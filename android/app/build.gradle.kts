@@ -54,9 +54,45 @@ cargo {
     profile = "release" // Force release for speed
 }
 
+tasks.register("copyNativeLibs") {
+    dependsOn("cargoBuild")
+    val targetDir = file("../../target")
+    val jniLibDir = file("src/main/jniLibs")
+
+    doLast {
+        if (!jniLibDir.exists()) {
+            jniLibDir.mkdirs()
+        }
+        
+        // Copy arm64
+        copy {
+            from(File(targetDir, "aarch64-linux-android/release/libmavivpn.so"))
+            into(File(jniLibDir, "arm64-v8a"))
+        }
+
+        // Copy arm
+        copy {
+            from(File(targetDir, "armv7-linux-androideabi/release/libmavivpn.so"))
+            into(File(jniLibDir, "armeabi-v7a"))
+        }
+        
+        // Copy x86
+        copy {
+            from(File(targetDir, "i686-linux-android/release/libmavivpn.so"))
+            into(File(jniLibDir, "x86"))
+        }
+        
+        // Copy x86_64
+        copy {
+            from(File(targetDir, "x86_64-linux-android/release/libmavivpn.so"))
+            into(File(jniLibDir, "x86_64"))
+        }
+    }
+}
+
 tasks.whenTaskAdded {
     if (this.name == "mergeDebugJniLibFolders" || this.name == "mergeReleaseJniLibFolders") {
-        this.dependsOn("cargoBuild")
+        this.dependsOn("copyNativeLibs")
     }
 }
 

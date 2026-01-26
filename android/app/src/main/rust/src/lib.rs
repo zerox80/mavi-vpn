@@ -122,8 +122,8 @@ async fn run_vpn(fd: RawFd, token: String, endpoint_str: String) -> anyhow::Resu
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?))
-        .transport_config(Arc::new(transport_config));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
+    client_config.transport_config(Arc::new(transport_config));
 
     let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())?;
     endpoint.set_default_client_config(client_config);

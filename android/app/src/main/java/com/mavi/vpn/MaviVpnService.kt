@@ -61,15 +61,11 @@ class MaviVpnService : VpnService() {
         // Establish VPN Interface
         val builder = Builder()
         
-        // Add DNS server (Google DNS for reliability)
         builder.addDnsServer("8.8.8.8")
         builder.addDnsServer("8.8.4.4")
-        builder.addDnsServer("2606:4700:4700::1111")
 
         builder.addAddress("10.8.0.2", 24)
-        builder.addAddress("fd00::2", 64)
         builder.addRoute("0.0.0.0", 0)
-        builder.addRoute("::", 0)
         builder.setSession("MaviVPN")
         builder.setMtu(1280)
         

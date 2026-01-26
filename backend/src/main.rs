@@ -205,10 +205,10 @@ async fn handle_connection(
         gateway: state.gateway_ip(),
         dns_server: config.dns,
         mtu: 1280,
-        assigned_ipv6: Some(assigned_ip6),
-        netmask_v6: Some(64),
-        gateway_v6: Some(state.gateway_ip_v6()),
-        dns_server_v6: Some("2606:4700:4700::1111".parse().unwrap()), // Cloudflare DNS64
+        assigned_ipv6: None,
+        netmask_v6: None,
+        gateway_v6: None,
+        dns_server_v6: None,
     };
     let bytes = bincode::serialize(&success_msg)?;
     send_stream.write_u32_le(bytes.len() as u32).await?;

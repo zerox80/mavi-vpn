@@ -30,13 +30,16 @@ class MaviVpnService : VpnService() {
             stopVpn()
             return START_NOT_STICKY
         } else if (action == "CONNECT") {
-            startVpn()
+            val ip = intent?.getStringExtra("IP") ?: ""
+            val port = intent?.getStringExtra("PORT") ?: "4433"
+            val token = intent?.getStringExtra("TOKEN") ?: ""
+            startVpn(ip, port, token)
             return START_STICKY
         }
         return START_NOT_STICKY
     }
 
-    private fun startVpn() {
+    private fun startVpn(ip: String, port: String, token: String) {
         if (thread != null) return
 
         // Create Notification
@@ -49,7 +52,7 @@ class MaviVpnService : VpnService() {
 
         val notification = Notification.Builder(this, channelId)
             .setContentTitle("Mavi VPN")
-            .setContentText("Connected to secure network")
+            .setContentText("Connecting to $ip...")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .build()
         
@@ -57,14 +60,7 @@ class MaviVpnService : VpnService() {
 
         // Establish VPN Interface
         val builder = Builder()
-        builder.addAddress("10.8.0.2", 24) // Initial dummy address, will be updated by Rust logic ideally? 
-        // Note: Android VpnService usually needs an address upfront. 
-        // For a proper setup, Rust should negotiate IP then we update builder. 
-        // But for simplicity/demo, we can set a dummy or try to set it dynamically via JNI callback.
-        // For 10/10 app, we should do the handshake FIRST in regular socket, get IP, then establish VPN.
-        // But here we'll pass the FD to Rust directly.
-        // Let's assume we use 0.0.0.0 and let Rust handle TUN read/write, but Android requires an address.
-        // We'll use a placeholder and fix it later if needed.
+        builder.addAddress("10.8.0.2", 24)
         builder.addRoute("0.0.0.0", 0)
         builder.setSession("MaviVPN")
         builder.setMtu(1280)
@@ -74,8 +70,8 @@ class MaviVpnService : VpnService() {
         if (vpnInterface != null) {
             val fd = vpnInterface!!.fd
             thread = Thread {
-                Log.d("MaviVPN", "Starting native VPN loop")
-                connect(fd, "test-token", "192.168.1.100:4433") // TODO: Configurable
+                Log.d("MaviVPN", "Starting native VPN loop to $ip:$port")
+                connect(fd, token, "$ip:$port")
                 Log.d("MaviVPN", "Native VPN loop exited")
                 stopSelf()
             }.also { it.start() }

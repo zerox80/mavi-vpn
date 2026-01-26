@@ -14,29 +14,65 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.sp
+
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            MaterialTheme(
+                colorScheme = darkColorScheme(
+                    primary = Color(0xFF007AFF),
+                    background = Color(0xFF121212),
+                    surface = Color(0xFF1E1E1E)
+                )
+            ) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    VpnScreen(onConnect = { prepareAndStartVpn() }, onDisconnect = { stopVpn() })
+                    VpnScreen(
+                        onConnect = { ip, port, token -> prepareAndStartVpn(ip, port, token) },
+                        onDisconnect = { stopVpn() }
+                    )
                 }
             }
         }
     }
 
-    private fun prepareAndStartVpn() {
+    private fun prepareAndStartVpn(ip: String, port: String, token: String) {
         val intent = VpnService.prepare(this)
         if (intent != null) {
+            // Save settings temporarily to use in onActivityResult or use a better state management
+            lastIp = ip
+            lastPort = port
+            lastToken = token
             startActivityForResult(intent, 0)
         } else {
-            onActivityResult(0, Activity.RESULT_OK, null)
+            startVpnService(ip, port, token)
         }
+    }
+
+    private var lastIp = ""
+    private var lastPort = ""
+    private var lastToken = ""
+
+    private fun startVpnService(ip: String, port: String, token: String) {
+        val intent = Intent(this, MaviVpnService::class.java).apply {
+            action = "CONNECT"
+            putExtra("IP", ip)
+            putExtra("PORT", port)
+            putExtra("TOKEN", token)
+        }
+        startService(intent)
     }
 
     private fun stopVpn() {
@@ -47,44 +83,142 @@ class MainActivity : ComponentActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (resultCode == Activity.RESULT_OK) {
-            val intent = Intent(this, MaviVpnService::class.java)
-            intent.action = "CONNECT"
-            startService(intent)
+            startVpnService(lastIp, lastPort, lastToken)
         }
         super.onActivityResult(requestCode, resultCode, data)
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun VpnScreen(onConnect: () -> Unit, onDisconnect: () -> Unit) {
+fun VpnScreen(onConnect: (String, String, String) -> Unit, onDisconnect: () -> Unit) {
     var isConnected by remember { mutableStateOf(false) }
+    var serverIp by remember { mutableStateOf("") }
+    var serverPort by remember { mutableStateOf("4433") }
+    var authToken by remember { mutableStateOf("") }
 
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = Arrangement.Top
     ) {
-        Text(
-            text = if (isConnected) "CONNECTED 🚀" else "DISCONNECTED",
-            style = MaterialTheme.typography.headlineLarge,
-            color = if (isConnected) Color.Green else Color.Red
+        Spacer(modifier = Modifier.height(48.dp))
+        
+        Icon(
+            imageVector = if (isConnected) Icons.Default.Lock else Icons.Default.Settings,
+            contentDescription = null,
+            modifier = Modifier.size(80.dp),
+            tint = if (isConnected) Color(0xFF00FF7F) else Color(0xFF007AFF)
         )
-        Spacer(modifier = Modifier.height(32.dp))
+        
+        Spacer(modifier = Modifier.height(24.dp))
+        
+        Text(
+            text = "MAVI VPN",
+            fontSize = 32.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+        
+        Text(
+            text = if (isConnected) "SECURED CONNECTION" else "READY TO CONNECT",
+            fontSize = 14.sp,
+            color = if (isConnected) Color(0xFF00FF7F) else Color.Gray
+        )
+
+        Spacer(modifier = Modifier.height(48.dp))
+
+        if (!isConnected) {
+            OutlinedTextField(
+                value = serverIp,
+                onValueChange = { serverIp = it },
+                label = { Text("Server IP", color = Color.Gray) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = TextFieldDefaults.outlinedTextFieldColors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedBorderColor = Color.DarkGray,
+                    textColor = Color.White
+                )
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = serverPort,
+                onValueChange = { serverPort = it },
+                label = { Text("Port", color = Color.Gray) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = TextFieldDefaults.outlinedTextFieldColors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedBorderColor = Color.DarkGray,
+                    textColor = Color.White
+                )
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = authToken,
+                onValueChange = { authToken = it },
+                label = { Text("Auth Token", color = Color.Gray) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                colors = TextFieldDefaults.outlinedTextFieldColors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedBorderColor = Color.DarkGray,
+                    textColor = Color.White
+                )
+            )
+        } else {
+            // Stats or connection info could go here
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
+                    .padding(24.dp)
+            ) {
+                Column {
+                    Text("Connected to:", color = Color.Gray, fontSize = 12.sp)
+                    Text(serverIp, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
         Button(
             onClick = {
                 if (isConnected) {
                     onDisconnect()
                     isConnected = false
                 } else {
-                    onConnect()
-                    isConnected = true
+                    if (serverIp.isNotEmpty() && authToken.isNotEmpty()) {
+                        onConnect(serverIp, serverPort, authToken)
+                        isConnected = true
+                    }
                 }
             },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (isConnected) Color.Red else Color.Blue
+                containerColor = if (isConnected) Color(0xFFFF3B30) else Color(0xFF007AFF)
             )
         ) {
-            Text(text = if (isConnected) "DISCONNECT" else "CONNECT")
+            Text(
+                text = if (isConnected) "DISCONNECT" else "CONNECT",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
         }
+        
+        Spacer(modifier = Modifier.height(24.dp))
     }
 }

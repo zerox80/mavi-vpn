@@ -13,7 +13,7 @@ mod state;
 use crate::config::Config;
 use shared::ControlMessage;
 use crate::state::AppState;
-use etherparse::Ipv4HeaderSlice;
+use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -73,9 +73,21 @@ async fn main() -> Result<()> {
     }
 
     let dev = tun::create_as_async(&tun_config).context("Failed to create TUN device. Ensure NET_ADMIN cap is set.")?;
+    let tun_name = dev.get_ref().name().to_string();
     let (mut tun_reader, mut tun_writer) = tokio::io::split(dev);
 
-    info!("TUN Device created. IP: {}", gateway_ip);
+    info!("TUN Device created: {}. IP: {}", tun_name, gateway_ip);
+
+    // Configure IPv6 on TUN
+    let gateway_ip6 = state.gateway_ip_v6();
+    let output = std::process::Command::new("ip")
+        .args(&["-6", "addr", "add", &format!("{}/64", gateway_ip6), "dev", &tun_name])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => info!("IPv6 address {} added to {}", gateway_ip6, tun_name),
+        Ok(out) => error!("Failed to add IPv6: {:?}", String::from_utf8_lossy(&out.stderr)),
+        Err(e) => error!("Failed to execute ip command: {}", e),
+    }
 
     // 6. Packet Routing Helper Channels
     // Client -> TUN (Multiple clients write to one TUN Writer)
@@ -101,13 +113,21 @@ async fn main() -> Result<()> {
                 Ok(n) => {
                     if n > 0 {
                         let packet = &buf[0..n];
-                        // Safe parsing using etherparse
-                        if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(packet) {
-                            let dest_ip = ipv4_header.destination_addr();
-                            
-                            // Route: Look up client in map
-                            if let Some(tx_client) = state_reader.peers.get(&dest_ip) {
-                                let _ = tx_client.send(Bytes::copy_from_slice(packet)).await;
+                        // Check IP version
+                        let version = packet[0] >> 4;
+                        if version == 4 {
+                             if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(packet) {
+                                let dest_ip = ipv4_header.destination_addr();
+                                if let Some(tx_client) = state_reader.peers.get(&dest_ip) {
+                                    let _ = tx_client.send(Bytes::copy_from_slice(packet)).await;
+                                }
+                            }
+                        } else if version == 6 {
+                             if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(packet) {
+                                let dest_ip = ipv6_header.destination_addr();
+                                if let Some(tx_client) = state_reader.peers_v6.get(&dest_ip) {
+                                    let _ = tx_client.send(Bytes::copy_from_slice(packet)).await;
+                                }
                             }
                         }
                     }
@@ -148,7 +168,6 @@ async fn handle_connection(
     info!("New connection from {}", remote_addr);
 
     // --- Handshake Phase ---
-    // Wait for client to open a bi-directional stream for Auth
     let (mut send_stream, mut recv_stream) = connection.accept_bi().await?;
     
     // Read auth message length (u32 LE)
@@ -159,7 +178,7 @@ async fn handle_connection(
     
     let msg: ControlMessage = bincode::deserialize(&buf)?;
     
-    let assigned_ip = match msg {
+    let (assigned_ip, assigned_ip6) = match msg {
         ControlMessage::Auth { token } => {
             if token != config.auth_token {
                 // Send Error
@@ -171,7 +190,9 @@ async fn handle_connection(
                 return Err(anyhow::anyhow!("Invalid Token from {}", remote_addr));
             }
             // Assign IP
-            state.assign_ip()?
+            let v4 = state.assign_ip()?;
+            let v6 = state.assign_ipv6()?;
+            (v4, v6)
         }
         _ => return Err(anyhow::anyhow!("Unexpected message type during handshake")),
     };
@@ -183,17 +204,21 @@ async fn handle_connection(
         gateway: state.gateway_ip(),
         dns_server: config.dns,
         mtu: 1280,
+        assigned_ipv6: Some(assigned_ip6),
+        netmask_v6: Some(64),
+        gateway_v6: Some(state.gateway_ip_v6()),
+        dns_server_v6: Some("2606:4700:4700::1111".parse().unwrap()), // Cloudflare DNS64
     };
     let bytes = bincode::serialize(&success_msg)?;
     send_stream.write_u32_le(bytes.len() as u32).await?;
     send_stream.write_all(&bytes).await?;
     let _ = send_stream.finish();
 
-    info!("Authenticated {} -> Assigned IP: {}", remote_addr, assigned_ip);
+    info!("Authenticated {} -> IPv4: {}, IPv6: {}", remote_addr, assigned_ip, assigned_ip6);
 
     // --- Session Phase ---
     let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(1000);
-    state.register_client(assigned_ip, tx_client);
+    state.register_client(assigned_ip, assigned_ip6, tx_client);
 
     let connection_arc = Arc::new(connection);
     
@@ -210,22 +235,34 @@ async fn handle_connection(
     let res = loop {
         match connection_arc.read_datagram().await {
             Ok(data) => {
-                // Security Check: Ensure packet source IP matches assigned IP
-                if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&data) {
-                    if ipv4_header.source_addr() == assigned_ip {
-                         // tracing::info!("Received valid packet from {} len {}", assigned_ip, data.len());
+                 if data.len() > 0 {
+                    let version = data[0] >> 4;
+                    let mut valid = false;
+                    
+                    if version == 4 {
+                        if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&data) {
+                            if ipv4_header.source_addr() == assigned_ip {
+                                valid = true;
+                            } else {
+                                tracing::warn!("Spoofed IPv4? Src: {}, Expected: {}", ipv4_header.source_addr(), assigned_ip);
+                            }
+                        }
+                    } else if version == 6 {
+                         if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&data) {
+                            if ipv6_header.source_addr() == assigned_ip6 {
+                                valid = true;
+                            } else {
+                                tracing::warn!("Spoofed IPv6? Src: {}, Expected: {}", ipv6_header.source_addr(), assigned_ip6);
+                            }
+                        }
+                    } else {
+                         tracing::warn!("Unknown packet version: {}", version);
+                    }
+
+                    if valid {
                          let _ = tx_tun.send(data).await;
-                    } else {
-                        tracing::warn!("Spoofed packet? Src: {}, Expected: {}", ipv4_header.source_addr(), assigned_ip);
                     }
-                } else {
-                    // Start of IPv6 is 0x60
-                    if data.len() > 0 && (data[0] >> 4) == 6 {
-                         // silently ignore IPv6 for now
-                    } else {
-                         tracing::warn!("Failed to parse IPv4 packet from {}. Len: {}. First byte: {:02X}", assigned_ip, data.len(), if data.len() > 0 { data[0] } else { 0 });
-                    }
-                }
+                 }
             }
             Err(e) => {
                 break Err(anyhow::anyhow!("Connection lost: {}", e));
@@ -235,8 +272,8 @@ async fn handle_connection(
 
     // Cleanup
     tun_to_quic.abort();
-    state.release_ip(assigned_ip);
-    info!("Released IP {} for {}", assigned_ip, remote_addr);
+    state.release_ips(assigned_ip, assigned_ip6);
+    info!("Released IPs for {}", remote_addr);
 
     res
 }

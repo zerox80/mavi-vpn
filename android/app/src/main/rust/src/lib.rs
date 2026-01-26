@@ -6,7 +6,7 @@ use android_logger::Config;
 use log::{info, error};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bytes::{Bytes, BytesMut};
+use bytes::{BytesMut};
 use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -63,6 +63,7 @@ fn start_runtime(fd: RawFd, token: String, endpoint_addr: String) -> bool {
     })
 }
 
+#[derive(Debug)]
 struct SkipServerVerification;
 impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(
@@ -117,10 +118,12 @@ async fn run_vpn(fd: RawFd, token: String, endpoint_str: String) -> anyhow::Resu
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
-    let transport_config = Arc::get_mut(&mut client_config.transport).unwrap();
+    let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?))
+        .transport_config(Arc::new(transport_config));
 
     let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())?;
     endpoint.set_default_client_config(client_config);

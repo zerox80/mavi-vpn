@@ -1,14 +1,17 @@
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
-use jni::sys::{jint};
+use jni::sys::jint;
 use std::os::unix::io::{FromRawFd, RawFd};
 use android_logger::Config;
 use log::{info, error};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use shared::ControlMessage;
-use std::net::ToSocketAddrs;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Global stop flag for graceful shutdown
+static STOP_FLAG: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_connect(
@@ -19,6 +22,9 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_connect(
     endpoint: JString,
 ) -> jint {
     android_logger::init_once(Config::default().with_tag("MaviVPN"));
+    
+    // Reset stop flag
+    STOP_FLAG.store(false, Ordering::SeqCst);
     
     let token: String = env.get_string(&token).expect("Couldn't get java string!").into();
     let endpoint: String = env.get_string(&endpoint).expect("Couldn't get java string!").into();
@@ -39,8 +45,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop(
     _class: JClass,
 ) {
     info!("Stop requested");
-    // In a real implementation, we would signal a CancellationToken here.
-    // implementation details omitted for brevity as we are replacing the process usually.
+    STOP_FLAG.store(true, Ordering::SeqCst);
 }
 
 fn start_runtime(fd: RawFd, token: String, endpoint_addr: String) -> bool {
@@ -91,8 +96,6 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA1,
-            rustls::SignatureScheme::ECDSA_SHA1_Legacy,
             rustls::SignatureScheme::RSA_PKCS1_SHA256,
             rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
             rustls::SignatureScheme::RSA_PKCS1_SHA384,
@@ -103,24 +106,16 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
             rustls::SignatureScheme::RSA_PSS_SHA384,
             rustls::SignatureScheme::RSA_PSS_SHA512,
             rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::ED448,
         ]
     }
 }
 
 async fn run_vpn(fd: RawFd, token: String, endpoint_str: String) -> anyhow::Result<()> {
-    // 1. Configure Client
-    let client_crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(rustls::RootCertStore::empty())
-        .with_no_client_auth(); // No client certs
-        
-    // DANGEROUS: Skip verification for self-signed certs
+    // 1. Configure Client (Skip verification for self-signed certs)
     let mut client_crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
-        
-    client_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
     let transport_config = Arc::get_mut(&mut client_config.transport).unwrap();
@@ -130,8 +125,10 @@ async fn run_vpn(fd: RawFd, token: String, endpoint_str: String) -> anyhow::Resu
     let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())?;
     endpoint.set_default_client_config(client_config);
 
-    // 2. Connect
-    let addr = endpoint_str.to_socket_addrs()?.next().ok_or(anyhow::anyhow!("Invalid address"))?;
+    // 2. Connect (async DNS resolution via tokio)
+    let addr = tokio::net::lookup_host(&endpoint_str).await?
+        .next()
+        .ok_or(anyhow::anyhow!("Invalid address"))?;
     info!("Connecting to {}...", addr);
     
     let connection = endpoint.connect(addr, "localhost")?.await?;
@@ -161,22 +158,27 @@ async fn run_vpn(fd: RawFd, token: String, endpoint_str: String) -> anyhow::Resu
         _ => return Err(anyhow::anyhow!("Invalid response")),
     }
 
-    // 4. Packet Loop
-    // Create Tokio File from RawFd
+    // 4. Packet Loop with reusable buffer
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mut tun_file = tokio::fs::File::from_std(file);
+    let tun_file = tokio::fs::File::from_std(file);
     let (mut tun_reader, mut tun_writer) = tokio::io::split(tun_file);
 
     let connection_arc = Arc::new(connection);
+    let stop_flag = Arc::new(AtomicBool::new(false));
     
-    // Task: TUN -> QUIC
+    // Task: TUN -> QUIC (with buffer reuse)
     let conn_send = connection_arc.clone();
+    let stop_clone = stop_flag.clone();
     let tun_to_quic = tokio::spawn(async move {
-        let mut buf = [0u8; 1500];
+        let mut buf = BytesMut::with_capacity(1500);
+        buf.resize(1500, 0);
         loop {
-            match tun_reader.read(&mut buf).await {
+            if STOP_FLAG.load(Ordering::SeqCst) {
+                break;
+            }
+            match tun_reader.read(&mut buf[..]).await {
                 Ok(n) if n > 0 => {
-                    let packet = Bytes::copy_from_slice(&buf[0..n]);
+                    let packet = buf[0..n].to_vec().into();
                     let _ = conn_send.send_datagram(packet);
                 },
                 _ => break,
@@ -185,20 +187,34 @@ async fn run_vpn(fd: RawFd, token: String, endpoint_str: String) -> anyhow::Resu
     });
 
     // Loop: QUIC -> TUN
-    let res = loop {
-        match connection_arc.read_datagram().await {
-            Ok(data) => {
-                if let Err(_) = tun_writer.write_all(&data).await {
-                   break;
+    loop {
+        if STOP_FLAG.load(Ordering::SeqCst) {
+            info!("Stop flag detected, exiting main loop");
+            break;
+        }
+        
+        tokio::select! {
+            result = connection_arc.read_datagram() => {
+                match result {
+                    Ok(data) => {
+                        if let Err(e) = tun_writer.write_all(&data).await {
+                            error!("TUN write error: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Connection lost: {}", e);
+                        break;
+                    }
                 }
             }
-            Err(e) => {
-                error!("Connection lost: {}", e);
-                break;
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                // Check stop flag periodically
             }
         }
-    };
+    }
     
     tun_to_quic.abort();
+    info!("VPN session ended cleanly");
     Ok(())
 }

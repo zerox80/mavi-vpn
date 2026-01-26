@@ -1,5 +1,5 @@
 # Builder Stage
-FROM rust:1.80-slim as builder
+FROM rust:1.84-slim as builder
 WORKDIR /app
 
 # Copy workspace files

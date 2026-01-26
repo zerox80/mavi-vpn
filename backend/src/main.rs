@@ -251,10 +251,11 @@ async fn handle_connection(
                     } else if version == 6 {
                          if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&data) {
                             let src = ipv6_header.source_addr();
-                            // Allow assigned IP OR Link-Local (fe80::/10)
+                            // Allow assigned IP OR Link-Local (fe80::/10) OR Unspecified (:: for DAD)
                             let is_link_local = src.segments()[0] & 0xffc0 == 0xfe80;
+                            let is_unspecified = src.is_unspecified();
                             
-                            if src == assigned_ip6 || is_link_local {
+                            if src == assigned_ip6 || is_link_local || is_unspecified {
                                 valid = true;
                             } else {
                                 tracing::warn!("Spoofed IPv6? Src: {}, Expected: {}", src, assigned_ip6);

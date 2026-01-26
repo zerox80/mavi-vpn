@@ -16,6 +16,7 @@ services:
       - ./data:/app/data # Persist certificates
     sysctls:
       - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
     environment:
       - RUST_LOG=info
       - VPN_AUTH_TOKEN=${VPN_AUTH_TOKEN:-change_me}

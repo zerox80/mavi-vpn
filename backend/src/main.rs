@@ -219,7 +219,7 @@ async fn handle_connection(
                         tracing::warn!("Spoofed packet? Src: {}, Expected: {}", ipv4_header.source_addr(), assigned_ip);
                     }
                 } else {
-                    tracing::warn!("Failed to parse IPv4 packet from {}", assigned_ip);
+                    tracing::warn!("Failed to parse IPv4 packet from {}. Len: {}. First 20 bytes: {:02X?}", assigned_ip, data.len(), &data[0..std::cmp::min(data.len(), 20)]);
                 }
             }
             Err(e) => {

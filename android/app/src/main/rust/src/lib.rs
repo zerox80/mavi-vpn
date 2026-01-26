@@ -213,10 +213,26 @@ async fn run_vpn(fd: RawFd, token: String, endpoint_str: String, socket: std::ne
             }
             match tun_reader.read(&mut buf[..]).await {
                 Ok(n) if n > 0 => {
-                    let packet = buf[0..n].to_vec().into();
+                    let packet_data = &buf[0..n];
+                    // Log first byte to check version (0x45 for IPv4)
+                    if n >= 1 {
+                        let version = packet_data[0] >> 4;
+                        if version != 4 {
+                            info!("Non-IPv4 packet read from TUN: len={}, version={}, bytes={:02X?}", n, version, &packet_data[0..std::cmp::min(n, 4)]);
+                        }
+                    } else {
+                         info!("Read empty packet?");
+                    }
+                    let packet = packet_data.to_vec().into();
                     let _ = conn_send.send_datagram(packet);
                 },
-                _ => break,
+                Ok(_) => {
+                    // 0 bytes read, usually EOF or spurious wakeup
+                }
+                Err(e) => {
+                    error!("TUN read error: {}", e);
+                    break;
+                }
             }
         }
     });

@@ -1,0 +1,12 @@
+[package]
+name = "shared"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+std = { version = "0.50", optional = true, package = "rustc-std-workspace-std" }  # Mock, usually just standard lib
+# We don't need many deps here, just types.
+
+[features]
+default = []

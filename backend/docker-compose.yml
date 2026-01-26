@@ -1,0 +1,23 @@
+services:
+  vpn-server:
+    build: .
+    image: mavi-vpn-server
+    container_name: mavi-vpn
+    restart: unless-stopped
+    ports:
+      - "4433:4433/udp" # QUIC uses UDP
+    cap_add:
+      - NET_ADMIN # Required for TUN device creation & iptables
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./data:/app/data # Persist certificates
+    sysctls:
+      - net.ipv4.ip_forward=1
+    environment:
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD-SHELL", "ip addr show tun0 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

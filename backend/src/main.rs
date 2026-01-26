@@ -250,10 +250,14 @@ async fn handle_connection(
                         }
                     } else if version == 6 {
                          if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&data) {
-                            if ipv6_header.source_addr() == assigned_ip6 {
+                            let src = ipv6_header.source_addr();
+                            // Allow assigned IP OR Link-Local (fe80::/10)
+                            let is_link_local = src.segments()[0] & 0xffc0 == 0xfe80;
+                            
+                            if src == assigned_ip6 || is_link_local {
                                 valid = true;
                             } else {
-                                tracing::warn!("Spoofed IPv6? Src: {}, Expected: {}", ipv6_header.source_addr(), assigned_ip6);
+                                tracing::warn!("Spoofed IPv6? Src: {}, Expected: {}", src, assigned_ip6);
                             }
                         }
                     } else {

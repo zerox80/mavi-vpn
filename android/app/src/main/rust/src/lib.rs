@@ -113,7 +113,7 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
 async fn run_vpn(fd: RawFd, token: String, endpoint_str: String) -> anyhow::Result<()> {
     // 1. Configure Client (Skip verification for self-signed certs)
-    let mut client_crypto = rustls::ClientConfig::builder()
+    let client_crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
@@ -171,7 +171,7 @@ async fn run_vpn(fd: RawFd, token: String, endpoint_str: String) -> anyhow::Resu
     
     // Task: TUN -> QUIC (with buffer reuse)
     let conn_send = connection_arc.clone();
-    let stop_clone = stop_flag.clone();
+    let _stop_clone = stop_flag.clone();
     let tun_to_quic = tokio::spawn(async move {
         let mut buf = BytesMut::with_capacity(1500);
         buf.resize(1500, 0);

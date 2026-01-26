@@ -7,7 +7,7 @@ services:
     container_name: mavi-vpn
     restart: unless-stopped
     ports:
-      - "4433:4433/udp" # QUIC uses UDP
+      - "10433:10433/udp" # QUIC uses UDP
     cap_add:
       - NET_ADMIN # Required for TUN device creation & iptables
     devices:

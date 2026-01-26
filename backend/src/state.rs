@@ -43,6 +43,8 @@ impl AppState {
     pub fn assign_ip(&self) -> Result<Ipv4Addr> {
         let mut allocated = self.allocated_ips.lock().unwrap();
         
+        // Skip .0 (Network) and .1 (Gateway) implicitly by the allocated set check,
+        // but explicit skipping is safer if allocated set drifts.
         for ip in self.network.iter() {
             if !allocated.contains(&ip) {
                 allocated.insert(ip);

@@ -22,30 +22,17 @@ fi
 
 echo "Detected default interface: $DEFAULT_IFACE"
 
-# Enable IP Forwarding
-echo 1 > /proc/sys/net/ipv4/ip_forward
+# Enable IP Forwarding (ignore error if read-only)
+echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "Info: Skipping ip_forward setting (handled by docker or host)"
 
 # Setup NAT (Masquerade)
-# Clear existing rules to prevent duplicates
-iptables -t nat -F
-# Use config from Env or default
 VPN_NETWORK=${VPN_NETWORK:-"10.8.0.0/24"}
+# Clear and set rules
+iptables -t nat -F
 iptables -t nat -A POSTROUTING -s "$VPN_NETWORK" -o "$DEFAULT_IFACE" -j MASQUERADE
 
 echo "NAT configured: $VPN_NETWORK -> $DEFAULT_IFACE"
 
-# Trap SIGTERM/SIGINT for graceful shutdown
-cleanup() {
-    echo "Stopping Mavi VPN Server..."
-    # Cleanup firewall rules
-    if [ -n "$VPN_NETWORK" ] && [ -n "$DEFAULT_IFACE" ]; then
-         iptables -t nat -D POSTROUTING -s "$VPN_NETWORK" -o "$DEFAULT_IFACE" -j MASQUERADE || true
-    fi
-    exit 0
-}
-trap cleanup SIGTERM SIGINT
-
-# Execute the binary in background to allow trap to work
-/app/mavi-vpn &
-PID=$!
-wait $PID
+# Run the binary
+echo "Executing mavi-vpn binary..."
+exec /app/mavi-vpn

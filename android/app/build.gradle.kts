@@ -38,12 +38,18 @@ android {
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.4"
     }
+
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDirs("src/main/jniLibs")
+        }
+    }
 }
 
 cargo {
     module = "src/main/rust"
     libname = "mavivpn"
-    targets = listOf("arm64", "x86_64") // Add arm, x86 if needed
+    targets = listOf("arm", "arm64", "x86", "x86_64")
     apiLevel = 26
 }
 

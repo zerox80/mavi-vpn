@@ -4,6 +4,8 @@ WORKDIR /app
 
 # Copy workspace files
 COPY Cargo.toml ./Cargo.toml
+# Remove Android member from workspace for server build (as source isn't copied)
+RUN sed -i '/android\/app\/src\/main\/rust/d' Cargo.toml
 COPY shared ./shared
 COPY backend ./backend
 

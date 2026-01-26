@@ -51,6 +51,13 @@ cargo {
     libname = "mavivpn"
     targets = listOf("arm", "arm64", "x86", "x86_64")
     apiLevel = 26
+    profile = "release" // Force release for speed
+}
+
+tasks.whenTaskAdded {
+    if (this.name == "mergeDebugJniLibFolders" || this.name == "mergeReleaseJniLibFolders") {
+        this.dependsOn("cargoBuild")
+    }
 }
 
 dependencies {

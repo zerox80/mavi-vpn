@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "backend",
     "shared",
-    "android/app/src/main/rust",
+    # "android/app/src/main/rust",
 ]
 
 [workspace.dependencies]

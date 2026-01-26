@@ -134,10 +134,11 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
 async fn run_vpn(fd: RawFd, token: String, endpoint_str: String, socket: std::net::UdpSocket) -> anyhow::Result<()> {
     // 1. Configure Client
-    let client_crypto = rustls::ClientConfig::builder()
+    let mut client_crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
+    client_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into().unwrap()));

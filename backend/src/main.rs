@@ -59,7 +59,6 @@ async fn main() -> Result<()> {
     let netmask = state.network.mask();
 
     tun_config.address(gateway_ip)
-              .destination(gateway_ip) 
               .netmask(netmask)
               .mtu(1280)
               .up();
@@ -87,6 +86,8 @@ async fn main() -> Result<()> {
         while let Some(packet) = rx_tun.recv().await {
             if let Err(e) = tun_writer.write_all(&packet).await {
                 error!("Failed to write to TUN: {}", e);
+            } else {
+                tracing::trace!("Wrote packet to TUN (len: {})", packet.len());
             }
         }
     });
@@ -212,8 +213,13 @@ async fn handle_connection(
                 // Security Check: Ensure packet source IP matches assigned IP
                 if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&data) {
                     if ipv4_header.source_addr() == assigned_ip {
+                         // tracing::info!("Received valid packet from {} len {}", assigned_ip, data.len());
                          let _ = tx_tun.send(data).await;
+                    } else {
+                        tracing::warn!("Spoofed packet? Src: {}, Expected: {}", ipv4_header.source_addr(), assigned_ip);
                     }
+                } else {
+                    tracing::warn!("Failed to parse IPv4 packet from {}", assigned_ip);
                 }
             }
             Err(e) => {

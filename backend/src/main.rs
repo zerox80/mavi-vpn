@@ -14,6 +14,7 @@ use crate::config::Config;
 use shared::ControlMessage;
 use crate::state::AppState;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
+use tun::Device;
 
 #[tokio::main]
 async fn main() -> Result<()> {

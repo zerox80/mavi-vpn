@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use ipnetwork::{Ipv4Network, Ipv6Network};
-use std::net::{Ipv4Addr, Ipv6Addr, IpAddr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc;
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
@@ -36,7 +36,7 @@ impl AppState {
 
         let mut allocated_v6 = HashSet::new();
         allocated_v6.insert(network_v6.network());
-        allocated_v6.insert(network_v6.nth(1).unwrap()); // ::1 is Gateway
+        allocated_v6.insert(network_v6.iter().nth(1).unwrap()); // ::1 is Gateway
 
         Ok(Self {
             peers: DashMap::new(),
@@ -65,7 +65,7 @@ impl AppState {
         let mut allocated = self.allocated_ips_v6.lock().unwrap();
         // Just try the first 1000 addresses for now
         for i in 2..1000 {
-            if let Some(ip) = self.network_v6.nth(i) {
+            if let Some(ip) = self.network_v6.iter().nth(i) {
                 if !allocated.contains(&ip) {
                     allocated.insert(ip);
                     return Ok(ip);
@@ -99,6 +99,6 @@ impl AppState {
     }
 
     pub fn gateway_ip_v6(&self) -> Ipv6Addr {
-        self.network_v6.nth(1).unwrap()
+        self.network_v6.iter().nth(1).unwrap()
     }
 }

@@ -1,7 +1,6 @@
 use dashmap::DashMap;
 use ipnetwork::Ipv4Network;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;

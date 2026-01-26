@@ -25,8 +25,8 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
         let subject_alt_names = vec!["localhost".to_string(), "vpn-server".to_string()];
         let cert = generate_simple_self_signed(subject_alt_names).unwrap();
         
-        let cert_pem = cert.cert.serialise_pem()?;
-        let key_pem = cert.key_pair.serialise_pem();
+        let cert_pem = cert.cert.serialize_pem()?;
+        let key_pem = cert.key_pair.serialize_pem();
 
         fs::write(&cert_path, &cert_pem).context("failed to write cert file")?;
         fs::write(&key_path, &key_pem).context("failed to write key file")?;

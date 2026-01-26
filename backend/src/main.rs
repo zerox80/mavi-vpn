@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
     }
 
     let dev = tun::create_as_async(&tun_config).context("Failed to create TUN device. Ensure NET_ADMIN cap is set.")?;
-    let tun_name = dev.get_ref().name().to_string();
+    let tun_name = dev.get_ref().name().unwrap_or_else(|_| "tun0".into());
     let (mut tun_reader, mut tun_writer) = tokio::io::split(dev);
 
     info!("TUN Device created: {}. IP: {}", tun_name, gateway_ip);

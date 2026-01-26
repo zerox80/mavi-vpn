@@ -140,7 +140,8 @@ fun VpnScreen(onConnect: (String, String, String) -> Unit, onDisconnect: () -> U
                 colors = TextFieldDefaults.outlinedTextFieldColors(
                     focusedBorderColor = Color(0xFF007AFF),
                     unfocusedBorderColor = Color.DarkGray,
-                    textColor = Color.White
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
                 )
             )
 
@@ -155,7 +156,8 @@ fun VpnScreen(onConnect: (String, String, String) -> Unit, onDisconnect: () -> U
                 colors = TextFieldDefaults.outlinedTextFieldColors(
                     focusedBorderColor = Color(0xFF007AFF),
                     unfocusedBorderColor = Color.DarkGray,
-                    textColor = Color.White
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
                 )
             )
 
@@ -171,7 +173,8 @@ fun VpnScreen(onConnect: (String, String, String) -> Unit, onDisconnect: () -> U
                 colors = TextFieldDefaults.outlinedTextFieldColors(
                     focusedBorderColor = Color(0xFF007AFF),
                     unfocusedBorderColor = Color.DarkGray,
-                    textColor = Color.White
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
                 )
             )
         } else {

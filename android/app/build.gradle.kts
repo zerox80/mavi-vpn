@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.mavi.vpn"
     compileSdk = 34
+    ndkVersion = "28.1.13356709"
 
     defaultConfig {
         applicationId = "com.mavi.vpn"

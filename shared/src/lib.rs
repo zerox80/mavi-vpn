@@ -1,4 +1,5 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
+use serde::{Deserialize, Serialize};
 
 /// The control messages exchanged during the handshake.
 #[derive(Debug, Serialize, Deserialize)]

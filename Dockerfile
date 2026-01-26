@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/backend/target/release/mavi-vpn /app/mavi-vpn
+COPY --from=builder /app/target/release/mavi-vpn /app/mavi-vpn
 COPY backend/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/entrypoint.sh

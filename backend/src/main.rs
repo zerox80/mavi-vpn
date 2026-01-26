@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use quinn::{Endpoint, ServerConfig, Connection};
+use quinn::{Endpoint, ServerConfig};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
@@ -37,11 +37,13 @@ async fn main() -> Result<()> {
     let (certs, key) = cert::load_or_generate_certs(cert_path, key_path)?;
 
     // 4. Setup QUIC Server Config
-    let server_crypto = rustls::ServerConfig::builder()
+    let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     
-    let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
+    server_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
+    
+    let mut server_config = ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?));
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
@@ -164,7 +166,7 @@ async fn handle_connection(
                 let bytes = bincode::serialize(&err_msg)?;
                 send_stream.write_u32_le(bytes.len() as u32).await?;
                 send_stream.write_all(&bytes).await?;
-                send_stream.finish().await?;
+                let _ = send_stream.finish();
                 return Err(anyhow::anyhow!("Invalid Token from {}", remote_addr));
             }
             // Assign IP
@@ -184,7 +186,7 @@ async fn handle_connection(
     let bytes = bincode::serialize(&success_msg)?;
     send_stream.write_u32_le(bytes.len() as u32).await?;
     send_stream.write_all(&bytes).await?;
-    send_stream.finish().await?;
+    let _ = send_stream.finish();
 
     info!("Authenticated {} -> Assigned IP: {}", remote_addr, assigned_ip);
 
@@ -207,7 +209,6 @@ async fn handle_connection(
     let res = loop {
         match connection_arc.read_datagram().await {
             Ok(data) => {
-                // Security Check: Ensure packet source IP matches assigned IP
                 // Security Check: Ensure packet source IP matches assigned IP
                 if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&data) {
                     if ipv4_header.source_addr() == assigned_ip {

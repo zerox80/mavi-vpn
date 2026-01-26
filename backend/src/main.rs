@@ -205,6 +205,7 @@ async fn handle_connection(
         gateway: state.gateway_ip(),
         dns_server: config.dns,
         mtu: 1280,
+        // Disable IPv6 for client until server has IPv6 uplink
         assigned_ipv6: None,
         netmask_v6: None,
         gateway_v6: None,

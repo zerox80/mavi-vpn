@@ -150,60 +150,74 @@ class MaviVpnService : VpnService() {
                         val config = if (root.has("Config")) root.getJSONObject("Config") else root
                         
                         // 3. Establish Interface
-                        val builder = Builder()
+                        var localInterface: ParcelFileDescriptor? = null // Declare outside try
                         
-                        // Parse Config
-                        val assignedIp = config.getString("assigned_ip")
-                        // Dynamic netmask calculation
-                        val netmask = config.optString("netmask", "255.255.255.0")
-                        val prefixLength = netmaskToPrefixLength(netmask)
+                        try {
+                             val builder = Builder()
                         
-                        builder.addAddress(assignedIp, prefixLength)
+                             // Parse Config
+                             val assignedIp = config.getString("assigned_ip")
+                             // Dynamic netmask calculation
+                             val netmask = config.optString("netmask", "255.255.255.0")
+                             val prefixLength = netmaskToPrefixLength(netmask)
                         
-                        // Routes
-                        builder.addRoute("0.0.0.0", 0)
+                             builder.addAddress(assignedIp, prefixLength)
                         
-                        // DNS
-                        val dns = config.optString("dns_server", "8.8.8.8")
-                        builder.addDnsServer(dns)
+                             // Routes
+                             builder.addRoute("0.0.0.0", 0)
                         
-                        // IPv6
-                        if (config.has("assigned_ipv6")) {
-                            val v6 = config.getString("assigned_ipv6")
-                            val v6Prefix = config.optInt("netmask_v6", 64)
-                            try {
-                                builder.addAddress(v6, v6Prefix)
-                                builder.addRoute("::", 0)
-                                if (config.has("dns_server_v6")) {
-                                     builder.addDnsServer(config.getString("dns_server_v6"))
-                                }
-                            } catch (e: Exception) {
-                                Log.w("MaviVPN", "Failed to add IPv6: ${e.message}")
-                            }
-                        }
+                             // DNS
+                             val dns = config.optString("dns_server", "8.8.8.8")
+                             builder.addDnsServer(dns)
+                        
+                             // IPv6
+                             if (config.has("assigned_ipv6")) {
+                                 val v6 = config.getString("assigned_ipv6")
+                                 val v6Prefix = config.optInt("netmask_v6", 64)
+                                 try {
+                                     builder.addAddress(v6, v6Prefix)
+                                     builder.addRoute("::", 0)
+                                     if (config.has("dns_server_v6")) {
+                                          builder.addDnsServer(config.getString("dns_server_v6"))
+                                     }
+                                 } catch (e: Exception) {
+                                     Log.w("MaviVPN", "Failed to add IPv6: ${e.message}")
+                                 }
+                             }
 
 
-                        builder.setSession("MaviVPN")
-                        // STANDARD: Inner MTU must be 1280.
-                        // This matches the standardized Wire MTU of 1360 (1280 + 80 overhead).
-                        builder.setMtu(1280)
+                             builder.setSession("MaviVPN")
+                             // STANDARD: Inner MTU must be 1280.
+                             // This matches the standardized Wire MTU of 1360 (1280 + 80 overhead).
+                             builder.setMtu(1280)
 
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            builder.setMetered(false)
-                        }
+                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                 builder.setMetered(false)
+                             }
 
-                        vpnInterface = builder.establish()
+                             localInterface = builder.establish()
+                             synchronized(vpnLock) {
+                                  vpnInterface = localInterface
+                             }
 
-                        if (vpnInterface != null) {
-                            val fd = vpnInterface!!.fd
-                            Log.d("MaviVPN", "Interface established. Starting Loop.")
+                             if (localInterface != null) {
+                                 val fd = localInterface.fd
+                                 Log.d("MaviVPN", "Interface established. Starting Loop.")
                             
-                            // 4. Start Loop (Blocks until error or stop)
-                            startLoop(handle, fd)
+                                 // 4. Start Loop (Blocks until error or stop)
+                                 startLoop(handle, fd)
                             
-                            Log.d("MaviVPN", "Native VPN loop exited")
-                        } else {
-                            Log.e("MaviVPN", "Failed to establish VPN interface")
+                                 Log.d("MaviVPN", "Native VPN loop exited")
+                             } else {
+                                 Log.e("MaviVPN", "Failed to establish VPN interface")
+                             }
+                        } finally {
+                             try { localInterface?.close() } catch(e: Exception) {}
+                             synchronized(vpnLock) {
+                                  if (vpnInterface == localInterface) {
+                                       vpnInterface = null
+                                  }
+                             }
                         }
 
                     } catch (e: Exception) {
@@ -219,16 +233,16 @@ class MaviVpnService : VpnService() {
                                   vpnSessionHandle = 0
                              }
                         }
-                        
-                        // Close interface to allow system to clean up routes before potential reconnect
-                        try {
-                            vpnInterface?.close()
-                        } catch(e: Exception){}
-                        vpnInterface = null
                     }
                 } catch (e: Exception) {
                      Log.e("MaviVPN", "Critical error in VPN thread: ${e.message}")
                      try { Thread.sleep(500) } catch(_: Exception){}
+                }
+                
+                // Fix: Check if we are still the active thread
+                if (Thread.currentThread() != thread) {
+                    Log.i("MaviVPN", "Thread superseded. Exiting loop.")
+                    break
                 }
                 
                 if (isRunning) {

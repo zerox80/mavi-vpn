@@ -369,7 +369,7 @@ use tokio::io::AsyncReadExt;
 
 async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<AtomicBool>) {
     let raw_fd = fd as RawFd;
-    let raw_fd = fd as RawFd;
+
     
     // FIX: Duplicate the FD so we have our own copy to manage. 
     // Java owns the original FD and will close it. We cannot close the one Java gave us.
@@ -403,34 +403,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     
     use futures_util::FutureExt; 
 
-    // Shared timestamp of last received packet (in milliseconds)
-    let last_receive = Arc::new(std::sync::atomic::AtomicI64::new(
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64
-    ));
 
-    // --- WATCHDOG TASK ---
-    let wd_stop = stop_flag.clone();
-    let wd_last = last_receive.clone();
-    let wd_conn = connection_arc.clone();
-    
-    // Explicitly move clones into the task
-    let watchdog_task = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            if wd_stop.load(Ordering::Relaxed) { break; }
-            
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-            let last = wd_last.load(Ordering::Relaxed);
-            
-            // FIX: Increased to 25s to prevent disconnects on 5G/Network Switching
-            if (now - last) > 25000 {
-                 error!("WATCHDOG: No response from server for 25s. Forcing Reconnect!");
-                 wd_stop.store(true, Ordering::SeqCst);
-                 wd_conn.close(0u32.into(), b"Watchdog Timeout");
-                 break;
-            }
-        }
-    });
 
     // TUN -> QUIC
     let conn_send = connection_arc.clone();
@@ -486,17 +459,29 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                 match conn_send.send_datagram(retry_packet.clone()) {
                     Ok(_) => break,
                     Err(e) => {
-                        // In Quinn 0.11, there isn't a "Blocked" variant in SendDatagramError.
-                        // If it fails, we might just want to yield and retry a few times, 
-                        // or check if it's a fatal error.
                         match e {
                             quinn::SendDatagramError::ConnectionLost(_) => {
                                 error!("Connection lost during send");
                                 stop_check.store(true, Ordering::SeqCst);
                                 break;
                             }
+                            quinn::SendDatagramError::TooLarge => {
+                                // FATAL: Packet too large for path MTU. Drop it.
+                                warn!("Packet too large to send ({} bytes). Dropping.", retry_packet.len());
+                                break; 
+                            },
+                             quinn::SendDatagramError::UnsupportedByPeer => {
+                                error!("Datagrams unsupported by peer. Closing.");
+                                stop_check.store(true, Ordering::SeqCst);
+                                break;
+                             },
+                             quinn::SendDatagramError::Disabled => {
+                                 error!("Datagrams disabled. Closing.");
+                                 stop_check.store(true, Ordering::SeqCst);
+                                 break;
+                             }
                             _ => {
-                                // Likely full or disabled. Yield and retry.
+                                // Likely full or temporarily congested. Yield and retry.
                                 tokio::task::yield_now().await;
                                 // Small sleep to prevent tight loop if it's sustained congestion
                                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -515,9 +500,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
         
         match connection_arc.read_datagram().await {
             Ok(first_packet) => {
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-                last_receive.store(now, Ordering::Relaxed);
-                
+
                 let mut batch = Vec::with_capacity(64);
                 batch.push(first_packet);
 
@@ -564,7 +547,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     // Cleanup
     stop_flag.store(true, Ordering::SeqCst);
     tun_to_quic.abort();
-    watchdog_task.abort();
+
 }
 
 // Helpers

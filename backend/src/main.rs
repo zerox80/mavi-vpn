@@ -16,6 +16,21 @@ use crate::state::AppState;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
 use tun::Device;
 use constant_time_eq::constant_time_eq;
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+// RAII Guard to ensure IPs are released when the connection handler exits
+struct IpGuard {
+    state: Arc<AppState>,
+    ip4: Ipv4Addr,
+    ip6: Ipv6Addr,
+}
+
+impl Drop for IpGuard {
+    fn drop(&mut self) {
+        self.state.release_ips(self.ip4, self.ip6);
+        info!("Released IPs for dropped connection: {} / {}", self.ip4, self.ip6);
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -307,8 +322,30 @@ async fn handle_connection(
             let v4 = state.assign_ip()?;
             let v6 = state.assign_ipv6()?;
             (v4, v6)
+    let (assigned_ip, assigned_ip6) = match msg {
+        ControlMessage::Auth { token } => {
+            if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
+                // Send Error
+                let err_msg = ControlMessage::Error { message: "Invalid Token".into() };
+                let bytes = bincode::serialize(&err_msg)?;
+                send_stream.write_u32_le(bytes.len() as u32).await?;
+                send_stream.write_all(&bytes).await?;
+                let _ = send_stream.finish();
+                return Err(anyhow::anyhow!("Invalid Token from {}", remote_addr));
+            }
+            // Assign IP
+            let v4 = state.assign_ip()?;
+            let v6 = state.assign_ipv6()?;
+            (v4, v6)
         }
         _ => return Err(anyhow::anyhow!("Unexpected message type during handshake")),
+    };
+
+    // RAII Guard: IPs will be released when this variable goes out of scope (Connection ends or error)
+    let _ip_guard = IpGuard {
+        state: state.clone(),
+        ip4: assigned_ip,
+        ip6: assigned_ip6,
     };
 
     // Send Success Config
@@ -420,8 +457,8 @@ async fn handle_connection(
 
     // Cleanup
     tun_to_quic.abort();
-    state.release_ips(assigned_ip, assigned_ip6);
-    info!("Released IPs for {}", remote_addr);
+    // state.release_ips(assigned_ip, assigned_ip6); // Handled by IpGuard
+    // info!("Released IPs for {}", remote_addr); // Handled by IpGuard
 
     res
 }

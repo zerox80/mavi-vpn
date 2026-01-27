@@ -52,13 +52,14 @@ async fn main() -> Result<()> {
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
     
     // Performance Optimizations for high throughput
-    transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB receive buffer
-    transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB send buffer
+    // FIX: Reduced buffers from 8MB to 1MB to prevent bufferbloat/latency spikes
+    transport_config.datagram_receive_buffer_size(Some(1024 * 1024)); // 1MB receive buffer
+    transport_config.datagram_send_buffer_size(1024 * 1024); // 1MB send buffer
     
     // Increase receive window for better throughput
-    transport_config.receive_window(quinn::VarInt::from(16u32 * 1024 * 1024)); // 16MB
-    transport_config.stream_receive_window(quinn::VarInt::from(8u32 * 1024 * 1024)); // 8MB per stream
-    transport_config.send_window(16 * 1024 * 1024); // 16MB send window
+    transport_config.receive_window(quinn::VarInt::from(4u32 * 1024 * 1024)); // 4MB
+    transport_config.stream_receive_window(quinn::VarInt::from(1024u32 * 1024)); // 1MB per stream
+    transport_config.send_window(4 * 1024 * 1024); // 4MB send window
     
     // Enable BBR Congestion Control
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
@@ -70,8 +71,8 @@ async fn main() -> Result<()> {
     // Manually bind socket to set SO_RCVBUF and SO_SNDBUF
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
     let socket2_sock = socket2::Socket::from(socket);
-    let _ = socket2_sock.set_recv_buffer_size(8 * 1024 * 1024); // 8MB
-    let _ = socket2_sock.set_send_buffer_size(8 * 1024 * 1024); // 8MB
+    let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024); // 2MB
+    let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024); // 2MB
     let socket = std::net::UdpSocket::from(socket2_sock);
 
     let endpoint = Endpoint::new(

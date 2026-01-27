@@ -76,10 +76,10 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
             }
         };
         
-        // Increase socket buffers to 8MB for high throughput
-        // Try resetting buffers: 8MB -> 4MB -> 2MB -> 1MB -> System Default
+        // Reduce socket buffers to prevent bufferbloat
+        // Try resetting buffers: 1MB -> 512KB -> System Default
         let socket2_sock = socket2::Socket::from(socket);
-        let buffers = [8 * 1024 * 1024, 4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024];
+        let buffers = [1024 * 1024, 512 * 1024];
         
         for size in buffers {
             if let Err(e) = socket2_sock.set_recv_buffer_size(size) {
@@ -299,16 +299,17 @@ async fn connect_and_handshake(
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
-    transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB
-    transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB
+    // FIX: Reduced buffers to prevent upload speed dropping to 0 (Bufferbloat)
+    transport_config.datagram_receive_buffer_size(Some(1024 * 1024)); // 1MB
+    transport_config.datagram_send_buffer_size(512 * 1024); // 512KB
     
     // Enable BBR Congestion Control
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     
-    // Increase receive window
-    transport_config.receive_window(quinn::VarInt::from(16u32 * 1024 * 1024)); // 16MB
-    transport_config.stream_receive_window(quinn::VarInt::from(8u32 * 1024 * 1024)); // 8MB per stream
-    transport_config.send_window(16 * 1024 * 1024); // 16MB send window
+    // Optimize window sizes
+    transport_config.receive_window(quinn::VarInt::from(2u32 * 1024 * 1024)); // 2MB
+    transport_config.stream_receive_window(quinn::VarInt::from(512u32 * 1024)); // 512KB per stream
+    transport_config.send_window(1024 * 1024); // 1MB send window
     // Enable MTU discovery
     transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
 

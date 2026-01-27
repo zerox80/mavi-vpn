@@ -59,4 +59,4 @@ Server configuration is handled via environment variables:
 
 ## License
 
-This project is open source.
+This project is licenced under MIT

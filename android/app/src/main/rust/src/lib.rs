@@ -531,7 +531,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     }
     
     // Cleanup
-    wd_stop.store(true, Ordering::SeqCst);
+    stop_flag.store(true, Ordering::SeqCst);
     tun_to_quic.abort();
     watchdog_task.abort();
 }

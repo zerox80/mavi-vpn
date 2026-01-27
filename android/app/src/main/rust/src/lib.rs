@@ -386,19 +386,14 @@ use futures_util::FutureExt; // Import for now_or_never()
         loop {
             if stop_check.load(Ordering::Relaxed) { break; }
             
-            // WATCHDOG CHECK
-            // If we are actively trying to send data, check if the server is responding.
-            // If we haven't heard from the server in 5 seconds, FORCE RESTART.
+            // WATCHDOG CHECK (Outer Loop - Low Frequency)
+            // Check once per batch/wake-up
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
             let last = last_receive_producer.load(Ordering::Relaxed);
             
             if (now - last) > 5000 {
-                // Check if we have actually sent something recently? 
-                // We are in the loop, about to read/send.
-                // If we are here, we are alive.
-                // But we only want to kill if we are TRYING to send.
-                // Actually, if we are just sitting here waiting for TUN packets, we shouldn't kill.
-                // The kill check should happen AFTER we read a packet from TUN but BEFORE we send.
+                 // We haven't received anything in 5 seconds.
+                 // This acts as a dead peer detection if we are trying to read/write.
             }
 
             let mut guard = match tun_reader.readable().await {
@@ -416,6 +411,7 @@ use futures_util::FutureExt; // Import for now_or_never()
                      }
                      let chunk = buf.chunk_mut();
                      // Use specific max len to avoid reading partial next packet
+                     // read() from TUN on Linux/Android returns one packet per call
                      let max_len = 2048.min(chunk.len());
                      
                      let n = unsafe { libc::read(raw_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
@@ -433,28 +429,33 @@ use futures_util::FutureExt; // Import for now_or_never()
                      
                      unsafe { buf.advance_mut(n); }
                      
-                     // WATCHDOG CHECK (Active)
-                     // We have a packet to send. Is the connection healthy?
-                     let now_w = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-                     let last_w = last_receive_producer.load(Ordering::Relaxed);
-                     if (now_w - last_w) > 5000 {
-                         error!("WATCHDOG: No response from server for 5s while sending data. Forcing Reconnect!");
-                         // Signal stop AND return error to break loop
-                         stop_check.store(true, Ordering::SeqCst);
-                         // Quinn might block on send if full? active abort.
-                         conn_send.close(0u32.into(), b"Watchdog Timeout");
-                         return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Watchdog"));
-                     }
-
                      // Send immediately
                      let packet = buf.split_to(n).freeze();
-                     let _ = conn_send.send_datagram(packet);
+                     match conn_send.send_datagram(packet) {
+                        Ok(_) => {},
+                        Err(e) => {
+                             // If buffer is full, we log once per second max to avoid spam, or just trace
+                             // For now, let's just count or ignore, but BBR should handle it.
+                             // Dropping is the correct behavior for UDP VPN if congestion exists.
+                        }
+                     }
                      
                      packets_read += 1;
                      if packets_read >= 64 { 
                          break;
                      }
                  }
+                 
+                 // Watchdog check only after a batch or partial batch
+                 let now_w = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                 let last_w = last_receive_producer.load(Ordering::Relaxed);
+                 if (now_w - last_w) > 5000 {
+                     error!("WATCHDOG: No response from server for 5s. Forcing Reconnect!");
+                     stop_check.store(true, Ordering::SeqCst);
+                     conn_send.close(0u32.into(), b"Watchdog Timeout");
+                     return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Watchdog"));
+                 }
+
                  Ok(packets_read)
             });
 

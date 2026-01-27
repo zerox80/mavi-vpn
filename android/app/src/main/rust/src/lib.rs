@@ -9,6 +9,7 @@ use tokio::io::unix::AsyncFd;
 use bytes::BytesMut;
 use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
+use ring::digest;
 
 // Global stop flag removed. We use per-session flags.
 
@@ -99,11 +100,11 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig(
-    mut env: JNIEnv,
-    _class: JClass,
+pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass<'a>,
     handle: jlong,
-) -> JString {
+) -> JString<'a> {
     if handle == 0 { return env.new_string("{}").unwrap(); }
     let session = unsafe { &mut *(handle as *mut VpnSession) };
     
@@ -171,7 +172,7 @@ async fn connect_and_handshake(
     
     // Verifier Setup
     let verifier = if let Some(bytes) = decode_hex(&cert_pin) {
-         Arc::new(PinnedServerVerifier { expected_hash: bytes })
+         Arc::new(PinnedServerVerifier::new(bytes))
     } else {
          return Err(anyhow::anyhow!("Invalid Certificate PIN"));
     };
@@ -308,7 +309,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                                      let err = std::io::Error::last_os_error();
                                      if err.kind() == std::io::ErrorKind::WouldBlock { return Err(err); }
                                      Ok(Err(err))
-                                 } else { Ok(Ok(n)) }
+                                 } else { Ok(Ok(n as usize)) }
                              }) {
                                  Ok(Ok(_)) => break,
                                  Ok(Err(e)) => { error!("TUN Write Error: {}", e); break; }, 
@@ -337,6 +338,18 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 #[derive(Debug)]
 struct PinnedServerVerifier {
     expected_hash: Vec<u8>,
+    inner: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>,
+}
+
+impl PinnedServerVerifier {
+    fn new(expected_hash: Vec<u8>) -> Self {
+        let roots = rustls::pki_types::RootCertStore::empty();
+        let inner = rustls::client::WebPkiServerVerifier::builder(
+            std::sync::Arc::new(roots),
+            std::sync::Arc::new(rustls::crypto::ring::default_provider())
+        ).build().expect("Failed to build verifier");
+        Self { expected_hash, inner }
+    }
 }
 
 impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
@@ -348,7 +361,6 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        use ring::digest;
         let cert_hash = digest::digest(&digest::SHA256, end_entity.as_ref());
         if cert_hash.as_ref() == self.expected_hash.as_slice() {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
@@ -357,12 +369,12 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
         }
     }
     fn verify_tls12_signature(&self, message: &[u8], cert: &rustls::pki_types::CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-         rustls::crypto::ring::default_provider().signature_verification_algorithms.verify_tls12_signature(message, cert, dss)
+        self.inner.verify_tls12_signature(message, cert, dss)
     }
     fn verify_tls13_signature(&self, message: &[u8], cert: &rustls::pki_types::CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::ring::default_provider().signature_verification_algorithms.verify_tls13_signature(message, cert, dss)
+        self.inner.verify_tls13_signature(message, cert, dss)
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-         rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_verify_schemes()
+        self.inner.supported_verify_schemes()
     }
 }

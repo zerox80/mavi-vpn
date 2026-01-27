@@ -365,7 +365,8 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     let conn_send = connection_arc.clone();
     let stop_check = stop_flag.clone();
     let tun_to_quic = tokio::spawn(async move {
-        let mut buf = BytesMut::with_capacity(65535); // Allow reading multiple packets if supported
+        // MTU-aligned buffer for optimal cache performance (MTU 1280 + headers)
+        let mut buf = BytesMut::with_capacity(1400);
         loop {
             if stop_check.load(Ordering::Relaxed) { break; }
             
@@ -375,8 +376,8 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             };
 
             let result = guard.try_io(|_inner| {
-                 // Reserve capacity for a standard buffer
-                 if buf.capacity() < 16384 { buf.reserve(16384); }
+                 // Reserve MTU-aligned capacity for cache efficiency (MTU 1280 + headers)
+                 if buf.capacity() < 1400 { buf.reserve(1400); }
                  
                  // Unsafe write to the buffer's uninitialized part
                  let chunk = buf.chunk_mut();

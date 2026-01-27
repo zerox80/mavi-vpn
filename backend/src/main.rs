@@ -142,39 +142,50 @@ async fn main() -> Result<()> {
     });
 
     // Task: TUN Reader (Reads from Kernel, Routes to Specific Client)
+    // Zero-Copy Implementation: Use BytesMut + split_to().freeze() to avoid memcpy
     let state_reader = state.clone();
     tokio::spawn(async move {
-        let mut buf = [0u8; 65535]; // Large buffer to allow kernel to pass more data
+        use bytes::BufMut;
+        let mut buf = bytes::BytesMut::with_capacity(2048);
         loop {
-            match tun_reader.read(&mut buf).await {
+            // Ensure buffer has capacity for next read
+            if buf.capacity() < 2048 {
+                buf.reserve(2048);
+            }
+            
+            // Read into BytesMut's spare capacity
+            match tun_reader.read_buf(&mut buf).await {
+                Ok(0) => break, // EOF
                 Ok(n) => {
-                    if n > 0 {
-                        let packet = &buf[0..n];
-                        // Check IP version
-                        let version = packet[0] >> 4;
-                        if version == 4 {
-                             if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(packet) {
-                                let dest_ip = ipv4_header.destination_addr();
-                                // Avoid deadlock: clone the sender and drop the lock before awaiting
-                                let tx_opt = state_reader.peers.get(&dest_ip).map(|r| r.clone());
-                                if let Some(tx_client) = tx_opt {
-                                    // Use try_send to prevent one blocked client from halting the entire network
-                                    if let Err(e) = tx_client.try_send(Bytes::copy_from_slice(packet)) {
-                                        tracing::warn!("Dropping packet for {} (Channel full or closed): {}", dest_ip, e);
-                                    }
+                    // Zero-copy extract: split off the packet without copying
+                    let packet = buf.split_to(n).freeze();
+                    
+                    if packet.len() == 0 { continue; }
+                    
+                    // Check IP version
+                    let version = packet[0] >> 4;
+                    if version == 4 {
+                         if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&packet) {
+                            let dest_ip = ipv4_header.destination_addr();
+                            // Avoid deadlock: clone the sender and drop the lock before awaiting
+                            let tx_opt = state_reader.peers.get(&dest_ip).map(|r| r.clone());
+                            if let Some(tx_client) = tx_opt {
+                                // Zero-copy send: Bytes is reference-counted, clone is cheap
+                                if let Err(e) = tx_client.try_send(packet) {
+                                    tracing::warn!("Dropping packet for {} (Channel full or closed): {}", dest_ip, e);
                                 }
                             }
-                        } else if version == 6 {
-                             if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(packet) {
-                                let dest_ip = ipv6_header.destination_addr();
-                                    // Avoid deadlock: clone the sender and drop the lock before awaiting
-                                    let tx_opt = state_reader.peers_v6.get(&dest_ip).map(|r| r.clone());
-                                    if let Some(tx_client) = tx_opt {
-                                        // Use try_send to prevent one blocked client from halting the entire network
-                                        if let Err(e) = tx_client.try_send(Bytes::copy_from_slice(packet)) {
-                                            tracing::warn!("Dropping packet for {} (Channel full or closed): {}", dest_ip, e);
-                                        }
-                                    }
+                        }
+                    } else if version == 6 {
+                         if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&packet) {
+                            let dest_ip = ipv6_header.destination_addr();
+                            // Avoid deadlock: clone the sender and drop the lock before awaiting
+                            let tx_opt = state_reader.peers_v6.get(&dest_ip).map(|r| r.clone());
+                            if let Some(tx_client) = tx_opt {
+                                // Zero-copy send: Bytes is reference-counted, clone is cheap
+                                if let Err(e) = tx_client.try_send(packet) {
+                                    tracing::warn!("Dropping packet for {} (Channel full or closed): {}", dest_ip, e);
+                                }
                             }
                         }
                     }

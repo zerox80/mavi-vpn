@@ -27,3 +27,9 @@ thiserror = "1.0"
 
 [patch.crates-io]
 time = { git = "https://github.com/time-rs/time", tag = "v0.3.36" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

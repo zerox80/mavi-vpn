@@ -163,7 +163,6 @@ async fn main() -> Result<()> {
     // Zero-Copy Implementation: Use BytesMut + split_to().freeze() to avoid memcpy
     let state_reader = state.clone();
     tokio::spawn(async move {
-        use bytes::BufMut;
         // 2KB cache-aligned buffer for optimal performance
         let mut buf = bytes::BytesMut::with_capacity(2048);
         loop {

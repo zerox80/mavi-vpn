@@ -43,11 +43,11 @@ impl AppState {
 
         // IPv6 - O(n) initialization using iterator chaining
         // Skip network (0) and gateway (1), take next 5000
-        let free_ips_v6: Vec<Ipv6Addr> = network_v6.iter()
+        let mut free_ips_v6: Vec<Ipv6Addr> = network_v6.iter()
             .skip(2)
             .take(5000)
-            .rev() // Reverse so pop() gives us lowest IPs first
             .collect();
+        free_ips_v6.reverse(); // Reverse so pop() gives us lowest IPs first
 
         Ok(Self {
             peers: DashMap::new(),

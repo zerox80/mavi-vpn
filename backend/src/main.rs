@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     let cert_path = config.cert_path.clone();
     let key_path = config.key_path.clone();
     if let Some(parent) = cert_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).context("Failed to create certificate directory")?;
     }
     let (certs, key) = cert::load_or_generate_certs(cert_path, key_path)?;
 
@@ -121,12 +121,23 @@ async fn main() -> Result<()> {
     // For MTU 1280, MSS should be 1280 - 40 (IP+TCP headers) = 1240
     let mss = config.mtu - 40;
     info!("Applying MSS clamping: {} bytes on {}", mss, tun_name);
-    let _ = std::process::Command::new("iptables")
+    let out1 = std::process::Command::new("iptables")
         .args(&["-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", &mss.to_string()])
         .output();
-    let _ = std::process::Command::new("iptables")
+    match out1 {
+        Ok(o) if !o.status.success() => warn!("iptables MSS clamping failed (FORWARD): {}", String::from_utf8_lossy(&o.stderr)),
+        Err(e) => warn!("Failed to execute iptables (FORWARD): {}", e),
+        _ => {}
+    }
+
+    let out2 = std::process::Command::new("iptables")
         .args(&["-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", &tun_name, "-j", "TCPMSS", "--set-mss", &mss.to_string()])
         .output();
+    match out2 {
+        Ok(o) if !o.status.success() => warn!("iptables MSS clamping failed (POSTROUTING): {}", String::from_utf8_lossy(&o.stderr)),
+        Err(e) => warn!("Failed to execute iptables (POSTROUTING): {}", e),
+        _ => {}
+    }
 
     // 6. Packet Routing Helper Channels
     // Client -> TUN (Multiple clients write to one TUN Writer)
@@ -325,7 +336,13 @@ async fn handle_connection(
                             if ipv4_header.source_addr() == assigned_ip {
                                 valid = true;
                             } else {
-                                tracing::warn!("Spoofed IPv4? Src: {}, Expected: {}", ipv4_header.source_addr(), assigned_ip);
+                                static MSG_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                let last = MSG_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+                                if now > last + 5 { // Log at most once every 5 seconds
+                                     tracing::warn!("Spoofed IPv4? Src: {}, Expected: {}", ipv4_header.source_addr(), assigned_ip);
+                                     MSG_LIMIT.store(now, std::sync::atomic::Ordering::Relaxed);
+                                }
                             }
                         }
                     } else if version == 6 {

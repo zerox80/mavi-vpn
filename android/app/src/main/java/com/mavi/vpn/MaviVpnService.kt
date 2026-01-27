@@ -127,8 +127,9 @@ class MaviVpnService : VpnService() {
                         
                         // Parse Config
                         val assignedIp = config.getString("assigned_ip")
-                        // netmask usually /24 for IPv4 in this simple setup
-                        val prefixLength = 24 
+                        // Dynamic netmask calculation
+                        val netmask = config.optString("netmask", "255.255.255.0")
+                        val prefixLength = netmaskToPrefixLength(netmask)
                         
                         builder.addAddress(assignedIp, prefixLength)
                         
@@ -252,4 +253,13 @@ class MaviVpnService : VpnService() {
         }
         wakeLock = null
     }
+
+    private fun netmaskToPrefixLength(netmask: String): Int {
+        return try {
+            netmask.split(".").sumOf { Integer.bitCount(it.toInt()) }
+        } catch (e: Exception) {
+            24 // Fallback default
+        }
+    }
+}
 }

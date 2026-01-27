@@ -60,12 +60,6 @@ async fn main() -> Result<()> {
     transport_config.stream_receive_window(quinn::VarInt::from(8u32 * 1024 * 1024)); // 8MB per stream
     transport_config.send_window(16 * 1024 * 1024); // 16MB send window
     
-    // CRITICAL: Fast initial ramp-up (default is ~14KB, way too conservative!)
-    transport_config.initial_window(10 * 1024 * 1024); // 10MB initial window
-    
-    // BBR-style: Higher pacing burst for better throughput
-    transport_config.pacing_burst(10); // Send 10 packets per burst
-    
     // Manually bind socket to set SO_RCVBUF and SO_SNDBUF
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
     let socket2_sock = socket2::Socket::from(socket);

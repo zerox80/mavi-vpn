@@ -267,8 +267,8 @@ async fn connect_and_handshake(
     client_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(15).try_into().unwrap()));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
+    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(45).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
     
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));
@@ -345,7 +345,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     let conn_send = connection_arc.clone();
     let stop_check = stop_flag.clone();
     let tun_to_quic = tokio::spawn(async move {
-        let mut buf = BytesMut::with_capacity(1500);
+        let mut buf = BytesMut::with_capacity(1280);
         loop {
             if stop_check.load(Ordering::Relaxed) { break; }
             
@@ -356,11 +356,11 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
 
             let result = guard.try_io(|_inner| {
                  // Reserve capacity for a standard MTU frame
-                 if buf.capacity() < 1500 { buf.reserve(1500); }
+                 if buf.capacity() < 1280 { buf.reserve(1280); }
                  
                  // Unsafe write to the buffer's uninitialized part
                  let ptr = buf.chunk_mut().as_mut_ptr();
-                 let n = unsafe { libc::read(raw_fd, ptr as *mut libc::c_void, 1500) };
+                 let n = unsafe { libc::read(raw_fd, ptr as *mut libc::c_void, 1280) };
                  
                  if n < 0 {
                      let err = std::io::Error::last_os_error();

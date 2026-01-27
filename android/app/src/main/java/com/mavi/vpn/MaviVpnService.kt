@@ -112,8 +112,8 @@ class MaviVpnService : VpnService() {
                     // 1. Init / Handshake
                     val handle = init(this, token, "$ip:$port", certPin)
                     if (handle == 0L) {
-                        Log.e("MaviVPN", "Handshake failed. Retrying in 2s...")
-                        Thread.sleep(2000)
+                        Log.e("MaviVPN", "Handshake failed. Retrying in 500ms...")
+                        Thread.sleep(500)
                         continue
                     }
                     vpnSessionHandle = handle
@@ -158,7 +158,9 @@ class MaviVpnService : VpnService() {
                             }
                         }
 
+
                         builder.setSession("MaviVPN")
+                        // Enforce 1280 MTU strictly if not present, though config.optInt defaults to it.
                         builder.setMtu(config.optInt("mtu", 1280))
 
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -199,12 +201,12 @@ class MaviVpnService : VpnService() {
                     }
                 } catch (e: Exception) {
                      Log.e("MaviVPN", "Critical error in VPN thread: ${e.message}")
-                     try { Thread.sleep(2000) } catch(_: Exception){}
+                     try { Thread.sleep(500) } catch(_: Exception){}
                 }
                 
                 if (isRunning) {
-                    Log.i("MaviVPN", "Connection lost or loop exited. Restarting in 2 seconds...")
-                    try { Thread.sleep(2000) } catch(_: Exception){}
+                    Log.i("MaviVPN", "Connection lost or loop exited. Restarting in 500ms...")
+                    try { Thread.sleep(500) } catch(_: Exception){}
                 }
             }
             

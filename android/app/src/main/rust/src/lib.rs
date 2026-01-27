@@ -76,8 +76,10 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
         };
         
         // Increase socket buffers to 2MB
-        let _ = socket.set_recv_buffer_size(2 * 1024 * 1024);
-        let _ = socket.set_send_buffer_size(2 * 1024 * 1024);
+        let socket2_sock = socket2::Socket::from(socket);
+        let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024);
+        let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024);
+        let socket = std::net::UdpSocket::from(socket2_sock);
 
         let sock_fd = socket.as_raw_fd();
         

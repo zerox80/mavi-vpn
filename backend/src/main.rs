@@ -59,8 +59,10 @@ async fn main() -> Result<()> {
     
     // Manually bind socket to set SO_RCVBUF and SO_SNDBUF
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
-    let _ = socket.set_recv_buffer_size(2 * 1024 * 1024);
-    let _ = socket.set_send_buffer_size(2 * 1024 * 1024);
+    let socket2_sock = socket2::Socket::from(socket);
+    let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024);
+    let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024);
+    let socket = std::net::UdpSocket::from(socket2_sock);
 
     let endpoint = Endpoint::new(
         quinn::EndpointConfig::default(),

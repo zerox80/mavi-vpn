@@ -21,3 +21,4 @@ bincode = { workspace = true }
 libc = "0.2"
 serde_json = "1.0"
 ring = "0.17"
+socket2 = { workspace = true }

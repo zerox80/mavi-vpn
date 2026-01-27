@@ -277,10 +277,7 @@ async fn connect_and_handshake(
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(45).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
-    
-    // Explicitly set max datagram frame size to 1280 to match VPN MTU
-    transport_config.max_datagram_frame_size(Some(1280));
+    transport_config.datagram_send_buffer_size(Some(2 * 1024 * 1024));
     
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

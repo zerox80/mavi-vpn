@@ -273,22 +273,25 @@ async fn connect_and_handshake(
         .with_no_client_auth();
     client_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
 
-    // Performance Optimizations for high throughput
+    // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(45).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
     transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB
     transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB
     
-    // Increase receive window for better throughput
+    // Enable BBR Congestion Control
+    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    
+    // Increase receive window
     transport_config.receive_window(quinn::VarInt::from(16u32 * 1024 * 1024)); // 16MB
     transport_config.stream_receive_window(quinn::VarInt::from(8u32 * 1024 * 1024)); // 8MB per stream
     transport_config.send_window(16 * 1024 * 1024); // 16MB send window
-    
+    // Enable MTU discovery
+    transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
+
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));
-
-
 
     let mut endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),
@@ -358,12 +361,12 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
 
     let connection_arc = Arc::new(connection);
     
-    // TUN -> QUIC
+    // TUN -> QUIC (Optimized Loop)
     let conn_send = connection_arc.clone();
     let stop_check = stop_flag.clone();
     let tun_to_quic = tokio::spawn(async move {
-        // 2KB buffer for optimal cache alignment and headroom
-        let mut buf = BytesMut::with_capacity(2048);
+        // Larger staging buffer to minimize allocations, though we use split_to
+        let mut buf = BytesMut::with_capacity(65536); 
         loop {
             if stop_check.load(Ordering::Relaxed) { break; }
             
@@ -373,37 +376,51 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             };
 
             let result = guard.try_io(|_inner| {
-                 // Ensure capacity for MTU-sized packet (capacity managed by BytesMut)
-                 let chunk = buf.chunk_mut();
-                 let n = unsafe { libc::read(raw_fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
-                 
-                 if n < 0 {
-                     let err = std::io::Error::last_os_error();
-                     if err.kind() == std::io::ErrorKind::WouldBlock {
-                         return Err(err); 
+                 // Try to read multiple packets if possible in a loop without yielding
+                 let mut packets_read = 0;
+                 loop {
+                     // Reserve space for MTU (e.g., 2048)
+                     if buf.capacity() < 2048 {
+                         buf.reserve(2048);
                      }
-                     return Ok(Err(err));
+                     let chunk = buf.chunk_mut();
+                     // Use specific max len to avoid reading partial next packet if that were possible (TUN usually distinct)
+                     let max_len = 2048.min(chunk.len());
+                     
+                     let n = unsafe { libc::read(raw_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
+                     
+                     if n < 0 {
+                         let err = std::io::Error::last_os_error();
+                         if err.kind() == std::io::ErrorKind::WouldBlock {
+                             // If we read at least one packet, consider this success for the outer loop
+                             if packets_read > 0 { return Ok(packets_read); }
+                             return Err(err); 
+                         }
+                         return Ok(Err(err));
+                     }
+                     let n = n as usize;
+                     if n == 0 { return Ok(0); } // EOF
+                     
+                     unsafe { buf.advance_mut(n); }
+                     
+                     // Send immediately - Quinn's send_datagram is non-blocking and fast
+                     let packet = buf.split_to(n).freeze();
+                     // Ignore error (queue full), helps backpressure
+                     let _ = conn_send.send_datagram(packet);
+                     
+                     packets_read += 1;
+                     if packets_read >= 16 { // limit batch size to yield
+                         break;
+                     }
                  }
-                 Ok(Ok(n as usize))
+                 Ok(packets_read)
             });
 
             match result {
                 Ok(inner_result) => {
                     match inner_result {
-                        Ok(n_res) => {
-                            let n = match n_res {
-                                Ok(n) => n,
-                                Err(e) => { error!("TUN Read failed: {}", e); break; }
-                            };
-                            if n == 0 { break; } // EOF
-                            
-                            // Commit the data written
-                            unsafe { buf.advance_mut(n); }
-                            
-                            // Zero-copy extract
-                            let packet = buf.split_to(n).freeze();
-                            let _ = conn_send.send_datagram(packet);
-                        }
+                        Ok(n) if n == 0 => { break; } // EOF/Error
+                        Ok(_) => {}, // success
                         Err(e) => { error!("TUN Read Error: {}", e); break; }
                     }
                 },
@@ -412,36 +429,60 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
         }
     });
 
-    // QUIC -> TUN
+    // QUIC -> TUN (Optimized Batch Write)
     loop {
         if stop_flag.load(Ordering::Relaxed) { break; }
         
-        tokio::select! {
-             result = connection_arc.read_datagram() => {
-                match result {
-                    Ok(data) => {
-                        loop {
-                             let mut guard = match tun_writer.writable().await {
-                                 Ok(g) => g,
-                                 Err(_) => break,
-                             };
-                             match guard.try_io(|_inner| {
-                                 let n = unsafe { libc::write(raw_fd, data.as_ptr() as *const libc::c_void, data.len()) };
-                                 if n < 0 {
-                                     let err = std::io::Error::last_os_error();
-                                     if err.kind() == std::io::ErrorKind::WouldBlock { return Err(err); }
-                                     Ok(Err(err))
-                                 } else { Ok(Ok(n as usize)) }
-                             }) {
-                                 Ok(Ok(_)) => break,
-                                 Ok(Err(e)) => { error!("TUN Write Warning (packet dropped): {}", e); }, 
-                                 Err(_) => continue,
+        // We want to read as many available datagrams as possible and write them to TUN
+        // But we must await the *first* one.
+        match connection_arc.read_datagram().await {
+            Ok(first_packet) => {
+                // We have at least one packet. Try to grab more from the internal queue without awaiting.
+                let mut batch = Vec::with_capacity(16);
+                batch.push(first_packet);
+
+                // Drain up to 15 more packets that are ready NOW
+                for _ in 0..15 {
+                     match connection_arc.read_datagram().now_or_never() {
+                         Some(Ok(pkt)) => batch.push(pkt),
+                         _ => break,
+                     }
+                }
+
+                // Write batch to TUN
+                let mut guard = match tun_writer.writable().await {
+                     Ok(g) => g,
+                     Err(_) => break,
+                };
+                
+                let res = guard.try_io(|_inner| {
+                    for packet in &batch {
+                         let n = unsafe { libc::write(raw_fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
+                         if n < 0 {
+                             let err = std::io::Error::last_os_error();
+                             if err.kind() == std::io::ErrorKind::WouldBlock {
+                                 // Partial write of batch? We lose the rest.
+                                 // Ideally we should handle this, but for VPN, dropping is better than blocking head-of-line.
+                                 return Err(err); 
                              }
-                        }
+                             // Serious error
+                             return Ok(Err(err));
+                         }
                     }
-                    Err(e) => { error!("Connection lost: {}", e); break; }
+                    Ok(())
+                });
+                
+                match res {
+                    Ok(Ok(_)) => {},
+                    Ok(Err(e)) => { error!("TUN Write Error: {}", e); },
+                    Err(_) => { 
+                        // WouldBlock on the first write? We might lose the batch logic here if we retry all.
+                        // Since we checked writable(), this shouldn't happen often. 
+                        // Simplified: Just drop if we can't write instantly after writable signal.
+                    }
                 }
             }
+            Err(e) => { error!("Connection lost: {}", e); break; }
         }
     }
     

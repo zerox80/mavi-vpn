@@ -60,6 +60,11 @@ async fn main() -> Result<()> {
     transport_config.stream_receive_window(quinn::VarInt::from(8u32 * 1024 * 1024)); // 8MB per stream
     transport_config.send_window(16 * 1024 * 1024); // 16MB send window
     
+    // Enable BBR Congestion Control
+    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    // Enable MTU discovery
+    transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
+    
     // Manually bind socket to set SO_RCVBUF and SO_SNDBUF
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
     let socket2_sock = socket2::Socket::from(socket);

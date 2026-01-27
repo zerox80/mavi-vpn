@@ -286,8 +286,7 @@ async fn connect_and_handshake(
     transport_config.send_window(16 * 1024 * 1024); // 16MB send window
     
     // Larger initial window for faster ramp-up
-    transport_config.initial_window(1024 * 1024); // 1MB initial window
-    transport_config.min_mtu(1280); // Our MTU
+    // Note: initial_window() and min_mtu() not available in all Quinn versions
     
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

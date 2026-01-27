@@ -411,7 +411,7 @@ use futures_util::FutureExt; // Import for now_or_never()
                      let _ = conn_send.send_datagram(packet);
                      
                      packets_read += 1;
-                     if packets_read >= 16 { // limit batch size to yield
+                     if packets_read >= 64 { // limit batch size to 64 for better throughput
                          break;
                      }
                  }
@@ -442,11 +442,11 @@ use futures_util::FutureExt; // Import for now_or_never()
         match connection_arc.read_datagram().await {
             Ok(first_packet) => {
                 // We have at least one packet. Try to grab more from the internal queue without awaiting.
-                let mut batch = Vec::with_capacity(16);
+                let mut batch = Vec::with_capacity(64);
                 batch.push(first_packet);
 
-                // Drain up to 15 more packets that are ready NOW
-                for _ in 0..15 {
+                // Drain up to 63 more packets that are ready NOW
+                for _ in 0..63 {
                      match connection_arc.read_datagram().now_or_never() {
                          Some(Ok(pkt)) => batch.push(pkt),
                          _ => break,

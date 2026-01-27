@@ -4,6 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -13,6 +17,8 @@ class MaviVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var thread: Thread? = null
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var vpnSessionHandle: Long = 0
 
     companion object {
@@ -27,6 +33,7 @@ class MaviVpnService : VpnService() {
     private external fun startLoop(handle: Long, fd: Int)
     private external fun stop(handle: Long)
     private external fun free(handle: Long)
+    private external fun networkChanged(handle: Long)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
@@ -46,6 +53,25 @@ class MaviVpnService : VpnService() {
 
     private fun startVpn(ip: String, port: String, token: String, certPin: String) {
         if (thread != null) return
+
+        // Register Network Callback
+        try {
+            connectivityManager = getSystemService(ConnectivityManager::class.java)
+            networkCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    Log.d("MaviVPN", "Network available: $network")
+                    if (vpnSessionHandle != 0L) {
+                         networkChanged(vpnSessionHandle)
+                    }
+                }
+            }
+            val req = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            connectivityManager?.registerNetworkCallback(req, networkCallback!!)
+        } catch (e: Exception) {
+            Log.e("MaviVPN", "Failed to register network callback", e)
+        }
 
         // Create Notification
         val channelId = "vpn_channel"
@@ -158,6 +184,16 @@ class MaviVpnService : VpnService() {
         if (handle != 0L) {
              stop(handle) // Signal Rust to stop
         }
+        
+        try {
+            if (connectivityManager != null && networkCallback != null) {
+                connectivityManager?.unregisterNetworkCallback(networkCallback!!)
+            }
+        } catch(e: Exception) {
+            Log.w("MaviVPN", "Error unregistering callback: ${e.message}")
+        }
+        connectivityManager = null
+        networkCallback = null
         
         try {
             vpnInterface?.close()

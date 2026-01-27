@@ -6,11 +6,11 @@ use android_logger::Config;
 use log::{info, error};
 use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut, BufMut};
 use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use ring::digest;
-use rustls::RootCertStore;
+
 use std::sync::Once;
 
 // Global stop flag removed. We use per-session flags.
@@ -216,6 +216,31 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_free(
     }));
 }
 
+#[no_mangle]
+pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_networkChanged(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    if handle == 0 { return; }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let session = unsafe { &*(handle as *mut VpnSession) };
+        info!("Network Event: Triggering Rebind/Migration Ping");
+        
+        let conn = session.connection.clone();
+        
+        // Spawn a task to send a ping/datagram
+        session.runtime.spawn(async move {
+            info!("Sending migration datagram...");
+            // Send an empty datagram effectively acting as a ping to update the path
+            match conn.send_datagram(Bytes::from_static(&[])) {
+                 Ok(_) => info!("Migration datagram sent"),
+                 Err(e) => error!("Failed to send migration datagram: {}", e),
+            }
+        });
+    }));
+}
+
 // --- Internal Logic ---
 
 async fn connect_and_handshake(
@@ -330,9 +355,13 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             };
 
             let result = guard.try_io(|_inner| {
+                 // Reserve capacity for a standard MTU frame
                  if buf.capacity() < 1500 { buf.reserve(1500); }
-                 let ptr = buf.as_mut_ptr();
+                 
+                 // Unsafe write to the buffer's uninitialized part
+                 let ptr = buf.chunk_mut().as_mut_ptr();
                  let n = unsafe { libc::read(raw_fd, ptr as *mut libc::c_void, 1500) };
+                 
                  if n < 0 {
                      let err = std::io::Error::last_os_error();
                      if err.kind() == std::io::ErrorKind::WouldBlock {
@@ -352,9 +381,14 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                                 Err(e) => { error!("TUN Read failed: {}", e); break; }
                             };
                             if n == 0 { break; } // EOF
-                            unsafe { buf.set_len(n); }
-                            let _ = conn_send.send_datagram(buf.to_vec().into());
-                            buf.clear();
+                            
+                            // Commit the data written
+                            unsafe { buf.advance_mut(n); }
+                            
+                            // Zero-copy extract
+                            let packet = buf.split_to(n).freeze();
+                            let _ = conn_send.send_datagram(packet);
+                            // buf is now ready for next read at tail or will reserve
                         }
                         Err(e) => { error!("TUN Read Error: {}", e); break; }
                     }

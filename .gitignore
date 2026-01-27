@@ -28,3 +28,4 @@ auth_token.txt
 *.log
 problems-report.html
 android/app/src/main/jniLibs/
+android/java_pid7424.hprof

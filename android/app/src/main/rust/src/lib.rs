@@ -312,9 +312,8 @@ async fn connect_and_handshake(
     transport_config.send_window(1024 * 1024); // 1MB send window
     // FIX: Re-enable Discovery. We need Wire MTU > 1280 to carry 1280-byte Inner packets.
     // User correctly calculated 1280 + 80 (overhead) = 1360.
-    // We set to 1400 to be safe/standard for mobile networks.
     transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
-    transport_config.initial_mtu(1400);
+    transport_config.initial_mtu(1360);
 
     // Enable Segmentation Offload (GSO) for higher throughput
     transport_config.enable_segmentation_offload(true);
@@ -474,8 +473,9 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                      let packet = buf.split_to(n).freeze();
                      match conn_send.send_datagram(packet) {
                         Ok(_) => {},
-                        Err(_e) => {
+                        Err(e) => {
                              // Buffer full or closed
+                             warn!("Failed to send datagram: {}", e);
                         }
                      }
                      

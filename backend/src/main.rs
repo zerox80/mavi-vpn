@@ -52,8 +52,22 @@ async fn main() -> Result<()> {
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB buffer
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB buffer
+    
+    // Explicitly set max datagram frame size to accommodate MTU 1280
+    // QUIC header is ~20-30 bytes, so 1280 is safe and optimal
+    transport_config.max_datagram_frame_size(Some(config.mtu as usize));
+    
+    // Manually bind socket to set SO_RCVBUF and SO_SNDBUF
+    let socket = std::net::UdpSocket::bind(config.bind_addr)?;
+    let _ = socket.set_recv_buffer_size(2 * 1024 * 1024);
+    let _ = socket.set_send_buffer_size(2 * 1024 * 1024);
 
-    let endpoint = Endpoint::server(server_config, config.bind_addr)?;
+    let endpoint = Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(server_config),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )?;
     
     // 5. Setup TUN Interface
     let mut tun_config = tun::Configuration::default();
@@ -64,7 +78,7 @@ async fn main() -> Result<()> {
 
     tun_config.address(gateway_ip)
               .netmask(netmask)
-              .mtu(1280)
+              .mtu(config.mtu as i32)
               .up();
 
     #[cfg(target_os = "linux")]
@@ -92,6 +106,17 @@ async fn main() -> Result<()> {
         Ok(out) => error!("Failed to add IPv6: {:?}", String::from_utf8_lossy(&out.stderr)),
         Err(e) => error!("Failed to execute ip command: {}", e),
     }
+
+    // 5b. MSS Clamping to prevent TCP fragmentation
+    // For MTU 1280, MSS should be 1280 - 40 (IP+TCP headers) = 1240
+    let mss = config.mtu - 40;
+    info!("Applying MSS clamping: {} bytes on {}", mss, tun_name);
+    let _ = std::process::Command::new("iptables")
+        .args(&["-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", &mss.to_string()])
+        .output();
+    let _ = std::process::Command::new("iptables")
+        .args(&["-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", &tun_name, "-j", "TCPMSS", "--set-mss", &mss.to_string()])
+        .output();
 
     // 6. Packet Routing Helper Channels
     // Client -> TUN (Multiple clients write to one TUN Writer)
@@ -217,7 +242,7 @@ async fn handle_connection(
         netmask: state.network.mask(),
         gateway: state.gateway_ip(),
         dns_server: config.dns,
-        mtu: 1280,
+        mtu: config.mtu as u32,
         // Disable IPv6 for client until server has IPv6 uplink
         assigned_ipv6: Some(assigned_ip6),
         netmask_v6: Some(64), // Standard /64

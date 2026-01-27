@@ -74,6 +74,11 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
                 return 0;
             }
         };
+        
+        // Increase socket buffers to 2MB
+        let _ = socket.set_recv_buffer_size(2 * 1024 * 1024);
+        let _ = socket.set_send_buffer_size(2 * 1024 * 1024);
+
         let sock_fd = socket.as_raw_fd();
         
         let protected = env.call_method(
@@ -271,6 +276,9 @@ async fn connect_and_handshake(
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
+    
+    // Explicitly set max datagram frame size to 1280 to match VPN MTU
+    transport_config.max_datagram_frame_size(Some(1280));
     
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

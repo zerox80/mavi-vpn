@@ -311,9 +311,10 @@ async fn connect_and_handshake(
     transport_config.stream_receive_window(quinn::VarInt::from(512u32 * 1024)); // 512KB per stream
     transport_config.send_window(1024 * 1024); // 1MB send window
     // FIX: Re-enable Discovery. We need Wire MTU > 1280 to carry 1280-byte Inner packets.
-    // User correctly calculated 1280 + 80 (overhead) = 1360.
-    transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
+    // STANDARD: Wire MTU 1360 to exactly fit 1280-byte Inner packets + 80 bytes overhead
     transport_config.initial_mtu(1360);
+    // REMOVED: max_datagram_frame_size not supported in this version.
+    // initial_mtu(1360) should provide enough headroom (1360 - overhead > 1280). 
 
     // Enable Segmentation Offload (GSO) for higher throughput
     transport_config.enable_segmentation_offload(true);
@@ -481,7 +482,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                      
                      packets_read += 1;
                  }
-                 Ok(packets_read)
+                 // Unreachable code removed
             });
 
             match result {

@@ -33,7 +33,7 @@ pub struct Config {
     #[arg(long, env = "VPN_KEY", default_value = "data/key.pem")]
     pub key_path: std::path::PathBuf,
 
-    /// MTU for the VPN interface
+    /// Inner Device MTU (Standard: 1280). Wire MTU will be this + 80 (1360).
     #[arg(long, env = "VPN_MTU", default_value = "1280")]
     pub mtu: u16,
 }

@@ -65,6 +65,10 @@ async fn main() -> Result<()> {
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     // Enable MTU discovery
     transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
+    // STANDARD: Wire MTU 1360 to exactly fit 1280-byte Inner packets + 80 bytes overhead
+    transport_config.initial_mtu(1360);
+    // REMOVED: max_datagram_frame_size not supported in this version. 
+    // initial_mtu(1360) should provide enough headroom (1360 - overhead > 1280).
     // Enable Segmentation Offload (GSO)
     transport_config.enable_segmentation_offload(true);
     

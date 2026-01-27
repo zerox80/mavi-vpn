@@ -285,8 +285,11 @@ async fn connect_and_handshake(
     transport_config.stream_receive_window(quinn::VarInt::from(8u32 * 1024 * 1024)); // 8MB per stream
     transport_config.send_window(16 * 1024 * 1024); // 16MB send window
     
-    // Larger initial window for faster ramp-up
-    // Note: initial_window() and min_mtu() not available in all Quinn versions
+    // CRITICAL: Fast initial ramp-up (default is ~14KB, way too conservative!)
+    transport_config.initial_window(10 * 1024 * 1024); // 10MB initial window
+    
+    // BBR-style: Higher pacing burst for better throughput
+    transport_config.pacing_burst(10); // Send 10 packets per burst
     
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

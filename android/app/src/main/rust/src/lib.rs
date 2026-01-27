@@ -281,7 +281,8 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             match result {
                 Ok(inner_result) => {
                     match inner_result {
-                        Ok(n) => {
+                        Ok(n_res) => {
+                            let n = n_res.expect("TUN Read failed");
                             if n == 0 { break; } // EOF
                             unsafe { buf.set_len(n); }
                             let _ = conn_send.send_datagram(buf.to_vec().into());

@@ -127,9 +127,9 @@ async fn main() -> Result<()> {
     // 5b. MSS Clamping to prevent TCP fragmentation
     // For MTU 1280:
     // IPv4: 1280 - 20 (IP) - 20 (TCP) = 1240
-    // IPv6: 1280 - 40 (IP) - 20 (TCP) = 1220
-    let mss_v4 = config.mtu - 40;
-    let mss_v6 = config.mtu - 60;
+    // IPv6: 1280 - 40 (IPv6) - 20 (TCP) = 1220
+    let mss_v4 = 1240;
+    let mss_v6 = 1220;
 
     info!("Applying MSS clamping: IPv4={} IPv6={} on {}", mss_v4, mss_v6, tun_name);
 

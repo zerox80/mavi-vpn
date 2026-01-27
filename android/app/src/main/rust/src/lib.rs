@@ -438,7 +438,6 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     
     let tun_to_quic = tokio::spawn(async move {
         let mut buf = BytesMut::with_capacity(65536); 
-        let mut first_packet_logged = false;
         loop {
             if stop_check.load(Ordering::Relaxed) { break; }
             
@@ -473,24 +472,51 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                      unsafe { buf.advance_mut(n); }
                      
                      let packet = buf.split_to(n).freeze();
-                     match conn_send.send_datagram(packet) {
+                     // PERF: If send_datagram is blocked, we should NOT read more from TUN.
+                     // Instead, we wait and retry. This prevents draining the TUN dev and dropping packets.
+                     match conn_send.send_datagram(packet.clone()) {
                         Ok(_) => {},
+                        Err(quinn::SendDatagramError::Blocked(p)) => {
+                            // Re-append the packet to the front of our processing or just wait.
+                            // Since we already split it, we need to handle it.
+                            // We yield and retry sending THIS packet.
+                            let mut retry_packet = p;
+                            loop {
+                                tokio::task::yield_now().await;
+                                if stop_check.load(Ordering::Relaxed) { break; }
+                                match conn_send.send_datagram(retry_packet) {
+                                    Ok(_) => break,
+                                    Err(quinn::SendDatagramError::Blocked(p)) => {
+                                        retry_packet = p;
+                                        // Exponential backoff or just yield? 
+                                        // Yield is usually enough for async executors.
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        // Connection actually closed or similar
+                                        return Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, e));
+                                    }
+                                }
+                            }
+                        },
                         Err(e) => {
-                             // Buffer full or closed
-                             warn!("Failed to send datagram: {}", e);
+                             // Buffer closed or fatal error
+                             return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
                         }
                      }
                      
                      packets_read += 1;
+                     if packets_read >= 32 { return Ok(packets_read); } // Yield periodically
                  }
-                 // Unreachable code removed
             });
 
             match result {
                 Ok(Ok(n)) => if n == 0 { break; },
                 Ok(Err(e)) => {
-                    error!("TUN Read Error: {}", e);
-                    break;
+                    if e.kind() != std::io::ErrorKind::WouldBlock {
+                        error!("TUN Read Error: {}", e);
+                        break;
+                    }
                 },
                 Err(_) => continue, 
             }

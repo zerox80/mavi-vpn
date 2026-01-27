@@ -48,8 +48,8 @@ services:
       # Logging
       - "--log.level=INFO"
     ports:
-      - "80:80"
-      - "443:443"
+      - "${TRAEFIK_HTTP_PORT:-80}:80"
+      - "${TRAEFIK_HTTPS_PORT:-443}:443"
       # Dashboard (Optional, insecure unless protected)
       # - "8080:8080"
     volumes:
@@ -66,4 +66,7 @@ services:
       # Router for HTTPS
       - "traefik.http.routers.web-server.rule=Host(`${DOMAIN_NAME}`)"
       - "traefik.http.routers.web-server.entrypoints=websecure"
-      - "traefik.http.routers.web-server.tls.certresolver=myresolver"
+      # TLS Config: Use resolver from ENV, or fallback to manual/self-signed if empty/commented
+      # If TRAEFIK_ACME_RESOLVER is set to 'myresolver', LE is used.
+      # If it's invalid or empty, it might default to self-signed.
+      - "traefik.http.routers.web-server.tls.certresolver=${TRAEFIK_ACME_RESOLVER:-myresolver}"

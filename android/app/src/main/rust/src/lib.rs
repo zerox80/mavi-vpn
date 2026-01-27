@@ -298,7 +298,7 @@ async fn connect_and_handshake(
     // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
     // FIX: Reduced buffers to prevent upload speed dropping to 0 (Bufferbloat)
     transport_config.datagram_receive_buffer_size(Some(1024 * 1024)); // 1MB
     transport_config.datagram_send_buffer_size(512 * 1024); // 512KB
@@ -310,8 +310,9 @@ async fn connect_and_handshake(
     transport_config.receive_window(quinn::VarInt::from(2u32 * 1024 * 1024)); // 2MB
     transport_config.stream_receive_window(quinn::VarInt::from(512u32 * 1024)); // 512KB per stream
     transport_config.send_window(1024 * 1024); // 1MB send window
-    // Enable MTU discovery
-    transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
+    // FIX: Strict MTU 1280 (User Rule) - Disable Discovery
+    transport_config.mtu_discovery_config(None);
+    transport_config.initial_mtu(1280);
 
     // Enable Segmentation Offload (GSO) for higher throughput
     transport_config.enable_segmentation_offload(true);
@@ -418,8 +419,9 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
             let last = wd_last.load(Ordering::Relaxed);
             
-            if (now - last) > 5000 {
-                 error!("WATCHDOG: No response from server for 5s. Forcing Reconnect!");
+            // FIX: Increased to 25s to prevent disconnects on 5G/Network Switching
+            if (now - last) > 25000 {
+                 error!("WATCHDOG: No response from server for 25s. Forcing Reconnect!");
                  wd_stop.store(true, Ordering::SeqCst);
                  wd_conn.close(0u32.into(), b"Watchdog Timeout");
                  break;

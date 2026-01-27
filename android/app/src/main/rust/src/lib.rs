@@ -490,7 +490,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                         // If it fails, we might just want to yield and retry a few times, 
                         // or check if it's a fatal error.
                         match e {
-                            quinn::SendDatagramError::ConnectionLost => {
+                            quinn::SendDatagramError::ConnectionLost(_) => {
                                 error!("Connection lost during send");
                                 stop_check.store(true, Ordering::SeqCst);
                                 break;

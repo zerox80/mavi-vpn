@@ -310,9 +310,11 @@ async fn connect_and_handshake(
     transport_config.receive_window(quinn::VarInt::from(2u32 * 1024 * 1024)); // 2MB
     transport_config.stream_receive_window(quinn::VarInt::from(512u32 * 1024)); // 512KB per stream
     transport_config.send_window(1024 * 1024); // 1MB send window
-    // FIX: Strict MTU 1280 (User Rule) - Disable Discovery
-    transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1280);
+    // FIX: Re-enable Discovery. We need Wire MTU > 1280 to carry 1280-byte Inner packets.
+    // User correctly calculated 1280 + 80 (overhead) = 1360.
+    // We set to 1400 to be safe/standard for mobile networks.
+    transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
+    transport_config.initial_mtu(1400);
 
     // Enable Segmentation Offload (GSO) for higher throughput
     transport_config.enable_segmentation_offload(true);
@@ -435,6 +437,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     
     let tun_to_quic = tokio::spawn(async move {
         let mut buf = BytesMut::with_capacity(65536); 
+        let mut first_packet_logged = false;
         loop {
             if stop_check.load(Ordering::Relaxed) { break; }
             
@@ -452,6 +455,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                      let chunk = buf.chunk_mut();
                      let max_len = 2048.min(chunk.len());
                      
+                     // REVERT: Use raw_fd (original) for IO, dup_fd only for polling
                      let n = unsafe { libc::read(raw_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
                      
                      if n < 0 {
@@ -476,8 +480,6 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                      }
                      
                      packets_read += 1;
-                     // FIX: Do not break eagerly. Read until WouldBlock to ensure AsyncFd state is cleared.
-                     // if packets_read >= 64 { break; }
                  }
                  Ok(packets_read)
             });
@@ -501,7 +503,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             Ok(first_packet) => {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                 last_receive.store(now, Ordering::Relaxed);
-
+                
                 let mut batch = Vec::with_capacity(64);
                 batch.push(first_packet);
 
@@ -519,6 +521,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                 
                 let res = guard.try_io(|_inner| {
                     for packet in &batch {
+                         // REVERT: Use raw_fd
                          let n = unsafe { libc::write(raw_fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
                          if n < 0 {
                              let err = std::io::Error::last_os_error();

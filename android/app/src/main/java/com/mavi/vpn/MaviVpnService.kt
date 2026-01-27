@@ -184,8 +184,10 @@ class MaviVpnService : VpnService() {
 
 
                         builder.setSession("MaviVPN")
-                        // Enforce 1280 MTU strictly if not present, though config.optInt defaults to it.
-                        builder.setMtu(config.optInt("mtu", 1280))
+                        // FIX: IPv6 REQUIRES MTU >= 1280.
+                        // We set this to 1280 to fix the Crash.
+                        // We must ensure 'Wire' MTU in Rust is larger (e.g. 1350+) to fit these packets.
+                        builder.setMtu(1280)
 
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                             builder.setMetered(false)

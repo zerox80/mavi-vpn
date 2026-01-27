@@ -419,11 +419,16 @@ use futures_util::FutureExt; // Import for now_or_never()
             });
 
             match result {
-                Ok(n) => {
+                Ok(Ok(n)) => {
                      // Success (n packets read)
-                     if n == 0 { break; } // EOF/Error treated as break? No, n=0 means potential EOF if we didn't get WouldBlock
+                     // If n is 0, it means we read 0 packets total, likely EOF on first read
+                     if n == 0 { break; } 
                 },
-                Err(_) => continue, // WouldBlock (handled by try_io returning Err)
+                Ok(Err(e)) => {
+                    error!("TUN Read Error: {}", e);
+                    break;
+                },
+                Err(_) => continue, // TryIoError/WouldBlock
             }
         }
     });
@@ -471,11 +476,11 @@ use futures_util::FutureExt; // Import for now_or_never()
                 });
                 
                 match res {
-                    Ok(()) => {},
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => { 
-                         // try_io logic handles wait
+                    Ok(Ok(())) => {},
+                    Ok(Err(e)) => { error!("TUN Write Error: {}", e); },
+                    Err(_) => { 
+                         // TryIoError (WouldBlock)
                     },
-                    Err(e) => { error!("TUN Write Error: {}", e); },
                 }
             }
             Err(e) => { error!("Connection lost: {}", e); break; }

@@ -13,6 +13,7 @@ class MaviVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var thread: Thread? = null
+    @Volatile private var vpnSessionHandle: Long = 0
 
     companion object {
         init {
@@ -24,7 +25,8 @@ class MaviVpnService : VpnService() {
     private external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String): Long
     private external fun getConfig(handle: Long): String
     private external fun startLoop(handle: Long, fd: Int)
-    private external fun stop()
+    private external fun stop(handle: Long)
+    private external fun free(handle: Long)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
@@ -71,6 +73,7 @@ class MaviVpnService : VpnService() {
                 stopVpn()
                 return@Thread
             }
+            vpnSessionHandle = handle
 
             try {
                 // 2. Get Config
@@ -138,14 +141,22 @@ class MaviVpnService : VpnService() {
                 Log.e("MaviVPN", "Error during VPN setup: ${e.message}")
                 e.printStackTrace()
             } finally {
-                stop() // Ensure clean shutdown of Rust side if loop wasn't started or crashed
+                Log.d("MaviVPN", "Cleaning up VPN session")
+                if (vpnSessionHandle != 0L) {
+                     free(vpnSessionHandle)
+                     vpnSessionHandle = 0
+                }
                 stopSelf()
             }
         }.also { it.start() }
     }
 
     private fun stopVpn() {
-        stop() // Signal Rust to stop
+        val handle = vpnSessionHandle
+        if (handle != 0L) {
+             stop(handle) // Signal Rust to stop
+        }
+        
         try {
             vpnInterface?.close()
         } catch (e: Exception) {

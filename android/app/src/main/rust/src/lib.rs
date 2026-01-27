@@ -10,14 +10,13 @@ use bytes::BytesMut;
 use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// Global stop flag for graceful shutdown
-static STOP_FLAG: AtomicBool = AtomicBool::new(false);
+// Global stop flag removed. We use per-session flags.
 
 struct VpnSession {
     runtime: tokio::runtime::Runtime,
     connection: quinn::Connection,
     config: ControlMessage,
-    // We keep the socket alive within the runtime/connection
+    stop_flag: Arc<AtomicBool>,
 }
 
 #[no_mangle]
@@ -30,7 +29,6 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
     cert_pin: JString,
 ) -> jlong {
     android_logger::init_once(Config::default().with_tag("MaviVPN"));
-    STOP_FLAG.store(false, Ordering::SeqCst);
     
     let token: String = env.get_string(&token).expect("Couldn't get java string!").into();
     let endpoint: String = env.get_string(&endpoint).expect("Couldn't get java string!").into();
@@ -89,6 +87,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
                 runtime: rt,
                 connection,
                 config,
+                stop_flag: Arc::new(AtomicBool::new(false)),
             };
             Box::into_raw(Box::new(session)) as jlong
         },
@@ -120,12 +119,16 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop(
     tun_fd: jint,
 ) {
     if handle == 0 { return; }
-    let session = unsafe { Box::from_raw(handle as *mut VpnSession) };
+    // borrow session, do not consume
+    let session = unsafe { &mut *(handle as *mut VpnSession) };
     
     info!("Starting VPN Loop with TUN FD: {}", tun_fd);
     
+    let stop_flag = session.stop_flag.clone();
+    let conn = session.connection.clone();
+
     session.runtime.block_on(async {
-        run_vpn_loop(session.connection, tun_fd).await;
+        run_vpn_loop(conn, tun_fd, stop_flag).await;
     });
     
     info!("VPN Loop terminated.");
@@ -135,9 +138,26 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop(
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop(
     _env: JNIEnv,
     _class: JClass,
+    handle: jlong,
 ) {
-    info!("Stop requested");
-    STOP_FLAG.store(true, Ordering::SeqCst);
+    if handle == 0 { return; }
+    let session = unsafe { &*(handle as *mut VpnSession) };
+    
+    info!("Stop requested for session");
+    session.stop_flag.store(true, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_free(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    if handle == 0 { return; }
+    info!("Freeing VPN Session memory");
+    unsafe {
+        let _ = Box::from_raw(handle as *mut VpnSession);
+    }
 }
 
 // --- Internal Logic ---
@@ -208,7 +228,7 @@ async fn connect_and_handshake(
 use tokio::io::AsyncWriteExt;
 use tokio::io::AsyncReadExt;
 
-async fn run_vpn_loop(connection: quinn::Connection, fd: jint) {
+async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<AtomicBool>) {
     let raw_fd = fd as RawFd;
     let file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
     
@@ -231,10 +251,11 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint) {
     
     // TUN -> QUIC
     let conn_send = connection_arc.clone();
+    let stop_check = stop_flag.clone();
     let tun_to_quic = tokio::spawn(async move {
         let mut buf = BytesMut::with_capacity(1500);
         loop {
-            if STOP_FLAG.load(Ordering::Relaxed) { break; }
+            if stop_check.load(Ordering::Relaxed) { break; }
             
             let mut guard = match tun_reader.readable().await {
                 Ok(g) => g,
@@ -270,7 +291,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint) {
 
     // QUIC -> TUN
     loop {
-        if STOP_FLAG.load(Ordering::Relaxed) { break; }
+        if stop_flag.load(Ordering::Relaxed) { break; }
         
         tokio::select! {
              result = connection_arc.read_datagram() => {

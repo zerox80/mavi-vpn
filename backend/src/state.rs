@@ -19,10 +19,9 @@ pub struct AppState {
     pub network: Ipv4Network,
     pub network_v6: Ipv6Network,
 
-    /// Simple IP Allocator
-    allocated_ips: Mutex<HashSet<Ipv4Addr>>,
-    // Stores (Allocated Set, Next Index to try)
-    allocated_ips_v6: Mutex<(HashSet<Ipv6Addr>, usize)>,
+    /// Stack of free IPs for O(1) allocation
+    free_ips: Mutex<Vec<Ipv4Addr>>,
+    free_ips_v6: Mutex<Vec<Ipv6Addr>>,
 }
 
 impl AppState {
@@ -30,82 +29,63 @@ impl AppState {
         let network: Ipv4Network = cidr.parse().map_err(|_| anyhow!("Invalid CIDR"))?;
         let network_v6: Ipv6Network = "fd00::/64".parse().unwrap();
         
-        let mut allocated = HashSet::new();
-        allocated.insert(network.network());
-        allocated.insert(network.nth(1).unwrap()); // .1 is Gateway
-        allocated.insert(network.broadcast());
+        // Pre-fill free IPs (excluding Network, Gateway, Broadcast)
+        let mut free_ips = Vec::new();
+        let gateway = network.nth(1).unwrap();
+        let broadcast = network.broadcast();
+        
+        for ip in network.iter() {
+            if ip != network.network() && ip != gateway && ip != broadcast {
+                free_ips.push(ip);
+            }
+        }
+        // Reverse so we allocate from .2 upwards (pop from end)
+        free_ips.reverse();
 
-        let mut allocated_v6 = HashSet::new();
-        allocated_v6.insert(network_v6.network());
-        allocated_v6.insert(network_v6.iter().nth(1).unwrap()); // ::1 is Gateway
+        // IPv6 (Simpler, just take first 5000 for now to avoid massive memory usage)
+        let mut free_ips_v6 = Vec::new();
+        let gateway_v6 = network_v6.iter().nth(1).unwrap();
+        
+        // We can't iterate all IPv6 /64, just take a reasonable pool size
+        for i in 2..5002 {
+             if let Some(ip) = network_v6.iter().nth(i) {
+                 free_ips_v6.push(ip);
+             }
+        }
+        free_ips_v6.reverse();
 
         Ok(Self {
             peers: DashMap::new(),
             peers_v6: DashMap::new(),
             network,
             network_v6,
-            allocated_ips: Mutex::new(allocated),
-            allocated_ips_v6: Mutex::new((allocated_v6, 2)), // Start trying from 2
+            free_ips: Mutex::new(free_ips),
+            free_ips_v6: Mutex::new(free_ips_v6),
         })
     }
 
-    /// Allocate a new free IPv4 address
+    /// Allocate a new free IPv4 address (O(1))
     pub fn assign_ip(&self) -> Result<Ipv4Addr> {
-        let mut allocated = self.allocated_ips.lock().unwrap();
-        for ip in self.network.iter() {
-            if !allocated.contains(&ip) {
-                allocated.insert(ip);
-                return Ok(ip);
-            }
-        }
-        Err(anyhow!("No IPv4 addresses available"))
+        let mut free = self.free_ips.lock().unwrap();
+        free.pop().ok_or_else(|| anyhow!("No IPv4 addresses available"))
     }
 
-    /// Allocate a new free IPv6 address (sequential search with cursor)
+    /// Allocate a new free IPv6 address (O(1))
     pub fn assign_ipv6(&self) -> Result<Ipv6Addr> {
-        let mut guard = self.allocated_ips_v6.lock().unwrap();
-        let (allocated, next_idx) = &mut *guard;
-        
-        let network_u128 = u128::from(self.network_v6.network());
-        let mask = self.network_v6.prefix(); // e.g. 64
-        
-        // Safety check: ensure we don't overflow the subnet
-        // shifting (128 - mask) gives us the size. 
-        // Realistically for /64 we have plenty of space.
-        
-        let start = *next_idx;
-        
-        // Try next 5000 indices starting from cursor
-        for i in 0..5000 {
-            let offset = start + i;
-             // Manual addition since Ipv6Network iterator with nth() is O(N)
-            let ip_u128 = network_u128.wrapping_add(offset as u128);
-            let ip = Ipv6Addr::from(ip_u128);
-
-            // Verify it is still in the network (in case of overflow/wrap, unlikely with u128 but good practice)
-            if !self.network_v6.contains(ip) {
-                 break;
-            }
-
-            if !allocated.contains(&ip) {
-                allocated.insert(ip);
-                *next_idx = offset + 1;
-                return Ok(ip);
-            }
-        }
-        
-        Err(anyhow!("No IPv6 addresses available (temporary limit reached)"))
+        let mut free = self.free_ips_v6.lock().unwrap();
+        free.pop().ok_or_else(|| anyhow!("No IPv6 addresses available"))
     }
 
-    /// Release IP addresses
+    /// Release IP addresses (O(1))
     pub fn release_ips(&self, ip4: Ipv4Addr, ip6: Ipv6Addr) {
         {
-            let mut allocated = self.allocated_ips.lock().unwrap();
-            allocated.remove(&ip4);
+            let mut free = self.free_ips.lock().unwrap();
+            // We push back to stack. Order doesn't strictly matter for correctness.
+            free.push(ip4);
         }
         {
-            let mut guard = self.allocated_ips_v6.lock().unwrap();
-            guard.0.remove(&ip6);
+            let mut free = self.free_ips_v6.lock().unwrap();
+            free.push(ip6);
         }
         self.peers.remove(&ip4);
         self.peers_v6.remove(&ip6);

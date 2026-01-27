@@ -370,15 +370,37 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     
 use futures_util::FutureExt; // Import for now_or_never()
 
-    // TUN -> QUIC (Optimized Loop)
+    // Shared timestamp of last received packet (in milliseconds)
+    let last_receive = Arc::new(std::sync::atomic::AtomicI64::new(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    ));
+
+    // TUN -> QUIC (Optimized Loop with Watchdog)
     let conn_send = connection_arc.clone();
     let stop_check = stop_flag.clone();
+    let last_receive_producer = last_receive.clone();
+    
     let tun_to_quic = tokio::spawn(async move {
         // Larger staging buffer to minimize allocations, though we use split_to
         let mut buf = BytesMut::with_capacity(65536); 
         loop {
             if stop_check.load(Ordering::Relaxed) { break; }
             
+            // WATCHDOG CHECK
+            // If we are actively trying to send data, check if the server is responding.
+            // If we haven't heard from the server in 5 seconds, FORCE RESTART.
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+            let last = last_receive_producer.load(Ordering::Relaxed);
+            
+            if (now - last) > 5000 {
+                // Check if we have actually sent something recently? 
+                // We are in the loop, about to read/send.
+                // If we are here, we are alive.
+                // But we only want to kill if we are TRYING to send.
+                // Actually, if we are just sitting here waiting for TUN packets, we shouldn't kill.
+                // The kill check should happen AFTER we read a packet from TUN but BEFORE we send.
+            }
+
             let mut guard = match tun_reader.readable().await {
                 Ok(g) => g,
                 Err(_) => break,
@@ -393,7 +415,7 @@ use futures_util::FutureExt; // Import for now_or_never()
                          buf.reserve(2048);
                      }
                      let chunk = buf.chunk_mut();
-                     // Use specific max len to avoid reading partial next packet if that were possible (TUN usually distinct)
+                     // Use specific max len to avoid reading partial next packet
                      let max_len = 2048.min(chunk.len());
                      
                      let n = unsafe { libc::read(raw_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
@@ -401,24 +423,35 @@ use futures_util::FutureExt; // Import for now_or_never()
                      if n < 0 {
                          let err = std::io::Error::last_os_error();
                          if err.kind() == std::io::ErrorKind::WouldBlock {
-                             // If we read at least one packet, consider this success for the outer loop
                              if packets_read > 0 { return Ok(packets_read); }
                              return Err(err); 
                          }
                          return Err(err);
                      }
                      let n = n as usize;
-                     if n == 0 { return Ok(packets_read); } // EOF, return what we have
+                     if n == 0 { return Ok(packets_read); } 
                      
                      unsafe { buf.advance_mut(n); }
                      
-                     // Send immediately - Quinn's send_datagram is non-blocking and fast
+                     // WATCHDOG CHECK (Active)
+                     // We have a packet to send. Is the connection healthy?
+                     let now_w = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                     let last_w = last_receive_producer.load(Ordering::Relaxed);
+                     if (now_w - last_w) > 5000 {
+                         error!("WATCHDOG: No response from server for 5s while sending data. Forcing Reconnect!");
+                         // Signal stop AND return error to break loop
+                         stop_check.store(true, Ordering::SeqCst);
+                         // Quinn might block on send if full? active abort.
+                         conn_send.close(0u32.into(), b"Watchdog Timeout");
+                         return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Watchdog"));
+                     }
+
+                     // Send immediately
                      let packet = buf.split_to(n).freeze();
-                     // Ignore error (queue full), helps backpressure
                      let _ = conn_send.send_datagram(packet);
                      
                      packets_read += 1;
-                     if packets_read >= 64 { // limit batch size to 64 for better throughput
+                     if packets_read >= 64 { 
                          break;
                      }
                  }
@@ -427,15 +460,13 @@ use futures_util::FutureExt; // Import for now_or_never()
 
             match result {
                 Ok(Ok(n)) => {
-                     // Success (n packets read)
-                     // If n is 0, it means we read 0 packets total, likely EOF on first read
                      if n == 0 { break; } 
                 },
                 Ok(Err(e)) => {
                     error!("TUN Read Error: {}", e);
                     break;
                 },
-                Err(_) => continue, // TryIoError/WouldBlock
+                Err(_) => continue, 
             }
         }
     });
@@ -444,15 +475,16 @@ use futures_util::FutureExt; // Import for now_or_never()
     loop {
         if stop_flag.load(Ordering::Relaxed) { break; }
         
-        // We want to read as many available datagrams as possible and write them to TUN
-        // But we must await the *first* one.
         match connection_arc.read_datagram().await {
             Ok(first_packet) => {
-                // We have at least one packet. Try to grab more from the internal queue without awaiting.
+                // Update Watchdog Timestamp
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                last_receive.store(now, Ordering::Relaxed);
+
+                // We have at least one packet. Try to grab more.
                 let mut batch = Vec::with_capacity(64);
                 batch.push(first_packet);
 
-                // Drain up to 63 more packets that are ready NOW
                 for _ in 0..63 {
                      match connection_arc.read_datagram().now_or_never() {
                          Some(Ok(pkt)) => batch.push(pkt),
@@ -472,10 +504,8 @@ use futures_util::FutureExt; // Import for now_or_never()
                          if n < 0 {
                              let err = std::io::Error::last_os_error();
                              if err.kind() == std::io::ErrorKind::WouldBlock {
-                                 // Partial write of batch? We lose the rest.
                                  return Err(err); 
                              }
-                             // Serious error
                              return Err(err);
                          }
                     }
@@ -485,9 +515,7 @@ use futures_util::FutureExt; // Import for now_or_never()
                 match res {
                     Ok(Ok(())) => {},
                     Ok(Err(e)) => { error!("TUN Write Error: {}", e); },
-                    Err(_) => { 
-                         // TryIoError (WouldBlock)
-                    },
+                    Err(_) => {},
                 }
             }
             Err(e) => { error!("Connection lost: {}", e); break; }

@@ -55,14 +55,12 @@ async fn main() -> Result<()> {
     transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB receive buffer
     transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB send buffer
     
-    // Increase receive window for better throughput (default is ~1.5MB)
-    transport_config.receive_window((16 * 1024 * 1024).try_into().unwrap()); // 16MB
-    transport_config.stream_receive_window((8 * 1024 * 1024).try_into().unwrap()); // 8MB per stream
+    // Increase receive window for better throughput
+    transport_config.receive_window(quinn::VarInt::from(16u32 * 1024 * 1024)); // 16MB
+    transport_config.stream_receive_window(quinn::VarInt::from(8u32 * 1024 * 1024)); // 8MB per stream
     transport_config.send_window(16 * 1024 * 1024); // 16MB send window
     
-    // Larger initial window for faster ramp-up (10 packets * MTU is RFC default, we go higher)
-    transport_config.initial_window(1024 * 1024); // 1MB initial window
-    transport_config.min_mtu(1280); // Our MTU
+    // Note: initial_window() and min_mtu() not available in all Quinn versions
     
     // Manually bind socket to set SO_RCVBUF and SO_SNDBUF
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;

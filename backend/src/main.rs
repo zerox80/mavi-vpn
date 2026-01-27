@@ -345,7 +345,7 @@ async fn handle_connection(
     // We check Source IP to prevent spoofing
     use futures_util::FutureExt; // Ensure this is available or imported at top
     
-    let res = loop {
+    let res = 'outer_loop: loop {
         // 1. Read first packet (await)
         let first_packet = match connection_arc.read_datagram().await {
             Ok(p) => p,
@@ -365,44 +365,50 @@ async fn handle_connection(
 
         // 3. Process Batch
         for data in batch {
-             if data.len() > 0 {
-                let version = data[0] >> 4;
-                let mut valid = false;
-                
-                if version == 4 {
-                    if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&data) {
-                        if ipv4_header.source_addr() == assigned_ip {
-                            valid = true;
-                        } else {
-                            static MSG_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                            let last = MSG_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
-                            if now > last + 5 { // Log at most once every 5 seconds
-                                 tracing::warn!("Spoofed IPv4? Src: {}, Expected: {}", ipv4_header.source_addr(), assigned_ip);
-                                 MSG_LIMIT.store(now, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                    }
-                } else if version == 6 {
-                     if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&data) {
-                        let src = ipv6_header.source_addr();
-                        // Allow assigned IP OR Link-Local (fe80::/10) OR Unspecified (:: for DAD)
-                        let is_link_local = src.segments()[0] & 0xffc0 == 0xfe80;
-                        let is_unspecified = src.is_unspecified();
-                        
-                        if src == assigned_ip6 || is_link_local || is_unspecified {
-                            valid = true;
-                        } else {
-                            tracing::warn!("Spoofed IPv6? Src: {}, Expected: {}", src, assigned_ip6);
-                        }
-                    }
-                } else {
-                     tracing::warn!("Unknown packet version: {}", version);
-                }
+             if data.is_empty() {
+                 tracing::debug!("Received empty packet (Keepalive/Migration)");
+                 continue;
+             }
 
-                if valid {
-                     let _ = tx_tun.send(data).await;
-                }
+             let version = data[0] >> 4;
+             let mut valid = false;
+             
+             if version == 4 {
+                 if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&data) {
+                     if ipv4_header.source_addr() == assigned_ip {
+                         valid = true;
+                     } else {
+                         static MSG_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                         let last = MSG_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+                         if now > last + 5 { // Log at most once every 5 seconds
+                              tracing::warn!("Spoofed IPv4? Src: {}, Expected: {}", ipv4_header.source_addr(), assigned_ip);
+                              MSG_LIMIT.store(now, std::sync::atomic::Ordering::Relaxed);
+                         }
+                     }
+                 }
+             } else if version == 6 {
+                  if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&data) {
+                     let src = ipv6_header.source_addr();
+                     // Allow assigned IP OR Link-Local (fe80::/10) OR Unspecified (:: for DAD)
+                     let is_link_local = src.segments()[0] & 0xffc0 == 0xfe80;
+                     let is_unspecified = src.is_unspecified();
+                     
+                     if src == assigned_ip6 || is_link_local || is_unspecified {
+                         valid = true;
+                     } else {
+                         tracing::warn!("Spoofed IPv6? Src: {}, Expected: {}", src, assigned_ip6);
+                     }
+                 }
+             } else {
+                  tracing::warn!("Unknown packet version: {}", version);
+             }
+
+             if valid {
+                  if let Err(e) = tx_tun.send(data).await {
+                      tracing::error!("Failed to send to TUN writer (Channel closed): {}", e);
+                      break 'outer_loop;
+                  }
              }
         }
     };

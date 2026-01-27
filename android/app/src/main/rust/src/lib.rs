@@ -3,7 +3,7 @@ use jni::objects::{JClass, JString, JObject, JValue};
 use jni::sys::{jint, jlong};
 use std::os::unix::io::{FromRawFd, RawFd, AsRawFd};
 use android_logger::Config;
-use log::{info, error};
+use log::{info, error, warn};
 use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use bytes::{Bytes, BytesMut, BufMut};
@@ -76,9 +76,26 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
         };
         
         // Increase socket buffers to 8MB for high throughput
+        // Try resetting buffers: 8MB -> 4MB -> 2MB -> 1MB -> System Default
         let socket2_sock = socket2::Socket::from(socket);
-        let _ = socket2_sock.set_recv_buffer_size(8 * 1024 * 1024);
-        let _ = socket2_sock.set_send_buffer_size(8 * 1024 * 1024);
+        let buffers = [8 * 1024 * 1024, 4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024];
+        
+        for size in buffers {
+            if let Err(e) = socket2_sock.set_recv_buffer_size(size) {
+                 warn!("Failed to set receive buffer to {}: {}", size, e);
+            } else {
+                 info!("Receive buffer set to {}", size);
+                 break;
+            }
+        }
+        for size in buffers {
+             if let Err(e) = socket2_sock.set_send_buffer_size(size) {
+                 warn!("Failed to set send buffer to {}: {}", size, e);
+             } else {
+                 info!("Send buffer set to {}", size);
+                 break;
+             }
+        }
         let socket = std::net::UdpSocket::from(socket2_sock);
 
         let sock_fd = socket.as_raw_fd();
@@ -368,50 +385,56 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
 
     let connection_arc = Arc::new(connection);
     
-use futures_util::FutureExt; // Import for now_or_never()
+    use futures_util::FutureExt; 
 
     // Shared timestamp of last received packet (in milliseconds)
     let last_receive = Arc::new(std::sync::atomic::AtomicI64::new(
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64
     ));
 
-    // TUN -> QUIC (Optimized Loop with Watchdog)
+    // --- WATCHDOG TASK ---
+    let wd_stop = stop_flag.clone();
+    let wd_last = last_receive.clone();
+    let wd_conn = connection_arc.clone();
+    
+    let watchdog_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if wd_stop.load(Ordering::Relaxed) { break; }
+            
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+            let last = wd_last.load(Ordering::Relaxed);
+            
+            if (now - last) > 5000 {
+                 error!("WATCHDOG: No response from server for 5s. Forcing Reconnect!");
+                 wd_stop.store(true, Ordering::SeqCst);
+                 wd_conn.close(0u32.into(), b"Watchdog Timeout");
+                 break;
+            }
+        }
+    });
+
+    // TUN -> QUIC
     let conn_send = connection_arc.clone();
     let stop_check = stop_flag.clone();
-    let last_receive_producer = last_receive.clone();
     
     let tun_to_quic = tokio::spawn(async move {
-        // Larger staging buffer to minimize allocations, though we use split_to
         let mut buf = BytesMut::with_capacity(65536); 
         loop {
             if stop_check.load(Ordering::Relaxed) { break; }
             
-            // WATCHDOG CHECK (Outer Loop - Low Frequency)
-            // Check once per batch/wake-up
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-            let last = last_receive_producer.load(Ordering::Relaxed);
-            
-            if (now - last) > 5000 {
-                 // We haven't received anything in 5 seconds.
-                 // This acts as a dead peer detection if we are trying to read/write.
-            }
-
             let mut guard = match tun_reader.readable().await {
                 Ok(g) => g,
                 Err(_) => break,
             };
 
             let result = guard.try_io(|_inner| {
-                 // Try to read multiple packets if possible in a loop without yielding
                  let mut packets_read = 0;
                  loop {
-                     // Reserve space for MTU (e.g., 2048)
                      if buf.capacity() < 2048 {
                          buf.reserve(2048);
                      }
                      let chunk = buf.chunk_mut();
-                     // Use specific max len to avoid reading partial next packet
-                     // read() from TUN on Linux/Android returns one packet per call
                      let max_len = 2048.min(chunk.len());
                      
                      let n = unsafe { libc::read(raw_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
@@ -429,14 +452,11 @@ use futures_util::FutureExt; // Import for now_or_never()
                      
                      unsafe { buf.advance_mut(n); }
                      
-                     // Send immediately
                      let packet = buf.split_to(n).freeze();
                      match conn_send.send_datagram(packet) {
                         Ok(_) => {},
-                        Err(e) => {
-                             // If buffer is full, we log once per second max to avoid spam, or just trace
-                             // For now, let's just count or ignore, but BBR should handle it.
-                             // Dropping is the correct behavior for UDP VPN if congestion exists.
+                        Err(_e) => {
+                             // Buffer full or closed
                         }
                      }
                      
@@ -445,24 +465,11 @@ use futures_util::FutureExt; // Import for now_or_never()
                          break;
                      }
                  }
-                 
-                 // Watchdog check only after a batch or partial batch
-                 let now_w = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-                 let last_w = last_receive_producer.load(Ordering::Relaxed);
-                 if (now_w - last_w) > 5000 {
-                     error!("WATCHDOG: No response from server for 5s. Forcing Reconnect!");
-                     stop_check.store(true, Ordering::SeqCst);
-                     conn_send.close(0u32.into(), b"Watchdog Timeout");
-                     return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Watchdog"));
-                 }
-
                  Ok(packets_read)
             });
 
             match result {
-                Ok(Ok(n)) => {
-                     if n == 0 { break; } 
-                },
+                Ok(Ok(n)) => if n == 0 { break; },
                 Ok(Err(e)) => {
                     error!("TUN Read Error: {}", e);
                     break;
@@ -472,17 +479,15 @@ use futures_util::FutureExt; // Import for now_or_never()
         }
     });
 
-    // QUIC -> TUN (Optimized Batch Write)
+    // QUIC -> TUN
     loop {
         if stop_flag.load(Ordering::Relaxed) { break; }
         
         match connection_arc.read_datagram().await {
             Ok(first_packet) => {
-                // Update Watchdog Timestamp
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                 last_receive.store(now, Ordering::Relaxed);
 
-                // We have at least one packet. Try to grab more.
                 let mut batch = Vec::with_capacity(64);
                 batch.push(first_packet);
 
@@ -493,7 +498,6 @@ use futures_util::FutureExt; // Import for now_or_never()
                      }
                 }
 
-                // Write batch to TUN
                 let mut guard = match tun_writer.writable().await {
                      Ok(g) => g,
                      Err(_) => break,
@@ -515,7 +519,10 @@ use futures_util::FutureExt; // Import for now_or_never()
                 
                 match res {
                     Ok(Ok(())) => {},
-                    Ok(Err(e)) => { error!("TUN Write Error: {}", e); },
+                    Ok(Err(e)) => {
+                         error!("TUN Write Error (Critical): {}", e);
+                         break; // Fixed infinite loop
+                    },
                     Err(_) => {},
                 }
             }
@@ -523,7 +530,10 @@ use futures_util::FutureExt; // Import for now_or_never()
         }
     }
     
+    // Cleanup
+    wd_stop.store(true, Ordering::SeqCst);
     tun_to_quic.abort();
+    watchdog_task.abort();
 }
 
 // Helpers

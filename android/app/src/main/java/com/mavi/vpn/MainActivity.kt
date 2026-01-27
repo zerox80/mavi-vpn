@@ -3,7 +3,11 @@ package com.mavi.vpn
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -39,6 +43,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        requestBatteryOptimizationIgnore()
         
         // Load saved credentials
         val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
@@ -110,6 +116,19 @@ class MainActivity : ComponentActivity() {
         val intent = Intent(this, MaviVpnService::class.java)
         intent.action = "STOP"
         startService(intent)
+    }
+
+    private fun requestBatteryOptimizationIgnore() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent()
+            val packageName = packageName
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                intent.action = Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+            }
+        }
     }
 }
 

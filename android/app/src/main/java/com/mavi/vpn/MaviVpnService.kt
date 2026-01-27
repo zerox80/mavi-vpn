@@ -42,17 +42,41 @@ class MaviVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
+
         if (action == "STOP") {
             stopVpn()
             return START_NOT_STICKY
-        } else if (action == "CONNECT") {
-            val ip = intent?.getStringExtra("IP") ?: ""
-            val port = intent?.getStringExtra("PORT") ?: "4433"
-            val token = intent?.getStringExtra("TOKEN") ?: ""
-            val pin = intent?.getStringExtra("PIN") ?: ""
-            startVpn(ip, port, token, pin)
-            return START_STICKY
         }
+        
+        // If action is CONNECT or intent is null (System Restart), we try to start
+        if (action == "CONNECT" || intent == null) {
+            val ip: String
+            val port: String
+            val token: String
+            val pin: String
+
+            if (intent != null) {
+                ip = intent.getStringExtra("IP") ?: ""
+                port = intent.getStringExtra("PORT") ?: "4433"
+                token = intent.getStringExtra("TOKEN") ?: ""
+                pin = intent.getStringExtra("PIN") ?: ""
+            } else {
+                Log.i("MaviVPN", "Service restarted by System. Reloading credentials...")
+                val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+                ip = prefs.getString("saved_ip", "") ?: ""
+                port = prefs.getString("saved_port", "4433") ?: "4433"
+                token = prefs.getString("saved_token", "") ?: ""
+                pin = prefs.getString("saved_pin", "") ?: ""
+            }
+
+            if (ip.isNotEmpty() && token.isNotEmpty()) {
+                startVpn(ip, port, token, pin)
+                return START_STICKY
+            } else {
+                Log.e("MaviVPN", "Cannot restart: Credentials missing.")
+            }
+        }
+        
         return START_NOT_STICKY
     }
 

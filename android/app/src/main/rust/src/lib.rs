@@ -364,12 +364,22 @@ use tokio::io::AsyncReadExt;
 
 async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<AtomicBool>) {
     let raw_fd = fd as RawFd;
-    let file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    let raw_fd = fd as RawFd;
     
-    // Set non-blocking
+    // FIX: Duplicate the FD so we have our own copy to manage. 
+    // Java owns the original FD and will close it. We cannot close the one Java gave us.
+    let dup_fd = unsafe { libc::dup(raw_fd) };
+    if dup_fd < 0 {
+        error!("Failed to dup FD: {}", std::io::Error::last_os_error());
+        return;
+    }
+
+    let file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+    
+    // Set non-blocking on the DUPLICATED FD
     unsafe {
-        let flags = libc::fcntl(raw_fd, libc::F_GETFL);
-        libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        let flags = libc::fcntl(dup_fd, libc::F_GETFL);
+        libc::fcntl(dup_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
     
     let tun_reader = match file.try_clone() {

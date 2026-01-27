@@ -30,71 +30,104 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
     endpoint: JString,
     cert_pin: JString,
 ) -> jlong {
-    android_logger::init_once(Config::default().with_tag("MaviVPN"));
+    // 0. Panic Guard
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        android_logger::init_once(
+        Config::default()
+            .with_tag("MaviVPN")
+            .with_max_level(log::LevelFilter::Debug)
+    );
     
-    let token: String = env.get_string(&token).expect("Couldn't get java string!").into();
-    let endpoint: String = env.get_string(&endpoint).expect("Couldn't get java string!").into();
-    let cert_pin_str: String = env.get_string(&cert_pin).expect("Couldn't get java string!").into();
+    info!("JNI init called"); // visible proof
+    
+    // Helper to extract string safely
+    let get_string = |env: &mut JNIEnv, jstr: &JString| -> Option<String> {
+         match env.get_string(jstr) {
+             Ok(s) => Some(s.into()),
+             Err(e) => {
+                 error!("Failed to get string from JNI: {}", e);
+                 None
+             }
+         }
+    };
+
+    let token = match get_string(&mut env, &token) { Some(s) => s, None => { error!("Token is null/invalid"); return 0; } };
+    let endpoint = match get_string(&mut env, &endpoint) { Some(s) => s, None => { error!("Endpoint is null/invalid"); return 0; } };
+    let cert_pin_str = match get_string(&mut env, &cert_pin) { Some(s) => s, None => { error!("CertPin is null/invalid"); return 0; } };
+
+    if cert_pin_str.is_empty() {
+        error!("Certificate PIN is empty. Connection aborted.");
+        return 0;
+    }
 
     info!("Initializing VPN Session. Endpoint: {}", endpoint);
 
-    // 1. Create Socket and Protect it
-    let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to bind UDP socket: {}", e);
+        // 1. Create Socket and Protect it
+        let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to bind UDP socket: {}", e);
+                return 0;
+            }
+        };
+        let sock_fd = socket.as_raw_fd();
+        
+        let protected = env.call_method(
+            &service, 
+            "protect", 
+            "(I)Z", 
+            &[JValue::Int(sock_fd as jint)]
+        ).and_then(|val| val.z()).unwrap_or(false);
+        
+        if !protected {
+            error!("Failed to protect VPN socket!");
             return 0;
         }
-    };
-    let sock_fd = socket.as_raw_fd();
-    
-    let protected = env.call_method(
-        &service, 
-        "protect", 
-        "(I)Z", 
-        &[JValue::Int(sock_fd as jint)]
-    ).and_then(|val| val.z()).unwrap_or(false);
-    
-    if !protected {
-        error!("Failed to protect VPN socket!");
-        return 0;
-    }
-    
-    match socket.set_nonblocking(true) {
-        Ok(_) => {},
-        Err(e) => {
-            error!("Failed to set non-blocking: {}", e);
-            return 0;
+        
+        match socket.set_nonblocking(true) {
+            Ok(_) => {},
+            Err(e) => {
+                error!("Failed to set non-blocking: {}", e);
+                return 0;
+            }
         }
-    }
 
-    // 2. Create Runtime
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            error!("Failed to create runtime: {}", e);
-            return 0;
-        }
-    };
+        // 2. Create Runtime
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                error!("Failed to create runtime: {}", e);
+                return 0;
+            }
+        };
 
-    // 3. Connect and Handshake
-    let result = rt.block_on(async {
-        connect_and_handshake(socket, token, endpoint, cert_pin_str).await
-    });
+        // 3. Connect and Handshake
+        let result = rt.block_on(async {
+            connect_and_handshake(socket, token, endpoint, cert_pin_str).await
+        });
+
+        match result {
+            Ok((connection, config)) => {
+                info!("Handshake successful. IP: {:?}", config);
+                let session = VpnSession {
+                    runtime: rt,
+                    connection,
+                    config,
+                    stop_flag: Arc::new(AtomicBool::new(false)),
+                };
+                Box::into_raw(Box::new(session)) as jlong
+            },
+            Err(e) => {
+                error!("Handshake failed: {}", e);
+                0
+            }
+        }
+    }));
 
     match result {
-        Ok((connection, config)) => {
-            info!("Handshake successful. IP: {:?}", config);
-            let session = VpnSession {
-                runtime: rt,
-                connection,
-                config,
-                stop_flag: Arc::new(AtomicBool::new(false)),
-            };
-            Box::into_raw(Box::new(session)) as jlong
-        },
+        Ok(handle) => handle,
         Err(e) => {
-            error!("Handshake failed: {}", e);
+            error!("Rust Panic caught in init: {:?}", e);
             0
         }
     }
@@ -106,11 +139,21 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig<'a>(
     _class: JClass<'a>,
     handle: jlong,
 ) -> JString<'a> {
-    if handle == 0 { return env.new_string("{}").unwrap(); }
-    let session = unsafe { &mut *(handle as *mut VpnSession) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if handle == 0 { return env.new_string("{}").unwrap_or_else(|_| JString::default()); }
+        let session = unsafe { &mut *(handle as *mut VpnSession) };
+        
+        let json = serde_json::to_string(&session.config).unwrap_or("{}".to_string());
+        env.new_string(json).expect("Failed to create string")
+    }));
     
-    let json = serde_json::to_string(&session.config).unwrap_or("{}".to_string());
-    env.new_string(json).expect("Failed to create string")
+    match result {
+        Ok(s) => s,
+        Err(_) => {
+            error!("Panic in getConfig");
+            env.new_string("{}").unwrap_or_else(|_| JString::default())
+        }
+    }
 }
 
 #[no_mangle]
@@ -121,19 +164,22 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop(
     tun_fd: jint,
 ) {
     if handle == 0 { return; }
-    // borrow session, do not consume
-    let session = unsafe { &mut *(handle as *mut VpnSession) };
     
-    info!("Starting VPN Loop with TUN FD: {}", tun_fd);
-    
-    let stop_flag = session.stop_flag.clone();
-    let conn = session.connection.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // borrow session, do not consume
+        let session = unsafe { &mut *(handle as *mut VpnSession) };
+        
+        info!("Starting VPN Loop with TUN FD: {}", tun_fd);
+        
+        let stop_flag = session.stop_flag.clone();
+        let conn = session.connection.clone();
 
-    session.runtime.block_on(async {
-        run_vpn_loop(conn, tun_fd, stop_flag).await;
-    });
-    
-    info!("VPN Loop terminated.");
+        session.runtime.block_on(async {
+            run_vpn_loop(conn, tun_fd, stop_flag).await;
+        });
+        
+        info!("VPN Loop terminated.");
+    }));
 }
 
 #[no_mangle]
@@ -143,10 +189,12 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop(
     handle: jlong,
 ) {
     if handle == 0 { return; }
-    let session = unsafe { &*(handle as *mut VpnSession) };
-    
-    info!("Stop requested for session");
-    session.stop_flag.store(true, Ordering::SeqCst);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let session = unsafe { &*(handle as *mut VpnSession) };
+        
+        info!("Stop requested for session");
+        session.stop_flag.store(true, Ordering::SeqCst);
+    }));
 }
 
 #[no_mangle]
@@ -156,10 +204,12 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_free(
     handle: jlong,
 ) {
     if handle == 0 { return; }
-    info!("Freeing VPN Session memory");
-    unsafe {
-        let _ = Box::from_raw(handle as *mut VpnSession);
-    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        info!("Freeing VPN Session memory");
+        unsafe {
+            let _ = Box::from_raw(handle as *mut VpnSession);
+        }
+    }));
 }
 
 // --- Internal Logic ---
@@ -171,11 +221,14 @@ async fn connect_and_handshake(
     cert_pin: String
 ) -> anyhow::Result<(quinn::Connection, ControlMessage)> {
     
+    info!("Connect and Handshake started. Pin: {}", cert_pin);
+
     // Verifier Setup
     let verifier = if let Some(bytes) = decode_hex(&cert_pin) {
+         info!("Pin decoded successfully. Len: {}", bytes.len());
          Arc::new(PinnedServerVerifier::new(bytes))
     } else {
-         return Err(anyhow::anyhow!("Invalid Certificate PIN"));
+         return Err(anyhow::anyhow!("Invalid Certificate PIN hex string"));
     };
 
     let mut client_crypto = rustls::ClientConfig::builder()
@@ -200,19 +253,24 @@ async fn connect_and_handshake(
     endpoint.set_default_client_config(client_config);
 
     // Connect
+    info!("Resolving host: {}", endpoint_str);
     let addr = tokio::net::lookup_host(&endpoint_str).await?
         .next()
         .ok_or(anyhow::anyhow!("Invalid address"))?;
     
+    info!("Connecting to {}", addr);
     let connection = endpoint.connect(addr, "localhost")?.await?;
+    info!("Connection established");
 
     // Handshake
     let (mut send_stream, mut recv_stream) = connection.open_bi().await?;
+    info!("Stream opened");
     
     let auth_msg = ControlMessage::Auth { token };
     let bytes = bincode::serialize(&auth_msg)?;
     send_stream.write_u32_le(bytes.len() as u32).await?;
     send_stream.write_all(&bytes).await?;
+    info!("Auth sent");
     
     // Read Config
     let len = recv_stream.read_u32_le().await? as usize;
@@ -240,9 +298,12 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
         libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
     
-    let tun_reader = match AsyncFd::new(file.try_clone().unwrap()) {
-        Ok(t) => t,
-        Err(e) => { error!("Failed to create AsyncFd: {}", e); return; }
+    let tun_reader = match file.try_clone() {
+        Ok(f) => match AsyncFd::new(f) {
+            Ok(t) => t,
+            Err(e) => { error!("Failed to create AsyncFd for reader: {}", e); return; }
+        },
+        Err(e) => { error!("Failed to clone file descriptor: {}", e); return; }
     };
     let tun_writer = match AsyncFd::new(file) {
         Ok(t) => t,
@@ -282,7 +343,10 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                 Ok(inner_result) => {
                     match inner_result {
                         Ok(n_res) => {
-                            let n = n_res.expect("TUN Read failed");
+                            let n = match n_res {
+                                Ok(n) => n,
+                                Err(e) => { error!("TUN Read failed: {}", e); break; }
+                            };
                             if n == 0 { break; } // EOF
                             unsafe { buf.set_len(n); }
                             let _ = conn_send.send_datagram(buf.to_vec().into());
@@ -344,16 +408,15 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 #[derive(Debug)]
 struct PinnedServerVerifier {
     expected_hash: Vec<u8>,
-    inner: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    supported: rustls::crypto::WebPkiSupportedAlgorithms,
 }
 
 impl PinnedServerVerifier {
     fn new(expected_hash: Vec<u8>) -> Self {
-        let roots = RootCertStore::empty();
-        let inner = rustls::client::WebPkiServerVerifier::builder(std::sync::Arc::new(roots))
-            .build()
-            .expect("Failed to build verifier");
-        Self { expected_hash, inner }
+        Self { 
+            expected_hash, 
+            supported: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        }
     }
 }
 
@@ -373,13 +436,26 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
              Err(rustls::Error::General("Pin mismatch".into()))
         }
     }
-    fn verify_tls12_signature(&self, message: &[u8], cert: &rustls::pki_types::CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        self.inner.verify_tls12_signature(message, cert, dss)
+    
+    fn verify_tls12_signature(
+        &self, 
+        message: &[u8], 
+        cert: &rustls::pki_types::CertificateDer<'_>, 
+        dss: &rustls::DigitallySignedStruct
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.supported)
     }
-    fn verify_tls13_signature(&self, message: &[u8], cert: &rustls::pki_types::CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        self.inner.verify_tls13_signature(message, cert, dss)
+    
+    fn verify_tls13_signature(
+        &self, 
+        message: &[u8], 
+        cert: &rustls::pki_types::CertificateDer<'_>, 
+        dss: &rustls::DigitallySignedStruct
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.supported)
     }
+    
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.inner.supported_verify_schemes()
+        self.supported.supported_schemes()
     }
 }

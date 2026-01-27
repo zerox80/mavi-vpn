@@ -2,6 +2,7 @@ use rcgen::generate_simple_self_signed;
 use std::{fs, path::PathBuf};
 use anyhow::{Result, Context};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use sha2::{Digest, Sha256};
 
 pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     if cert_path.exists() && key_path.exists() {
@@ -18,6 +19,23 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
             .collect();
             
         let key = keys.into_iter().next().ok_or_else(|| anyhow::anyhow!("no private key found"))?;
+
+        if let Some(cert) = certs.first() {
+            let mut hasher = Sha256::new();
+            hasher.update(cert.as_ref());
+            let hash = hasher.finalize();
+            let pin_hex = hex::encode(hash);
+            tracing::info!("Server Certificate PIN (SHA256 Hex): {}", pin_hex);
+            
+            if let Some(parent) = cert_path.parent() {
+                let pin_path = parent.join("cert_pin.txt");
+                if let Err(e) = std::fs::write(&pin_path, &pin_hex) {
+                    tracing::warn!("Failed to write cert_pin.txt: {}", e);
+                } else {
+                    tracing::info!("Wrote Certificate PIN to {:?}", pin_path);
+                }
+            }
+        }
 
         Ok((certs, key))
     } else {
@@ -40,6 +58,23 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
             .map(PrivateKeyDer::Pkcs8)
             .collect();
         let key = keys.into_iter().next().unwrap();
+
+        if let Some(cert) = certs.first() {
+            let mut hasher = Sha256::new();
+            hasher.update(cert.as_ref());
+            let hash = hasher.finalize();
+            let pin_hex = hex::encode(hash);
+            tracing::info!("Server Certificate PIN (SHA256 Hex): {}", pin_hex);
+            
+            if let Some(parent) = cert_path.parent() {
+                let pin_path = parent.join("cert_pin.txt");
+                if let Err(e) = std::fs::write(&pin_path, &pin_hex) {
+                    tracing::warn!("Failed to write cert_pin.txt: {}", e);
+                } else {
+                    tracing::info!("Wrote Certificate PIN to {:?}", pin_path);
+                }
+            }
+        }
 
         Ok((certs, key))
     }

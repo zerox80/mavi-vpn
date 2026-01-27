@@ -28,10 +28,11 @@ class MainActivity : ComponentActivity() {
     private var lastIp = ""
     private var lastPort = ""
     private var lastToken = ""
+    private var lastPin = ""
 
     private val vpnPrepareLauncher = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-             startVpnService(lastIp, lastPort, lastToken)
+             startVpnService(lastIp, lastPort, lastToken, lastPin)
         }
     }
 
@@ -50,7 +51,7 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     VpnScreen(
-                        onConnect = { ip, port, token -> prepareAndStartVpn(ip, port, token) },
+                        onConnect = { ip, port, token, pin -> prepareAndStartVpn(ip, port, token, pin) },
                         onDisconnect = { stopVpn() }
                     )
                 }
@@ -58,24 +59,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun prepareAndStartVpn(ip: String, port: String, token: String) {
+    private fun prepareAndStartVpn(ip: String, port: String, token: String, pin: String) {
         val intent = VpnService.prepare(this)
         if (intent != null) {
             lastIp = ip
             lastPort = port
             lastToken = token
+            lastPin = pin
             vpnPrepareLauncher.launch(intent)
         } else {
-            startVpnService(ip, port, token)
+            startVpnService(ip, port, token, pin)
         }
     }
 
-    private fun startVpnService(ip: String, port: String, token: String) {
+    private fun startVpnService(ip: String, port: String, token: String, pin: String) {
         val intent = Intent(this, MaviVpnService::class.java).apply {
             action = "CONNECT"
             putExtra("IP", ip)
             putExtra("PORT", port)
             putExtra("TOKEN", token)
+            putExtra("PIN", pin)
         }
         startService(intent)
     }
@@ -89,11 +92,12 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun VpnScreen(onConnect: (String, String, String) -> Unit, onDisconnect: () -> Unit) {
+fun VpnScreen(onConnect: (String, String, String, String) -> Unit, onDisconnect: () -> Unit) {
     var isConnected by remember { mutableStateOf(false) }
     var serverIp by remember { mutableStateOf("") }
     var serverPort by remember { mutableStateOf("4433") }
     var authToken by remember { mutableStateOf("") }
+    var certPin by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -175,6 +179,22 @@ fun VpnScreen(onConnect: (String, String, String) -> Unit, onDisconnect: () -> U
                     unfocusedTextColor = Color.White
                 )
             )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = certPin,
+                onValueChange = { certPin = it },
+                label = { Text("Certificate PIN (SHA256 Hex)", color = Color.Gray) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = TextFieldDefaults.outlinedTextFieldColors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedBorderColor = Color.DarkGray,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
+                )
+            )
         } else {
             // Stats or connection info could go here
             Box(
@@ -199,7 +219,7 @@ fun VpnScreen(onConnect: (String, String, String) -> Unit, onDisconnect: () -> U
                     isConnected = false
                 } else {
                     if (serverIp.isNotEmpty() && authToken.isNotEmpty()) {
-                        onConnect(serverIp, serverPort, authToken)
+                        onConnect(serverIp, serverPort, authToken, certPin)
                         isConnected = true
                     }
                 }

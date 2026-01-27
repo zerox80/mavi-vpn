@@ -75,10 +75,10 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
             }
         };
         
-        // Increase socket buffers to 2MB
+        // Increase socket buffers to 8MB for high throughput
         let socket2_sock = socket2::Socket::from(socket);
-        let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024);
-        let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024);
+        let _ = socket2_sock.set_recv_buffer_size(8 * 1024 * 1024);
+        let _ = socket2_sock.set_send_buffer_size(8 * 1024 * 1024);
         let socket = std::net::UdpSocket::from(socket2_sock);
 
         let sock_fd = socket.as_raw_fd();
@@ -273,14 +273,26 @@ async fn connect_and_handshake(
         .with_no_client_auth();
     client_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
 
+    // Performance Optimizations for high throughput
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(45).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
+    transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB
+    transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB
+    
+    // Increase receive window for better throughput
+    transport_config.receive_window((16 * 1024 * 1024).try_into().unwrap()); // 16MB
+    transport_config.stream_receive_window((8 * 1024 * 1024).try_into().unwrap()); // 8MB per stream
+    transport_config.send_window(16 * 1024 * 1024); // 16MB send window
+    
+    // Larger initial window for faster ramp-up
+    transport_config.initial_window(1024 * 1024); // 1MB initial window
+    transport_config.min_mtu(1280); // Our MTU
     
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));
+
+
 
     let mut endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),

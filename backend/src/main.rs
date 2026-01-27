@@ -50,18 +50,25 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Failed to access transport config"))?;
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(15).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
-    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
     
-    // Explicitly set max datagram frame size to accommodate MTU 1280
-    // In Quinn 0.11, this is implicitly set by datagram_receive_buffer_size.
-    // We already set this to 2MB above which is more than enough for MTU 1280.
+    // Performance Optimizations for high throughput
+    transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB receive buffer
+    transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB send buffer
+    
+    // Increase receive window for better throughput (default is ~1.5MB)
+    transport_config.receive_window((16 * 1024 * 1024).try_into().unwrap()); // 16MB
+    transport_config.stream_receive_window((8 * 1024 * 1024).try_into().unwrap()); // 8MB per stream
+    transport_config.send_window(16 * 1024 * 1024); // 16MB send window
+    
+    // Larger initial window for faster ramp-up (10 packets * MTU is RFC default, we go higher)
+    transport_config.initial_window(1024 * 1024); // 1MB initial window
+    transport_config.min_mtu(1280); // Our MTU
     
     // Manually bind socket to set SO_RCVBUF and SO_SNDBUF
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
     let socket2_sock = socket2::Socket::from(socket);
-    let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024);
-    let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024);
+    let _ = socket2_sock.set_recv_buffer_size(8 * 1024 * 1024); // 8MB
+    let _ = socket2_sock.set_send_buffer_size(8 * 1024 * 1024); // 8MB
     let socket = std::net::UdpSocket::from(socket2_sock);
 
     let endpoint = Endpoint::new(
@@ -122,7 +129,8 @@ async fn main() -> Result<()> {
 
     // 6. Packet Routing Helper Channels
     // Client -> TUN (Multiple clients write to one TUN Writer)
-    let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Bytes>(10000);
+    // Increased channel capacity for burst handling
+    let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Bytes>(50000);
 
     // Task: TUN Writer (Receives from Clients, Writes to Kernel)
     tokio::spawn(async move {
@@ -260,7 +268,7 @@ async fn handle_connection(
     info!("Authenticated {} -> IPv4: {}, IPv6: {}", remote_addr, assigned_ip, assigned_ip6);
 
     // --- Session Phase ---
-    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(10000);
+    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(50000);
     state.register_client(assigned_ip, assigned_ip6, tx_client);
 
     let connection_arc = Arc::new(connection);

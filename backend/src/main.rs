@@ -118,25 +118,40 @@ async fn main() -> Result<()> {
     }
 
     // 5b. MSS Clamping to prevent TCP fragmentation
-    // For MTU 1280, MSS should be 1280 - 40 (IP+TCP headers) = 1240
-    let mss = config.mtu - 40;
-    info!("Applying MSS clamping: {} bytes on {}", mss, tun_name);
-    let out1 = std::process::Command::new("iptables")
-        .args(&["-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", &mss.to_string()])
-        .output();
-    match out1 {
-        Ok(o) if !o.status.success() => warn!("iptables MSS clamping failed (FORWARD): {}", String::from_utf8_lossy(&o.stderr)),
-        Err(e) => warn!("Failed to execute iptables (FORWARD): {}", e),
-        _ => {}
+    // For MTU 1280:
+    // IPv4: 1280 - 20 (IP) - 20 (TCP) = 1240
+    // IPv6: 1280 - 40 (IP) - 20 (TCP) = 1220
+    let mss_v4 = config.mtu - 40;
+    let mss_v6 = config.mtu - 60;
+
+    info!("Applying MSS clamping: IPv4={} IPv6={} on {}", mss_v4, mss_v6, tun_name);
+
+    // IPv4 Clamping
+    let rules_v4 = [
+        vec!["-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", &mss_v4.to_string()],
+        vec!["-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", &tun_name, "-j", "TCPMSS", "--set-mss", &mss_v4.to_string()]
+    ];
+
+    for args in rules_v4 {
+        match std::process::Command::new("iptables").args(&args).output() {
+            Ok(o) if !o.status.success() => warn!("iptables failed: {}", String::from_utf8_lossy(&o.stderr)),
+            Err(e) => warn!("Failed to execute iptables: {}", e),
+            _ => {}
+        }
     }
 
-    let out2 = std::process::Command::new("iptables")
-        .args(&["-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", &tun_name, "-j", "TCPMSS", "--set-mss", &mss.to_string()])
-        .output();
-    match out2 {
-        Ok(o) if !o.status.success() => warn!("iptables MSS clamping failed (POSTROUTING): {}", String::from_utf8_lossy(&o.stderr)),
-        Err(e) => warn!("Failed to execute iptables (POSTROUTING): {}", e),
-        _ => {}
+    // IPv6 Clamping
+    let rules_v6 = [
+        vec!["-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", &mss_v6.to_string()],
+        vec!["-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", &tun_name, "-j", "TCPMSS", "--set-mss", &mss_v6.to_string()]
+    ];
+
+    for args in rules_v6 {
+        match std::process::Command::new("ip6tables").args(&args).output() {
+            Ok(o) if !o.status.success() => warn!("ip6tables failed: {}", String::from_utf8_lossy(&o.stderr)),
+            Err(e) => warn!("Failed to execute ip6tables: {}", e),
+            _ => {}
+        }
     }
 
     // 6. Packet Routing Helper Channels

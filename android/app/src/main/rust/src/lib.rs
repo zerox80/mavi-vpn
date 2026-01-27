@@ -11,6 +11,7 @@ use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use ring::digest;
 use rustls::RootCertStore;
+use std::sync::Once;
 
 // Global stop flag removed. We use per-session flags.
 
@@ -32,11 +33,14 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
 ) -> jlong {
     // 0. Panic Guard
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        android_logger::init_once(
-        Config::default()
-            .with_tag("MaviVPN")
-            .with_max_level(log::LevelFilter::Debug)
-    );
+        static LOGGER_INIT: Once = Once::new();
+        LOGGER_INIT.call_once(|| {
+            android_logger::init_once(
+                Config::default()
+                    .with_tag("MaviVPN")
+                    .with_max_level(log::LevelFilter::Debug)
+            );
+        });
     
     info!("JNI init called"); // visible proof
     
@@ -144,7 +148,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig<'a>(
         let session = unsafe { &mut *(handle as *mut VpnSession) };
         
         let json = serde_json::to_string(&session.config).unwrap_or("{}".to_string());
-        env.new_string(json).expect("Failed to create string")
+        env.new_string(json).unwrap_or_else(|_| JString::default())
     }));
     
     match result {
@@ -382,7 +386,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                                  } else { Ok(Ok(n as usize)) }
                              }) {
                                  Ok(Ok(_)) => break,
-                                 Ok(Err(e)) => { error!("TUN Write Error: {}", e); break; }, 
+                                 Ok(Err(e)) => { error!("TUN Write Warning (packet dropped): {}", e); }, 
                                  Err(_) => continue,
                              }
                         }

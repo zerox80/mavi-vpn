@@ -79,7 +79,9 @@ class MaviVpnService : VpnService() {
                 // 2. Get Config
                 val configJson = getConfig(handle)
                 Log.d("MaviVPN", "Config Received: $configJson")
-                val config = org.json.JSONObject(configJson)
+                val root = org.json.JSONObject(configJson)
+                // Check if wrapped in Config (which it is due to Rust Enum serialization)
+                val config = if (root.has("Config")) root.getJSONObject("Config") else root
                 
                 // 3. Establish Interface
                 val builder = Builder()

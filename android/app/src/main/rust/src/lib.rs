@@ -281,8 +281,8 @@ async fn connect_and_handshake(
     transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB
     
     // Increase receive window for better throughput
-    transport_config.receive_window((16 * 1024 * 1024).try_into().unwrap()); // 16MB
-    transport_config.stream_receive_window((8 * 1024 * 1024).try_into().unwrap()); // 8MB per stream
+    transport_config.receive_window(quinn::VarInt::from(16u32 * 1024 * 1024)); // 16MB
+    transport_config.stream_receive_window(quinn::VarInt::from(8u32 * 1024 * 1024)); // 8MB per stream
     transport_config.send_window(16 * 1024 * 1024); // 16MB send window
     
     // Larger initial window for faster ramp-up

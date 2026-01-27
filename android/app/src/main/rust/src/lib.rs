@@ -96,8 +96,8 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
             }
         }
 
-        // 2. Create Runtime
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        // 2. Create Runtime (Multi-threaded for better encryption performance)
+        let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(e) => {
                 error!("Failed to create runtime: {}", e);
@@ -269,6 +269,9 @@ async fn connect_and_handshake(
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(45).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
+    transport_config.datagram_send_buffer_size(Some(2 * 1024 * 1024));
+    transport_config.max_datagram_frame_size(Some(1280));
     
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));
@@ -345,7 +348,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     let conn_send = connection_arc.clone();
     let stop_check = stop_flag.clone();
     let tun_to_quic = tokio::spawn(async move {
-        let mut buf = BytesMut::with_capacity(1280);
+        let mut buf = BytesMut::with_capacity(65535); // Allow reading multiple packets if supported
         loop {
             if stop_check.load(Ordering::Relaxed) { break; }
             
@@ -355,12 +358,12 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             };
 
             let result = guard.try_io(|_inner| {
-                 // Reserve capacity for a standard MTU frame
-                 if buf.capacity() < 1280 { buf.reserve(1280); }
+                 // Reserve capacity for a standard buffer
+                 if buf.capacity() < 16384 { buf.reserve(16384); }
                  
                  // Unsafe write to the buffer's uninitialized part
-                 let ptr = buf.chunk_mut().as_mut_ptr();
-                 let n = unsafe { libc::read(raw_fd, ptr as *mut libc::c_void, 1280) };
+                 let chunk = buf.chunk_mut();
+                 let n = unsafe { libc::read(raw_fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
                  
                  if n < 0 {
                      let err = std::io::Error::last_os_error();
@@ -388,7 +391,6 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                             // Zero-copy extract
                             let packet = buf.split_to(n).freeze();
                             let _ = conn_send.send_datagram(packet);
-                            // buf is now ready for next read at tail or will reserve
                         }
                         Err(e) => { error!("TUN Read Error: {}", e); break; }
                     }

@@ -50,7 +50,9 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Failed to access transport config"))?;
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(15).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
-    transport_config.datagram_receive_buffer_size(Some(1024 * 1024)); // 1MB buffer
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB buffer
+    transport_config.datagram_send_buffer_size(Some(2 * 1024 * 1024)); // 2MB buffer
+    transport_config.max_datagram_frame_size(Some(1280)); // Matching MTU
 
     let endpoint = Endpoint::server(server_config, config.bind_addr)?;
     
@@ -110,7 +112,7 @@ async fn main() -> Result<()> {
     // Task: TUN Reader (Reads from Kernel, Routes to Specific Client)
     let state_reader = state.clone();
     tokio::spawn(async move {
-        let mut buf = [0u8; 1500];
+        let mut buf = [0u8; 65535]; // Large buffer to allow kernel to pass more data
         loop {
             match tun_reader.read(&mut buf).await {
                 Ok(n) => {

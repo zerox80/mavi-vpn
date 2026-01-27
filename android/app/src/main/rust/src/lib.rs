@@ -279,8 +279,8 @@ async fn connect_and_handshake(
 
     // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(45).try_into().unwrap()));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
     transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB
     transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB
     

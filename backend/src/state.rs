@@ -41,17 +41,13 @@ impl AppState {
         // Reverse so we allocate from .2 upwards (pop from end)
         free_ips.reverse();
 
-        // IPv6 (Simpler, just take first 5000 for now to avoid massive memory usage)
-        let mut free_ips_v6 = Vec::new();
-        let _gateway_v6 = network_v6.iter().nth(1).unwrap();
-        
-        // We can't iterate all IPv6 /64, just take a reasonable pool size
-        for i in 2..5002 {
-             if let Some(ip) = network_v6.iter().nth(i) {
-                 free_ips_v6.push(ip);
-             }
-        }
-        free_ips_v6.reverse();
+        // IPv6 - O(n) initialization using iterator chaining
+        // Skip network (0) and gateway (1), take next 5000
+        let free_ips_v6: Vec<Ipv6Addr> = network_v6.iter()
+            .skip(2)
+            .take(5000)
+            .rev() // Reverse so pop() gives us lowest IPs first
+            .collect();
 
         Ok(Self {
             peers: DashMap::new(),

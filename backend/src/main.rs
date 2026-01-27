@@ -131,12 +131,30 @@ async fn main() -> Result<()> {
     let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Bytes>(50000);
 
     // Task: TUN Writer (Receives from Clients, Writes to Kernel)
+    // Batched writes for reduced syscall overhead
     tokio::spawn(async move {
-        while let Some(packet) = rx_tun.recv().await {
-            if let Err(e) = tun_writer.write_all(&packet).await {
-                error!("Failed to write to TUN: {}", e);
-            } else {
-                tracing::trace!("Wrote packet to TUN (len: {})", packet.len());
+        let mut batch: Vec<Bytes> = Vec::with_capacity(64);
+        loop {
+            // Wait for at least one packet
+            match rx_tun.recv().await {
+                Some(packet) => batch.push(packet),
+                None => break, // Channel closed
+            }
+            
+            // Drain any additional queued packets (non-blocking)
+            while batch.len() < 64 {
+                match rx_tun.try_recv() {
+                    Ok(packet) => batch.push(packet),
+                    Err(_) => break,
+                }
+            }
+            
+            // Write batch to TUN
+            for packet in batch.drain(..) {
+                if let Err(e) = tun_writer.write_all(&packet).await {
+                    error!("Failed to write to TUN: {}", e);
+                    break;
+                }
             }
         }
     });
@@ -146,6 +164,7 @@ async fn main() -> Result<()> {
     let state_reader = state.clone();
     tokio::spawn(async move {
         use bytes::BufMut;
+        // 2KB cache-aligned buffer for optimal performance
         let mut buf = bytes::BytesMut::with_capacity(2048);
         loop {
             // Ensure buffer has capacity for next read

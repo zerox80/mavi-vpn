@@ -91,14 +91,10 @@ class MaviVpnService : VpnService() {
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .build()
         
-        // Acquire WakeLock
+        // Acquire WakeLock to keep VPN running during sleep
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MaviVPN::ServiceWakeLock")
-        wakeLock?.acquire(10 * 60 * 1000L /*10 minutes*/ ) // timeout just in case, but we hold it. Actually for VPN usually no timeout or renew.
-        // Better to acquire without timeout but ensure release. 
-        // Let's us acquire without timeout for persistent VPN
-        if (wakeLock?.isHeld == true) wakeLock?.release()
-        wakeLock?.acquire()
+        wakeLock?.acquire() // Held until stopVpn() releases it
 
         isRunning = true
         startForeground(1, notification)

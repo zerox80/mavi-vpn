@@ -26,3 +26,44 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # Traefik Reverse Proxy
+  traefik:
+    image: traefik:v2.10
+    container_name: traefik
+    command:
+      # Enable Docker provider
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      # Entry points
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # HTTP -> HTTPS Redirect
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # Let's Encrypt Resolver
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      # Logging
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "443:443"
+      # Dashboard (Optional, insecure unless protected)
+      # - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./letsencrypt:/letsencrypt"
+
+  # Demo Web Server (Whoami)
+  # Replace this with your actual web content (e.g., nginx) later
+  web-server:
+    image: traefik/whoami
+    container_name: web-server
+    labels:
+      - "traefik.enable=true"
+      # Router for HTTPS
+      - "traefik.http.routers.web-server.rule=Host(`${DOMAIN_NAME}`)"
+      - "traefik.http.routers.web-server.entrypoints=websecure"
+      - "traefik.http.routers.web-server.tls.certresolver=myresolver"

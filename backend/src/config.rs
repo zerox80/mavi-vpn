@@ -24,6 +24,14 @@ pub struct Config {
     /// The DNS server to push to clients
     #[arg(long, env = "VPN_DNS", default_value = "1.1.1.1")]
     pub dns: std::net::Ipv4Addr,
+
+    /// Path to the SSL Certificate
+    #[arg(long, env = "VPN_CERT", default_value = "data/cert.pem")]
+    pub cert_path: std::path::PathBuf,
+
+    /// Path to the SSL Private Key
+    #[arg(long, env = "VPN_KEY", default_value = "data/key.pem")]
+    pub key_path: std::path::PathBuf,
 }
 
 pub fn load() -> Config {

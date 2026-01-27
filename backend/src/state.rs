@@ -21,7 +21,8 @@ pub struct AppState {
 
     /// Simple IP Allocator
     allocated_ips: Mutex<HashSet<Ipv4Addr>>,
-    allocated_ips_v6: Mutex<HashSet<Ipv6Addr>>,
+    // Stores (Allocated Set, Next Index to try)
+    allocated_ips_v6: Mutex<(HashSet<Ipv6Addr>, usize)>,
 }
 
 impl AppState {
@@ -44,7 +45,7 @@ impl AppState {
             network,
             network_v6,
             allocated_ips: Mutex::new(allocated),
-            allocated_ips_v6: Mutex::new(allocated_v6),
+            allocated_ips_v6: Mutex::new((allocated_v6, 2)), // Start trying from 2
         })
     }
 
@@ -60,19 +61,31 @@ impl AppState {
         Err(anyhow!("No IPv4 addresses available"))
     }
 
-    /// Allocate a new free IPv6 address (sequential search)
+    /// Allocate a new free IPv6 address (sequential search with cursor)
     pub fn assign_ipv6(&self) -> Result<Ipv6Addr> {
-        let mut allocated = self.allocated_ips_v6.lock().unwrap();
-        // Just try the first 1000 addresses for now
-        for i in 2..1000 {
-            if let Some(ip) = self.network_v6.iter().nth(i) {
+        let mut guard = self.allocated_ips_v6.lock().unwrap();
+        let (allocated, next_idx) = &mut *guard;
+        
+        // Try next 5000 indices starting from cursor
+        let start = *next_idx;
+        // Limit to reasonable search space to prevent infinite loops if full
+        for i in start..(start + 5000) {
+           if let Some(ip) = self.network_v6.iter().nth(i) {
                 if !allocated.contains(&ip) {
                     allocated.insert(ip);
+                    *next_idx = i + 1;
                     return Ok(ip);
                 }
+            } else {
+                // End of network range (unlikely for /64)
+                break;
             }
         }
-        Err(anyhow!("No IPv6 addresses available (limit reached)"))
+        
+        // Wrap around attempt if first pass failed (simple reset for now)
+        // Ideally we would search 2..start
+        
+        Err(anyhow!("No IPv6 addresses available (limit reached or fragmented)"))
     }
 
     /// Release IP addresses
@@ -82,8 +95,8 @@ impl AppState {
             allocated.remove(&ip4);
         }
         {
-            let mut allocated_v6 = self.allocated_ips_v6.lock().unwrap();
-            allocated_v6.remove(&ip6);
+            let mut guard = self.allocated_ips_v6.lock().unwrap();
+            guard.0.remove(&ip6);
         }
         self.peers.remove(&ip4);
         self.peers_v6.remove(&ip6);

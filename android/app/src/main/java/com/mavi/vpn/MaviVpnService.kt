@@ -21,7 +21,7 @@ class MaviVpnService : VpnService() {
     }
 
     // Native methods implemented in Rust
-    private external fun connect(fd: Int, token: String, endpoint: String): Int
+    private external fun connect(fd: Int, token: String, endpoint: String, certPin: String): Int
     private external fun stop()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -33,13 +33,14 @@ class MaviVpnService : VpnService() {
             val ip = intent?.getStringExtra("IP") ?: ""
             val port = intent?.getStringExtra("PORT") ?: "4433"
             val token = intent?.getStringExtra("TOKEN") ?: ""
-            startVpn(ip, port, token)
+            val pin = intent?.getStringExtra("PIN") ?: ""
+            startVpn(ip, port, token, pin)
             return START_STICKY
         }
         return START_NOT_STICKY
     }
 
-    private fun startVpn(ip: String, port: String, token: String) {
+    private fun startVpn(ip: String, port: String, token: String, certPin: String) {
         if (thread != null) return
 
         // Create Notification
@@ -80,7 +81,7 @@ class MaviVpnService : VpnService() {
             val fd = vpnInterface!!.fd
             thread = Thread {
                 Log.d("MaviVPN", "Starting native VPN loop to $ip:$port")
-                connect(fd, token, "$ip:$port")
+                connect(fd, token, "$ip:$port", certPin)
                 Log.d("MaviVPN", "Native VPN loop exited")
                 stopSelf()
             }.also { it.start() }

@@ -15,6 +15,7 @@ use shared::ControlMessage;
 use crate::state::AppState;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
 use tun::Device;
+use constant_time_eq::constant_time_eq;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -30,8 +31,8 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState::new(&config.network_cidr)?);
 
     // 3. Setup Certificates
-    let cert_path = std::path::PathBuf::from("/app/data/cert.pem");
-    let key_path = std::path::PathBuf::from("/app/data/key.pem");
+    let cert_path = config.cert_path.clone();
+    let key_path = config.key_path.clone();
     if let Some(parent) = cert_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -119,16 +120,26 @@ async fn main() -> Result<()> {
                         if version == 4 {
                              if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(packet) {
                                 let dest_ip = ipv4_header.destination_addr();
-                                if let Some(tx_client) = state_reader.peers.get(&dest_ip) {
-                                    let _ = tx_client.send(Bytes::copy_from_slice(packet)).await;
+                                // Avoid deadlock: clone the sender and drop the lock before awaiting
+                                let tx_opt = state_reader.peers.get(&dest_ip).map(|r| r.clone());
+                                if let Some(tx_client) = tx_opt {
+                                    // Use try_send to prevent one blocked client from halting the entire network
+                                    if let Err(e) = tx_client.try_send(Bytes::copy_from_slice(packet)) {
+                                        tracing::warn!("Dropping packet for {} (Channel full or closed): {}", dest_ip, e);
+                                    }
                                 }
                             }
                         } else if version == 6 {
                              if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(packet) {
                                 let dest_ip = ipv6_header.destination_addr();
-                                if let Some(tx_client) = state_reader.peers_v6.get(&dest_ip) {
-                                    let _ = tx_client.send(Bytes::copy_from_slice(packet)).await;
-                                }
+                                    // Avoid deadlock: clone the sender and drop the lock before awaiting
+                                    let tx_opt = state_reader.peers_v6.get(&dest_ip).map(|r| r.clone());
+                                    if let Some(tx_client) = tx_opt {
+                                        // Use try_send to prevent one blocked client from halting the entire network
+                                        if let Err(e) = tx_client.try_send(Bytes::copy_from_slice(packet)) {
+                                            tracing::warn!("Dropping packet for {} (Channel full or closed): {}", dest_ip, e);
+                                        }
+                                    }
                             }
                         }
                     }
@@ -181,7 +192,7 @@ async fn handle_connection(
     
     let (assigned_ip, assigned_ip6) = match msg {
         ControlMessage::Auth { token } => {
-            if token != config.auth_token {
+            if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
                 // Send Error
                 let err_msg = ControlMessage::Error { message: "Invalid Token".into() };
                 let bytes = bincode::serialize(&err_msg)?;
@@ -206,10 +217,11 @@ async fn handle_connection(
         dns_server: config.dns,
         mtu: 1280,
         // Disable IPv6 for client until server has IPv6 uplink
-        assigned_ipv6: None,
-        netmask_v6: None,
-        gateway_v6: None,
-        dns_server_v6: None,
+        assigned_ipv6: Some(assigned_ip6),
+        netmask_v6: Some(64), // Standard /64
+        gateway_v6: Some(state.gateway_ip_v6()),
+        // Cloudflare DNS64 or similar could be better, trying Google for now
+        dns_server_v6: Some("2001:4860:4860::8888".parse().unwrap()),
     };
     let bytes = bincode::serialize(&success_msg)?;
     send_stream.write_u32_le(bytes.len() as u32).await?;

@@ -236,14 +236,18 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_networkChanged(
         
         let conn = session.connection.clone();
         
-        // Spawn a task to send a ping/datagram
+        // Spawn a task to send a burst of pings/datagrams to force migration
         session.runtime.spawn(async move {
-            info!("Sending migration datagram...");
-            // Send an empty datagram effectively acting as a ping to update the path
-            match conn.send_datagram(Bytes::from_static(&[])) {
-                 Ok(_) => info!("Migration datagram sent"),
-                 Err(e) => error!("Failed to send migration datagram: {}", e),
+            info!("Starting migration burst (5 packets)...");
+            for i in 0..5 {
+                match conn.send_datagram(Bytes::from_static(&[])) {
+                     Ok(_) => info!("Migration datagram {}/5 sent", i+1),
+                     Err(e) => error!("Failed to send migration datagram {}/5: {}", i+1, e),
+                }
+                // Small delay to ensure they are spaced out slightly but cover the network switch window
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
+            info!("Migration burst completed.");
         });
     }));
 }
@@ -289,6 +293,9 @@ async fn connect_and_handshake(
     transport_config.send_window(16 * 1024 * 1024); // 16MB send window
     // Enable MTU discovery
     transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
+
+    // Enable Segmentation Offload (GSO) for higher throughput
+    transport_config.enable_segmentation_offload(true);
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

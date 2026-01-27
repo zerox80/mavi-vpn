@@ -1,6 +1,7 @@
 package com.mavi.vpn
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
@@ -38,6 +39,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Load saved credentials
+        val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+        val savedIp = prefs.getString("saved_ip", "") ?: ""
+        val savedPort = prefs.getString("saved_port", "4433") ?: "4433"
+        val savedToken = prefs.getString("saved_token", "") ?: ""
+        val savedPin = prefs.getString("saved_pin", "") ?: ""
+
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -51,7 +60,21 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     VpnScreen(
-                        onConnect = { ip, port, token, pin -> prepareAndStartVpn(ip, port, token, pin) },
+                        initialIp = savedIp,
+                        initialPort = savedPort,
+                        initialToken = savedToken,
+                        initialPin = savedPin,
+                        onConnect = { ip, port, token, pin -> 
+                            // Save credentials
+                            val editor = prefs.edit()
+                            editor.putString("saved_ip", ip)
+                            editor.putString("saved_port", port)
+                            editor.putString("saved_token", token)
+                            editor.putString("saved_pin", pin)
+                            editor.apply()
+                            
+                            prepareAndStartVpn(ip, port, token, pin) 
+                        },
                         onDisconnect = { stopVpn() }
                     )
                 }
@@ -92,12 +115,19 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun VpnScreen(onConnect: (String, String, String, String) -> Unit, onDisconnect: () -> Unit) {
+fun VpnScreen(
+    initialIp: String,
+    initialPort: String,
+    initialToken: String,
+    initialPin: String,
+    onConnect: (String, String, String, String) -> Unit, 
+    onDisconnect: () -> Unit
+) {
     var isConnected by remember { mutableStateOf(false) }
-    var serverIp by remember { mutableStateOf("") }
-    var serverPort by remember { mutableStateOf("4433") }
-    var authToken by remember { mutableStateOf("") }
-    var certPin by remember { mutableStateOf("") }
+    var serverIp by remember { mutableStateOf(initialIp) }
+    var serverPort by remember { mutableStateOf(initialPort) }
+    var authToken by remember { mutableStateOf(initialToken) }
+    var certPin by remember { mutableStateOf(initialPin) }
 
     Column(
         modifier = Modifier

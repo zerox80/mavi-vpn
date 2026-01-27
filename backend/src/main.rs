@@ -64,6 +64,8 @@ async fn main() -> Result<()> {
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     // Enable MTU discovery
     transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
+    // Enable Segmentation Offload (GSO)
+    transport_config.enable_segmentation_offload(true);
     
     // Manually bind socket to set SO_RCVBUF and SO_SNDBUF
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;

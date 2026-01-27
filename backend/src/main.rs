@@ -407,7 +407,7 @@ async fn handle_connection(
              if valid {
                   if let Err(e) = tx_tun.send(data).await {
                       tracing::error!("Failed to send to TUN writer (Channel closed): {}", e);
-                      break 'outer_loop;
+                      break 'outer_loop Err(anyhow::anyhow!("TUN writer channel closed"));
                   }
              }
         }

@@ -54,8 +54,8 @@ async fn main() -> Result<()> {
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
     
     // Explicitly set max datagram frame size to accommodate MTU 1280
-    // QUIC header is ~20-30 bytes, so 1280 is safe and optimal
-    transport_config.max_datagram_frame_size(Some(config.mtu as usize));
+    // In Quinn 0.11, this is implicitly set by datagram_receive_buffer_size.
+    // We already set this to 2MB above which is more than enough for MTU 1280.
     
     // Manually bind socket to set SO_RCVBUF and SO_SNDBUF
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
@@ -244,7 +244,7 @@ async fn handle_connection(
         netmask: state.network.mask(),
         gateway: state.gateway_ip(),
         dns_server: config.dns,
-        mtu: config.mtu as u32,
+        mtu: config.mtu as u16,
         // Disable IPv6 for client until server has IPv6 uplink
         assigned_ipv6: Some(assigned_ip6),
         netmask_v6: Some(64), // Standard /64

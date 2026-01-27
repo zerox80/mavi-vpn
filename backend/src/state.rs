@@ -3,7 +3,6 @@ use ipnetwork::{Ipv4Network, Ipv6Network};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc;
 use anyhow::{Result, anyhow};
-use std::collections::HashSet;
 use std::sync::Mutex;
 
 /// A channel to send specific IP packets to a connected client task.
@@ -44,7 +43,7 @@ impl AppState {
 
         // IPv6 (Simpler, just take first 5000 for now to avoid massive memory usage)
         let mut free_ips_v6 = Vec::new();
-        let gateway_v6 = network_v6.iter().nth(1).unwrap();
+        let _gateway_v6 = network_v6.iter().nth(1).unwrap();
         
         // We can't iterate all IPv6 /64, just take a reasonable pool size
         for i in 2..5002 {

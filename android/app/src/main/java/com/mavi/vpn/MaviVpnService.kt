@@ -24,6 +24,7 @@ class MaviVpnService : VpnService() {
     @Volatile private var vpnSessionHandle: Long = 0
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
+    private val vpnLock = Any() // Fix: Synchronization Lock
 
     companion object {
         init {
@@ -112,7 +113,9 @@ class MaviVpnService : VpnService() {
                         Thread.sleep(500)
                         continue
                     }
-                    vpnSessionHandle = handle
+                    synchronized(vpnLock) {
+                        vpnSessionHandle = handle
+                    }
 
                     try {
                         // 2. Get Config
@@ -184,10 +187,12 @@ class MaviVpnService : VpnService() {
                     } finally {
                         Log.d("MaviVPN", "Cleaning up VPN session for retry/stop")
                         
-                        // Clean native memory
-                        if (vpnSessionHandle != 0L) {
-                             free(vpnSessionHandle)
-                             vpnSessionHandle = 0
+                        // Clean native memory safely
+                        synchronized(vpnLock) {
+                             if (vpnSessionHandle != 0L) {
+                                  free(vpnSessionHandle)
+                                  vpnSessionHandle = 0
+                             }
                         }
                         
                         // Close interface to allow system to clean up routes before potential reconnect
@@ -214,9 +219,13 @@ class MaviVpnService : VpnService() {
 
     private fun stopVpn() {
         isRunning = false
-        val handle = vpnSessionHandle
-        if (handle != 0L) {
-             stop(handle) // Signal Rust to stop
+
+        // Fix: Race condition prevention
+        synchronized(vpnLock) {
+             val handle = vpnSessionHandle
+             if (handle != 0L) {
+                  stop(handle) // Signal Rust to stop
+             }
         }
         
         try {

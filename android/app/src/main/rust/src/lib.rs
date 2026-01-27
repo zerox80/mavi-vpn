@@ -397,6 +397,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     let wd_last = last_receive.clone();
     let wd_conn = connection_arc.clone();
     
+    // Explicitly move clones into the task
     let watchdog_task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -461,9 +462,8 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                      }
                      
                      packets_read += 1;
-                     if packets_read >= 64 { 
-                         break;
-                     }
+                     // FIX: Do not break eagerly. Read until WouldBlock to ensure AsyncFd state is cleared.
+                     // if packets_read >= 64 { break; }
                  }
                  Ok(packets_read)
             });

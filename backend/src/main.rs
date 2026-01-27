@@ -185,8 +185,8 @@ async fn main() -> Result<()> {
             // Write batch to TUN
             for packet in batch.drain(..) {
                 if let Err(e) = tun_writer.write_all(&packet).await {
-                    error!("Failed to write to TUN: {}", e);
-                    break;
+                    error!("CRITICAL: Failed to write to TUN: {}. Exiting.", e);
+                    std::process::exit(1); 
                 }
             }
         }
@@ -242,8 +242,8 @@ async fn main() -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    error!("Error reading from TUN: {}", e);
-                    break;
+                    error!("CRITICAL: Error reading from TUN: {}. Exiting.", e);
+                    std::process::exit(1);
                 }
             }
         }

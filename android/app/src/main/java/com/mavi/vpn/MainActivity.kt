@@ -1,0 +1,294 @@
+package com.mavi.vpn
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.net.VpnService
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.sp
+
+class MainActivity : ComponentActivity() {
+
+    private var lastIp = ""
+    private var lastPort = ""
+    private var lastToken = ""
+    private var lastPin = ""
+
+    private val vpnPrepareLauncher = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+             startVpnService(lastIp, lastPort, lastToken, lastPin)
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        requestBatteryOptimizationIgnore()
+        
+        // Load saved credentials
+        val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+        val savedIp = prefs.getString("saved_ip", "") ?: ""
+        val savedPort = prefs.getString("saved_port", "4433") ?: "4433"
+        val savedToken = prefs.getString("saved_token", "") ?: ""
+        val savedPin = prefs.getString("saved_pin", "") ?: ""
+
+        setContent {
+            MaterialTheme(
+                colorScheme = darkColorScheme(
+                    primary = Color(0xFF007AFF),
+                    background = Color(0xFF121212),
+                    surface = Color(0xFF1E1E1E)
+                )
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    VpnScreen(
+                        initialIp = savedIp,
+                        initialPort = savedPort,
+                        initialToken = savedToken,
+                        initialPin = savedPin,
+                        onConnect = { ip, port, token, pin -> 
+                            // Save credentials
+                            val editor = prefs.edit()
+                            editor.putString("saved_ip", ip)
+                            editor.putString("saved_port", port)
+                            editor.putString("saved_token", token)
+                            editor.putString("saved_pin", pin)
+                            editor.apply()
+                            
+                            prepareAndStartVpn(ip, port, token, pin) 
+                        },
+                        onDisconnect = { stopVpn() }
+                    )
+                }
+            }
+        }
+    }
+
+    private fun prepareAndStartVpn(ip: String, port: String, token: String, pin: String) {
+        val intent = VpnService.prepare(this)
+        if (intent != null) {
+            lastIp = ip
+            lastPort = port
+            lastToken = token
+            lastPin = pin
+            vpnPrepareLauncher.launch(intent)
+        } else {
+            startVpnService(ip, port, token, pin)
+        }
+    }
+
+    private fun startVpnService(ip: String, port: String, token: String, pin: String) {
+        val intent = Intent(this, MaviVpnService::class.java).apply {
+            action = "CONNECT"
+            putExtra("IP", ip)
+            putExtra("PORT", port)
+            putExtra("TOKEN", token)
+            putExtra("PIN", pin)
+        }
+        startService(intent)
+    }
+
+    private fun stopVpn() {
+        val intent = Intent(this, MaviVpnService::class.java)
+        intent.action = "STOP"
+        startService(intent)
+    }
+
+    private fun requestBatteryOptimizationIgnore() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent()
+            val packageName = packageName
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                intent.action = Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VpnScreen(
+    initialIp: String,
+    initialPort: String,
+    initialToken: String,
+    initialPin: String,
+    onConnect: (String, String, String, String) -> Unit, 
+    onDisconnect: () -> Unit
+) {
+    var isConnected by remember { mutableStateOf(false) }
+    var serverIp by remember { mutableStateOf(initialIp) }
+    var serverPort by remember { mutableStateOf(initialPort) }
+    var authToken by remember { mutableStateOf(initialToken) }
+    var certPin by remember { mutableStateOf(initialPin) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Top
+    ) {
+        Spacer(modifier = Modifier.height(48.dp))
+        
+        Icon(
+            imageVector = if (isConnected) Icons.Default.Lock else Icons.Default.Settings,
+            contentDescription = null,
+            modifier = Modifier.size(80.dp),
+            tint = if (isConnected) Color(0xFF00FF7F) else Color(0xFF007AFF)
+        )
+        
+        Spacer(modifier = Modifier.height(24.dp))
+        
+        Text(
+            text = "MAVI VPN",
+            fontSize = 32.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+        
+        Text(
+            text = if (isConnected) "SECURED CONNECTION" else "READY TO CONNECT",
+            fontSize = 14.sp,
+            color = if (isConnected) Color(0xFF00FF7F) else Color.Gray
+        )
+
+        Spacer(modifier = Modifier.height(48.dp))
+
+        if (!isConnected) {
+            OutlinedTextField(
+                value = serverIp,
+                onValueChange = { serverIp = it },
+                label = { Text("Server IP", color = Color.Gray) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = TextFieldDefaults.outlinedTextFieldColors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedBorderColor = Color.DarkGray,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
+                )
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = serverPort,
+                onValueChange = { serverPort = it },
+                label = { Text("Port", color = Color.Gray) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = TextFieldDefaults.outlinedTextFieldColors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedBorderColor = Color.DarkGray,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
+                )
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = authToken,
+                onValueChange = { authToken = it },
+                label = { Text("Auth Token", color = Color.Gray) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                colors = TextFieldDefaults.outlinedTextFieldColors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedBorderColor = Color.DarkGray,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
+                )
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = certPin,
+                onValueChange = { certPin = it },
+                label = { Text("Certificate PIN (SHA256 Hex)", color = Color.Gray) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = TextFieldDefaults.outlinedTextFieldColors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedBorderColor = Color.DarkGray,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
+                )
+            )
+        } else {
+            // Stats or connection info could go here
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
+                    .padding(24.dp)
+            ) {
+                Column {
+                    Text("Connected to:", color = Color.Gray, fontSize = 12.sp)
+                    Text(serverIp, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        Button(
+            onClick = {
+                if (isConnected) {
+                    onDisconnect()
+                    isConnected = false
+                } else {
+                    if (serverIp.isNotEmpty() && authToken.isNotEmpty()) {
+                        onConnect(serverIp, serverPort, authToken, certPin)
+                        isConnected = true
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isConnected) Color(0xFFFF3B30) else Color(0xFF007AFF)
+            )
+        ) {
+            Text(
+                text = if (isConnected) "DISCONNECT" else "CONNECT",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+        }
+        
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+}

@@ -1,0 +1,31 @@
+# --- Rust ---
+/target
+/debug
+**/*.rs.bk
+Cargo.lock
+
+# --- Android ---
+.gradle/
+.idea/
+build/
+app/build/
+android/build/
+android/app/build/
+local.properties
+*.iml
+.DS_Store
+
+# --- Secrets & Config ---
+.env
+.env.local
+*.pem
+*.key
+*.p12
+*.jks
+auth_token.txt
+
+# --- Logs & Reports ---
+*.log
+problems-report.html
+android/app/src/main/jniLibs/
+android/java_pid7424.hprof

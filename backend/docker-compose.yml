@@ -1,0 +1,74 @@
+services:
+  vpn-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: mavi-vpn-server
+    container_name: mavi-vpn
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "10433:10433/udp" # QUIC uses UDP
+    cap_add:
+      - NET_ADMIN # Required for TUN device creation & iptables
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./data:/app/data # Persist certificates
+    environment:
+      - RUST_LOG=info
+      - VPN_AUTH_TOKEN=${VPN_AUTH_TOKEN:-change_me}
+      - VPN_BIND_ADDR=${VPN_BIND_ADDR:-0.0.0.0:10433}
+      - VPN_NETWORK=10.8.0.0/24
+      - VPN_DNS=1.1.1.1
+    healthcheck:
+      test: ["CMD-SHELL", "ip addr show tun0 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Traefik Reverse Proxy
+  traefik:
+    image: traefik:v2.10
+    profiles: ["traefik"] # OPTIONAL: Only starts if --profile traefik is used
+    container_name: traefik
+    command:
+      # Enable Docker provider
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      # Entry points
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # HTTP -> HTTPS Redirect
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # Let's Encrypt Resolver
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      # Logging
+      - "--log.level=INFO"
+    ports:
+      - "${TRAEFIK_HTTP_PORT:-80}:80"
+      - "${TRAEFIK_HTTPS_PORT:-443}:443"
+      # Dashboard (Optional, insecure unless protected)
+      # - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./letsencrypt:/letsencrypt"
+
+  # Demo Web Server (Whoami)
+  # Replace this with your actual web content (e.g., nginx) later
+  web-server:
+    image: traefik/whoami
+    profiles: ["traefik"] # OPTIONAL
+    container_name: web-server
+    labels:
+      - "traefik.enable=true"
+      # Router for HTTPS
+      - "traefik.http.routers.web-server.rule=Host(`${DOMAIN_NAME}`)"
+      - "traefik.http.routers.web-server.entrypoints=websecure"
+      # TLS Config: Use resolver from ENV, or fallback to manual/self-signed if empty/commented
+      # If TRAEFIK_ACME_RESOLVER is set to 'myresolver', LE is used.
+      # If it's invalid or empty, it might default to self-signed.
+      - "traefik.http.routers.web-server.tls.certresolver=${TRAEFIK_ACME_RESOLVER:-myresolver}"

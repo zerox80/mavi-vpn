@@ -1,0 +1,6 @@
+<resources>
+    <!-- Base application theme. -->
+    <style name="Theme.MaviVPN" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- We use Compose for UI, so XML theme can be minimal -->
+    </style>
+</resources>

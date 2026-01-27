@@ -21,7 +21,9 @@ class MaviVpnService : VpnService() {
     }
 
     // Native methods implemented in Rust
-    private external fun connect(fd: Int, token: String, endpoint: String, certPin: String): Int
+    private external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String): Long
+    private external fun getConfig(handle: Long): String
+    private external fun startLoop(handle: Long, fd: Int)
     private external fun stop()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -59,45 +61,103 @@ class MaviVpnService : VpnService() {
         
         startForeground(1, notification)
 
-        // Establish VPN Interface
-        val builder = Builder()
-        
-        builder.addDnsServer("8.8.8.8")
-        builder.addDnsServer("8.8.4.4")
+        thread = Thread {
+            Log.d("MaviVPN", "Starting VPN initialization to $ip:$port")
+            
+            // 1. Init / Handshake
+            val handle = init(this, token, "$ip:$port", certPin)
+            if (handle == 0L) {
+                Log.e("MaviVPN", "Handshake failed. Stopping.")
+                stopVpn()
+                return@Thread
+            }
 
-        builder.addAddress("10.8.0.2", 24)
-        builder.addRoute("0.0.0.0", 0)
-        builder.setSession("MaviVPN")
-        builder.setMtu(1280)
-        
-        // Ensure blocking for better reachability on some networks
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            builder.setMetered(false)
-        }
-        
-        vpnInterface = builder.establish()
+            try {
+                // 2. Get Config
+                val configJson = getConfig(handle)
+                Log.d("MaviVPN", "Config Received: $configJson")
+                val config = org.json.JSONObject(configJson)
+                
+                // 3. Establish Interface
+                val builder = Builder()
+                
+                // Parse Config
+                val assignedIp = config.getString("assigned_ip")
+                // netmask usually /24 for IPv4 in this simple setup, or we can parse string
+                // config doesn't send CIDR for v4, just netmask IP.. but Builder wants prefix length.
+                // Rust config sends 'netmask' as IP. 255.255.255.0 -> 24.
+                // For simplicity assuming /24 as server default is 10.8.0.0/24
+                val prefixLength = 24 
+                
+                builder.addAddress(assignedIp, prefixLength)
+                
+                // Routes
+                builder.addRoute("0.0.0.0", 0)
+                
+                // DNS
+                val dns = config.optString("dns_server", "8.8.8.8")
+                builder.addDnsServer(dns)
+                
+                // IPv6
+                if (config.has("assigned_ipv6")) {
+                    val v6 = config.getString("assigned_ipv6")
+                    val v6Prefix = config.optInt("netmask_v6", 64)
+                    try {
+                        builder.addAddress(v6, v6Prefix)
+                        builder.addRoute("::", 0)
+                        if (config.has("dns_server_v6")) {
+                             builder.addDnsServer(config.getString("dns_server_v6"))
+                        }
+                    } catch (e: Exception) {
+                        Log.w("MaviVPN", "Failed to add IPv6: ${e.message}")
+                    }
+                }
 
-        if (vpnInterface != null) {
-            val fd = vpnInterface!!.fd
-            thread = Thread {
-                Log.d("MaviVPN", "Starting native VPN loop to $ip:$port")
-                connect(fd, token, "$ip:$port", certPin)
-                Log.d("MaviVPN", "Native VPN loop exited")
+                builder.setSession("MaviVPN")
+                builder.setMtu(config.optInt("mtu", 1280))
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    builder.setMetered(false)
+                }
+
+                vpnInterface = builder.establish()
+
+                if (vpnInterface != null) {
+                    val fd = vpnInterface!!.fd
+                    Log.d("MaviVPN", "Interface established. Starting Loop.")
+                    
+                    // 4. Start Loop
+                    startLoop(handle, fd)
+                    
+                    Log.d("MaviVPN", "Native VPN loop exited")
+                } else {
+                    Log.e("MaviVPN", "Failed to establish VPN interface")
+                }
+
+            } catch (e: Exception) {
+                Log.e("MaviVPN", "Error during VPN setup: ${e.message}")
+                e.printStackTrace()
+            } finally {
+                stop() // Ensure clean shutdown of Rust side if loop wasn't started or crashed
                 stopSelf()
-            }.also { it.start() }
-        }
+            }
+        }.also { it.start() }
     }
 
     private fun stopVpn() {
-        stop()
+        stop() // Signal Rust to stop
         try {
             vpnInterface?.close()
         } catch (e: Exception) {
             e.printStackTrace()
         }
         vpnInterface = null
-        thread?.interrupt()
-        thread = null
+        if (thread != null) {
+            try {
+                // thread?.interrupt() // Don't interrupt, let the native stop flag handle it
+                thread = null 
+            } catch(_: Exception){}
+        }
         stopForeground(true)
     }
 }

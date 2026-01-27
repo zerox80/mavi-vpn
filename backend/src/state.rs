@@ -66,26 +66,35 @@ impl AppState {
         let mut guard = self.allocated_ips_v6.lock().unwrap();
         let (allocated, next_idx) = &mut *guard;
         
-        // Try next 5000 indices starting from cursor
+        let network_u128 = u128::from(self.network_v6.network());
+        let mask = self.network_v6.prefix(); // e.g. 64
+        
+        // Safety check: ensure we don't overflow the subnet
+        // shifting (128 - mask) gives us the size. 
+        // Realistically for /64 we have plenty of space.
+        
         let start = *next_idx;
-        // Limit to reasonable search space to prevent infinite loops if full
-        for i in start..(start + 5000) {
-           if let Some(ip) = self.network_v6.iter().nth(i) {
-                if !allocated.contains(&ip) {
-                    allocated.insert(ip);
-                    *next_idx = i + 1;
-                    return Ok(ip);
-                }
-            } else {
-                // End of network range (unlikely for /64)
-                break;
+        
+        // Try next 5000 indices starting from cursor
+        for i in 0..5000 {
+            let offset = start + i;
+             // Manual addition since Ipv6Network iterator with nth() is O(N)
+            let ip_u128 = network_u128.wrapping_add(offset as u128);
+            let ip = Ipv6Addr::from(ip_u128);
+
+            // Verify it is still in the network (in case of overflow/wrap, unlikely with u128 but good practice)
+            if !self.network_v6.contains(ip) {
+                 break;
+            }
+
+            if !allocated.contains(&ip) {
+                allocated.insert(ip);
+                *next_idx = offset + 1;
+                return Ok(ip);
             }
         }
         
-        // Wrap around attempt if first pass failed (simple reset for now)
-        // Ideally we would search 2..start
-        
-        Err(anyhow!("No IPv6 addresses available (limit reached or fragmented)"))
+        Err(anyhow!("No IPv6 addresses available (temporary limit reached)"))
     }
 
     /// Release IP addresses

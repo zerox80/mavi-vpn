@@ -46,7 +46,8 @@ async fn main() -> Result<()> {
     server_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
     
     let mut server_config = ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?));
-    let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+    let transport_config = Arc::get_mut(&mut server_config.transport)
+        .ok_or_else(|| anyhow::anyhow!("Failed to access transport config"))?;
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
     transport_config.datagram_receive_buffer_size(Some(1024 * 1024)); // 1MB buffer

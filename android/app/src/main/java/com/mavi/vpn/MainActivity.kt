@@ -25,6 +25,16 @@ import androidx.compose.ui.unit.sp
 
 class MainActivity : ComponentActivity() {
 
+    private var lastIp = ""
+    private var lastPort = ""
+    private var lastToken = ""
+
+    private val vpnPrepareLauncher = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+             startVpnService(lastIp, lastPort, lastToken)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -51,19 +61,14 @@ class MainActivity : ComponentActivity() {
     private fun prepareAndStartVpn(ip: String, port: String, token: String) {
         val intent = VpnService.prepare(this)
         if (intent != null) {
-            // Save settings temporarily to use in onActivityResult or use a better state management
             lastIp = ip
             lastPort = port
             lastToken = token
-            startActivityForResult(intent, 0)
+            vpnPrepareLauncher.launch(intent)
         } else {
             startVpnService(ip, port, token)
         }
     }
-
-    private var lastIp = ""
-    private var lastPort = ""
-    private var lastToken = ""
 
     private fun startVpnService(ip: String, port: String, token: String) {
         val intent = Intent(this, MaviVpnService::class.java).apply {
@@ -79,13 +84,6 @@ class MainActivity : ComponentActivity() {
         val intent = Intent(this, MaviVpnService::class.java)
         intent.action = "STOP"
         startService(intent)
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (resultCode == Activity.RESULT_OK) {
-            startVpnService(lastIp, lastPort, lastToken)
-        }
-        super.onActivityResult(requestCode, resultCode, data)
     }
 }
 

@@ -262,4 +262,4 @@ class MaviVpnService : VpnService() {
         }
     }
 }
-}
+

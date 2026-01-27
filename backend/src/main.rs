@@ -127,9 +127,10 @@ async fn main() -> Result<()> {
     info!("Applying MSS clamping: IPv4={} IPv6={} on {}", mss_v4, mss_v6, tun_name);
 
     // IPv4 Clamping
+    let mss_v4_str = mss_v4.to_string();
     let rules_v4 = [
-        vec!["-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", &mss_v4.to_string()],
-        vec!["-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", &tun_name, "-j", "TCPMSS", "--set-mss", &mss_v4.to_string()]
+        vec!["-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", &mss_v4_str],
+        vec!["-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", &tun_name, "-j", "TCPMSS", "--set-mss", &mss_v4_str]
     ];
 
     for args in rules_v4 {
@@ -141,9 +142,10 @@ async fn main() -> Result<()> {
     }
 
     // IPv6 Clamping
+    let mss_v6_str = mss_v6.to_string();
     let rules_v6 = [
-        vec!["-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", &mss_v6.to_string()],
-        vec!["-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", &tun_name, "-j", "TCPMSS", "--set-mss", &mss_v6.to_string()]
+        vec!["-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", &mss_v6_str],
+        vec!["-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", &tun_name, "-j", "TCPMSS", "--set-mss", &mss_v6_str]
     ];
 
     for args in rules_v6 {

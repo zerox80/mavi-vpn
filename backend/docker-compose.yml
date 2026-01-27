@@ -30,6 +30,7 @@ services:
   # Traefik Reverse Proxy
   traefik:
     image: traefik:v2.10
+    profiles: ["traefik"] # OPTIONAL: Only starts if --profile traefik is used
     container_name: traefik
     command:
       # Enable Docker provider
@@ -60,6 +61,7 @@ services:
   # Replace this with your actual web content (e.g., nginx) later
   web-server:
     image: traefik/whoami
+    profiles: ["traefik"] # OPTIONAL
     container_name: web-server
     labels:
       - "traefik.enable=true"

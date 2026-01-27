@@ -311,6 +311,7 @@ async fn connect_and_handshake(
     transport_config.stream_receive_window(quinn::VarInt::from(512u32 * 1024)); // 512KB per stream
     transport_config.send_window(1024 * 1024); // 1MB send window
     // FIX: Re-enable Discovery. We need Wire MTU > 1280 to carry 1280-byte Inner packets.
+    transport_config.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
     // STANDARD: Wire MTU 1360 to exactly fit 1280-byte Inner packets + 80 bytes overhead
     transport_config.initial_mtu(1360);
     // REMOVED: max_datagram_frame_size not supported in this version.

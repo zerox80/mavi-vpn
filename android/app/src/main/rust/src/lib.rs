@@ -361,6 +361,8 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
 
     let connection_arc = Arc::new(connection);
     
+use futures_util::FutureExt; // Import for now_or_never()
+
     // TUN -> QUIC (Optimized Loop)
     let conn_send = connection_arc.clone();
     let stop_check = stop_flag.clone();
@@ -396,10 +398,10 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                              if packets_read > 0 { return Ok(packets_read); }
                              return Err(err); 
                          }
-                         return Ok(Err(err));
+                         return Err(err);
                      }
                      let n = n as usize;
-                     if n == 0 { return Ok(0); } // EOF
+                     if n == 0 { return Ok(packets_read); } // EOF, return what we have
                      
                      unsafe { buf.advance_mut(n); }
                      
@@ -417,14 +419,11 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             });
 
             match result {
-                Ok(inner_result) => {
-                    match inner_result {
-                        Ok(n) if n == 0 => { break; } // EOF/Error
-                        Ok(_) => {}, // success
-                        Err(e) => { error!("TUN Read Error: {}", e); break; }
-                    }
+                Ok(n) => {
+                     // Success (n packets read)
+                     if n == 0 { break; } // EOF/Error treated as break? No, n=0 means potential EOF if we didn't get WouldBlock
                 },
-                Err(_) => continue, // WouldBlock
+                Err(_) => continue, // WouldBlock (handled by try_io returning Err)
             }
         }
     });
@@ -462,24 +461,21 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                              let err = std::io::Error::last_os_error();
                              if err.kind() == std::io::ErrorKind::WouldBlock {
                                  // Partial write of batch? We lose the rest.
-                                 // Ideally we should handle this, but for VPN, dropping is better than blocking head-of-line.
                                  return Err(err); 
                              }
                              // Serious error
-                             return Ok(Err(err));
+                             return Err(err);
                          }
                     }
                     Ok(())
                 });
                 
                 match res {
-                    Ok(Ok(_)) => {},
-                    Ok(Err(e)) => { error!("TUN Write Error: {}", e); },
-                    Err(_) => { 
-                        // WouldBlock on the first write? We might lose the batch logic here if we retry all.
-                        // Since we checked writable(), this shouldn't happen often. 
-                        // Simplified: Just drop if we can't write instantly after writable signal.
-                    }
+                    Ok(()) => {},
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => { 
+                         // try_io logic handles wait
+                    },
+                    Err(e) => { error!("TUN Write Error: {}", e); },
                 }
             }
             Err(e) => { error!("Connection lost: {}", e); break; }

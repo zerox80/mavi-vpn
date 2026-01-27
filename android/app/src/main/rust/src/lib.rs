@@ -446,79 +446,65 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                 Err(_) => break,
             };
 
-            let result = guard.try_io(|_inner| {
-                 let mut packets_read = 0;
-                 loop {
-                     if buf.capacity() < 2048 {
-                         buf.reserve(2048);
-                     }
-                     let chunk = buf.chunk_mut();
-                     let max_len = 2048.min(chunk.len());
-                     
-                     // REVERT: Use raw_fd (original) for IO, dup_fd only for polling
-                     let n = unsafe { libc::read(raw_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
-                     
-                     if n < 0 {
-                         let err = std::io::Error::last_os_error();
-                         if err.kind() == std::io::ErrorKind::WouldBlock {
-                             if packets_read > 0 { return Ok(packets_read); }
-                             return Err(err); 
-                         }
-                         return Err(err);
-                     }
-                     let n = n as usize;
-                     if n == 0 { return Ok(packets_read); } 
-                     
-                     unsafe { buf.advance_mut(n); }
-                     
-                     let packet = buf.split_to(n).freeze();
-                     // PERF: If send_datagram is blocked, we should NOT read more from TUN.
-                     // Instead, we wait and retry. This prevents draining the TUN dev and dropping packets.
-                     match conn_send.send_datagram(packet.clone()) {
-                        Ok(_) => {},
-                        Err(quinn::SendDatagramError::Blocked(p)) => {
-                            // Re-append the packet to the front of our processing or just wait.
-                            // Since we already split it, we need to handle it.
-                            // We yield and retry sending THIS packet.
-                            let mut retry_packet = p;
-                            loop {
-                                tokio::task::yield_now().await;
-                                if stop_check.load(Ordering::Relaxed) { break; }
-                                match conn_send.send_datagram(retry_packet) {
-                                    Ok(_) => break,
-                                    Err(quinn::SendDatagramError::Blocked(p)) => {
-                                        retry_packet = p;
-                                        // Exponential backoff or just yield? 
-                                        // Yield is usually enough for async executors.
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        // Connection actually closed or similar
-                                        return Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, e));
-                                    }
-                                }
-                            }
-                        },
-                        Err(e) => {
-                             // Buffer closed or fatal error
-                             return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-                        }
-                     }
-                     
-                     packets_read += 1;
-                     if packets_read >= 32 { return Ok(packets_read); } // Yield periodically
+            // Read ONE packet from TUN
+            let packet = match guard.try_io(|_inner| {
+                 if buf.capacity() < 2048 {
+                     buf.reserve(2048);
                  }
-            });
-
-            match result {
-                Ok(Ok(n)) => if n == 0 { break; },
+                 let chunk = buf.chunk_mut();
+                 let max_len = 2048.min(chunk.len());
+                 
+                 let n = unsafe { libc::read(raw_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
+                 
+                 if n < 0 {
+                     let err = std::io::Error::last_os_error();
+                     return Err(err);
+                 }
+                 let n = n as usize;
+                 if n == 0 { return Ok(None); } 
+                 
+                 unsafe { buf.advance_mut(n); }
+                 let packet = buf.split_to(n).freeze();
+                 Ok(Some(packet))
+            }) {
+                Ok(Ok(Some(p))) => p,
+                Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
                     if e.kind() != std::io::ErrorKind::WouldBlock {
                         error!("TUN Read Error: {}", e);
                         break;
                     }
+                    continue;
                 },
-                Err(_) => continue, 
+                Err(_) => continue, // WouldBlock
+            };
+
+            // Send to QUIC (Outside try_io so we can await)
+            let mut retry_packet = packet;
+            loop {
+                if stop_check.load(Ordering::Relaxed) { break; }
+                match conn_send.send_datagram(retry_packet.clone()) {
+                    Ok(_) => break,
+                    Err(e) => {
+                        // In Quinn 0.11, there isn't a "Blocked" variant in SendDatagramError.
+                        // If it fails, we might just want to yield and retry a few times, 
+                        // or check if it's a fatal error.
+                        match e {
+                            quinn::SendDatagramError::ConnectionLost => {
+                                error!("Connection lost during send");
+                                stop_check.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                            _ => {
+                                // Likely full or disabled. Yield and retry.
+                                tokio::task::yield_now().await;
+                                // Small sleep to prevent tight loop if it's sustained congestion
+                                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                                continue;
+                            }
+                        }
+                    }
+                }
             }
         }
     });

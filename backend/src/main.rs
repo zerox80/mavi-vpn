@@ -160,8 +160,8 @@ async fn main() -> Result<()> {
 
     // 6. Packet Routing Helper Channels
     // Client -> TUN (Multiple clients write to one TUN Writer)
-    // Increased channel capacity for burst handling
-    let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Bytes>(50000);
+    // Reduce buffer to prevent bufferbloat. 2048 * 1280 bytes = ~2.5MB max queue.
+    let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Bytes>(2048);
 
     // Task: TUN Writer (Receives from Clients, Writes to Kernel)
     // Batched writes for reduced syscall overhead
@@ -328,7 +328,7 @@ async fn handle_connection(
     info!("Authenticated {} -> IPv4: {}, IPv6: {}", remote_addr, assigned_ip, assigned_ip6);
 
     // --- Session Phase ---
-    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(50000);
+    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(1024);
     state.register_client(assigned_ip, assigned_ip6, tx_client);
 
     let connection_arc = Arc::new(connection);

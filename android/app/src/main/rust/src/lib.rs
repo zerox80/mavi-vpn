@@ -10,6 +10,7 @@ use bytes::BytesMut;
 use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use ring::digest;
+use rustls::RootCertStore;
 
 // Global stop flag removed. We use per-session flags.
 
@@ -101,7 +102,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
 
 #[no_mangle]
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig<'a>(
-    mut env: JNIEnv<'a>,
+    env: JNIEnv<'a>,
     _class: JClass<'a>,
     handle: jlong,
 ) -> JString<'a> {
@@ -278,14 +279,18 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             });
 
             match result {
-                Ok(Ok(n)) => {
-                    if n == 0 { break; } // EOF
-                    unsafe { buf.set_len(n); }
-                    let _ = conn_send.send_datagram(buf.to_vec().into());
-                    buf.clear();
+                Ok(inner_result) => {
+                    match inner_result {
+                        Ok(n) => {
+                            if n == 0 { break; } // EOF
+                            unsafe { buf.set_len(n); }
+                            let _ = conn_send.send_datagram(buf.to_vec().into());
+                            buf.clear();
+                        }
+                        Err(e) => { error!("TUN Read Error: {}", e); break; }
+                    }
                 },
-                Ok(Err(e)) => { error!("TUN Read Error: {}", e); break; },
-                Err(_) => continue,
+                Err(_) => continue, // WouldBlock
             }
         }
     });
@@ -343,11 +348,10 @@ struct PinnedServerVerifier {
 
 impl PinnedServerVerifier {
     fn new(expected_hash: Vec<u8>) -> Self {
-        let roots = rustls::pki_types::RootCertStore::empty();
-        let inner = rustls::client::WebPkiServerVerifier::builder(
-            std::sync::Arc::new(roots),
-            std::sync::Arc::new(rustls::crypto::ring::default_provider())
-        ).build().expect("Failed to build verifier");
+        let roots = RootCertStore::empty();
+        let inner = rustls::client::WebPkiServerVerifier::builder(std::sync::Arc::new(roots))
+            .build()
+            .expect("Failed to build verifier");
         Self { expected_hash, inner }
     }
 }

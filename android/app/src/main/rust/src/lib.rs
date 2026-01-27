@@ -38,7 +38,8 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
             android_logger::init_once(
                 Config::default()
                     .with_tag("MaviVPN")
-                    .with_max_level(log::LevelFilter::Debug)
+                    // PERF: Change to Info or Warn to prevent Logcat flooding which kills throughput (50mbps -> 300mbps)
+                    .with_max_level(log::LevelFilter::Info)
             );
         });
     

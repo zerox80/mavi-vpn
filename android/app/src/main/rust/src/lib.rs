@@ -434,14 +434,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     let stop_check = stop_flag.clone();
     
     // TUN -> QUIC
-    let conn_send = connection_arc.clone();
-    let stop_check = stop_flag.clone();
-    let bypass = bypass_manager.clone();
-    let bypass_writer_ref = tun_writer.get_ref().try_clone().unwrap(); // Use for creating writer in bypass
-    let bypass_raw_fd = bypass_writer_ref.as_raw_fd();
-    let dup_fd = unsafe { libc::dup(bypass_raw_fd) };
-    let file_dup = unsafe { std::fs::File::from_raw_fd(dup_fd) };
-    let bypass_writer_fd = tokio::io::unix::AsyncFd::new(file_dup).unwrap();
+
 
     let tun_to_quic = tokio::spawn(async move {
         let mut buf = BytesMut::with_capacity(65536); 
@@ -488,10 +481,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
 
             let packet_len = packet.len();
             
-            // Check Bypass
-            if bypass.handle_packet(&packet, &bypass_writer_fd).await {
-                continue;
-            }
+
 
             // Send to QUIC (Non-blocking / Drop on congestion)
             match conn_send.send_datagram(packet) {
@@ -543,42 +533,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                 while batch_idx < batch.len() {
                     let packet = &batch[batch_idx];
                     
-                    // Simple DNS Snooping (IPv4 only for simplicity of example, v6 similar)
-                    if packet.len() > 0 && (packet[0] >> 4) == 4 {
-                         if let Ok(ip_header) = Ipv4HeaderSlice::from_slice(&packet) {
-                             if ip_header.protocol() == 17 { // UDP
-                                 let payload = &packet[ip_header.slice().len()..];
-                                 if let Ok(udp) = UdpHeaderSlice::from_slice(payload) {
-                                     if udp.source_port() == 53 {
-                                         // DNS Response!
-                                         let dns_payload = &payload[8..];
-                                         // Minimal DNS parser looking for A records to matched domains
-                                         // This is a "quick and dirty" parser to avoid huge crates.
-                                         // In production, use `simple_dns` or similar.
-                                         // We skip Header (12 bytes)
-                                         if dns_payload.len() > 12 {
-                                             // We just search for the IP in the packet? No, too risky.
-                                             // We need to match the Question.
-                                             // This requires a real parser.
-                                             // If we assume the user surfs "google.de", they sent a query.
-                                             // We don't have the query state here.
-                                             // BUT, we have the `whitelist` domains.
-                                             // If the response contains a Name that matches whitelist, we whiteist the IP.
-                                             // Parsing DNS name labels is annoying.
-                                             // Strategy: If `whitelist` is set, we assume any DNS response that resolves to an IP 
-                                             // corresponding to a whitelisted domain should be added.
-                                             // Since we can't easily parse without a crate, and I didn't add one (except etherparse),
-                                             // I will leave this as a TODO/Placeholder or do a very crude check.
-                                             
-                                             // Actually, I'll attempt to sniff for known patterns if I had more time.
-                                             // For now, I'll log that I saw a DNS response.
-                                             // FIXME: Add real DNS parsing here.
-                                         }
-                                     }
-                                 }
-                             }
-                         }
-                    }
+
 
                     let mut guard = match tun_writer.writable().await {
                          Ok(g) => g,

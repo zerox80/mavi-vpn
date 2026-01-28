@@ -3,13 +3,34 @@ FROM rust:1.84-slim AS builder
 WORKDIR /app
 
 # Copy workspace files
-COPY Cargo.toml ./Cargo.toml
-# Remove Android member from workspace for server build (as source isn't copied)
+# 1. Prepare Metadata for Caching
+COPY Cargo.toml Cargo.lock ./
+# Remove Android member from workspace for server build
 RUN sed -i '/android\/app\/src\/main\/rust/d' Cargo.toml
+
+COPY shared/Cargo.toml ./shared/Cargo.toml
+COPY backend/Cargo.toml ./backend/Cargo.toml
+
+# 2. Create Dummy Source to Cache Dependencies
+RUN mkdir -p shared/src backend/src
+RUN echo "fn main() {}" > backend/src/main.rs
+RUN touch shared/src/lib.rs
+
+# 3. Build Dependencies (Targeting the workspace)
+WORKDIR /app/backend
+RUN cargo build --release
+
+# 4. Remove Dummy Artifacts
+RUN rm -f /app/target/release/deps/mavi_vpn* /app/target/release/deps/mavi-vpn*
+RUN rm -f /app/target/release/deps/shared*
+
+WORKDIR /app
+
+# 5. Copy Real Source
 COPY shared ./shared
 COPY backend ./backend
 
-# Build from backend directory
+# 6. Build Actual Application
 WORKDIR /app/backend
 RUN cargo build --release
 

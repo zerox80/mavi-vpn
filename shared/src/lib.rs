@@ -16,7 +16,9 @@ pub enum ControlMessage {
         assigned_ipv6: Option<Ipv6Addr>,
         netmask_v6: Option<u8>, // CIDR prefix length is standard for v6
         gateway_v6: Option<Ipv6Addr>,
+        gateway_v6: Option<Ipv6Addr>,
         dns_server_v6: Option<Ipv6Addr>,
+        whitelist_domains: Option<Vec<String>>,
     },
     /// Server rejects the connection.
     Error { message: String },

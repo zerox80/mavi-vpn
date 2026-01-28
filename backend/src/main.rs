@@ -380,6 +380,7 @@ async fn handle_connection(
         netmask_v6: Some(64),
         gateway_v6: Some(state.gateway_ip_v6()),
         dns_server_v6: Some("2001:4860:4860::8888".parse().unwrap()),
+        whitelist_domains: Some(config.whitelist_domains.clone()),
     };
     let bytes = bincode::serialize(&success_msg)?;
     send_stream.write_u32_le(bytes.len() as u32).await?;

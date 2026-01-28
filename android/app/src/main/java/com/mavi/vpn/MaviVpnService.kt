@@ -54,12 +54,27 @@ class MaviVpnService : VpnService() {
             val port: String
             val token: String
             val pin: String
+            val splitMode: String
+            val splitPackages: String
 
             if (intent != null) {
                 ip = intent.getStringExtra("IP") ?: ""
                 port = intent.getStringExtra("PORT") ?: "4433"
                 token = intent.getStringExtra("TOKEN") ?: ""
                 pin = intent.getStringExtra("PIN") ?: ""
+                splitMode = intent.getStringExtra("SPLIT_MODE") ?: ""
+                splitPackages = intent.getStringExtra("SPLIT_PACKAGES") ?: ""
+                
+                // Save to prefs for restart
+                val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+                prefs.edit()
+                    .putString("saved_ip", ip)
+                    .putString("saved_port", port)
+                    .putString("saved_token", token)
+                    .putString("saved_pin", pin)
+                    .putString("saved_split_mode", splitMode)
+                    .putString("saved_split_packages", splitPackages)
+                    .apply()
             } else {
                 Log.i("MaviVPN", "Service restarted by System. Reloading credentials...")
                 val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
@@ -67,10 +82,12 @@ class MaviVpnService : VpnService() {
                 port = prefs.getString("saved_port", "4433") ?: "4433"
                 token = prefs.getString("saved_token", "") ?: ""
                 pin = prefs.getString("saved_pin", "") ?: ""
+                splitMode = prefs.getString("saved_split_mode", "") ?: ""
+                splitPackages = prefs.getString("saved_split_packages", "") ?: ""
             }
 
             if (ip.isNotEmpty() && token.isNotEmpty()) {
-                startVpn(ip, port, token, pin)
+                startVpn(ip, port, token, pin, splitMode, splitPackages)
                 return START_STICKY
             } else {
                 Log.e("MaviVPN", "Cannot restart: Credentials missing.")
@@ -80,7 +97,7 @@ class MaviVpnService : VpnService() {
         return START_NOT_STICKY
     }
 
-    private fun startVpn(ip: String, port: String, token: String, certPin: String) {
+    private fun startVpn(ip: String, port: String, token: String, certPin: String, splitMode: String, splitPackages: String) {
         if (thread != null) return
 
         // Register Network Callback
@@ -182,6 +199,24 @@ class MaviVpnService : VpnService() {
                                      }
                                  } catch (e: Exception) {
                                      Log.w("MaviVPN", "Failed to add IPv6: ${e.message}")
+                                 }
+                             }
+
+                             // Split Tunneling (App based)
+                             if (splitMode == "include" || splitMode == "exclude") {
+                                 val packages = splitPackages.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                                 Log.d("MaviVPN", "Applying Split Tunneling: Mode=$splitMode, Packages=$packages")
+                                 
+                                 for (pkg in packages) {
+                                     try {
+                                          if (splitMode == "include") {
+                                              builder.addAllowedApplication(pkg)
+                                          } else {
+                                              builder.addDisallowedApplication(pkg)
+                                          }
+                                     } catch (e: Exception) {
+                                          Log.w("MaviVPN", "Failed to add split tunneling for package '$pkg': ${e.message}")
+                                     }
                                  }
                              }
 

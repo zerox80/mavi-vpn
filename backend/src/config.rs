@@ -41,6 +41,10 @@ pub struct Config {
     /// If enabled, the server emulates a standard HTTP/3 web server.
     #[arg(long, env = "VPN_CENSORSHIP_RESISTANT", default_value = "false")]
     pub censorship_resistant: bool,
+
+    /// Comma-separated list of domains to whitelist (bypass VPN)
+    #[arg(long, env = "VPN_WHITELIST_DOMAINS", value_delimiter = ',', num_args = 0..)]
+    pub whitelist_domains: Vec<String>,
 }
 
 pub fn load() -> Config {

@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Copy workspace files
 # 1. Prepare Metadata for Caching
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 # Remove Android member from workspace for server build
 RUN sed -i '/android\/app\/src\/main\/rust/d' Cargo.toml
 

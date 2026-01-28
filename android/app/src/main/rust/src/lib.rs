@@ -73,7 +73,8 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
     info!("Initializing VPN Session. Endpoint: {}", endpoint);
 
         // 1. Create Socket and Protect it
-        let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+        // We bind to [::]:0 to allow both IPv4 and IPv6 (Dual Stack)
+        let socket = match std::net::UdpSocket::bind("[::]:0") {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to bind UDP socket: {}", e);
@@ -83,6 +84,12 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
         
         // Initialize socket buffers
         let socket2_sock = socket2::Socket::from(socket);
+        
+        // Ensure Dual Stack is enabled (IPV6_V6ONLY = 0)
+        if let Err(e) = socket2_sock.set_only_v6(false) {
+             warn!("Failed to set IPV6_V6ONLY=false: {}", e);
+             // We continue, as some OS/kernels might have it disabled by default or fail if bound to IPv4 mapped
+        }
         let buffer_candidates = [1024 * 1024, 512 * 1024];
         
         for size in buffer_candidates {

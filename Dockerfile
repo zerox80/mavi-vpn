@@ -30,6 +30,9 @@ WORKDIR /app
 COPY shared ./shared
 COPY backend ./backend
 
+# Fix timestamp issue: Ensure source files are newer than dummy build artifacts
+RUN touch shared/src/lib.rs backend/src/main.rs
+
 # 6. Build Actual Application
 WORKDIR /app/backend
 RUN cargo build --release

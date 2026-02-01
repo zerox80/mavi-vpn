@@ -352,7 +352,15 @@ async fn connect_and_handshake(
         .context("Failed to resolve endpoint")?;
 
     info!("Resolved to {}", addr);
-    let connection = endpoint.connect(addr, "localhost")?.await?;
+    
+    let connection = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        endpoint.connect(addr, "localhost")?
+    )
+    .await
+    .context("Connection timeout (10s) - check firewall/network")?
+    .context("QUIC connection failed")?;
+    
     info!("QUIC connection established");
 
     let (mut send_stream, mut recv_stream) = connection.open_bi().await?;

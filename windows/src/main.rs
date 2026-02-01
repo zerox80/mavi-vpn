@@ -154,10 +154,15 @@ fn extract_wintun_dll() -> Result<PathBuf> {
     let temp_dir = std::env::temp_dir();
     let dll_path = temp_dir.join("mavi_wintun.dll");
     
-    if !dll_path.exists() {
+    info!("Embedded wintun.dll size: {} bytes", WINTUN_DLL.len());
+    
+    if dll_path.exists() {
+        info!("Using cached wintun.dll at {}", dll_path.display());
+    } else {
+        info!("Extracting wintun.dll to {}...", dll_path.display());
         std::fs::write(&dll_path, WINTUN_DLL)
             .context("Failed to extract wintun.dll to temp directory")?;
-        info!("Extracted wintun.dll to {}", dll_path.display());
+        info!("wintun.dll extracted successfully");
     }
     
     Ok(dll_path)

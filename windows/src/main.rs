@@ -14,6 +14,8 @@ use wintun::Adapter;
 
 const CONFIG_FILE: &str = "config.json";
 
+static WINTUN_DLL: &[u8] = include_bytes!("../wintun.dll");
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Config {
     endpoint: String,
@@ -148,12 +150,42 @@ fn read_line() -> Result<String> {
     Ok(input.trim().to_string())
 }
 
+fn extract_wintun_dll() -> Result<PathBuf> {
+    let temp_dir = std::env::temp_dir();
+    let dll_path = temp_dir.join("mavi_wintun.dll");
+    
+    if !dll_path.exists() {
+        std::fs::write(&dll_path, WINTUN_DLL)
+            .context("Failed to extract wintun.dll to temp directory")?;
+        info!("Extracted wintun.dll to {}", dll_path.display());
+    }
+    
+    Ok(dll_path)
+}
+
 async fn run_vpn(config: Config) -> Result<()> {
     let cert_pin_bytes = decode_hex(&config.cert_pin).context("Invalid certificate PIN hex")?;
 
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
-    configure_socket(&socket)?;
-    socket.set_nonblocking(true)?;
+    // Create socket using socket2 for better Windows compatibility
+    let socket2_sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    
+    socket2_sock.bind(&socket2::SockAddr::from(
+        std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0)
+    ))?;
+    
+    // Set buffer sizes
+    let _ = socket2_sock.set_recv_buffer_size(1024 * 1024);
+    let _ = socket2_sock.set_send_buffer_size(1024 * 1024);
+    
+    // Set non-blocking
+    socket2_sock.set_nonblocking(true)?;
+    
+    let socket: std::net::UdpSocket = socket2_sock.into();
+    info!("Socket bound to {}", socket.local_addr()?);
 
     let (connection, server_config) = connect_and_handshake(
         socket,
@@ -180,8 +212,9 @@ async fn run_vpn(config: Config) -> Result<()> {
     info!("Connected! Assigned IP: {}", assigned_ip);
     info!("DNS: {}, MTU: {}", dns, mtu);
 
-    let wintun = unsafe { wintun::load_from_path("wintun.dll") }
-        .context("Failed to load wintun.dll. Make sure it's in the current directory.")?;
+    let dll_path = extract_wintun_dll()?;
+    let wintun = unsafe { wintun::load_from_path(&dll_path) }
+        .context("Failed to load wintun.dll")?;
 
     let adapter = Adapter::create(&wintun, "MaviVPN", "Mavi VPN Tunnel", None)
         .context("Failed to create WinTUN adapter. Run as Administrator.")?;
@@ -357,13 +390,20 @@ async fn connect_and_handshake(
     let connecting = endpoint.connect(addr, "localhost")?;
     info!("Connect initiated, waiting for handshake...");
     
-    let connection = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        connecting
-    )
-    .await
-    .context("Connection timeout (10s) - check firewall/network")?
-    .context("QUIC connection failed")?;
+    let connection = tokio::select! {
+        result = connecting => {
+            match result {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("QUIC handshake failed: {:?}", e);
+                    return Err(anyhow::anyhow!("QUIC handshake failed: {}", e));
+                }
+            }
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+            return Err(anyhow::anyhow!("Connection timeout (10s) - no response from server"));
+        }
+    };
     
     info!("QUIC connection established");
 

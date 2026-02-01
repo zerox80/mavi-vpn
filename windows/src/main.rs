@@ -191,6 +191,7 @@ async fn run_vpn(config: Config) -> Result<()> {
     // Set non-blocking
     socket2_sock.set_nonblocking(true)?;
     
+    let socket: std::net::UdpSocket = socket2_sock.into();
     info!("Socket bound to {}", socket.local_addr()?);
 
 
@@ -203,13 +204,15 @@ async fn run_vpn(config: Config) -> Result<()> {
     )
     .await?;
 
-    let (assigned_ip, dns, mtu) = match server_config {
+    let (assigned_ip, netmask, gateway, dns, mtu) = match server_config {
         ControlMessage::Config {
             assigned_ip,
+            netmask,
+            gateway,
             dns_server,
             mtu,
             ..
-        } => (assigned_ip, dns_server, mtu),
+        } => (assigned_ip, netmask, gateway, dns_server, mtu),
         ControlMessage::Error { message } => {
             return Err(anyhow::anyhow!("Server error: {}", message));
         }
@@ -217,6 +220,7 @@ async fn run_vpn(config: Config) -> Result<()> {
     };
 
     info!("Connected! Assigned IP: {}", assigned_ip);
+    info!("Netmask: {}, Gateway: {}", netmask, gateway);
     info!("DNS: {}, MTU: {}", dns, mtu);
 
     let dll_path = extract_wintun_dll()?;
@@ -226,7 +230,7 @@ async fn run_vpn(config: Config) -> Result<()> {
     let adapter = Adapter::create(&wintun, "MaviVPN", "Mavi VPN Tunnel", None)
         .context("Failed to create WinTUN adapter. Run as Administrator.")?;
 
-    set_adapter_ip(&adapter, assigned_ip, dns, mtu)?;
+    set_adapter_ip(&adapter, assigned_ip, netmask, gateway, dns, mtu, &config.endpoint)?;
 
     let session = Arc::new(
         adapter
@@ -429,8 +433,17 @@ async fn connect_and_handshake(
     Ok((connection, config))
 }
 
-fn set_adapter_ip(adapter: &Adapter, ip: Ipv4Addr, dns: Ipv4Addr, mtu: u16) -> Result<()> {
+fn set_adapter_ip(
+    adapter: &Adapter,
+    ip: Ipv4Addr,
+    netmask: Ipv4Addr,
+    gateway: Ipv4Addr,
+    dns: Ipv4Addr,
+    mtu: u16,
+    endpoint: &str,
+) -> Result<()> {
     let luid = adapter.get_luid();
+    let prefix_len = netmask_to_prefix_len(netmask)?;
 
     unsafe {
         use windows_sys::Win32::NetworkManagement::IpHelper::*;
@@ -442,7 +455,7 @@ fn set_adapter_ip(adapter: &Adapter, ip: Ipv4Addr, dns: Ipv4Addr, mtu: u16) -> R
         row.InterfaceLuid = std::mem::transmute(luid);
         row.Address.si_family = AF_INET as u16;
         row.Address.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(ip.octets());
-        row.OnLinkPrefixLength = 24;
+        row.OnLinkPrefixLength = prefix_len;
         row.DadState = IpDadStatePreferred;
 
         let result = CreateUnicastIpAddressEntry(&row);
@@ -454,7 +467,11 @@ fn set_adapter_ip(adapter: &Adapter, ip: Ipv4Addr, dns: Ipv4Addr, mtu: u16) -> R
         }
     }
 
-    info!("Set adapter IP to {}/24", ip);
+    info!("Set adapter IP to {}/{}", ip, prefix_len);
+
+    let adapter_index = adapter
+        .get_adapter_index()
+        .context("Failed to get adapter index")?;
 
     let _ = std::process::Command::new("netsh")
         .args([
@@ -481,19 +498,75 @@ fn set_adapter_ip(adapter: &Adapter, ip: Ipv4Addr, dns: Ipv4Addr, mtu: u16) -> R
         ])
         .output();
 
+    // Route first half of IPv4 space
     let _ = std::process::Command::new("route")
         .args([
             "add",
             "0.0.0.0",
             "mask",
-            "0.0.0.0",
-            &ip.to_string(),
+            "128.0.0.0",
+            &gateway.to_string(),
             "metric",
-            "5",
+            "1",
+            "if",
+            &adapter_index.to_string(),
         ])
         .output();
 
+    // Route second half of IPv4 space
+    let _ = std::process::Command::new("route")
+        .args([
+            "add",
+            "128.0.0.0",
+            "mask",
+            "128.0.0.0",
+            &gateway.to_string(),
+            "metric",
+            "1",
+            "if",
+            &adapter_index.to_string(),
+        ])
+        .output();
+    
+    // CRITICAL: prevents routing loop
+    // Add specific route for the VPN server IP via the PHYSICAL gateway
+    if let Err(e) = add_host_route_exception(endpoint) {
+        warn!("Failed to add host route exception: {}. Connection might be unstable.", e);
+    }
+
     Ok(())
+}
+
+fn add_host_route_exception(endpoint: &str) -> Result<()> {
+    let server_ip = endpoint.split(':').next().context("Invalid endpoint format")?;
+    
+    // Get default gateway IP via PowerShell
+    let output = std::process::Command::new("powershell")
+        .args(["-Command", "(Get-NetRoute -DestinationPrefix 0.0.0.0/0).NextHop"])
+        .output()?;
+        
+    let gateway = String::from_utf8(output.stdout)?.trim().to_string();
+    
+    if !gateway.is_empty() {
+        info!("Adding host route exception for {} via physical gateway {}", server_ip, gateway);
+        let _ = std::process::Command::new("route")
+            .args(["add", server_ip, "mask", "255.255.255.255", &gateway, "metric", "1"])
+            .output();
+    } else {
+        warn!("Could not detect physical gateway. Skipping host route exception.");
+    }
+    
+    Ok(())
+}
+
+fn netmask_to_prefix_len(netmask: Ipv4Addr) -> Result<u8> {
+    let mask = u32::from_be_bytes(netmask.octets());
+    let prefix = mask.count_ones() as u8;
+    let expected = if prefix == 0 { 0 } else { (!0u32) << (32 - prefix) };
+    if mask != expected {
+        return Err(anyhow::anyhow!("Invalid netmask {}", netmask));
+    }
+    Ok(prefix)
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {

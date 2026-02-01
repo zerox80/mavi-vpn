@@ -151,7 +151,7 @@ fn read_line() -> Result<String> {
 async fn run_vpn(config: Config) -> Result<()> {
     let cert_pin_bytes = decode_hex(&config.cert_pin).context("Invalid certificate PIN hex")?;
 
-    let socket = std::net::UdpSocket::bind("[::]:0")?;
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
     configure_socket(&socket)?;
     socket.set_nonblocking(true)?;
 

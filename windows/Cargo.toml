@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 shared = { workspace = true }
 tokio = { workspace = true }
-quinn = { workspace = true, default-features = false, features = ["rustls"] }
+quinn = { workspace = true }
 rustls = { workspace = true }
 bytes = { workspace = true }
 bincode = { workspace = true }

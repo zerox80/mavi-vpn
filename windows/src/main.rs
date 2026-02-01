@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use shared::ControlMessage;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
+use std::os::windows::io::AsRawSocket;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -183,11 +184,7 @@ async fn run_vpn(config: Config) -> Result<()> {
     socket2_sock.bind(&socket2::SockAddr::from(
         std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0)
     ))?;
-    
-    // Set buffer sizes
-    let _ = socket2_sock.set_recv_buffer_size(1024 * 1024);
-    let _ = socket2_sock.set_send_buffer_size(1024 * 1024);
-    
+
     // Set non-blocking
     socket2_sock.set_nonblocking(true)?;
     
@@ -343,6 +340,42 @@ fn configure_socket(socket: &std::net::UdpSocket) -> Result<()> {
     let _ = socket2_sock.set_recv_buffer_size(1024 * 1024);
     let _ = socket2_sock.set_send_buffer_size(1024 * 1024);
 
+    // Allow IP fragmentation by disabling "Don't Fragment" (MTU discovery)
+    let value: u32 = 0;
+    unsafe {
+        let rc = windows_sys::Win32::Networking::WinSock::setsockopt(
+            socket.as_raw_socket() as usize,
+            windows_sys::Win32::Networking::WinSock::IPPROTO_IP,
+            windows_sys::Win32::Networking::WinSock::IP_DONTFRAGMENT,
+            &value as *const _ as _,
+            std::mem::size_of_val(&value) as i32,
+        );
+        if rc != 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to disable IP_DONTFRAGMENT (IPv4): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+
+    if matches!(socket.local_addr(), Ok(addr) if addr.is_ipv6()) {
+        unsafe {
+            let rc = windows_sys::Win32::Networking::WinSock::setsockopt(
+                socket.as_raw_socket() as usize,
+                windows_sys::Win32::Networking::WinSock::IPPROTO_IPV6,
+                windows_sys::Win32::Networking::WinSock::IPV6_DONTFRAG,
+                &value as *const _ as _,
+                std::mem::size_of_val(&value) as i32,
+            );
+            if rc != 0 {
+                return Err(anyhow::anyhow!(
+                    "Failed to disable IPV6_DONTFRAG (IPv6): {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -354,6 +387,13 @@ async fn connect_and_handshake(
     censorship_resistant: bool,
 ) -> Result<(quinn::Connection, ControlMessage)> {
     info!("Connecting to {}...", endpoint_str);
+
+    let socket_cfg = socket
+        .try_clone()
+        .context("Failed to clone UDP socket for configuration")?;
+
+    // Apply socket options before Quinn takes ownership.
+    configure_socket(&socket)?;
 
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
@@ -390,15 +430,24 @@ async fn connect_and_handshake(
     )?;
     endpoint.set_default_client_config(client_config);
 
+    // Quinn's Windows UDP backend enables DF by default; disable it again to allow fragmentation.
+    configure_socket(&socket_cfg)
+        .context("Failed to disable DF after QUIC endpoint init")?;
+
     let addr = tokio::net::lookup_host(&endpoint_str)
         .await?
-        .next()
-        .context("Failed to resolve endpoint")?;
+        .find(|addr| addr.is_ipv4())
+        .context("Failed to resolve endpoint (no IPv4 address found)")?;
 
     info!("Resolved to {}", addr);
     info!("Starting QUIC handshake...");
     
-    let connecting = endpoint.connect(addr, "localhost")?;
+    let server_name = endpoint_str
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .filter(|host| !host.is_empty())
+        .unwrap_or(endpoint_str.as_str());
+    let connecting = endpoint.connect(addr, server_name)?;
     info!("Connect initiated, waiting for handshake...");
     
     let connection = tokio::select! {
@@ -442,6 +491,7 @@ fn set_adapter_ip(
     mtu: u16,
     endpoint: &str,
 ) -> Result<()> {
+    let adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let luid = adapter.get_luid();
     let prefix_len = netmask_to_prefix_len(netmask)?;
 
@@ -454,6 +504,7 @@ fn set_adapter_ip(
 
         row.InterfaceLuid = std::mem::transmute(luid);
         row.Address.si_family = AF_INET as u16;
+        // Windows expects S_addr in network byte order; on little-endian this requires native bytes.
         row.Address.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(ip.octets());
         row.OnLinkPrefixLength = prefix_len;
         row.DadState = IpDadStatePreferred;
@@ -473,33 +524,49 @@ fn set_adapter_ip(
         .get_adapter_index()
         .context("Failed to get adapter index")?;
 
-    let _ = std::process::Command::new("netsh")
-        .args([
-            "interface",
-            "ipv4",
-            "set",
-            "dnsservers",
-            "name=\"MaviVPN\"",
-            "static",
-            &dns.to_string(),
-            "primary",
-        ])
-        .output();
+    if let Err(e) = adapter.set_dns_servers(&[std::net::IpAddr::V4(dns)]) {
+        warn!("Failed to set DNS via adapter API: {}", e);
+        let out = std::process::Command::new("netsh")
+            .args([
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                &format!("name=\"{}\"", adapter_name),
+                "static",
+                &dns.to_string(),
+                "primary",
+            ])
+            .output();
+        if let Ok(out) = out {
+            if !out.status.success() {
+                warn!("netsh set dnsservers failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+    }
 
-    let _ = std::process::Command::new("netsh")
-        .args([
-            "interface",
-            "ipv4",
-            "set",
-            "subinterface",
-            "\"MaviVPN\"",
-            &format!("mtu={}", mtu),
-            "store=active",
-        ])
-        .output();
+    if let Err(e) = adapter.set_mtu(mtu as usize) {
+        warn!("Failed to set MTU via adapter API: {}", e);
+        let out = std::process::Command::new("netsh")
+            .args([
+                "interface",
+                "ipv4",
+                "set",
+                "subinterface",
+                &format!("\"{}\"", adapter_name),
+                &format!("mtu={}", mtu),
+                "store=active",
+            ])
+            .output();
+        if let Ok(out) = out {
+            if !out.status.success() {
+                warn!("netsh set mtu failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+    }
 
     // Route first half of IPv4 space
-    let _ = std::process::Command::new("route")
+    let out = std::process::Command::new("route")
         .args([
             "add",
             "0.0.0.0",
@@ -512,9 +579,14 @@ fn set_adapter_ip(
             &adapter_index.to_string(),
         ])
         .output();
+    if let Ok(out) = out {
+        if !out.status.success() {
+            warn!("route add 0.0.0.0/1 failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
 
     // Route second half of IPv4 space
-    let _ = std::process::Command::new("route")
+    let out = std::process::Command::new("route")
         .args([
             "add",
             "128.0.0.0",
@@ -527,6 +599,11 @@ fn set_adapter_ip(
             &adapter_index.to_string(),
         ])
         .output();
+    if let Ok(out) = out {
+        if !out.status.success() {
+            warn!("route add 128.0.0.0/1 failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
     
     // CRITICAL: prevents routing loop
     // Add specific route for the VPN server IP via the PHYSICAL gateway
@@ -542,10 +619,18 @@ fn add_host_route_exception(endpoint: &str) -> Result<()> {
     
     // Get default gateway IP via PowerShell
     let output = std::process::Command::new("powershell")
-        .args(["-Command", "(Get-NetRoute -DestinationPrefix 0.0.0.0/0).NextHop"])
+        .args([
+            "-Command",
+            "Get-NetRoute -DestinationPrefix 0.0.0.0/0 -AddressFamily IPv4 | Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1 -ExpandProperty NextHop",
+        ])
         .output()?;
-        
-    let gateway = String::from_utf8(output.stdout)?.trim().to_string();
+
+    let gateway = String::from_utf8(output.stdout)?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string();
     
     if !gateway.is_empty() {
         info!("Adding host route exception for {} via physical gateway {}", server_ip, gateway);

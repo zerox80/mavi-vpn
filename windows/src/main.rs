@@ -191,15 +191,8 @@ async fn run_vpn(config: Config) -> Result<()> {
     // Set non-blocking
     socket2_sock.set_nonblocking(true)?;
     
-    let socket: std::net::UdpSocket = socket2_sock.into();
     info!("Socket bound to {}", socket.local_addr()?);
-    
-    // Test UDP connectivity
-    let target: std::net::SocketAddr = config.endpoint.parse()
-        .context("Invalid endpoint format")?;
-    info!("Testing UDP connectivity to {}...", target);
-    socket.connect(target)?;
-    info!("UDP socket connected (pseudo-connected to {})", target);
+
 
     let (connection, server_config) = connect_and_handshake(
         socket,
@@ -233,7 +226,7 @@ async fn run_vpn(config: Config) -> Result<()> {
     let adapter = Adapter::create(&wintun, "MaviVPN", "Mavi VPN Tunnel", None)
         .context("Failed to create WinTUN adapter. Run as Administrator.")?;
 
-    set_adapter_ip(&adapter, assigned_ip, dns)?;
+    set_adapter_ip(&adapter, assigned_ip, dns, mtu)?;
 
     let session = Arc::new(
         adapter
@@ -436,7 +429,7 @@ async fn connect_and_handshake(
     Ok((connection, config))
 }
 
-fn set_adapter_ip(adapter: &Adapter, ip: Ipv4Addr, dns: Ipv4Addr) -> Result<()> {
+fn set_adapter_ip(adapter: &Adapter, ip: Ipv4Addr, dns: Ipv4Addr, mtu: u16) -> Result<()> {
     let luid = adapter.get_luid();
 
     unsafe {
@@ -463,17 +456,28 @@ fn set_adapter_ip(adapter: &Adapter, ip: Ipv4Addr, dns: Ipv4Addr) -> Result<()> 
 
     info!("Set adapter IP to {}/24", ip);
 
-    let index = adapter.get_adapter_index()?;
     let _ = std::process::Command::new("netsh")
         .args([
             "interface",
             "ipv4",
             "set",
             "dnsservers",
-            &format!("name={}", index),
+            "name=\"MaviVPN\"",
             "static",
             &dns.to_string(),
             "primary",
+        ])
+        .output();
+
+    let _ = std::process::Command::new("netsh")
+        .args([
+            "interface",
+            "ipv4",
+            "set",
+            "subinterface",
+            "\"MaviVPN\"",
+            &format!("mtu={}", mtu),
+            "store=active",
         ])
         .output();
 

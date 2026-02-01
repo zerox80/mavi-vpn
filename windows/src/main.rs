@@ -506,6 +506,7 @@ async fn connect_and_handshake(
     transport_config.initial_mtu(1500);
     transport_config.min_mtu(1500);
     transport_config.enable_segmentation_offload(true);
+    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,

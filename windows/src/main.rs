@@ -201,9 +201,12 @@ async fn run_vpn(config: Config) -> Result<()> {
     let session_rx = session.clone();
     let conn_tx = connection.clone();
     let tun_to_quic = std::thread::spawn(move || {
-        while RUNNING.load(Ordering::Relaxed) {
-            match session_rx.receive_blocking() {
-                Ok(packet) => {
+        loop {
+            if !RUNNING.load(Ordering::Relaxed) {
+                break;
+            }
+            match session_rx.try_receive() {
+                Ok(Some(packet)) => {
                     let data = Bytes::copy_from_slice(packet.bytes());
                     if let Err(e) = conn_tx.send_datagram(data) {
                         match e {
@@ -223,6 +226,9 @@ async fn run_vpn(config: Config) -> Result<()> {
                         }
                     }
                 }
+                Ok(None) => {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
                 Err(e) => {
                     if RUNNING.load(Ordering::Relaxed) {
                         error!("TUN read error: {:?}", e);
@@ -235,41 +241,53 @@ async fn run_vpn(config: Config) -> Result<()> {
 
     let session_tx = session.clone();
     let quic_to_tun = tokio::spawn(async move {
-        while RUNNING.load(Ordering::Relaxed) {
-            match connection.read_datagram().await {
-                Ok(data) => {
-                    if data.is_empty() {
-                        continue;
-                    }
-                    match session_tx.allocate_send_packet(data.len() as u16) {
-                        Ok(mut packet) => {
-                            packet.bytes_mut().copy_from_slice(&data);
-                            session_tx.send_packet(packet);
+        loop {
+            if !RUNNING.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::select! {
+                result = connection.read_datagram() => {
+                    match result {
+                        Ok(data) => {
+                            if data.is_empty() {
+                                continue;
+                            }
+                            match session_tx.allocate_send_packet(data.len() as u16) {
+                                Ok(mut packet) => {
+                                    packet.bytes_mut().copy_from_slice(&data);
+                                    session_tx.send_packet(packet);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to allocate packet: {:?}", e);
+                                }
+                            }
                         }
                         Err(e) => {
-                            warn!("Failed to allocate packet: {:?}", e);
+                            if RUNNING.load(Ordering::Relaxed) {
+                                error!("QUIC read error: {:?}", e);
+                                RUNNING.store(false, Ordering::SeqCst);
+                            }
+                            break;
                         }
                     }
                 }
-                Err(e) => {
-                    if RUNNING.load(Ordering::Relaxed) {
-                        error!("QUIC read error: {:?}", e);
-                        RUNNING.store(false, Ordering::SeqCst);
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    if !RUNNING.load(Ordering::Relaxed) {
+                        break;
                     }
-                    break;
                 }
             }
         }
     });
 
     while RUNNING.load(Ordering::Relaxed) {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
     info!("Shutting down...");
+    quic_to_tun.abort();
     drop(session);
     let _ = tun_to_quic.join();
-    quic_to_tun.abort();
 
     info!("Disconnected.");
     Ok(())

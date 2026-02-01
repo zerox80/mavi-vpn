@@ -352,10 +352,14 @@ async fn connect_and_handshake(
         .context("Failed to resolve endpoint")?;
 
     info!("Resolved to {}", addr);
+    info!("Starting QUIC handshake...");
+    
+    let connecting = endpoint.connect(addr, "localhost")?;
+    info!("Connect initiated, waiting for handshake...");
     
     let connection = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        endpoint.connect(addr, "localhost")?
+        connecting
     )
     .await
     .context("Connection timeout (10s) - check firewall/network")?

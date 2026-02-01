@@ -4,11 +4,12 @@ use ring::digest;
 use serde::{Deserialize, Serialize};
 use shared::ControlMessage;
 use std::io::{self, Write};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::io::AsRawSocket;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
 use wintun::Adapter;
@@ -16,6 +17,10 @@ use wintun::Adapter;
 const CONFIG_FILE: &str = "config.json";
 
 static WINTUN_DLL: &[u8] = include_bytes!("../wintun.dll");
+const KEEPALIVE_SECS: u64 = 10;
+const IDLE_TIMEOUT_SECS: u64 = 60;
+const RECONNECT_INITIAL_SECS: u64 = 1;
+const RECONNECT_MAX_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Config {
@@ -28,14 +33,12 @@ struct Config {
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("mavi_vpn=debug".parse().unwrap())
-                .add_directive("quinn=debug".parse().unwrap())
-                .add_directive("quinn_proto=debug".parse().unwrap()),
-        )
-        .init();
+    let env_filter = if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::EnvFilter::from_default_env()
+    } else {
+        tracing_subscriber::EnvFilter::new("mavi_vpn=info,quinn=warn,quinn_proto=warn")
+    };
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     println!();
     println!("╔══════════════════════════════════════╗");
@@ -174,60 +177,139 @@ fn extract_wintun_dll() -> Result<PathBuf> {
 async fn run_vpn(config: Config) -> Result<()> {
     let cert_pin_bytes = decode_hex(&config.cert_pin).context("Invalid certificate PIN hex")?;
 
-    // Create socket using socket2 for better Windows compatibility
+    let dll_path = extract_wintun_dll()?;
+    let wintun = unsafe { wintun::load_from_path(&dll_path) }
+        .context("Failed to load wintun.dll")?;
+    let adapter = get_or_create_adapter(&wintun)?;
+
+    let mut backoff = Duration::from_secs(RECONNECT_INITIAL_SECS);
+
+    while RUNNING.load(Ordering::Relaxed) {
+        let outcome = run_session(&config, &cert_pin_bytes, &adapter).await;
+        if !RUNNING.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let (reconnect_delay, next_backoff) = match outcome {
+            Ok(SessionEnd::UserStopped) => break,
+            Ok(SessionEnd::ConnectionLost) => (
+                Duration::from_secs(RECONNECT_INITIAL_SECS),
+                Duration::from_secs(RECONNECT_INITIAL_SECS),
+            ),
+            Err(e) => {
+                warn!("Session failed: {}", e);
+                (backoff, (backoff * 2).min(Duration::from_secs(RECONNECT_MAX_SECS)))
+            }
+        };
+
+        info!("Reconnecting in {}s...", reconnect_delay.as_secs());
+        tokio::time::sleep(reconnect_delay).await;
+        backoff = next_backoff;
+    }
+
+    info!("Disconnected.");
+    Ok(())
+}
+
+enum SessionEnd {
+    UserStopped,
+    ConnectionLost,
+}
+
+fn get_or_create_adapter(wintun: &wintun::Wintun) -> Result<Arc<Adapter>> {
+    if let Ok(adapter) = Adapter::open(wintun, "MaviVPN") {
+        return Ok(adapter);
+    }
+
+    Adapter::create(wintun, "MaviVPN", "Mavi VPN Tunnel", None)
+        .context("Failed to create WinTUN adapter. Run as Administrator.")
+}
+
+fn create_udp_socket() -> Result<std::net::UdpSocket> {
     let socket2_sock = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
     )?;
-    
+
     socket2_sock.bind(&socket2::SockAddr::from(
-        std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0)
+        std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
     ))?;
 
-    // Set non-blocking
     socket2_sock.set_nonblocking(true)?;
-    
+
     let socket: std::net::UdpSocket = socket2_sock.into();
     info!("Socket bound to {}", socket.local_addr()?);
+    Ok(socket)
+}
 
+async fn run_session(
+    config: &Config,
+    cert_pin_bytes: &[u8],
+    adapter: &Arc<Adapter>,
+) -> Result<SessionEnd> {
+    let socket = create_udp_socket()?;
 
     let (connection, server_config) = connect_and_handshake(
         socket,
-        config.token,
+        config.token.clone(),
         config.endpoint.clone(),
-        cert_pin_bytes,
+        cert_pin_bytes.to_vec(),
         config.censorship_resistant,
     )
     .await?;
 
-    let (assigned_ip, netmask, gateway, dns, mtu) = match server_config {
-        ControlMessage::Config {
-            assigned_ip,
-            netmask,
-            gateway,
-            dns_server,
-            mtu,
-            ..
-        } => (assigned_ip, netmask, gateway, dns_server, mtu),
-        ControlMessage::Error { message } => {
-            return Err(anyhow::anyhow!("Server error: {}", message));
-        }
-        _ => return Err(anyhow::anyhow!("Unexpected response")),
-    };
+    let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
+        match server_config {
+            ControlMessage::Config {
+                assigned_ip,
+                netmask,
+                gateway,
+                dns_server,
+                mtu,
+                assigned_ipv6,
+                netmask_v6,
+                gateway_v6,
+                dns_server_v6,
+                ..
+            } => (
+                assigned_ip,
+                netmask,
+                gateway,
+                dns_server,
+                mtu,
+                assigned_ipv6,
+                netmask_v6,
+                gateway_v6,
+                dns_server_v6,
+            ),
+            ControlMessage::Error { message } => {
+                return Err(anyhow::anyhow!("Server error: {}", message));
+            }
+            _ => return Err(anyhow::anyhow!("Unexpected response")),
+        };
 
     info!("Connected! Assigned IP: {}", assigned_ip);
     info!("Netmask: {}, Gateway: {}", netmask, gateway);
     info!("DNS: {}, MTU: {}", dns, mtu);
+    if let Some(ipv6) = assigned_ipv6 {
+        let prefix = netmask_v6.unwrap_or(64);
+        info!("IPv6: {}/{}", ipv6, prefix);
+    }
 
-    let dll_path = extract_wintun_dll()?;
-    let wintun = unsafe { wintun::load_from_path(&dll_path) }
-        .context("Failed to load wintun.dll")?;
-
-    let adapter = Adapter::create(&wintun, "MaviVPN", "Mavi VPN Tunnel", None)
-        .context("Failed to create WinTUN adapter. Run as Administrator.")?;
-
-    set_adapter_ip(&adapter, assigned_ip, netmask, gateway, dns, mtu, &config.endpoint)?;
+    set_adapter_ip(
+        adapter,
+        assigned_ip,
+        netmask,
+        gateway,
+        dns,
+        mtu,
+        &config.endpoint,
+        assigned_ipv6,
+        netmask_v6,
+        gateway_v6,
+        dns_v6,
+    )?;
 
     let session = Arc::new(
         adapter
@@ -238,12 +320,14 @@ async fn run_vpn(config: Config) -> Result<()> {
     info!("VPN tunnel established. Press Ctrl+C to disconnect.");
 
     let connection = Arc::new(connection);
+    let session_alive = Arc::new(AtomicBool::new(true));
 
     let session_rx = session.clone();
     let conn_tx = connection.clone();
+    let alive_tx = session_alive.clone();
     let tun_to_quic = std::thread::spawn(move || {
         loop {
-            if !RUNNING.load(Ordering::Relaxed) {
+            if !RUNNING.load(Ordering::Relaxed) || !alive_tx.load(Ordering::Relaxed) {
                 break;
             }
             match session_rx.try_receive() {
@@ -253,7 +337,7 @@ async fn run_vpn(config: Config) -> Result<()> {
                         match e {
                             quinn::SendDatagramError::ConnectionLost(_) => {
                                 error!("Connection lost");
-                                RUNNING.store(false, Ordering::SeqCst);
+                                alive_tx.store(false, Ordering::SeqCst);
                                 break;
                             }
                             quinn::SendDatagramError::TooLarge => {
@@ -261,19 +345,20 @@ async fn run_vpn(config: Config) -> Result<()> {
                             }
                             _ => {
                                 error!("Send error: {:?}", e);
-                                RUNNING.store(false, Ordering::SeqCst);
+                                alive_tx.store(false, Ordering::SeqCst);
                                 break;
                             }
                         }
                     }
                 }
                 Ok(None) => {
-                    std::thread::sleep(std::time::Duration::from_micros(100));
+                    std::thread::sleep(Duration::from_micros(100));
                 }
                 Err(e) => {
                     if RUNNING.load(Ordering::Relaxed) {
                         error!("TUN read error: {:?}", e);
                     }
+                    alive_tx.store(false, Ordering::SeqCst);
                     break;
                 }
             }
@@ -281,9 +366,10 @@ async fn run_vpn(config: Config) -> Result<()> {
     });
 
     let session_tx = session.clone();
+    let alive_rx = session_alive.clone();
     let quic_to_tun = tokio::spawn(async move {
         loop {
-            if !RUNNING.load(Ordering::Relaxed) {
+            if !RUNNING.load(Ordering::Relaxed) || !alive_rx.load(Ordering::Relaxed) {
                 break;
             }
             tokio::select! {
@@ -300,19 +386,21 @@ async fn run_vpn(config: Config) -> Result<()> {
                                 }
                                 Err(e) => {
                                     warn!("Failed to allocate packet: {:?}", e);
+                                    alive_rx.store(false, Ordering::SeqCst);
+                                    break;
                                 }
                             }
                         }
                         Err(e) => {
                             if RUNNING.load(Ordering::Relaxed) {
                                 error!("QUIC read error: {:?}", e);
-                                RUNNING.store(false, Ordering::SeqCst);
                             }
+                            alive_rx.store(false, Ordering::SeqCst);
                             break;
                         }
                     }
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
                     if !RUNNING.load(Ordering::Relaxed) {
                         break;
                     }
@@ -321,17 +409,19 @@ async fn run_vpn(config: Config) -> Result<()> {
         }
     });
 
-    while RUNNING.load(Ordering::Relaxed) {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    while RUNNING.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    info!("Shutting down...");
     quic_to_tun.abort();
     drop(session);
     let _ = tun_to_quic.join();
 
-    info!("Disconnected.");
-    Ok(())
+    if RUNNING.load(Ordering::Relaxed) {
+        Ok(SessionEnd::ConnectionLost)
+    } else {
+        Ok(SessionEnd::UserStopped)
+    }
 }
 
 fn configure_socket(socket: &std::net::UdpSocket) -> Result<()> {
@@ -410,8 +500,8 @@ async fn connect_and_handshake(
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config
-        .max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+        .max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
     transport_config.mtu_discovery_config(None);
     transport_config.initial_mtu(1500);
     transport_config.min_mtu(1500);
@@ -460,7 +550,7 @@ async fn connect_and_handshake(
                 }
             }
         }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+        _ = tokio::time::sleep(Duration::from_secs(10)) => {
             return Err(anyhow::anyhow!("Connection timeout (10s) - no response from server"));
         }
     };
@@ -490,10 +580,15 @@ fn set_adapter_ip(
     dns: Ipv4Addr,
     mtu: u16,
     endpoint: &str,
+    assigned_ipv6: Option<Ipv6Addr>,
+    netmask_v6: Option<u8>,
+    gateway_v6: Option<Ipv6Addr>,
+    dns_v6: Option<Ipv6Addr>,
 ) -> Result<()> {
     let adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let luid = adapter.get_luid();
     let prefix_len = netmask_to_prefix_len(netmask)?;
+    let has_ipv6 = assigned_ipv6.is_some();
 
     unsafe {
         use windows_sys::Win32::NetworkManagement::IpHelper::*;
@@ -520,11 +615,25 @@ fn set_adapter_ip(
 
     info!("Set adapter IP to {}/{}", ip, prefix_len);
 
+    if let Some(ipv6) = assigned_ipv6 {
+        let prefix_v6 = netmask_v6.unwrap_or(64);
+        if let Err(e) = set_adapter_ipv6(adapter, ipv6, prefix_v6) {
+            warn!("Failed to set IPv6 address: {}", e);
+        } else {
+            info!("Set adapter IPv6 to {}/{}", ipv6, prefix_v6);
+        }
+    }
+
     let adapter_index = adapter
         .get_adapter_index()
         .context("Failed to get adapter index")?;
 
-    if let Err(e) = adapter.set_dns_servers(&[std::net::IpAddr::V4(dns)]) {
+    let mut dns_servers = vec![IpAddr::V4(dns)];
+    if let Some(dns_v6) = dns_v6 {
+        dns_servers.push(IpAddr::V6(dns_v6));
+    }
+
+    if let Err(e) = adapter.set_dns_servers(&dns_servers) {
         warn!("Failed to set DNS via adapter API: {}", e);
         let out = std::process::Command::new("netsh")
             .args([
@@ -541,6 +650,31 @@ fn set_adapter_ip(
         if let Ok(out) = out {
             if !out.status.success() {
                 warn!("netsh set dnsservers failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+
+        if let Some(dns_v6) = dns_servers.iter().find_map(|addr| match addr {
+            IpAddr::V6(v6) => Some(*v6),
+            _ => None,
+        }) {
+            let out = std::process::Command::new("netsh")
+                .args([
+                    "interface",
+                    "ipv6",
+                    "add",
+                    "dnsservers",
+                    &format!("name=\"{}\"", adapter_name),
+                    &format!("address={}", dns_v6),
+                    "index=1",
+                ])
+                .output();
+            if let Ok(out) = out {
+                if !out.status.success() {
+                    warn!(
+                        "netsh add ipv6 dns failed: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
             }
         }
     }
@@ -566,8 +700,8 @@ fn set_adapter_ip(
     }
 
     // Route first half of IPv4 space
-    let out = std::process::Command::new("route")
-        .args([
+    route_add_or_change(
+        &[
             "add",
             "0.0.0.0",
             "mask",
@@ -577,17 +711,24 @@ fn set_adapter_ip(
             "1",
             "if",
             &adapter_index.to_string(),
-        ])
-        .output();
-    if let Ok(out) = out {
-        if !out.status.success() {
-            warn!("route add 0.0.0.0/1 failed: {}", String::from_utf8_lossy(&out.stderr));
-        }
-    }
+        ],
+        &[
+            "change",
+            "0.0.0.0",
+            "mask",
+            "128.0.0.0",
+            &gateway.to_string(),
+            "metric",
+            "1",
+            "if",
+            &adapter_index.to_string(),
+        ],
+        "0.0.0.0/1",
+    );
 
     // Route second half of IPv4 space
-    let out = std::process::Command::new("route")
-        .args([
+    route_add_or_change(
+        &[
             "add",
             "128.0.0.0",
             "mask",
@@ -597,11 +738,24 @@ fn set_adapter_ip(
             "1",
             "if",
             &adapter_index.to_string(),
-        ])
-        .output();
-    if let Ok(out) = out {
-        if !out.status.success() {
-            warn!("route add 128.0.0.0/1 failed: {}", String::from_utf8_lossy(&out.stderr));
+        ],
+        &[
+            "change",
+            "128.0.0.0",
+            "mask",
+            "128.0.0.0",
+            &gateway.to_string(),
+            "metric",
+            "1",
+            "if",
+            &adapter_index.to_string(),
+        ],
+        "128.0.0.0/1",
+    );
+
+    if has_ipv6 {
+        if let Some(gateway_v6) = gateway_v6 {
+            add_ipv6_routes(&adapter_name, gateway_v6);
         }
     }
     
@@ -612,6 +766,81 @@ fn set_adapter_ip(
     }
 
     Ok(())
+}
+
+fn set_adapter_ipv6(adapter: &Adapter, ip: Ipv6Addr, prefix_len: u8) -> Result<()> {
+    unsafe {
+        use windows_sys::Win32::NetworkManagement::IpHelper::*;
+        use windows_sys::Win32::Networking::WinSock::*;
+
+        let mut row: MIB_UNICASTIPADDRESS_ROW = std::mem::zeroed();
+        InitializeUnicastIpAddressEntry(&mut row);
+
+        row.InterfaceLuid = std::mem::transmute(adapter.get_luid());
+        row.Address.si_family = AF_INET6 as u16;
+        row.Address.Ipv6.sin6_addr.u.Byte = ip.octets();
+        row.Address.Ipv6.Anonymous.sin6_scope_id = 0;
+        row.OnLinkPrefixLength = prefix_len;
+        row.DadState = IpDadStatePreferred;
+
+        let result = CreateUnicastIpAddressEntry(&row);
+        if result != 0 && result != 5010 {
+            return Err(anyhow::anyhow!(
+                "Failed to set IPv6 address: error code {}",
+                result
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn route_add_or_change(args_add: &[&str], args_change: &[&str], label: &str) {
+    let out = std::process::Command::new("route").args(args_add).output();
+    if let Ok(out) = out {
+        if out.status.success() {
+            return;
+        }
+    }
+
+    let out = std::process::Command::new("route").args(args_change).output();
+    match out {
+        Ok(out) if !out.status.success() => {
+            warn!("route {} failed: {}", label, String::from_utf8_lossy(&out.stderr));
+        }
+        Err(e) => {
+            warn!("route {} failed to execute: {}", label, e);
+        }
+        _ => {}
+    }
+}
+
+fn add_ipv6_routes(adapter_name: &str, gateway: Ipv6Addr) {
+    add_ipv6_route(adapter_name, "::/1", gateway, "::/1");
+    add_ipv6_route(adapter_name, "8000::/1", gateway, "8000::/1");
+}
+
+fn add_ipv6_route(adapter_name: &str, prefix: &str, gateway: Ipv6Addr, label: &str) {
+    let out = std::process::Command::new("netsh")
+        .args([
+            "interface",
+            "ipv6",
+            "add",
+            "route",
+            prefix,
+            &format!("\"{}\"", adapter_name),
+            &gateway.to_string(),
+        ])
+        .output();
+    if let Ok(out) = out {
+        if !out.status.success() {
+            warn!(
+                "netsh ipv6 add route {} failed: {}",
+                label,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
 }
 
 fn add_host_route_exception(endpoint: &str) -> Result<()> {

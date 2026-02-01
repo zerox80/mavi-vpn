@@ -193,6 +193,13 @@ async fn run_vpn(config: Config) -> Result<()> {
     
     let socket: std::net::UdpSocket = socket2_sock.into();
     info!("Socket bound to {}", socket.local_addr()?);
+    
+    // Test UDP connectivity
+    let target: std::net::SocketAddr = config.endpoint.parse()
+        .context("Invalid endpoint format")?;
+    info!("Testing UDP connectivity to {}...", target);
+    socket.connect(target)?;
+    info!("UDP socket connected (pseudo-connected to {})", target);
 
     let (connection, server_config) = connect_and_handshake(
         socket,

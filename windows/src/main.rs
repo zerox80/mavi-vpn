@@ -198,7 +198,7 @@ async fn run_vpn(config: Config) -> Result<()> {
     let (connection, server_config) = connect_and_handshake(
         socket,
         config.token,
-        config.endpoint,
+        config.endpoint.clone(),
         cert_pin_bytes,
         config.censorship_resistant,
     )

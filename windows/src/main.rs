@@ -30,7 +30,9 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("info".parse().unwrap()),
+                .add_directive("mavi_vpn=debug".parse().unwrap())
+                .add_directive("quinn=debug".parse().unwrap())
+                .add_directive("quinn_proto=debug".parse().unwrap()),
         )
         .init();
 

@@ -313,7 +313,7 @@ async fn run_session(
 
     let session = Arc::new(
         adapter
-            .start_session(0x20000)
+            .start_session(wintun::MAX_RING_CAPACITY)
             .context("Failed to start WinTUN session")?,
     );
 
@@ -385,6 +385,10 @@ async fn run_session(
                                     session_tx.send_packet(packet);
                                 }
                                 Err(e) => {
+                                    if is_wintun_ring_full(&e) {
+                                        tokio::time::sleep(Duration::from_millis(2)).await;
+                                        continue;
+                                    }
                                     warn!("Failed to allocate packet: {:?}", e);
                                     alive_rx.store(false, Ordering::SeqCst);
                                     break;
@@ -421,6 +425,16 @@ async fn run_session(
         Ok(SessionEnd::ConnectionLost)
     } else {
         Ok(SessionEnd::UserStopped)
+    }
+}
+
+fn is_wintun_ring_full(err: &wintun::Error) -> bool {
+    match err {
+        wintun::Error::Io(io_err) => {
+            io_err.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW as i32)
+        }
+        _ => false,
     }
 }
 

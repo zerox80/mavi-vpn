@@ -859,7 +859,19 @@ fn add_ipv6_route(adapter_name: &str, prefix: &str, gateway: Ipv6Addr, label: &s
 }
 
 fn add_host_route_exception(endpoint: &str) -> Result<()> {
-    let server_ip = endpoint.split(':').next().context("Invalid endpoint format")?;
+    let server_ip = if endpoint.starts_with('[') {
+        // IPv6: [2001:db8::1]:443
+        endpoint
+            .strip_prefix('[')
+            .and_then(|s| s.split(']').next())
+            .context("Invalid IPv6 endpoint format")?
+    } else {
+        // IPv4 oder Hostname: vpn.example.com:443
+        endpoint
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(endpoint)
+    };
     
     // Get default gateway IP via PowerShell
     let output = std::process::Command::new("powershell")

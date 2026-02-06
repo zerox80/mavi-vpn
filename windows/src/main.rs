@@ -297,6 +297,10 @@ async fn run_session(
         info!("IPv6: {}/{}", ipv6, prefix);
     }
 
+    // Get the actual resolved IP of the server to ensure the route exception works
+    // even if DNS is unreachable later.
+    let endpoint_ip = connection.remote_address().ip().to_string();
+
     set_adapter_ip(
         adapter,
         assigned_ip,
@@ -304,7 +308,7 @@ async fn run_session(
         gateway,
         dns,
         mtu,
-        &config.endpoint,
+        &endpoint_ip,
         assigned_ipv6,
         netmask_v6,
         gateway_v6,

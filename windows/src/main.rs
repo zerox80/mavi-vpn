@@ -500,8 +500,8 @@ async fn connect_and_handshake(
         .try_clone()
         .context("Failed to clone UDP socket for configuration")?;
 
-    // Apply socket options before Quinn takes ownership.
-    configure_socket(&socket)?;
+    // Apply socket options before Quinn takes ownership (via cloned handle).
+    configure_socket(&socket_cfg)?;
 
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 

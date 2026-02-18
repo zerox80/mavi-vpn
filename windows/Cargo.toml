@@ -1,0 +1,41 @@
+[package]
+name = "windows-vpn"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mavi-vpn"
+path = "src/main.rs"
+
+[dependencies]
+shared = { workspace = true }
+tokio = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+bytes = { workspace = true }
+bincode = { workspace = true }
+anyhow = { workspace = true }
+socket2 = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+etherparse = { workspace = true }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1.0"
+ring = "0.17"
+wintun = "0.5"
+parking_lot = "0.12"
+ctrlc = "3.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

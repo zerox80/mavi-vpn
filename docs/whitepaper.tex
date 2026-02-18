@@ -1,0 +1,206 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage{amsmath}
+
+\geometry{top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm}
+
+\title{\textbf{Mavi VPN Technical Whitepaper}\\ \large Architecture, Protocol \& Security Implementation}
+\author{Mavi Dev Team}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document details the technical architecture, security mechanisms, and implementation specifics of Mavi VPN. It covers the custom QUIC-based protocol, censorship resistance strategies, cross-platform client implementations (Windows/Android), and the novel "Pinned MTU" strategy that ensures robust connectivity across constrained networks (DS-Lite, PPPoE) without fragmentation or MSS clamping hacks.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+Mavi VPN is a high-performance, censorship-resistant VPN built on top of the IETF QUIC protocol. Unlike traditional VPNs (OpenVPN, WireGuard) that use custom packet headers or standard TCP/UDP streams, Mavi VPN is designed to look and behave like standard HTTP/3 web traffic to evade Deep Packet Inspection (DPI).
+
+The core philosophy is \textbf{invisibility and performance}:
+\begin{itemize}
+    \item \textbf{Transport}: UDP/QUIC (Userspace network stack).
+    \item \textbf{Encryption}: TLS 1.3 (inherent to QUIC).
+    \item \textbf{Authentication}: Token-based with Certificate Pinning (Eliminates CA trust issues).
+    \item \textbf{Platform Support}: Native implementations for Windows (Rust/WinTUN) and Android (Kotlin/Rust/VpnService).
+\end{itemize}
+
+\section{Architecture Overview}
+
+\subsection{Component Diagram}
+The system consists of three main components sharing a common core logic:
+
+\begin{verbatim}
+[ Android Client ]      [ Windows Client ]
+(Kotlin + Rust JNI)    (Rust + WinTUN)
+         |                    |
+         |   QUIC Tunnel      |
+         +--------+-----------+
+                  |
+          [ VPN Server ]
+         (Rust + Tun/Tap)
+\end{verbatim}
+
+\subsection{Shared Core (`shared` crate)}
+All components share the \texttt{shared} library, ensuring protocol consistency.
+\begin{itemize}
+    \item \textbf{Protocol Definition}: `ControlMessage` enum (Auth, Config, Error).
+    \item \textbf{Serialization}: \texttt{bincode} for compact, high-performance binary encoding.
+    \item \textbf{ICMP Logic}: Utilities for constructing ICMP "Packet Too Big" messages (fallback mechanism).
+\end{itemize}
+
+\section{Protocol Specification}
+
+\subsection{Transport Layer: QUIC}
+We use the \texttt{quinn} Rust crate (implementation of IETF QUIC).
+\begin{itemize}
+    \item \textbf{Streams}: Used for the initial Handshake (Reliable, Ordered).
+    \item \textbf{Datagrams}: Used for VPN traffic (Unreliable, Unordered). This eliminates Head-of-Line (HoL) blocking, critical for real-time applications.
+\end{itemize}
+
+\subsection{Handshake Flow}
+The connection establishment follows a strict zero-round-trip (0-RTT) capable design pattern:
+
+1. \textbf{Connect}: Client initiates QUIC connection to Server.
+2. \textbf{Auth (Stream)}: Client opens a bidirectional stream and sends:
+   \begin{itemize}
+       \item \texttt{ControlMessage::Auth \{ token: String \}} (Serialized via bincode).
+   \end{itemize}
+3. \textbf{Verification}: Server verifies the token using constant-time comparison.
+   \begin{itemize}
+       \item \textit{If Invalid (Standard Mode):} Returns \texttt{ControlMessage::Error}.
+       \item \textit{If Invalid (Censorship Resistant Mode):} Emulates a generic Nginx HTTP 200 OK response to confuse active probes.
+   \end{itemize}
+4. \textbf{Config (Stream)}: Server allocates IPs and responds with:
+   \begin{itemize}
+       \item \texttt{ControlMessage::Config}: Assigned IPv4, IPv6, Netmask, Gateway, DNS, MTU, Routes.
+   \end{itemize}
+5. \textbf{Tunnel Ready}: Client applies network config and switches to Datagram mode for payload transport.
+
+\section{Security \& Censorship Resistance}
+
+\subsection{Encryption (TLS 1.3)}
+All traffic is encrypted using TLS 1.3 (ChaCha20-Poly1305 or AES-GCM), provided by the QUIC stack. We use \texttt{rustls} as the crypto backend for memory safety.
+
+\subsection{Certificate Pinning}
+To essentially eliminate Man-in-the-Middle (MITM) attacks and reliance on compromised Certificate Authorities:
+\begin{itemize}
+    \item The client is hardcoded with the SHA256 hash of the server's X.509 certificate.
+    \item During the TLS handshake, the client verifies the remote certificate matches this hash exactly.
+    \item If the hash mismatches, the connection is immediately aborted.
+\end{itemize}
+
+\subsection{Censorship Resistant Mode (CR Mode)}
+Designed to bypass strict firewalls (GFW, Corporate Filters).
+\begin{itemize}
+    \item \textbf{ALPN Masquerading}: 
+    \begin{itemize}
+        \item \textbf{Standard}: Uses ALPN \texttt{mavivpn}.
+        \item \textbf{CR Mode}: Uses ALPN \texttt{h3} (HTTP/3). The traffic looks identical to a standard browser fetching a website via QUIC.
+    \end{itemize}
+    \item \textbf{Probe Resistance}: If the server detects an invalid token or protocol violation in CR Mode, it does NOT reset the connection. Instead, it sends valid HTML/HTTP responses (e.g., "Welcome to Nginx"), making the VPN server indistinguishable from a standard web server to active crawling bots.
+\end{itemize}
+
+\section{MTU Strategy: The "Pinned Mode" (The 1360 Fix)}
+
+This is the most critical architectural decision in Mavi VPN, solving the "Packet Too Big" and "Black Hole" issues common in modern networks.
+
+\subsection{The Problem: Fragmentation \& Black Holes}
+Most residential connections (DSL, Fiber with DS-Lite/PPPoE) have an MTU lower than the standard 1500 bytes (typically 1460-1492 bytes).
+\begin{itemize}
+    \item \textbf{Standard VPNs (MTU 1500)}: Attempt to send 1500-byte packets.
+    \item \textbf{Result}: The router MUST fragment the packet.
+    \item \textbf{Failure}: Many modern firewalls and NAT gateways drop fragments for security or performance reasons. Or the "Don't Fragment" bit is set, and the router sends an ICMP error which is also dropped.
+    \item \textbf{Consequence}: The packet vanishes ("Black Hole").
+    \item \textbf{Quinn's Reaction}: The QUIC stack detects packet loss, assumes congestion, and aggressively throttles the connection (MTU reset to 1280).
+\end{itemize}
+
+\subsection{The Solution: Pinned Mode (Inner 1280 / Outer 1360)}
+Instead of relying on Path MTU Discovery (which fails due to Black Holes) or Fragmentation (which is unreliable), Mavi VPN uses a strict two-layer MTU strategy:
+
+\subsubsection{Layer 1: The Inner Tunnel (Payload)}
+\begin{itemize}
+    \item \textbf{MTU}: \textbf{1280 Bytes}.
+    \item \textbf{Why?}: This is the minimum required MTU for IPv6. Every device on the internet MUST support 1280 bytes.
+    \item \textbf{Effect}: The OS inside the tunnel (Android/Windows) will never generate a packet larger than 1280 bytes.
+\end{itemize}
+
+\subsubsection{Layer 2: The Outer Tunnel (Wire)}
+\begin{itemize}
+    \item \textbf{MTU}: \textbf{1360 Bytes (Pinned)}.
+    \item \textbf{Mechanism}: 
+        \begin{enumerate}
+            \item We disable Quinn's dynamic Path MTU Discovery (\texttt{mtu\_discovery\_config(None)}).
+            \item We force \texttt{initial\_mtu(1360)} AND \texttt{min\_mtu(1360)}.
+        \end{enumerate}
+    \item \textbf{Why 1360?}:
+        \begin{itemize}
+            \item It is significantly smaller than common constrained MTUs (1460/1492), ensuring it passes through DSL/PPPoE lines \textbf{without fragmentation}.
+            \item It is large enough to contain our payload.
+        \end{itemize}
+\end{itemize}
+
+\subsection{The Math (Why it works)}
+\begin{itemize}
+    \item \textbf{Outer Capacity}: 1360 Bytes.
+    \item \textbf{Protocol Overhead}: $\sim$38 Bytes (IP Header + UDP Header + QUIC Header + Encryption Tag).
+    \item \textbf{Available Payload Space}: $1360 - 38 = \mathbf{1322}$ Bytes.
+    \item \textbf{Required Payload Space}: $\mathbf{1280}$ Bytes (Our Inner MTU).
+    \item \textbf{Check}: $1322 > 1280$. \textbf{It fits.}
+\end{itemize}
+
+By pinning the minimum MTU to 1360, we prevent the QUIC stack from ever dropping the effective payload capacity below 1280, guaranteeing that packets are never blocked due to size, regardless of network conditions.
+
+\section{Server Implementation (`backend`)}
+
+\subsection{Performance Tuning}
+The server is optimized for high throughput on Linux:
+\begin{itemize}
+    \item \textbf{Pinned MTU}: As described above.
+    \item \textbf{BBR Congestion Control}: Enabled by default for better bandwidth utilization and lower latency on lossy links.
+    \item \textbf{GSO (Generic Segmentation Offload)}: Enabled to offload packet segmentation to the NIC driver, reducing CPU usage.
+    \item \textbf{Large Windows}: Send/Receive windows set to 4MB.
+    \item \textbf{Socket Buffers}: SO\_RCVBUF/SO\_SNDBUF set to 2MB.
+\end{itemize}
+
+\subsection{MSS Clamping}
+\textbf{DISABLED.} We previously used `iptables` rules to clamp TCP MSS. This is no longer necessary or active, as the Pinned MTU strategy solves the root cause at the IP layer. We now rely purley on the correct MTU sizing and ICMP signals (if a peer sends oversize packets).
+
+\subsection{Zero-Copy Datapath}
+The packet forwarding loop uses \texttt{bytes::Bytes} and \texttt{bytes::BytesMut} to minimize memory copying. Packets are read from the TUN interface directly into a buffer, wrapped in a reference-counted \texttt{Bytes} handle, and passed to the QUIC channel without cloning the payload.
+
+\section{Client Implementation Details}
+
+\subsection{Windows Client (`windows`)}
+\begin{itemize}
+    \item \textbf{Driver}: Uses \texttt{wintun} (Layer 3 TUN driver).
+    \item \textbf{Pinned MTU}: Implements the 1360 pinning strategy.
+    \item \textbf{Configuration}: Uses \texttt{netsh} commands to reliably set DNS and MTU.
+    \item \textbf{Architecture}: Multithreaded async runtime (Tokio).
+\end{itemize}
+
+\subsection{Android Client (`android`)}
+\begin{itemize}
+    \item \textbf{Architecture}: Hybrid Kotlin (UI) + Rust (Core).
+    \item \textbf{JNI Bridge}: Rust core is compiled as a shared library (\texttt{libmavivpn.so}).
+    \item \textbf{MTU Handling}: Receives the 1280 MTU Config from server, sets TUN interface.
+    \item \textbf{ICMP Loopback}: Implements local generation of ICMP "Packet Too Big" messages if the app attempts to send > 1280 bytes (unlikely due to TUN setting, but present as safety net).
+\end{itemize}
+
+\section{Conclusion}
+Mavi VPN provides a modern, secure, and performant alternative to legacy VPN protocols. By leveraging QUIC and the mathematically verified "Pinned MTU" strategy, it offers robust connectivity even in hostile network environments where fragmentation and Path MTU Discovery fail.
+
+\end{document}

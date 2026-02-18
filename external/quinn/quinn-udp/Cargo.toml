@@ -1,0 +1,28 @@
+[package]
+name = "quinn-udp"
+version = "0.5.1"
+edition = "2021"
+rust-version = "1.66"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/quinn-rs/quinn"
+description = "UDP sockets with ECN information for the QUIC transport protocol"
+keywords = ["quic"]
+categories = ["network-programming", "asynchronous"]
+workspace = ".."
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["log"]
+# Write logs via the `log` crate when no `tracing` subscriber exists
+log = ["tracing/log"]
+
+[dependencies]
+libc = "0.2.113"
+socket2 = "0.5"
+tracing = "0.1.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52.0", features = ["Win32_Foundation", "Win32_System_IO", "Win32_Networking_WinSock"] }
+once_cell = "1.19.0"

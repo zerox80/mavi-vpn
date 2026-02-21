@@ -111,8 +111,13 @@ Designed to bypass strict firewalls (GFW, Corporate Filters).
         \item \textbf{Standard}: Uses ALPN \texttt{mavivpn}.
         \item \textbf{CR Mode}: Uses ALPN \texttt{h3} (HTTP/3). The traffic looks identical to a standard browser fetching a website via QUIC.
     \end{itemize}
-    \item \textbf{Probe Resistance}: If the server detects an invalid token or protocol violation in CR Mode, it does NOT reset the connection. Instead, it sends valid HTML/HTTP responses (e.g., "Welcome to Nginx"), making the VPN server indistinguishable from a standard web server to active crawling bots.
-\end{itemize}
+    \item \textbf{Probe Resistance}: If the server detects an invalid token or protocol violation in CR Mode, it does NOT discard the connection or send a plaintext HTTP/1.1 response (which is a known DPI fingerprinting vector). Instead, it simulates a legitimate HTTP/3 Web-Server:
+    \begin{itemize}
+        \item It opens a unidirectional control stream to send an HTTP/3 \texttt{SETTINGS} frame.
+        \item It sends a binary \texttt{HEADERS} frame containing valid QPACK-encoded headers (e.g., `:status 200', `server: nginx').
+        \item It follows up with a \texttt{DATA} frame containing the HTML payload. 
+    \end{itemize}
+    This advanced probe resistance makes the VPN completely indistinguishable from a standard web server during \textit{Active Probing} attacks by firewalls.
 
 \section{MTU Strategy: The "Pinned Mode" (The 1360 Fix)}
 
@@ -156,10 +161,10 @@ Instead of relying on Path MTU Discovery (which fails due to Black Holes) or Fra
 \subsection{The Math (Why it works)}
 \begin{itemize}
     \item \textbf{Outer Capacity}: 1360 Bytes.
-    \item \textbf{Protocol Overhead}: $\sim$38 Bytes (IP Header + UDP Header + QUIC Header + Encryption Tag).
-    \item \textbf{Available Payload Space}: $1360 - 38 = \mathbf{1322}$ Bytes.
+    \item \textbf{Protocol Overhead}: $\sim$80 Bytes (IPv4 Header + UDP Header + QUIC Header + TLS Encryption Tag).
+    \item \textbf{Available Payload Space}: $1360 - 80 = \mathbf{1280}$ Bytes.
     \item \textbf{Required Payload Space}: $\mathbf{1280}$ Bytes (Our Inner MTU).
-    \item \textbf{Check}: $1322 > 1280$. \textbf{It fits.}
+    \item \textbf{Check}: $1280 \geq 1280$. \textbf{It fits perfectly.}
 \end{itemize}
 
 By pinning the minimum MTU to 1360, we prevent the QUIC stack from ever dropping the effective payload capacity below 1280, guaranteeing that packets are never blocked due to size, regardless of network conditions.

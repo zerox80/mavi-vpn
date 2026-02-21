@@ -370,45 +370,79 @@ async fn handle_connection(
     // --- Handshake Phase ---
     let (mut send_stream, mut recv_stream) = connection.accept_bi().await?;
     
-    // Read auth message length (u32 LE)
-    let len = recv_stream.read_u32_le().await? as usize;
-    if len > 1024 { return Err(anyhow::anyhow!("Auth message too big")); }
-    let mut buf = vec![0u8; len];
-    recv_stream.read_exact(&mut buf).await?;
-    
-    let msg: ControlMessage = bincode::deserialize(&buf)?;
-    
-
-    let (assigned_ip, assigned_ip6) = match msg {
-        ControlMessage::Auth { token } => {
-            if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
-                if config.censorship_resistant {
-                    // Probe Resistance: Emulate standard web server response
-                    warn!("Unauthorized access attempt from {}. Sending simulated HTTP 200 OK.", remote_addr);
-                    
-                    // Sending a generic HTTP/1.1 response.
-                    // This is intended to confuse automated probes/DPI that look for VPN signatures.
-                    let fake_response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 157\r\nConnection: close\r\n\r\n<html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed.</p></body></html>";
-                     
-                    let _ = send_stream.write_all(fake_response).await;
-                    let _ = send_stream.finish();
-                    return Err(anyhow::anyhow!("Unauthorized probe from {}", remote_addr));
-                } else {
-                    // Standard Error
-                    let err_msg = ControlMessage::Error { message: "Invalid Token".into() };
-                    let bytes = bincode::serialize(&err_msg)?;
-                    send_stream.write_u32_le(bytes.len() as u32).await?;
-                    send_stream.write_all(&bytes).await?;
-                    let _ = send_stream.finish();
-                    return Err(anyhow::anyhow!("Invalid Token from {}", remote_addr));
+    // Wrap handshake in async block to catch all auth parsing errors for censorship resistance
+    let auth_result: Result<(std::net::Ipv4Addr, std::net::Ipv6Addr)> = async {
+        let len = tokio::time::timeout(std::time::Duration::from_secs(5), recv_stream.read_u32_le())
+            .await
+            .map_err(|_| anyhow::anyhow!("Timeout reading length"))??
+            as usize;
+        
+        if len > 1024 { anyhow::bail!("Auth message too big"); }
+        let mut buf = vec![0u8; len];
+        recv_stream.read_exact(&mut buf).await?;
+        
+        let msg: ControlMessage = bincode::deserialize(&buf).map_err(|e| anyhow::anyhow!("Deserialization error: {}", e))?;
+        
+        match msg {
+            ControlMessage::Auth { token } => {
+                if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
+                    anyhow::bail!("Invalid Token");
                 }
+                let v4 = state.assign_ip()?;
+                let v6 = state.assign_ipv6()?;
+                Ok((v4, v6))
             }
-            // Assign IP
-            let v4 = state.assign_ip()?;
-            let v6 = state.assign_ipv6()?;
-            (v4, v6)
+            _ => anyhow::bail!("Unexpected message type during handshake"),
         }
-        _ => return Err(anyhow::anyhow!("Unexpected message type during handshake")),
+    }.await;
+
+    let (assigned_ip, assigned_ip6) = match auth_result {
+        Ok(ips) => ips,
+        Err(e) => {
+            if config.censorship_resistant {
+                warn!("Unauthorized access attempt from {} ({}). Sending simulated HTTP/3 200 OK.", remote_addr, e);
+                
+                // 1. Send HTTP/3 SETTINGS frame on a unidirectional control stream
+                if let Ok(mut ctrl) = connection.open_uni().await {
+                    let _ = ctrl.write_all(&[0x00, 0x04, 0x00]).await;
+                    let _ = ctrl.finish();
+                }
+
+                // 2. Send HTTP/3 HEADERS and DATA frames on the current bidirectional stream
+                let mut response = Vec::new();
+                
+                // HEADERS Frame
+                response.push(0x01); // Frame type: HEADERS
+                response.push(0x19); // Length: 25 bytes (varint)
+                // QPACK Encoded Headers (pylsqpack output for :status 200, server nginx, content-type text/html, content-length 173)
+                let qpack_bytes: [u8; 25] = [
+                    0x00, 0x00, 0xd9, 0x5f, 0x4d, 0x84, 0xaa, 0x63, 0x55, 0xe7, 0x5f, 0x1d, 
+                    0x87, 0x49, 0x7c, 0xa5, 0x89, 0xd3, 0x4d, 0x1f, 0x54, 0x03, 0x31, 0x37, 0x33
+                ];
+                response.extend_from_slice(&qpack_bytes);
+
+                // DATA Frame
+                let fake_body = b"<html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed.</p></body></html>";
+                response.push(0x00); // Frame type: DATA
+                // Length: 173 bytes (varint encoded as 0x40AD: 0x4000 + 173)
+                response.push(0x40);
+                response.push(0xAD);
+                response.extend_from_slice(fake_body);
+
+                let _ = send_stream.write_all(&response).await;
+                let _ = send_stream.finish();
+                
+                return Err(anyhow::anyhow!("Unauthorized HTTP/3 probe handled from {}", remote_addr));
+            } else {
+                let err_msg = ControlMessage::Error { message: format!("Auth error: {}", e) };
+                if let Ok(bytes) = bincode::serialize(&err_msg) {
+                    let _ = send_stream.write_u32_le(bytes.len() as u32).await;
+                    let _ = send_stream.write_all(&bytes).await;
+                    let _ = send_stream.finish();
+                }
+                return Err(anyhow::anyhow!("Auth error from {}: {}", remote_addr, e));
+            }
+        }
     };
 
     // RAII Guard: IPs will be released when this variable goes out of scope (Connection ends or error)

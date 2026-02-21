@@ -4,7 +4,7 @@ members = [
     "backend",
     "shared",
     "android/app/src/main/rust",
-    "windows",
+    "windows", "quic-tester",
 ]
 
 [workspace.dependencies]

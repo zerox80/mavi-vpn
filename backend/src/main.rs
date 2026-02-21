@@ -432,6 +432,9 @@ async fn handle_connection(
                 let _ = send_stream.write_all(&response).await;
                 let _ = send_stream.finish();
                 
+                // Wait briefly to ensure packets are flushed to the OS before dropping the connection
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                
                 return Err(anyhow::anyhow!("Unauthorized HTTP/3 probe handled from {}", remote_addr));
             } else {
                 let err_msg = ControlMessage::Error { message: format!("Auth error: {}", e) };

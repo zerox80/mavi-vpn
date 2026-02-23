@@ -42,8 +42,9 @@ pub struct Config {
     #[arg(long, env = "VPN_CENSORSHIP_RESISTANT", default_value = "false")]
     pub censorship_resistant: bool,
 
-    /// Enable TCP MSS Clamping to prevent fragmentation issues (Highly Recommended).
-    #[arg(long, env = "VPN_MSS_CLAMPING", default_value = "true")]
+    /// Enable TCP MSS Clamping to prevent fragmentation issues.
+    /// Not required when using the Pinned MTU strategy (default: 1280/1360).
+    #[arg(long, env = "VPN_MSS_CLAMPING", default_value = "false")]
     pub mss_clamping: bool,
 
     /// Comma-separated list of domains to whitelist (bypass VPN)

@@ -16,7 +16,7 @@ mod state;
 use crate::config::Config;
 use crate::state::AppState;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
-use tun::Device;
+use tun::AbstractDevice;
 use constant_time_eq::constant_time_eq;
 use shared::icmp;
 
@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
 
     tun_config.address(gateway_ip)
               .netmask(netmask)
-              .mtu(config.mtu as i32)
+              .mtu(config.mtu as u16)
               .up();
 
     #[cfg(target_os = "linux")]
@@ -177,11 +177,11 @@ async fn main() -> Result<()> {
     });
 
     if let Some(dev_path) = &config.tun_device_path {
-        tun_config.name(dev_path);
+        tun_config.tun_name(dev_path);
     }
 
     let dev = tun::create_as_async(&tun_config).context("Failed to create TUN device. Ensure NET_ADMIN cap is set.")?;
-    let tun_name = dev.get_ref().name().unwrap_or_else(|_| "tun0".into());
+    let tun_name = std::ops::Deref::deref(&dev).tun_name().unwrap_or_else(|_| "tun0".into());
     let (mut tun_reader, mut tun_writer) = tokio::io::split(dev);
 
     info!("TUN Device created: {}. IP: {}", tun_name, gateway_ip);
@@ -381,7 +381,9 @@ async fn handle_connection(
         let mut buf = vec![0u8; len];
         recv_stream.read_exact(&mut buf).await?;
         
-        let msg: ControlMessage = bincode::deserialize(&buf).map_err(|e| anyhow::anyhow!("Deserialization error: {}", e))?;
+        let msg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+            .map(|(v, _)| v)
+            .map_err(|e| anyhow::anyhow!("Deserialization error: {}", e))?;
         
         match msg {
             ControlMessage::Auth { token } => {
@@ -438,7 +440,7 @@ async fn handle_connection(
                 return Err(anyhow::anyhow!("Unauthorized HTTP/3 probe handled from {}", remote_addr));
             } else {
                 let err_msg = ControlMessage::Error { message: format!("Auth error: {}", e) };
-                if let Ok(bytes) = bincode::serialize(&err_msg) {
+                if let Ok(bytes) = bincode::serde::encode_to_vec(&err_msg, bincode::config::standard()) {
                     let _ = send_stream.write_u32_le(bytes.len() as u32).await;
                     let _ = send_stream.write_all(&bytes).await;
                     let _ = send_stream.finish();
@@ -468,7 +470,7 @@ async fn handle_connection(
         dns_server_v6: Some("2001:4860:4860::8888".parse().unwrap()),
         whitelist_domains: Some(config.whitelist_domains.clone()),
     };
-    let bytes = bincode::serialize(&success_msg)?;
+    let bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
     send_stream.write_u32_le(bytes.len() as u32).await?;
     send_stream.write_all(&bytes).await?;
     let _ = send_stream.finish();

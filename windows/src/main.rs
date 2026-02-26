@@ -621,7 +621,7 @@ async fn connect_and_handshake(
     let (mut send_stream, mut recv_stream) = connection.open_bi().await?;
 
     let auth_msg = ControlMessage::Auth { token };
-    let bytes = bincode::serialize(&auth_msg)?;
+    let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard()).map_err(|e| anyhow::anyhow!("{}", e))?;
     send_stream.write_u32_le(bytes.len() as u32).await?;
     send_stream.write_all(&bytes).await?;
 
@@ -631,7 +631,9 @@ async fn connect_and_handshake(
     }
     let mut buf = vec![0u8; len];
     recv_stream.read_exact(&mut buf).await?;
-    let config: ControlMessage = bincode::deserialize(&buf)?;
+    let config: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     Ok((connection, config))
 }

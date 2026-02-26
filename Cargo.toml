@@ -16,7 +16,7 @@ anyhow = "1.0"
 bytes = "1.0"
 socket2 = { version = "0.6", features = ["all"] }
 serde = { version = "1.0", features = ["derive"] }
-bincode = "3.0"
+bincode = { package = "bincode-next", version = "3.0.0-rc.2", features = ["serde"] }
 tracing = "0.1"
 time = "=0.3.36"
 rcgen = "0.14"

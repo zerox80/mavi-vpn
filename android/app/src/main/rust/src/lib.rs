@@ -390,7 +390,7 @@ async fn connect_and_handshake(
     info!("Stream opened");
     
     let auth_msg = ControlMessage::Auth { token };
-    let bytes = bincode::serialize(&auth_msg)?;
+    let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard()).map_err(|e| anyhow::anyhow!("{}", e))?;
     send_stream.write_u32_le(bytes.len() as u32).await?;
     send_stream.write_all(&bytes).await?;
     info!("Auth sent");
@@ -402,7 +402,9 @@ async fn connect_and_handshake(
     }
     let mut buf = vec![0u8; len];
     recv_stream.read_exact(&mut buf).await?;
-    let config: ControlMessage = bincode::deserialize(&buf)?;
+    let config: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     
     if let ControlMessage::Error { message } = &config {
         return Err(anyhow::anyhow!("Server Error: {}", message));

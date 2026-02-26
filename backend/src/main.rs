@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-#[cfg(target_os = "linux")]
-use std::os::unix::io::AsRawFd;
 
 use quinn::{Endpoint, ServerConfig};
 use std::sync::Arc;
@@ -172,7 +170,7 @@ async fn main() -> Result<()> {
               .up();
 
     #[cfg(target_os = "linux")]
-    tun_config.platform(|config| {
+    tun_config.platform_config(|config| {
         config.packet_information(false); 
     });
 

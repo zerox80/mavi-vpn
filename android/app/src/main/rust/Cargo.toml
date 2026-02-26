@@ -7,13 +7,13 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-jni = "0.21"
+jni = "0.22"
 tokio = { workspace = true }
 tokio-util = "0.7"
 quinn = { workspace = true, default-features = false, features = ["rustls"] }
 bytes = { workspace = true }
 shared = { workspace = true }
-android_logger = "0.13"
+android_logger = "0.15"
 log = "0.4"
 anyhow = { workspace = true }
 rustls = { workspace = true }

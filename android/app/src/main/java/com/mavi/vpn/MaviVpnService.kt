@@ -244,19 +244,32 @@ class MaviVpnService : VpnService() {
                                   vpnInterface = localInterface
                              }
 
-                             if (localInterface != null) {
-                                 val fd = localInterface.fd
-                                 Log.d("MaviVPN", "Interface established. Starting Loop.")
-                                 isConnected.value = true
-                            
-                                 // 4. Start Loop (Blocks until error or stop)
-                                 startLoop(handle, fd)
-                            
-                                 Log.d("MaviVPN", "Native VPN loop exited")
-                                 isConnected.value = false
-                             } else {
-                                 Log.e("MaviVPN", "Failed to establish VPN interface")
-                             }
+                             if (localInterface != null) {
+
+                                 val fd = localInterface.fd
+
+                                 Log.d("MaviVPN", "Interface established. Starting Loop.")
+
+                                 isConnected.value = true
+
+                            
+
+                                 // 4. Start Loop (Blocks until error or stop)
+
+                                 startLoop(handle, fd)
+
+                            
+
+                                 Log.d("MaviVPN", "Native VPN loop exited")
+
+                                 isConnected.value = false
+
+                             } else {
+
+                                 Log.e("MaviVPN", "Failed to establish VPN interface")
+
+                             }
+
                         } finally {
                              try { localInterface?.close() } catch(e: Exception) {}
                              synchronized(vpnLock) {
@@ -335,7 +348,13 @@ class MaviVpnService : VpnService() {
             } catch(_: Exception){}
             thread = null
         }
-        stopForeground(true)
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
         
         try {
             if (wakeLock?.isHeld == true) {
@@ -346,6 +365,8 @@ class MaviVpnService : VpnService() {
             Log.w("MaviVPN", "Error releasing WakeLock: ${e.message}")
         }
         wakeLock = null
+        
+        stopSelf()
     }
 
     override fun onDestroy() {

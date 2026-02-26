@@ -10,6 +10,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 30
     groups:
       all:
         patterns:
@@ -20,21 +21,25 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 30
 
   # Maintain Dockerfile at backend/
   - package-ecosystem: "docker"
     directory: "/backend"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 30
 
   # Maintain Android dependencies
   - package-ecosystem: "gradle"
     directory: "/android"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 30
 
   # Maintain GitHub Actions updates
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 30

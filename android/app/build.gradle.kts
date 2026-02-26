@@ -2,7 +2,6 @@ import org.apache.tools.ant.taskdefs.condition.Os
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {

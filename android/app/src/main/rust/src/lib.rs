@@ -148,8 +148,8 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
         
         let protected = env.call_method(
             &service, 
-            jni::jni_str!("protect"), 
-            jni::jni_sig!("(I)Z"), 
+            "protect", 
+            "(I)Z", 
             &[JValue::Int(sock_fd as jint)]
         ).and_then(|val| val.z()).unwrap_or(false);
         

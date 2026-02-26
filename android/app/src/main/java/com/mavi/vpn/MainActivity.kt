@@ -37,6 +37,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.foundation.clickable
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.Drawable
 
 class MainActivity : ComponentActivity() {
 
@@ -407,6 +410,24 @@ fun VpnScreen(
     }
 }
 
+// --- Helper to convert any Drawable to Bitmap ---
+fun drawableToBitmap(drawable: Drawable): Bitmap? {
+    return try {
+        if (drawable is BitmapDrawable) {
+            return drawable.bitmap
+        }
+        val width = if (drawable.intrinsicWidth > 0) drawable.intrinsicWidth else 48
+        val height = if (drawable.intrinsicHeight > 0) drawable.intrinsicHeight else 48
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        drawable.setBounds(0, 0, canvas.width, canvas.height)
+        drawable.draw(canvas)
+        bitmap
+    } catch (e: Exception) {
+        null
+    }
+}
+
 // --- App Selection Screen ---
 
 data class InstalledApp(
@@ -453,8 +474,7 @@ fun SettingsScreen(
                  
                  if (launchIntent != null && (!isSystem || isUpdatedSystem)) {
                      val iconDrawable = appInfo.loadIcon(pm)
-                     val bitmap = (iconDrawable as? BitmapDrawable)?.bitmap
-                     val imageBitmap = bitmap?.asImageBitmap()
+                     val imageBitmap = drawableToBitmap(iconDrawable)?.asImageBitmap()
                      
                      InstalledApp(
                          name = appInfo.loadLabel(pm).toString(),

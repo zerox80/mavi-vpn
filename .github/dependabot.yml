@@ -37,9 +37,4 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 30
 
-  # Maintain GitHub Actions updates
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 30
+

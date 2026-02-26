@@ -40,7 +40,7 @@ WORKDIR /app/backend
 RUN cargo build --release
 
 # Runtime Stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 WORKDIR /app
 
 # Install runtime dependencies for VPN/Networking

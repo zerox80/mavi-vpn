@@ -9,7 +9,7 @@ quinn = { workspace = true, default-features = false, features = ["rustls"] }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
-tun = { version = "0.6", features = ["async"] }
+tun = { version = "0.8", features = ["async"] }
 anyhow = { workspace = true }
 dotenv = "0.15"
 bytes = { workspace = true }
@@ -24,7 +24,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 etherparse = { workspace = true }
-constant_time_eq = "0.3"
+constant_time_eq = "0.4"
 shared = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"

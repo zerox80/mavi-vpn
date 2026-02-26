@@ -1,5 +1,5 @@
-use jni::JNIEnv;
-use jni::objects::{JClass, JString, JObject, JValue};
+use jni::objects::{JClass, JString, JObject};
+use jni::{JValue, Env};
 use jni::sys::{jint, jlong};
 #[cfg(target_os = "android")]
 use std::os::unix::io::{FromRawFd, RawFd, AsRawFd};
@@ -30,14 +30,15 @@ struct VpnSession {
 
 
 
+#[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
-    mut env: JNIEnv,
-    _class: JClass,
-    service: JObject, // Needed to protect the socket
-    token: JString,
-    endpoint: JString,
-    cert_pin: JString,
+pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
+    mut env: Env<'local>,
+    _class: JClass<'local>,
+    service: JObject<'local>, // Needed to protect the socket
+    token: JString<'local>,
+    endpoint: JString<'local>,
+    cert_pin: JString<'local>,
     censorship_resistant: jni::sys::jboolean, // New Argument
 ) -> jlong {
     // 0. Panic Guard
@@ -52,10 +53,11 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
             );
         });
     
-    info!("JNI init called. CR Mode: {}", censorship_resistant != 0);
+    info!("JNI init called. CR Mode: {}", censorship_resistant);
     
     // Helper to extract string safely
-    let get_string = |env: &mut JNIEnv, jstr: &JString| -> Option<String> {
+    #[allow(deprecated)]
+    let get_string = |env: &mut Env, jstr: &JString| -> Option<String> {
          match env.get_string(jstr) {
              Ok(s) => Some(s.into()),
              Err(e) => {
@@ -146,8 +148,8 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
         
         let protected = env.call_method(
             &service, 
-            "protect", 
-            "(I)Z", 
+            jni::jni_str!("protect"), 
+            jni::jni_sig!("(I)Z"), 
             &[JValue::Int(sock_fd as jint)]
         ).and_then(|val| val.z()).unwrap_or(false);
         
@@ -175,7 +177,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
 
         // 3. Connect and Handshake
         let result = rt.block_on(async {
-            connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant != 0).await
+            connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant).await
         });
 
         match result {
@@ -205,33 +207,35 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init(
     }
 }
 
+#[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig<'a>(
-    env: JNIEnv<'a>,
-    _class: JClass<'a>,
+pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig<'local>(
+    mut env: Env<'local>,
+    _class: JClass<'local>,
     handle: jlong,
-) -> JString<'a> {
+) -> jni::sys::jstring {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if handle == 0 { return env.new_string("{}").unwrap_or_else(|_| JString::default()); }
+        if handle == 0 { return env.new_string("{}").unwrap().into_raw(); }
         let session = unsafe { &mut *(handle as *mut VpnSession) };
         
         let json = serde_json::to_string(&session.config).unwrap_or("{}".to_string());
-        env.new_string(json).unwrap_or_else(|_| JString::default())
+        env.new_string(json).unwrap().into_raw()
     }));
     
     match result {
         Ok(s) => s,
         Err(_) => {
             error!("Panic in getConfig");
-            env.new_string("{}").unwrap_or_else(|_| JString::default())
+            env.new_string("{}").unwrap().into_raw()
         }
     }
 }
 
+#[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop(
-    _env: JNIEnv,
-    _class: JClass,
+pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop<'local>(
+    mut _env: Env<'local>,
+    _class: JClass<'local>,
     handle: jlong,
     tun_fd: jint,
 ) {
@@ -255,10 +259,11 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop(
     }));
 }
 
+#[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop(
-    _env: JNIEnv,
-    _class: JClass,
+pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop<'local>(
+    mut _env: Env<'local>,
+    _class: JClass<'local>,
     handle: jlong,
 ) {
     if handle == 0 { return; }
@@ -270,10 +275,11 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop(
     }));
 }
 
+#[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_free(
-    _env: JNIEnv,
-    _class: JClass,
+pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_free<'local>(
+    mut _env: Env<'local>,
+    _class: JClass<'local>,
     handle: jlong,
 ) {
     if handle == 0 { return; }
@@ -285,10 +291,11 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_free(
     }));
 }
 
+#[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_networkChanged(
-    _env: JNIEnv,
-    _class: JClass,
+pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_networkChanged<'local>(
+    mut _env: Env<'local>,
+    _class: JClass<'local>,
     handle: jlong,
 ) {
     if handle == 0 { return; }

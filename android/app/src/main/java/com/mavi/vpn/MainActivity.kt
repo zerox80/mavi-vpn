@@ -289,7 +289,7 @@ fun VpnScreen(
                 label = { Text("Server IP", color = Color.Gray) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                colors = TextFieldDefaults.outlinedTextFieldColors(
+                colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Color(0xFF007AFF),
                     unfocusedBorderColor = Color.DarkGray,
                     focusedTextColor = Color.White,
@@ -305,7 +305,7 @@ fun VpnScreen(
                 label = { Text("Port", color = Color.Gray) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                colors = TextFieldDefaults.outlinedTextFieldColors(
+                colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Color(0xFF007AFF),
                     unfocusedBorderColor = Color.DarkGray,
                     focusedTextColor = Color.White,
@@ -322,7 +322,7 @@ fun VpnScreen(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
-                colors = TextFieldDefaults.outlinedTextFieldColors(
+                colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Color(0xFF007AFF),
                     unfocusedBorderColor = Color.DarkGray,
                     focusedTextColor = Color.White,
@@ -338,7 +338,7 @@ fun VpnScreen(
                 label = { Text("Certificate PIN (SHA256 Hex)", color = Color.Gray) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                colors = TextFieldDefaults.outlinedTextFieldColors(
+                colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Color(0xFF007AFF),
                     unfocusedBorderColor = Color.DarkGray,
                     focusedTextColor = Color.White,
@@ -442,21 +442,22 @@ fun SettingsScreen(
              val pm = context.packageManager
              val packages = pm.getInstalledPackages(0)
              packages.mapNotNull { pkg ->
+                 val appInfo = pkg.applicationInfo ?: return@mapNotNull null
                  // Filter out system apps loosely (optimized for user apps)
-                 val isSystem = (pkg.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+                 val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
                  // We show updated system apps too
-                 val isUpdatedSystem = (pkg.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                 val isUpdatedSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
                  
                  // Show only if it has a launcher intent (user runnable)
                  val launchIntent = pm.getLaunchIntentForPackage(pkg.packageName)
                  
                  if (launchIntent != null && (!isSystem || isUpdatedSystem)) {
-                     val iconDrawable = pkg.applicationInfo.loadIcon(pm)
+                     val iconDrawable = appInfo.loadIcon(pm)
                      val bitmap = (iconDrawable as? BitmapDrawable)?.bitmap
                      val imageBitmap = bitmap?.asImageBitmap()
                      
                      InstalledApp(
-                         name = pkg.applicationInfo.loadLabel(pm).toString(),
+                         name = appInfo.loadLabel(pm).toString(),
                          packageName = pkg.packageName,
                          icon = imageBitmap
                      )

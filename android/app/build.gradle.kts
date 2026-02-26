@@ -1,17 +1,19 @@
+import org.apache.tools.ant.taskdefs.condition.Os
+
 plugins {
     id("com.android.application")
-    id("org.mozilla.rust-android-gradle.rust-android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "com.mavi.vpn"
-    compileSdk = 34
+    compileSdk = 36
     ndkVersion = "28.1.13356709"
 
     defaultConfig {
         applicationId = "com.mavi.vpn"
         minSdk = 26 // Android 8.0 (Oreo) for better VpnService support
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
@@ -28,70 +30,30 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
     buildFeatures {
         compose = true
     }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.4"
-    }
-
-    sourceSets {
-        getByName("main") {
-            jniLibs.srcDirs("src/main/jniLibs")
-        }
-    }
 }
 
-cargo {
-    module = "src/main/rust"
-    libname = "mavivpn"
-    targets = listOf("arm", "arm64", "x86", "x86_64")
-    apiLevel = 26
-    profile = "release" // Force release for speed
-}
-
-tasks.register("copyNativeLibs") {
-    dependsOn("cargoBuild")
-    val targetDir = file("../../target")
-    val jniLibDir = file("src/main/jniLibs")
-
-    doLast {
-        if (!jniLibDir.exists()) {
-            jniLibDir.mkdirs()
-        }
-        
-        // Copy arm64
-        copy {
-            from(File(targetDir, "aarch64-linux-android/release/libmavivpn.so"))
-            into(File(jniLibDir, "arm64-v8a"))
-        }
-
-        // Copy arm
-        copy {
-            from(File(targetDir, "armv7-linux-androideabi/release/libmavivpn.so"))
-            into(File(jniLibDir, "armeabi-v7a"))
-        }
-        
-        // Copy x86
-        copy {
-            from(File(targetDir, "i686-linux-android/release/libmavivpn.so"))
-            into(File(jniLibDir, "x86"))
-        }
-        
-        // Copy x86_64
-        copy {
-            from(File(targetDir, "x86_64-linux-android/release/libmavivpn.so"))
-            into(File(jniLibDir, "x86_64"))
-        }
-    }
+tasks.register<Exec>("cargoBuild") {
+    workingDir = file("src/main/rust")
+    
+    val cargoCommand = if (Os.isFamily(Os.FAMILY_WINDOWS)) "cargo.exe" else "cargo"
+    
+    commandLine(
+        cargoCommand, "ndk",
+        "-t", "armeabi-v7a",
+        "-t", "arm64-v8a",
+        "-t", "x86",
+        "-t", "x86_64",
+        "-o", "../jniLibs",
+        "build", "--release"
+    )
 }
 
 tasks.whenTaskAdded {
-    if (this.name == "mergeDebugJniLibFolders" || this.name == "mergeReleaseJniLibFolders") {
-        this.dependsOn("copyNativeLibs")
+    if (name == "mergeDebugJniLibFolders" || name == "mergeReleaseJniLibFolders") {
+        dependsOn("cargoBuild")
     }
 }
 
@@ -104,4 +66,5 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
 }

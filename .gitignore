@@ -29,3 +29,6 @@ auth_token.txt
 problems-report.html
 android/app/src/main/jniLibs/
 android/java_pid7424.hprof
+.agents/rules/dependency.md
+android/java_pid10748.hprof
+android/.kotlin/sessions/kotlin-compiler-7764236979662921806.salive

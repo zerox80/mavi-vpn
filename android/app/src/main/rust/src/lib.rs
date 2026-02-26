@@ -1,5 +1,5 @@
 use jni::objects::{JClass, JString, JObject};
-use jni::{JValue, Env};
+use jni::{JValue, Env, AttachGuard, EnvUnowned};
 use jni::sys::{jint, jlong};
 #[cfg(target_os = "android")]
 use std::os::unix::io::{FromRawFd, RawFd, AsRawFd};
@@ -33,7 +33,7 @@ struct VpnSession {
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
-    mut env: Env<'local>,
+    env_unowned: EnvUnowned<'local>,
     _class: JClass<'local>,
     service: JObject<'local>, // Needed to protect the socket
     token: JString<'local>,
@@ -41,6 +41,10 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
     cert_pin: JString<'local>,
     censorship_resistant: jni::sys::jboolean, // New Argument
 ) -> jlong {
+    // EnvUnowned is #[repr(transparent)] and FFI-safe.
+    // We must convert it to a usable Env via AttachGuard.
+    let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
+    let mut env = guard.borrow_env_mut();
     // 0. Panic Guard
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         static LOGGER_INIT: Once = Once::new();
@@ -210,10 +214,12 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig<'local>(
-    mut env: Env<'local>,
+    env_unowned: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jni::sys::jstring {
+    let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
+    let env = guard.borrow_env_mut();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if handle == 0 { return env.new_string("{}").unwrap().into_raw(); }
         let session = unsafe { &mut *(handle as *mut VpnSession) };
@@ -234,7 +240,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig<'local>(
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop<'local>(
-    mut _env: Env<'local>,
+    mut _env: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
     tun_fd: jint,
@@ -262,7 +268,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop<'local>(
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop<'local>(
-    mut _env: Env<'local>,
+    mut _env: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
@@ -278,7 +284,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop<'local>(
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_free<'local>(
-    mut _env: Env<'local>,
+    mut _env: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
@@ -294,7 +300,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_free<'local>(
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_networkChanged<'local>(
-    mut _env: Env<'local>,
+    mut _env: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {

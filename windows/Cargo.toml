@@ -7,6 +7,10 @@ edition = "2021"
 name = "mavi-vpn"
 path = "src/main.rs"
 
+[[bin]]
+name = "mavi-vpn-service"
+path = "src/bin/service.rs"
+
 [dependencies]
 shared = { workspace = true }
 tokio = { workspace = true }
@@ -28,6 +32,7 @@ parking_lot = "0.12"
 ctrlc = "3.4"
 
 [target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",

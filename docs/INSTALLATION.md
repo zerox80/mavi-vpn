@@ -74,24 +74,32 @@ The Windows client is an interactive command-line application built on the moder
 2. **Assemble the Files:**
    It is recommended to create a dedicated installation folder for the VPN on your file system (e.g., `C:\MaviVPN\`).
    Copy the following files there:
-   * The newly compiled `target\release\mavi-vpn.exe`
+   * The client CLI `target\release\mavi-vpn.exe`
+   * The background service `target\release\mavi-vpn-service.exe`
    * The driver file `wintun.dll`
 
-3. **MANDATORY: Run as Administrator!**
-   The VPN client deeply integrates with the Windows networking system to modify routes and provide the virtual tunnel interface (TUN). **If started without administrator privileges, it will fail immediately.**
-   * Search for PowerShell or Command Prompt in your Windows Start menu.
-   * **Right-click** it and explicitly select **"Run as administrator"**.
-   * Navigate to your new VPN folder in the terminal:
+3. **Install and Start the Service (Requires Administrator privileges):**
+   The VPN runs as a secure Windows Background Service to modify routes and provide the virtual tunnel interface (TUN). **The service must be installed once.**
+   * Open an Administrator PowerShell or Command Prompt.
+   * Navigate to your new VPN folder:
      ```powershell
      cd C:\MaviVPN\
      ```
-   * Start the application:
+   * Register the background service:
      ```powershell
-     .\mavi-vpn.exe
+     .\mavi-vpn-service.exe install
+     ```
+   * Start the Windows service:
+     ```powershell
+     net start MaviVPNService
      ```
 
-4. **First Connection and Setup:**
-   When you start the client for the first time, it will guide you interactively through the setup and save the details in a `config.json` file, so you don't have to enter them on every start. It looks something like this:
+4. **Connect via CLI (No Admin Required):**
+   After the service is running, any normal user can start the client to connect to the VPN interactively or by command:
+   ```powershell
+   .\mavi-vpn.exe start
+   ```
+   When you start the client for the first time, it will guide you interactively through the setup and save the details in a `config.json` file. It looks something like this:
    ```text
    ╔══════════════════════════════════════╗
    ║         Mavi VPN - Windows           ║
@@ -102,14 +110,22 @@ The Windows client is an interactive command-line application built on the moder
    Certificate PIN (SHA256 hex): [The PIN from data/cert_pin.txt on the server]
    Censorship Resistant Mode? [y/N]: [Answer matching your server's .env]
    ```
+   The client will safely send these credentials to the background service which establishes the connection.
 
-5. **VPN Disconnect:**
-   To safely disconnect the VPN and restore your Windows routing to its previous normal state, return to the console window where the VPN is running and press `Ctrl + C`.
+5. **VPN Disconnect and Status:**
+   To disconnect the VPN, execute:
+   ```powershell
+   .\mavi-vpn.exe stop
+   ```
+   To query the current status:
+   ```powershell
+   .\mavi-vpn.exe status
+   ```
 
 ### Troubleshooting / Debugging
-If the connection fails or drops unexpectedly, you can start the client in a verbose mode for deeper log insights. Open an admin console again and run:
+If the connection fails or drops unexpectedly, verify the service is running (`Get-Service MaviVPNService`) or run the service temporarily in console mode for live debug logs:
 ```powershell
 $env:RUST_LOG = "debug"
-.\mavi-vpn.exe
+.\mavi-vpn-service.exe --console
 ```
 This will provide detailed information on whether the QUIC handshake succeeds or if there are permission issues when creating the WinTUN adapter.

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use ring::digest;
+use sha2::{Sha256, Digest};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 use shared::{icmp, ControlMessage};
@@ -865,7 +865,7 @@ impl PinnedServerVerifier {
     fn new(expected_hash: Vec<u8>) -> Self {
         Self {
             expected_hash,
-            supported: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            supported: rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
         }
     }
 }
@@ -879,8 +879,8 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let cert_hash = digest::digest(&digest::SHA256, end_entity.as_ref());
-        if cert_hash.as_ref() == self.expected_hash.as_slice() {
+        let cert_hash = Sha256::digest(end_entity.as_ref());
+        if cert_hash.as_slice() == self.expected_hash.as_slice() {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General("Certificate PIN mismatch".into()))

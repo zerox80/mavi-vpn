@@ -26,10 +26,11 @@ etherparse = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_json = "1.0"
-ring = "0.17"
+
 wintun = "0.5"
 parking_lot = "0.12"
 ctrlc = "3.4"
+sha2 = "0.10.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

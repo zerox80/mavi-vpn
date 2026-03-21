@@ -78,18 +78,19 @@ The core server logic manages client connections and data flow. It loads server 
 
 ### 👤 5.4 Client Authentication & IP Management
 Assignments of virtual IPs is handled by the **`IpGuard`** mechanism.
-- **Authentication**: Clients send a `ControlMessage::Auth` with a pre-shared token. The server performs a constant-time comparison to prevent timing attacks.
+- **Authentication**: This branch supports both **Token-Based Auth** and **Keycloak OIDC**.
 - **IpGuard**: Ensures that assigned IPv4 and IPv6 addresses are automatically released back to the pool when a client disconnects. This RAII pattern prevents IP leaks.
 - **IP Pools**: Managed in `backend/src/state.rs` using `free_ips` and `free_ips_v6` vectors for O(1) complexity.
 
 ---
 
-## 🧩 6. Enterprise Roadmap: Keycloak OIDC
-*Note: This feature is currently in the `beta-keycloak` branch and is not yet merged into main.*
+## 🧩 6. Advanced Authentication: Keycloak OIDC
+*Status: This is an ACTIVE feature in the `beta-keycloak` branch.*
 
-Future releases of Mavi VPN will support enterprise-grade identity management via **Keycloak**.
-- **OIDC Flow**: The server will act as a Resource Server, fetching certificates from a **JWKS endpoint**.
-- **JWT Handling**: Clients will provide an Access Token which is validated using the `jsonwebtoken` crate.
+This branch integrates enterprise-grade identity management via **Keycloak**.
+- **OIDC Flow**: The server acts as a Resource Server. It fetches public certificates from Keycloak's **JWKS endpoint** on startup.
+- **JWT Validation**: Every client connection is verified against the Keycloak realm. The server uses the `jsonwebtoken` crate to verify the signature, expiration, and audience of the client's Access Token.
+- **Benefits**: Centralized MFA, user session management, and granular access control via Keycloak's administration console.
 
 ---
 

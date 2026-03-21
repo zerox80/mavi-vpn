@@ -281,6 +281,8 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop<'local>(
         
         info!("Stop requested for session");
         session.stop_flag.store(true, Ordering::SeqCst);
+        // Close the QUIC connection to unblock read_datagram() immediately
+        session.connection.close(0u32.into(), b"user_disconnect");
     }));
 }
 

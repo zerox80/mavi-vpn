@@ -59,6 +59,14 @@ server {
 
 ## 🚀 3. Deployment
 
+### 🔄 Step 0: Syncing the Branch
+Since the `beta-keycloak` branch was rebased and force-pushed, a standard `git pull` will fail. Run this on your server:
+```bash
+git fetch origin beta-keycloak
+git reset --hard origin/beta-keycloak
+```
+
+### ⚙️ Step 1: Update Configuration
 1.  Update `.env` as shown above.
 2.  Restart the backend:
     ```bash

@@ -25,7 +25,7 @@ async fn main() {
         let cmd = args[0].to_lowercase();
         match cmd.as_str() {
             "start" => {
-                match load_or_prompt_config() {
+                match load_or_prompt_config().await {
                     Ok(config) => send_request(IpcRequest::Start(config)).await,
                     Err(e) => Err(e),
                 }
@@ -71,7 +71,7 @@ async fn interactive_mode() -> Result<()> {
         }
         Ok(IpcResponse::Status { running: false, .. }) => {
             println!("VPN is disconnected.");
-            let config = load_or_prompt_config()?;
+            let config = load_or_prompt_config().await?;
             send_request(IpcRequest::Start(config)).await?;
             
             println!("\n✅ VPN is now CONNECTED!");
@@ -169,7 +169,7 @@ fn save_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn load_or_prompt_config() -> Result<Config> {
+async fn load_or_prompt_config() -> Result<Config> {
     if let Some(saved) = load_config() {
         println!("Gespeicherte Konfiguration gefunden:");
         println!("  Endpoint: {}", saved.endpoint);
@@ -188,21 +188,86 @@ fn load_or_prompt_config() -> Result<Config> {
         println!();
     }
     
-    let config = prompt_new_config()?;
+    let config = prompt_new_config().await?;
     save_config(&config)?;
     Ok(config)
 }
 
-fn prompt_new_config() -> Result<Config> {
+async fn fetch_keycloak_token(url: &str, realm: &str, client_id: &str, user: &str, pass: &str) -> Result<String> {
+    let endpoint = format!("{}/realms/{}/protocol/openid-connect/token", url.trim_end_matches('/'), realm);
+    
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+        
+    let params = [
+        ("client_id", client_id),
+        ("grant_type", "password"),
+        ("username", user),
+        ("password", pass),
+    ];
+    
+    let res = client.post(&endpoint)
+        .form(&params)
+        .send().await
+        .context("Verbindung zu Keycloak fehlgeschlagen")?;
+        
+    if !res.status().is_success() {
+        let error_text = res.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Keycloak Authentifizierung fehlgeschlagen: {}", error_text));
+    }
+    
+    let json: serde_json::Value = res.json().await?;
+    let access_token = json["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Kein access_token in Keycloak Antwort gefunden"))?;
+        
+    Ok(access_token.to_string())
+}
+
+async fn prompt_new_config() -> Result<Config> {
     let mut stdout = io::stdout();
 
     print!("Server Endpoint (z.B. vpn.example.com:443): ");
     stdout.flush()?;
     let endpoint = read_line()?;
 
-    print!("Auth Token: ");
+    print!("Nutze Keycloak Authentifizierung? [j/N]: ");
     stdout.flush()?;
-    let token = read_line()?;
+    let is_keycloak = read_line()?.to_lowercase();
+    
+    let token;
+    if is_keycloak == "j" || is_keycloak == "ja" || is_keycloak == "y" || is_keycloak == "yes" {
+        print!("Keycloak Server URL (z.B. https://auth.example.com): ");
+        stdout.flush()?;
+        let kc_url = read_line()?;
+        
+        print!("Realm (default: mavi-vpn): ");
+        stdout.flush()?;
+        let mut realm = read_line()?;
+        if realm.is_empty() { realm = "mavi-vpn".to_string(); }
+        
+        print!("Client ID (default: mavi-client): ");
+        stdout.flush()?;
+        let mut client_id = read_line()?;
+        if client_id.is_empty() { client_id = "mavi-client".to_string(); }
+        
+        print!("Username: ");
+        stdout.flush()?;
+        let username = read_line()?;
+        
+        print!("Password: ");
+        stdout.flush()?;
+        let password = read_line()?;
+        
+        println!("Authentifiziere mit Keycloak...");
+        token = fetch_keycloak_token(&kc_url, &realm, &client_id, &username, &password).await?;
+        println!("Keycloak Authentifizierung erfolgreich! JWT Token bezogen.");
+    } else {
+        print!("Auth Token: ");
+        stdout.flush()?;
+        token = read_line()?;
+    }
 
     print!("Certificate PIN (SHA256 hex): ");
     stdout.flush()?;

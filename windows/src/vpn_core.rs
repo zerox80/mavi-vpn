@@ -432,26 +432,78 @@ const NRPT_COMMENT: &str = "MaviVPN";
 /// This prevents DNS leaks where Windows might try local DNS even when the VPN is up.
 fn set_nrpt_dns_rule(dns_v4: Ipv4Addr, dns_v6: Option<Ipv6Addr>) {
     let dns_servers = match dns_v6 {
-        Some(v6) => format!("'{}','{}'", dns_v4, v6),
+        Some(v6) => format!("'{}','{}'" , dns_v4, v6),
         None => format!("'{}'", dns_v4),
     };
 
-    // 1. Add rule for the root namespace "." to capture all queries
+    // 1. Add NRPT rule for the root namespace "." to capture all queries
     let nrpt_cmd = format!("Add-DnsClientNrptRule -Namespace '.' -NameServers {} -Comment '{}' -ErrorAction SilentlyContinue", dns_servers, NRPT_COMMENT);
     let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &nrpt_cmd]).output();
 
-    // 2. Set adapter priority
+    // 2. Disable Smart Multi-Homed Name Resolution (SMHNR)
+    // Windows sends DNS queries over ALL adapters simultaneously for speed.
+    // This is the #1 cause of DNS leaks - it bypasses NRPT and sends queries
+    // to physical adapter DNS servers (like Google 8.8.8.8 or ISP DNS).
+    let _ = std::process::Command::new("reg").args([
+        "add", r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient",
+        "/v", "DisableSmartNameResolution", "/t", "REG_DWORD", "/d", "1", "/f"
+    ]).output();
+    // Also disable via the newer Group Policy path
+    let _ = std::process::Command::new("reg").args([
+        "add", r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters",
+        "/v", "DisableParallelAandAAAA", "/t", "REG_DWORD", "/d", "1", "/f"
+    ]).output();
+
+    // 3. Set VPN adapter to highest priority
     let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", "Get-NetAdapter -Name 'MaviVPN*' | Set-NetIPInterface -InterfaceMetric 1"]).output();
 
-    // 3. Flush cache
+    // 4. Suppress DNS registration on physical adapters to prevent them from being used
+    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
+        "Get-NetAdapter | Where-Object { $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue }"
+    ]).output();
+
+    // 5. Flush DNS cache and re-register to pick up the new NRPT rules
     let _ = std::process::Command::new("ipconfig").args(["/flushdns"]).output();
+    let _ = std::process::Command::new("ipconfig").args(["/registerdns"]).output();
+
+    // 6. Restart DNS Client service to ensure NRPT + SMHNR changes take effect
+    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
+        "Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue"
+    ]).output();
+
+    info!("DNS leak prevention configured: NRPT + SMHNR disabled");
 }
 
-/// Cleans up NRPT rules on exit.
+/// Cleans up NRPT rules and restores DNS settings on exit.
 fn remove_nrpt_dns_rule() {
+    // 1. Remove NRPT rules
     let cmd = format!("Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue", NRPT_COMMENT);
     let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &cmd]).output();
+
+    // 2. Re-enable Smart Multi-Homed Name Resolution
+    let _ = std::process::Command::new("reg").args([
+        "delete", r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient",
+        "/v", "DisableSmartNameResolution", "/f"
+    ]).output();
+    let _ = std::process::Command::new("reg").args([
+        "delete", r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters",
+        "/v", "DisableParallelAandAAAA", "/f"
+    ]).output();
+
+    // 3. Restore DNS registration on physical adapters
+    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
+        "Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue }"
+    ]).output();
+
+    // 4. Flush DNS cache
     let _ = std::process::Command::new("ipconfig").args(["/flushdns"]).output();
+    
+    // 5. Restart DNS Client service to restore normal behavior
+    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
+        "Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue"
+    ]).output();
+
+    info!("DNS leak prevention removed, normal DNS restored");
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {

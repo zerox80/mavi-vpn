@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use quinn::{Endpoint, ServerConfig};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

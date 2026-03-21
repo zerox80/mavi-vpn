@@ -5,49 +5,66 @@ use tokio::sync::mpsc;
 use anyhow::{Result, anyhow};
 use std::sync::Mutex;
 
-/// A channel to send specific IP packets to a connected client task.
+/// A channel for sending raw IP packets to the specific task handling a client connection.
 pub type ClientTx = mpsc::Sender<bytes::Bytes>;
 
-/// Manages the state of the VPN server: connected peers and IP allocation.
+/// Global application state responsible for IP address management
+/// and tracking active VPN clients (peers).
+///
+/// This structure is shared across many tasks via `Arc<AppState>`.
 pub struct AppState {
-    /// Map of Virtual IP -> Channel to send packets to that client
+    /// Mapping of Virtual IPv4 -> Packet Sender.
+    /// Used by the TUN reader to route incoming internet traffic to the correct QUIC connection.
     pub peers: DashMap<Ipv4Addr, ClientTx>,
+    
+    /// Mapping of Virtual IPv6 -> Packet Sender.
     pub peers_v6: DashMap<Ipv6Addr, ClientTx>,
 
-    /// The network range we are managing (e.g., 10.8.0.0/24)
+    /// The IPv4 subnet managed by this server (e.g. 10.8.0.0/24).
     pub network: Ipv4Network,
+    
+    /// The IPv6 subnet managed by this server (Unique Local Address scope, default fd00::/64).
     pub network_v6: Ipv6Network,
 
-    /// Stack of free IPs for O(1) allocation
+    /// Stack of available (unassigned) IPv4 addresses.
+    /// Handled via a Mutex for atomic lease/release.
     free_ips: Mutex<Vec<Ipv4Addr>>,
+    
+    /// Stack of available (unassigned) IPv6 addresses.
     free_ips_v6: Mutex<Vec<Ipv6Addr>>,
 }
 
 impl AppState {
+    /// Initialises the application state and pre-fills the address pools.
+    ///
+    /// # Arguments
+    /// - `cidr` - The IPv4 network specification (e.g., "10.8.0.0/24").
     pub fn new(cidr: &str) -> Result<Self> {
-        let network: Ipv4Network = cidr.parse().map_err(|_| anyhow!("Invalid CIDR"))?;
+        let network: Ipv4Network = cidr.parse().map_err(|_| anyhow!("Invalid CIDR format: {}", cidr))?;
+        // Internal IPv6 network (ULA range)
         let network_v6: Ipv6Network = "fd00::/64".parse().unwrap();
         
-        // Pre-fill free IPs (excluding Network, Gateway, Broadcast)
+        // --- Populate IPv4 pool ---
         let mut free_ips = Vec::new();
-        let gateway = network.nth(1).unwrap();
+        let gateway = network.nth(1).unwrap(); // By convention, server is .1
         let broadcast = network.broadcast();
         
         for ip in network.iter() {
+            // Exclude the network address, the gateway (.1), and the broadcast address (.255)
             if ip != network.network() && ip != gateway && ip != broadcast {
                 free_ips.push(ip);
             }
         }
-        // Reverse so we allocate from .2 upwards (pop from end)
+        // Reverse so we allocate from .2 upwards (pop from end is O(1))
         free_ips.reverse();
 
-        // IPv6 - O(n) initialization using iterator chaining
-        // Skip network (0) and gateway (1), take next 5000
+        // --- Populate IPv6 pool ---
+        // For performance, we pre-allocate only the first 5000 suffix addresses
         let mut free_ips_v6: Vec<Ipv6Addr> = network_v6.iter()
-            .skip(2)
+            .skip(2) // Skip ::0 and ::1 (gateway)
             .take(5000)
             .collect();
-        free_ips_v6.reverse(); // Reverse so pop() gives us lowest IPs first
+        free_ips_v6.reverse();
 
         Ok(Self {
             peers: DashMap::new(),
@@ -59,23 +76,27 @@ impl AppState {
         })
     }
 
-    /// Allocate a new free IPv4 address (O(1))
+    /// Leases a free IPv4 address from the pool.
+    ///
+    /// # Errors
+    /// Returns an error if the pool is exhausted.
     pub fn assign_ip(&self) -> Result<Ipv4Addr> {
         let mut free = self.free_ips.lock().unwrap_or_else(|e| e.into_inner());
-        free.pop().ok_or_else(|| anyhow!("No IPv4 addresses available"))
+        free.pop().ok_or_else(|| anyhow!("VPN IPv4 pool exhausted"))
     }
 
-    /// Allocate a new free IPv6 address (O(1))
+    /// Leases a free IPv6 address from the pool.
     pub fn assign_ipv6(&self) -> Result<Ipv6Addr> {
         let mut free = self.free_ips_v6.lock().unwrap_or_else(|e| e.into_inner());
-        free.pop().ok_or_else(|| anyhow!("No IPv6 addresses available"))
+        free.pop().ok_or_else(|| anyhow!("VPN IPv6 pool exhausted"))
     }
 
-    /// Release IP addresses (O(1))
+    /// Returns the leasable IPs to the pool and removes the peer registration.
+    ///
+    /// This is typically called by the `IpGuard` when a client disconnects.
     pub fn release_ips(&self, ip4: Ipv4Addr, ip6: Ipv6Addr) {
         {
             let mut free = self.free_ips.lock().unwrap_or_else(|e| e.into_inner());
-            // We push back to stack. Order doesn't strictly matter for correctness.
             free.push(ip4);
         }
         {
@@ -86,16 +107,19 @@ impl AppState {
         self.peers_v6.remove(&ip6);
     }
 
+    /// Associates an IPv4/IPv6 pair with an async sender channel for a connected client.
     pub fn register_client(&self, ip4: Ipv4Addr, ip6: Ipv6Addr, tx: ClientTx) {
         self.peers.insert(ip4, tx.clone());
         self.peers_v6.insert(ip6, tx);
     }
 
+    /// Returns the server's internal IPv4 address (the VPN Gateway).
     pub fn gateway_ip(&self) -> Ipv4Addr {
-        self.network.nth(1).unwrap()
+        self.network.nth(1).expect("Network size too small")
     }
 
+    /// Returns the server's internal IPv6 address (the VPN Gateway).
     pub fn gateway_ip_v6(&self) -> Ipv6Addr {
-        self.network_v6.iter().nth(1).unwrap()
+        self.network_v6.iter().nth(1).expect("IPv6 network unexpectedly empty")
     }
 }

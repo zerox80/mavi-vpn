@@ -72,6 +72,8 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
         backoff = next_backoff;
     }
 
+    // Cleanup DNS leak prevention
+    remove_nrpt_dns_rule();
     info!("Disconnected.");
     Ok(())
 }
@@ -399,10 +401,14 @@ async fn connect_and_handshake(
 
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
-    let mut client_crypto = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into()
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .dangerous()
+    .with_custom_certificate_verifier(verifier)
+    .with_no_client_auth();
 
     if censorship_resistant {
         client_crypto.alpn_protocols = vec![b"h3".to_vec()];
@@ -715,6 +721,9 @@ fn set_adapter_ip(
         warn!("Failed to add host route exception: {}. Connection might be unstable.", e);
     }
 
+    // Prevent DNS Leak: Force all DNS through VPN using NRPT (Name Resolution Policy Table)
+    set_nrpt_dns_rule(dns, dns_v6);
+
     Ok(())
 }
 
@@ -843,6 +852,61 @@ fn netmask_to_prefix_len(netmask: Ipv4Addr) -> Result<u8> {
         return Err(anyhow::anyhow!("Invalid netmask {}", netmask));
     }
     Ok(prefix)
+}
+
+const NRPT_COMMENT: &str = "MaviVPN";
+
+fn set_nrpt_dns_rule(dns_v4: Ipv4Addr, dns_v6: Option<Ipv6Addr>) {
+    // Build DNS server list for NRPT
+    let dns_servers = match dns_v6 {
+        Some(v6) => format!("'{}','{}'", dns_v4, v6),
+        None => format!("'{}'", dns_v4),
+    };
+
+    // 1. Add NRPT rule via PowerShell (catch-all namespace "." forces all DNS through VPN)
+    let nrpt_cmd = format!(
+        "Add-DnsClientNrptRule -Namespace '.' -NameServers {} -Comment '{}' -ErrorAction SilentlyContinue",
+        dns_servers, NRPT_COMMENT
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &nrpt_cmd])
+        .output();
+    match &out {
+        Ok(o) if o.status.success() => info!("NRPT rule added: all DNS -> {}", dns_servers),
+        Ok(o) => warn!("NRPT rule failed: {}", String::from_utf8_lossy(&o.stderr)),
+        Err(e) => warn!("NRPT PowerShell failed: {}", e),
+    }
+
+    // 2. Set VPN adapter interface metric to 1 (highest priority)
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", 
+            "Get-NetAdapter -Name 'MaviVPN*' | Set-NetIPInterface -InterfaceMetric 1 -ErrorAction SilentlyContinue"])
+        .output();
+
+    // 3. Flush DNS cache
+    let _ = std::process::Command::new("ipconfig")
+        .args(["/flushdns"])
+        .output();
+
+    info!("DNS Leak Prevention enabled (NRPT + Interface Metric)");
+}
+
+fn remove_nrpt_dns_rule() {
+    // Remove all NRPT rules with our comment
+    let cmd = format!(
+        "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue",
+        NRPT_COMMENT
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &cmd])
+        .output();
+
+    // Flush DNS cache
+    let _ = std::process::Command::new("ipconfig")
+        .args(["/flushdns"])
+        .output();
+
+    info!("NRPT DNS rule removed (DNS Leak Prevention disabled)");
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {

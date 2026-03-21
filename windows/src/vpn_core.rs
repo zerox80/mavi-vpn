@@ -108,9 +108,9 @@ fn create_udp_socket() -> Result<std::net::UdpSocket> {
     // V6ONLY = false allows this socket to receive IPv4 traffic as well.
     socket2_sock.set_only_v6(false)?;
     socket2_sock.bind(&socket2::SockAddr::from(std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0)))?;
-    // Set larger socket buffers for high-throughput stability on Windows (2MB for GSO bursts)
-    let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024); 
-    let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024); 
+    // Set larger socket buffers for high-throughput stability on Windows (4MB for GSO bursts)
+    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024); 
+    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); 
 
     Ok(socket2_sock.into())
 }
@@ -286,8 +286,13 @@ async fn connect_and_handshake(
     transport_config.min_mtu(1360);
     transport_config.enable_segmentation_offload(true);
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    
+    // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
 
-    let client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
+    client_config.transport_config(Arc::new(transport_config));
     let mut endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
     endpoint.set_default_client_config(client_config);
 

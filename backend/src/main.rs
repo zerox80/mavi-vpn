@@ -59,8 +59,12 @@ async fn main() -> Result<()> {
     let (certs, key) = cert::load_or_generate_certs(cert_path, key_path)?;
 
     // 4. Setup QUIC Server Config
-    let mut server_crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
+    let mut server_crypto = rustls::ServerConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into()
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_no_client_auth()
         .with_single_cert(certs, key)?;
     
     if config.censorship_resistant {

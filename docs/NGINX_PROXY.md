@@ -6,7 +6,8 @@ This guide explains how to deploy the Mavi VPN backend (Keycloak + Traefik) behi
 ```mermaid
 graph LR
     User[User/Client] -- ":443 (HTTPS)" --> Nginx[Nginx (Wildcard SSL)]
-    Nginx -- ":11443 (HTTPS/Decrypted)" --> Traefik[Traefik]
+    User[User/Client] -- ":443 (HTTPS)" --> Nginx[Nginx (Wildcard SSL)]
+    Nginx -- ":11443 (HTTP)" --> Traefik[Traefik]
     Traefik -- ":8080 (HTTP)" --> Keycloak[Keycloak]
 ```
 
@@ -37,8 +38,8 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
 
     location / {
-        # Proxy to Traefik on port 11443
-        proxy_pass https://127.0.0.1:11443;
+        # Proxy to Traefik on port 11443 (HTTP)
+        proxy_pass http://127.0.0.1:11443;
         
         # Required Headers
         proxy_set_header Host $host;
@@ -46,8 +47,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # Since Traefik uses a self-signed fallback when ACME is off
-        proxy_ssl_verify off;
+        # (REMOVED) proxy_ssl_verify off (Not needed for plain HTTP)
 
         # WebSocket support (Required for some Keycloak interactions)
         proxy_http_version 1.1;

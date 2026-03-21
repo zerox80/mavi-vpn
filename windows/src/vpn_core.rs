@@ -9,10 +9,8 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use sha2::{Sha256, Digest};
-use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use shared::{icmp, ControlMessage};
-use std::io::{self, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -455,6 +453,7 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Custom certificate verifier that trusts only a specific SHA-256 fingerprint.
+#[derive(Debug)]
 struct PinnedServerVerifier {
     expected_hash: Vec<u8>,
     supported: rustls::crypto::WebPkiSupportedAlgorithms,

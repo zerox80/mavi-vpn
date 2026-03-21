@@ -54,14 +54,24 @@ async fn interactive_mode() -> Result<()> {
             print!("Do you want to stop it? [y/N]: ");
             io::stdout().flush()?;
             let input = read_line()?.to_lowercase();
-            if input == "y" || input == "yes" || input == "j" || input == "ja" {
+            if input == "y" || input == "yes" {
                 send_request(IpcRequest::Stop).await?;
+            } else {
+                println!("Leaving VPN running in background. Goodbye!");
             }
         }
         Ok(IpcResponse::Status { running: false, .. }) => {
             println!("VPN is disconnected.");
             let config = load_or_prompt_config()?;
             send_request(IpcRequest::Start(config)).await?;
+            
+            println!("\n✅ VPN is now CONNECTED!");
+            println!("To safely DISCONNECT and exit, press Enter...");
+            let _ = read_line();
+            
+            println!("Disconnecting...");
+            send_request(IpcRequest::Stop).await?;
+            println!("✅ Disconnected. Goodbye!");
         }
         Err(e) if e.to_string().contains("Connection refused") => {
             println!("Error: The Mavi VPN Service is not running.");
@@ -74,10 +84,6 @@ async fn interactive_mode() -> Result<()> {
         }
         _ => {}
     }
-
-    println!();
-    println!("Press Enter to exit...");
-    let _ = read_line();
 
     Ok(())
 }

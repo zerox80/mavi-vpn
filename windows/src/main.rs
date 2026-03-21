@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 mod ipc;
+mod oauth;
 use ipc::{Config, IpcRequest, IpcResponse};
 
 const CONFIG_FILE: &str = "config.json";
@@ -193,37 +194,7 @@ async fn load_or_prompt_config() -> Result<Config> {
     Ok(config)
 }
 
-async fn fetch_keycloak_token(url: &str, realm: &str, client_id: &str, user: &str, pass: &str) -> Result<String> {
-    let endpoint = format!("{}/realms/{}/protocol/openid-connect/token", url.trim_end_matches('/'), realm);
-    
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-        
-    let params = [
-        ("client_id", client_id),
-        ("grant_type", "password"),
-        ("username", user),
-        ("password", pass),
-    ];
-    
-    let res = client.post(&endpoint)
-        .form(&params)
-        .send().await
-        .context("Verbindung zu Keycloak fehlgeschlagen")?;
-        
-    if !res.status().is_success() {
-        let error_text = res.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Keycloak Authentifizierung fehlgeschlagen: {}", error_text));
-    }
-    
-    let json: serde_json::Value = res.json().await?;
-    let access_token = json["access_token"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Kein access_token in Keycloak Antwort gefunden"))?;
-        
-    Ok(access_token.to_string())
-}
+// fetch_keycloak_token removed, now using browser-based oauth::start_oauth_flow
 
 async fn prompt_new_config() -> Result<Config> {
     let mut stdout = io::stdout();
@@ -252,17 +223,8 @@ async fn prompt_new_config() -> Result<Config> {
         let mut client_id = read_line()?;
         if client_id.is_empty() { client_id = "mavi-client".to_string(); }
         
-        print!("Username: ");
-        stdout.flush()?;
-        let username = read_line()?;
-        
-        print!("Password: ");
-        stdout.flush()?;
-        let password = read_line()?;
-        
-        println!("Authentifiziere mit Keycloak...");
-        token = fetch_keycloak_token(&kc_url, &realm, &client_id, &username, &password).await?;
-        println!("Keycloak Authentifizierung erfolgreich! JWT Token bezogen.");
+        token = oauth::start_oauth_flow(&kc_url, &realm, &client_id).await?;
+        println!("Keycloak Login abgeschlossen! Caching JWT Token...");
     } else {
         print!("Auth Token: ");
         stdout.flush()?;

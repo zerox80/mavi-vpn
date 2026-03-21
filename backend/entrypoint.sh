@@ -31,18 +31,22 @@ VPN_NETWORK=${VPN_NETWORK:-"10.8.0.0/24"}
 # We only want to append our specific masquerade rule.
 
 # IPv4 NAT
-iptables -t nat -C POSTROUTING -s $VPN_NETWORK -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s $VPN_NETWORK -o $DEFAULT_IFACE -j MASQUERADE
-iptables -C FORWARD -i tun0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tun0 -j ACCEPT
-iptables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+# Use -I (Insert) to be at the top of the chain to avoid being blocked by trailing DROP rules.
+# Use tun+ wildcard to catch any TUN device name (tun0, tun1, etc.) assigned by the kernel.
+iptables -t nat -I POSTROUTING -s $VPN_NETWORK -o $DEFAULT_IFACE -j MASQUERADE
+iptables -I FORWARD -i tun+ -j ACCEPT
+iptables -I FORWARD -o tun+ -j ACCEPT
+iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 # IPv6 Support
 echo "Enabling IPv6 Forwarding..."
 sysctl -w net.ipv6.conf.all.forwarding=1 || echo "Failed to enable ipv6 forwarding (container might be restricted)"
 
 # IPv6 NAT
-ip6tables -t nat -C POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null || echo "ip6tables NAT failed"
-ip6tables -C FORWARD -i tun0 -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i tun0 -j ACCEPT 2>/dev/null
-ip6tables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+ip6tables -t nat -I POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null || echo "ip6tables NAT failed"
+ip6tables -I FORWARD -i tun+ -j ACCEPT 2>/dev/null
+ip6tables -I FORWARD -o tun+ -j ACCEPT 2>/dev/null
+ip6tables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
 
 echo "NAT configured: $VPN_NETWORK -> $DEFAULT_IFACE (IPv4)"
 echo "NAT configured: IPv6 -> $DEFAULT_IFACE"

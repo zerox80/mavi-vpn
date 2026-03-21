@@ -108,7 +108,9 @@ fn create_udp_socket() -> Result<std::net::UdpSocket> {
     // V6ONLY = false allows this socket to receive IPv4 traffic as well.
     socket2_sock.set_only_v6(false)?;
     socket2_sock.bind(&socket2::SockAddr::from(std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0)))?;
-    socket2_sock.set_nonblocking(true)?;
+    // Set larger socket buffers for high-throughput stability on Windows (2MB for GSO bursts)
+    let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024); 
+    let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024); 
 
     Ok(socket2_sock.into())
 }
@@ -277,8 +279,8 @@ async fn connect_and_handshake(
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
     
-    // MTU PINNING: We manually set 1360 to ensure 1280 payloads always fit over QUIC.
-    // Disabling auto-discovery prevents oscillating MTUs on unstable paths.
+    // MTU PINNING: 1360 Wire MTU to support 1280 payload over QUIC/UDP/IP.
+    // GSO (segmentation offload) is enabled for maximum performance as requested.
     transport_config.mtu_discovery_config(None);
     transport_config.initial_mtu(1360);
     transport_config.min_mtu(1360);

@@ -11,7 +11,7 @@ members = [
 shared = { path = "shared" }
 tokio = { version = "1.0", features = ["full"] }
 quinn = { version = "0.11", features = ["rustls"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 anyhow = "1.0"
 bytes = "1.0"
 socket2 = { version = "0.6", features = ["all"] }
@@ -19,7 +19,7 @@ serde = { version = "1.0", features = ["derive"] }
 bincode = { package = "bincode-next", version = "3.0.0-rc.2", features = ["serde"] }
 tracing = "0.1"
 time = "=0.3.36"
-rcgen = "0.14"
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 rustls-pemfile = "2.0"
 ipnetwork = "0.21"
 etherparse = "0.19"

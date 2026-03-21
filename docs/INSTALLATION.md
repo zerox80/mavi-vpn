@@ -51,6 +51,10 @@ Use this if you already run Nginx/Apache on Port 443.
 * `TRAEFIK_ACME_RESOLVER=` (Leave empty! Traefik internal SSL is disabled).
 * Check out [`docs/NGINX_PROXY.md`](NGINX_PROXY.md) for the exact Nginx `location /` configuration to proxy traffic to port 11443.
 
+**4. Performance Tuning (Critical for High-Speed)**
+* `VPN_MTU=1280`: **(Default)** This sets the TUN adapter payload size. Do not change this unless you know what you're doing. 1280 ensures the final QUIC packets (including headers) stay within 1360-1400 bytes, which is compatible with most mobile and residential networks.
+* **Socket Buffers**: The system now automatically requests **4MB** of OS-level UDP buffer space on both the server and client to prevent packet loss during high-speed bursts (GSO).
+
 ### Step 3: Start the Server
 
 ```bash
@@ -72,7 +76,9 @@ If you enabled Keycloak, it starts completely empty. You must create the Realm a
    - **Client authentication**: `Off` (We use a Public Client with PKCE).
    - **Standard flow**: `On` (Required for browser-based login).
    - Click Next.
-   - **Valid redirect URIs**: Enter `http://127.0.0.1:*` and `http://localhost:*` (This allows the Windows CLI to receive the local login callback).
+   - **Valid redirect URIs**: Enter these two lines:
+     1. `http://127.0.0.1:*` (For Windows CLI)
+     2. `mavivpn://oauth` (For Android App)
    - Click Save.
 5. On the left menu, click **Users** -> **Add user**.
    - Create a user for yourself.
@@ -135,3 +141,40 @@ If the client fails, check the Windows service logs by running it manually in an
 $env:RUST_LOG = "debug"
 .\mavi-vpn-service.exe --console
 ```
+
+---
+
+## 3. Android Client Installation
+
+The Android client is built as a native Kotlin app with a bundled Rust core for the VPN logic.
+
+### Prerequisites
+* **Android Studio** (Koala or newer).
+* **Android SDK 36** (target).
+* **Rust** with `cargo-ndk` installed:
+  ```bash
+  cargo install cargo-ndk
+  rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+  ```
+
+### Step-by-Step Guide
+
+**1. Configure the Backend:**
+Ensure your Keycloak client is configured with the `mavivpn://oauth` redirect URI as described in Section 1, Step 4.
+
+**2. Build the App:**
+1. Open the `/android` folder in Android Studio.
+2. The project will automatically sync and build the Rust core (via `cargoBuild` task in `build.gradle.kts`).
+3. Build the APK via **Build -> Build Bundle(s) / APK(s) -> Build APK(s)**.
+
+**3. Run and Login:**
+1. Install the APK on your Android device.
+2. Open **MAVI VPN**.
+3. Use the **"Login with Keycloak"** button.
+4. If it's your first time, click **"Edit Keycloak Server"** to enter your server URL and realm.
+5. After login, you'll be redirected back to the app with your token automatically filled.
+6. Enter your **Server Endpoint** and **Certificate PIN**.
+7. Click **CONNECT**.
+
+**4. Split Tunneling:**
+Go to **Settings** (Gear icon) to select which apps should bypass the VPN (Exclude mode) or which apps alone should use it (Include mode).

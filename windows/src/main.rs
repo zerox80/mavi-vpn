@@ -171,7 +171,7 @@ fn save_config(config: &Config) -> Result<()> {
 }
 
 async fn load_or_prompt_config() -> Result<Config> {
-    if let mut saved = load_config() {
+    if let Some(mut saved) = load_config() {
         println!("Gespeicherte Konfiguration gefunden:");
         println!("  Endpoint: {}", saved.endpoint);
         if saved.kc_auth.unwrap_or(false) {

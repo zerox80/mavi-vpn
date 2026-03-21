@@ -41,9 +41,7 @@ services:
       # Entry points
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
-      # HTTP -> HTTPS Redirect
-      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # (REMOVED) Global HTTP -> HTTPS Redirect (Nginx handles SSL)
       # Let's Encrypt Resolver
       - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
       - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL}"
@@ -67,10 +65,7 @@ services:
     container_name: web-server
     labels:
       - "traefik.enable=true"
-      # Router for HTTPS
+      # Router for HTTP (Nginx handles SSL)
       - "traefik.http.routers.web-server.rule=Host(`${DOMAIN_NAME}`)"
-      - "traefik.http.routers.web-server.entrypoints=websecure"
-      # TLS Config: Use resolver from ENV, or fallback to manual/self-signed if empty/commented
-      # If TRAEFIK_ACME_RESOLVER is set to 'myresolver', LE is used.
-      # If it's invalid or empty, it might default to self-signed.
-      - "traefik.http.routers.web-server.tls.certresolver=${TRAEFIK_ACME_RESOLVER:-myresolver}"
+      - "traefik.http.routers.web-server.entrypoints=web"
+      # (REMOVED) Internal ACME TLS Config

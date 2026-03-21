@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 mod ipc;
+mod oauth;
 use ipc::{Config, IpcRequest, IpcResponse};
 
 const CONFIG_FILE: &str = "config.json";
@@ -25,7 +26,7 @@ async fn main() {
         let cmd = args[0].to_lowercase();
         match cmd.as_str() {
             "start" => {
-                match load_or_prompt_config() {
+                match load_or_prompt_config().await {
                     Ok(config) => send_request(IpcRequest::Start(config)).await,
                     Err(e) => Err(e),
                 }
@@ -71,7 +72,7 @@ async fn interactive_mode() -> Result<()> {
         }
         Ok(IpcResponse::Status { running: false, .. }) => {
             println!("VPN is disconnected.");
-            let config = load_or_prompt_config()?;
+            let config = load_or_prompt_config().await?;
             send_request(IpcRequest::Start(config)).await?;
             
             println!("\n✅ VPN is now CONNECTED!");
@@ -169,11 +170,15 @@ fn save_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn load_or_prompt_config() -> Result<Config> {
-    if let Some(saved) = load_config() {
+async fn load_or_prompt_config() -> Result<Config> {
+    if let Some(mut saved) = load_config() {
         println!("Gespeicherte Konfiguration gefunden:");
         println!("  Endpoint: {}", saved.endpoint);
-        println!("  Token: {}...", &saved.token.chars().take(8).collect::<String>());
+        if saved.kc_auth.unwrap_or(false) {
+            println!("  Auth Mode: Keycloak (SSO)");
+        } else {
+            println!("  Token: {}...", &saved.token.chars().take(8).collect::<String>());
+        }
         println!("  CR Mode: {}", if saved.censorship_resistant { "Ja" } else { "Nein" });
         println!();
         
@@ -183,26 +188,78 @@ fn load_or_prompt_config() -> Result<Config> {
         
         if input.is_empty() || input == "j" || input == "ja" || input == "y" || input == "yes" {
             println!();
+            
+            // If Keycloak was used, we MUST fetch a fresh token because JWTs expire quickly!
+            if saved.kc_auth.unwrap_or(false) {
+                let kc_url = saved.kc_url.as_deref().unwrap_or("");
+                let realm = saved.kc_realm.as_deref().unwrap_or("mavi-vpn");
+                let client_id = saved.kc_client_id.as_deref().unwrap_or("mavi-client");
+                
+                println!("Erneuere Keycloak-Sitzung...");
+                let fresh_token = oauth::start_oauth_flow(kc_url, realm, client_id).await?;
+                println!("Sitzung erfolgreich erneuert!");
+                saved.token = fresh_token;
+                
+                // Save the fresh token to disk as well (though it expires again soon)
+                save_config(&saved)?;
+            }
+            
             return Ok(saved);
         }
         println!();
     }
     
-    let config = prompt_new_config()?;
+    let config = prompt_new_config().await?;
     save_config(&config)?;
     Ok(config)
 }
 
-fn prompt_new_config() -> Result<Config> {
+// fetch_keycloak_token removed, now using browser-based oauth::start_oauth_flow
+
+async fn prompt_new_config() -> Result<Config> {
     let mut stdout = io::stdout();
 
     print!("Server Endpoint (z.B. vpn.example.com:443): ");
     stdout.flush()?;
     let endpoint = read_line()?;
 
-    print!("Auth Token: ");
+    print!("Nutze Keycloak Authentifizierung? [j/N]: ");
     stdout.flush()?;
-    let token = read_line()?;
+    let is_keycloak = read_line()?.to_lowercase();
+    
+    let mut kc_auth = Some(false);
+    let mut saved_kc_url = None;
+    let mut saved_kc_realm = None;
+    let mut saved_kc_client_id = None;
+
+    let token;
+    if is_keycloak == "j" || is_keycloak == "ja" || is_keycloak == "y" || is_keycloak == "yes" {
+        kc_auth = Some(true);
+        print!("Keycloak Server URL (z.B. https://auth.example.com): ");
+        stdout.flush()?;
+        let kc_url = read_line()?;
+        
+        print!("Realm (default: mavi-vpn): ");
+        stdout.flush()?;
+        let mut realm = read_line()?;
+        if realm.is_empty() { realm = "mavi-vpn".to_string(); }
+        
+        print!("Client ID (default: mavi-client): ");
+        stdout.flush()?;
+        let mut client_id = read_line()?;
+        if client_id.is_empty() { client_id = "mavi-client".to_string(); }
+        
+        token = oauth::start_oauth_flow(&kc_url, &realm, &client_id).await?;
+        println!("Keycloak Login abgeschlossen! Speichere Konfiguration...");
+        
+        saved_kc_url = Some(kc_url);
+        saved_kc_realm = Some(realm);
+        saved_kc_client_id = Some(client_id);
+    } else {
+        print!("Auth Token: ");
+        stdout.flush()?;
+        token = read_line()?;
+    }
 
     print!("Certificate PIN (SHA256 hex): ");
     stdout.flush()?;
@@ -220,6 +277,10 @@ fn prompt_new_config() -> Result<Config> {
         token,
         cert_pin,
         censorship_resistant,
+        kc_auth,
+        kc_url: saved_kc_url,
+        kc_realm: saved_kc_realm,
+        kc_client_id: saved_kc_client_id,
     })
 }
 

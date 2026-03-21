@@ -171,10 +171,14 @@ fn save_config(config: &Config) -> Result<()> {
 }
 
 async fn load_or_prompt_config() -> Result<Config> {
-    if let Some(saved) = load_config() {
+    if let mut saved = load_config() {
         println!("Gespeicherte Konfiguration gefunden:");
         println!("  Endpoint: {}", saved.endpoint);
-        println!("  Token: {}...", &saved.token.chars().take(8).collect::<String>());
+        if saved.kc_auth.unwrap_or(false) {
+            println!("  Auth Mode: Keycloak (SSO)");
+        } else {
+            println!("  Token: {}...", &saved.token.chars().take(8).collect::<String>());
+        }
         println!("  CR Mode: {}", if saved.censorship_resistant { "Ja" } else { "Nein" });
         println!();
         
@@ -184,6 +188,22 @@ async fn load_or_prompt_config() -> Result<Config> {
         
         if input.is_empty() || input == "j" || input == "ja" || input == "y" || input == "yes" {
             println!();
+            
+            // If Keycloak was used, we MUST fetch a fresh token because JWTs expire quickly!
+            if saved.kc_auth.unwrap_or(false) {
+                let kc_url = saved.kc_url.as_deref().unwrap_or("");
+                let realm = saved.kc_realm.as_deref().unwrap_or("mavi-vpn");
+                let client_id = saved.kc_client_id.as_deref().unwrap_or("mavi-client");
+                
+                println!("Erneuere Keycloak-Sitzung...");
+                let fresh_token = oauth::start_oauth_flow(kc_url, realm, client_id).await?;
+                println!("Sitzung erfolgreich erneuert!");
+                saved.token = fresh_token;
+                
+                // Save the fresh token to disk as well (though it expires again soon)
+                save_config(&saved)?;
+            }
+            
             return Ok(saved);
         }
         println!();
@@ -207,8 +227,14 @@ async fn prompt_new_config() -> Result<Config> {
     stdout.flush()?;
     let is_keycloak = read_line()?.to_lowercase();
     
+    let mut kc_auth = Some(false);
+    let mut saved_kc_url = None;
+    let mut saved_kc_realm = None;
+    let mut saved_kc_client_id = None;
+
     let token;
     if is_keycloak == "j" || is_keycloak == "ja" || is_keycloak == "y" || is_keycloak == "yes" {
+        kc_auth = Some(true);
         print!("Keycloak Server URL (z.B. https://auth.example.com): ");
         stdout.flush()?;
         let kc_url = read_line()?;
@@ -224,7 +250,11 @@ async fn prompt_new_config() -> Result<Config> {
         if client_id.is_empty() { client_id = "mavi-client".to_string(); }
         
         token = oauth::start_oauth_flow(&kc_url, &realm, &client_id).await?;
-        println!("Keycloak Login abgeschlossen! Caching JWT Token...");
+        println!("Keycloak Login abgeschlossen! Speichere Konfiguration...");
+        
+        saved_kc_url = Some(kc_url);
+        saved_kc_realm = Some(realm);
+        saved_kc_client_id = Some(client_id);
     } else {
         print!("Auth Token: ");
         stdout.flush()?;
@@ -247,6 +277,10 @@ async fn prompt_new_config() -> Result<Config> {
         token,
         cert_pin,
         censorship_resistant,
+        kc_auth,
+        kc_url: saved_kc_url,
+        kc_realm: saved_kc_realm,
+        kc_client_id: saved_kc_client_id,
     })
 }
 

@@ -71,6 +71,22 @@ pub struct Config {
     /// the client side (resolved via local DNS, bypassing the VPN).
     #[arg(long, env = "VPN_WHITELIST_DOMAINS", value_delimiter = ',', num_args = 0..)]
     pub whitelist_domains: Vec<String>,
+
+    /// Enable Keycloak JWT authentication instead of static token
+    #[arg(long, env = "KEYCLOAK_ENABLED", default_value = "false")]
+    pub keycloak_enabled: bool,
+
+    /// Keycloak Server URL (e.g., https://auth.example.com)
+    #[arg(long, env = "KEYCLOAK_URL")]
+    pub keycloak_url: Option<String>,
+
+    /// Keycloak Realm
+    #[arg(long, env = "KEYCLOAK_REALM", default_value = "mavi-vpn")]
+    pub keycloak_realm: String,
+
+    /// Keycloak Client ID
+    #[arg(long, env = "KEYCLOAK_CLIENT_ID", default_value = "mavi-client")]
+    pub keycloak_client_id: String,
 }
 
 /// Loads the server configuration from environment variables and CLI arguments.

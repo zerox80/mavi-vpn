@@ -17,6 +17,14 @@ pub struct Config {
     pub cert_pin: String,
     /// Enable Layer 7 obfuscation (pretend to be HTTP/3).
     pub censorship_resistant: bool,
+    /// Was Keycloak authentication used?
+    pub kc_auth: Option<bool>,
+    /// Keycloak Server URL
+    pub kc_url: Option<String>,
+    /// Keycloak Realm
+    pub kc_realm: Option<String>,
+    /// Keycloak Client ID
+    pub kc_client_id: Option<String>,
 }
 
 /// Commands sent from the client UI to the background service.

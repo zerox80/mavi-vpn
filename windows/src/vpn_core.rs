@@ -9,10 +9,8 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use sha2::{Sha256, Digest};
-use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use shared::{icmp, ControlMessage};
-use std::io::{self, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,7 +108,9 @@ fn create_udp_socket() -> Result<std::net::UdpSocket> {
     // V6ONLY = false allows this socket to receive IPv4 traffic as well.
     socket2_sock.set_only_v6(false)?;
     socket2_sock.bind(&socket2::SockAddr::from(std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0)))?;
-    socket2_sock.set_nonblocking(true)?;
+    // Set larger socket buffers for high-throughput stability on Windows (4MB for GSO bursts)
+    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024); 
+    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); 
 
     Ok(socket2_sock.into())
 }
@@ -279,15 +279,20 @@ async fn connect_and_handshake(
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
     
-    // MTU PINNING: We manually set 1360 to ensure 1280 payloads always fit over QUIC.
-    // Disabling auto-discovery prevents oscillating MTUs on unstable paths.
+    // MTU PINNING: 1360 Wire MTU to support 1280 payload over QUIC/UDP/IP.
+    // GSO (segmentation offload) is enabled for maximum performance as requested.
     transport_config.mtu_discovery_config(None);
     transport_config.initial_mtu(1360);
     transport_config.min_mtu(1360);
     transport_config.enable_segmentation_offload(true);
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    
+    // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
 
-    let client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
+    client_config.transport_config(Arc::new(transport_config));
     let mut endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
     endpoint.set_default_client_config(client_config);
 
@@ -455,6 +460,7 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Custom certificate verifier that trusts only a specific SHA-256 fingerprint.
+#[derive(Debug)]
 struct PinnedServerVerifier {
     expected_hash: Vec<u8>,
     supported: rustls::crypto::WebPkiSupportedAlgorithms,

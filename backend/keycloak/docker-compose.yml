@@ -1,0 +1,47 @@
+services:
+  # Extends the vpn-server defined in the main docker-compose.yml
+  vpn-server:
+    environment:
+      - KEYCLOAK_ENABLED=true
+      - KEYCLOAK_URL=${KEYCLOAK_URL:-https://auth.${DOMAIN_NAME}}
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-mavi-vpn}
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-mavi-client}
+
+  keycloak-db:
+    image: postgres:15
+    container_name: keycloak-db
+    restart: unless-stopped
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-mavi_keycloak_secret_change_me!123}
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.1
+    container_name: keycloak
+    restart: unless-stopped
+    command: start
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-mavi_keycloak_secret_change_me!123}
+      # Keycloak Administrator Credentials - change these!
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASS:-admin}
+      KC_HOSTNAME: auth.${DOMAIN_NAME}
+      KC_PROXY: edge
+      KC_PROXY_HEADERS: xforwarded
+    # Uncomment the following to expose Keycloak internally if using external Nginx manually:
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+    depends_on:
+      - keycloak-db
+    # Traefik configuration (automatically applied if Traefik is running)
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keycloak.rule=Host(`auth.${DOMAIN_NAME}`)"
+      - "traefik.http.routers.keycloak.entrypoints=web"
+      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"

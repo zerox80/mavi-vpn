@@ -80,7 +80,8 @@ The connection establishment follows a strict zero-round-trip (0-RTT) capable de
 1. \textbf{Connect}: Client initiates QUIC connection to Server.
 4. \textbf{Auth (Stream)}: Client sends authentication credentials:
    \begin{itemize}
-       \item \textbf{Token-Based}: \texttt{ControlMessage::Auth \{ token: String \}}. The server performs a constant-time comparison against a pre-shared master token.
+       \item \textbf{Token-Based}: \texttt{ControlMessage::Auth \{ token: String \}}. 
+       \item \textbf{OIDC (Keycloak)}: Authenticate via OpenID Connect. The server validates the provided JWT against the Keycloak \textbf{JWKS endpoint}.
    \end{itemize}
 5. \textbf{Verification}: Server verifies credentials.
    \begin{itemize}
@@ -244,7 +245,7 @@ To ensure the long-term effectiveness of the censorship resistance mechanisms, t
 The Mavi VPN project continues to evolve to meet new censorship and performance challenges:
 \begin{itemize}
     \item \textbf{Socket Sharding}: Implementation of \texttt{SO\_REUSEPORT} to scale the UDP packet handling across all available CPU cores.
-    \item \textbf{Keycloak OIDC Integration}: Full integration with OpenID Connect for centralized identity management (currently in the \texttt{beta-keycloak} branch).
+    \item \textbf{Keycloak OIDC Integration}: [DEPOLYED IN BETA] Full integration with OpenID Connect for centralized identity management.
     \item \textbf{Kernel-Mode Data Plane}: Exploration of \texttt{eBPF} (Extended Berkeley Packet Filter) on Linux.
 \end{itemize}
 

@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 mod cert;
 mod config;
 mod state;
+mod keycloak;
 
 use crate::config::Config;
 use crate::state::AppState;
@@ -76,6 +77,28 @@ async fn main() -> Result<()> {
     }
     let (certs, key) = cert::load_or_generate_certs(cert_path, key_path)?;
 
+    // 3b. Keycloak Initialization (Beta-Keycloak)
+    let mut keycloak_validator = None;
+    if config.keycloak_enabled {
+        if let Some(url) = &config.keycloak_url {
+            let kc = crate::keycloak::KeycloakValidator::new(
+                url.clone(),
+                config.keycloak_realm.clone(),
+                config.keycloak_client_id.clone(),
+            );
+            match kc.init_and_fetch().await {
+                Ok(_) => keycloak_validator = Some(Arc::new(kc)),
+                Err(e) => {
+                    tracing::error!("Failed to initialize Keycloak JWKS cache: {}. Ensure Keycloak is running and reachable at {}", e, url);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            tracing::error!("KEYCLOAK_ENABLED is true but KEYCLOAK_URL is not set.");
+            std::process::exit(1);
+        }
+    }
+
     // 4. Setup QUIC Server Config
     // Uses TLS 1.3 exclusively.
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(
@@ -105,8 +128,8 @@ async fn main() -> Result<()> {
     
     // QUIC Performance Tuning: 
     // Large buffers are critical for throughput on high-latency mobile networks.
-    transport_config.datagram_receive_buffer_size(Some(1024 * 1024)); // 1MB receive buffer
-    transport_config.datagram_send_buffer_size(1024 * 1024); // 1MB send buffer
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB receive buffer
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB send buffer
     transport_config.receive_window(quinn::VarInt::from(4u32 * 1024 * 1024)); // 4MB
     transport_config.stream_receive_window(quinn::VarInt::from(1024u32 * 1024)); // 1MB per stream
     transport_config.send_window(4 * 1024 * 1024); // 4MB send window
@@ -128,8 +151,8 @@ async fn main() -> Result<()> {
     // Manually configure the underlying UDP socket
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
     let socket2_sock = socket2::Socket::from(socket);
-    let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024); // 2MB OS-level buffer
-    let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024); // 2MB OS-level buffer
+    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); // 4MB OS-level buffer
+    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024); // 4MB OS-level buffer
     
     // Enable UDP fragmentation for packets > Path MTU (Handling the 1280 floor on bad paths)
     // This allows the OS to fragment the QUIC packets if needed, rather than dropping them.
@@ -272,9 +295,11 @@ async fn main() -> Result<()> {
         let state = state.clone();
         let config = config.clone();
         let tx_tun = tx_tun.clone();
+        let keycloak = keycloak_validator.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn,state, config, tx_tun).await {
+            if let Err(e) = handle_connection(conn, state, config, tx_tun, keycloak).await {
+               // fine to fail, client disconnected or bad auth
                warn!("Connection terminated: {}", e);
             }
         });
@@ -288,7 +313,8 @@ async fn handle_connection(
     conn: quinn::Incoming,
     state: Arc<AppState>,
     config: Config,
-    tx_tun: tokio::sync::mpsc::Sender<Bytes>
+    tx_tun: tokio::sync::mpsc::Sender<Bytes>,
+    keycloak: Option<Arc<crate::keycloak::KeycloakValidator>>,
 ) -> Result<()> {
     // 1. Establish QUIC connection (wait for TLS handshake)
     let connection = conn.await?;
@@ -304,7 +330,8 @@ async fn handle_connection(
             .await
             .map_err(|_| anyhow::anyhow!("Handshake timeout"))?? as usize;
         
-        if len > 1024 { anyhow::bail!("Handshake message overflow"); }
+        // Increase maximum auth payload size from 1024 to 8192 to support large Keycloak JWTs
+        if len > 8192 { anyhow::bail!("Auth message too big (max 8192 bytes for JWT)"); }
         let mut buf = vec![0u8; len];
         recv_stream.read_exact(&mut buf).await?;
         
@@ -315,10 +342,18 @@ async fn handle_connection(
         
         match msg {
             ControlMessage::Auth { token } => {
-                // Time-constant comparison to protect against timing attacks
-                if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
-                    anyhow::bail!("Access Denied: Invalid Token");
+                // Keycloak vs Static Token Authentication
+                if let Some(kc) = &keycloak {
+                    if !kc.validate_token(&token).await? {
+                         anyhow::bail!("Access Denied: Invalid Keycloak JWT Token");
+                    }
+                } else {
+                    // Time-constant comparison to protect against timing attacks
+                    if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
+                        anyhow::bail!("Access Denied: Invalid Token");
+                    }
                 }
+
                 // Lease internal IPs
                 let v4 = state.assign_ip()?;
                 let v6 = state.assign_ipv6()?;

@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.platform.LocalContext
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,6 +41,8 @@ import androidx.compose.foundation.clickable
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.Drawable
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -59,8 +62,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        requestBatteryOptimizationIgnore()
         
         // Load saved credentials
         val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
@@ -106,8 +107,7 @@ class MainActivity : ComponentActivity() {
                             
                             prepareAndStartVpn(ip, port, token, pin, splitMode, splitPackages) 
                         },
-                        onDisconnect = { stopVpn() },
-                        context = this
+                        onDisconnect = { stopVpn() }
                     )
                 }
             }
@@ -141,6 +141,37 @@ class MainActivity : ComponentActivity() {
     // private var last... already defined.
     // I will modify the callback at the top of the class separately or just use prefs in the callback.
     
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent) {
+        val data: Uri? = intent.data
+        if (data != null && data.scheme == "mavivpn" && data.host == "oauth") {
+            val code = data.getQueryParameter("code")
+            if (code != null) {
+                // Clear the data so it's not processed again on potentially relaunch/recreate
+                intent.setData(null)
+                
+                val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+                val kcUrl = prefs.getString("saved_kc_url", "") ?: ""
+                val realm = prefs.getString("saved_kc_realm", "mavi-vpn") ?: "mavi-vpn"
+                val clientId = prefs.getString("saved_kc_client_id", "mavi-client") ?: "mavi-client"
+                
+                // Start a coroutine to exchange token
+                lifecycleScope.launch {
+                    val token = OAuthHelper.exchangeCodeForToken(code, kcUrl, realm, clientId)
+                    if (token != null) {
+                        prefs.edit().putString("saved_token", token).apply()
+                        // Restart the UI with the new token
+                        recreate()
+                    }
+                }
+            }
+        }
+    }
+
     private fun startVpnService(ip: String, port: String, token: String, pin: String, splitMode: String, splitPackages: String) {
         val intent = Intent(this, MaviVpnService::class.java).apply {
             action = "CONNECT"
@@ -160,7 +191,7 @@ class MainActivity : ComponentActivity() {
         startService(intent)
     }
 
-    private fun requestBatteryOptimizationIgnore() {
+    fun requestBatteryOptimizationIgnore() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val intent = Intent()
             val packageName = packageName
@@ -185,15 +216,15 @@ fun AppNavigation(
     initialSplitPackages: String,
     initialCensorshipResistant: Boolean,
     onConnect: (String, String, String, String, String, String) -> Unit,
-    onDisconnect: () -> Unit,
-    context: Context
+    onDisconnect: () -> Unit
 ) {
-    var currentScreen by remember { mutableStateOf("home") }
+    val context = LocalContext.current
+    var currentScreen by remember { mutableStateOf<String>("home") }
     
     // State to hold settings between screens
-    var splitMode by remember { mutableStateOf(initialSplitMode) }
-    var splitPackages by remember { mutableStateOf(initialSplitPackages) }
-    var censorshipResistant by remember { mutableStateOf(initialCensorshipResistant) }
+    var splitMode by remember { mutableStateOf<String>(initialSplitMode) }
+    var splitPackages by remember { mutableStateOf<String>(initialSplitPackages) }
+    var censorshipResistant by remember { mutableStateOf<Boolean>(initialCensorshipResistant) }
 
     if (currentScreen == "home") {
         VpnScreen(
@@ -202,11 +233,6 @@ fun AppNavigation(
             initialToken = initialToken,
             initialPin = initialPin,
             onConnect = { ip, port, token, pin -> 
-                // Save CR mode to prefs immediately (or rely on UI state if passed)
-                // Actually startVpnService reads from prefs in Service, but we might want to pass it explicitly?
-                // MaviVpnService reads "saved_censorship_resistant" from prefs. 
-                // We should save it there when settings change or when connecting.
-                // Let's save it when settings back is pressed.
                 onConnect(ip, port, token, pin, splitMode, splitPackages)
             },
             onDisconnect = onDisconnect,
@@ -214,7 +240,6 @@ fun AppNavigation(
         )
     } else {
         SettingsScreen(
-            context = context,
             initialMode = splitMode,
             initialSelection = splitPackages,
             initialCensorshipResistant = censorshipResistant,
@@ -244,11 +269,67 @@ fun VpnScreen(
     onDisconnect: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
+    val context = LocalContext.current
     val isConnected by MaviVpnService.isConnected.collectAsState()
-    var serverIp by remember { mutableStateOf(initialIp) }
-    var serverPort by remember { mutableStateOf(initialPort) }
-    var authToken by remember { mutableStateOf(initialToken) }
-    var certPin by remember { mutableStateOf(initialPin) }
+    var serverIp by remember { mutableStateOf<String>(initialIp) }
+    var serverPort by remember { mutableStateOf<String>(initialPort) }
+    var authToken by remember { mutableStateOf<String>(initialToken) }
+    var certPin by remember { mutableStateOf<String>(initialPin) }
+    
+    // Keycloak Specific State
+    val prefs = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+    var showKcDialog by remember { mutableStateOf<Boolean>(false) }
+    var kcUrl by remember { mutableStateOf<String>(prefs.getString("saved_kc_url", "") ?: "") }
+    var kcRealm by remember { mutableStateOf<String>(prefs.getString("saved_kc_realm", "mavi-vpn") ?: "mavi-vpn") }
+    var kcClientId by remember { mutableStateOf<String>(prefs.getString("saved_kc_client_id", "mavi-client") ?: "mavi-client") }
+
+    if (showKcDialog) {
+        AlertDialog(
+            onDismissRequest = { showKcDialog = false },
+            title = { Text("Keycloak Settings") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = kcUrl,
+                        onValueChange = { kcUrl = it },
+                        label = { Text("Keycloak Server URL") },
+                        placeholder = { Text("https://auth.example.com") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = kcRealm,
+                        onValueChange = { kcRealm = it },
+                        label = { Text("Realm") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = kcClientId,
+                        onValueChange = { kcClientId = it },
+                        label = { Text("Client ID") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    prefs.edit()
+                        .putString("saved_kc_url", kcUrl)
+                        .putString("saved_kc_realm", kcRealm)
+                        .putString("saved_kc_client_id", kcClientId)
+                        .apply()
+                    showKcDialog = false
+                    OAuthHelper.startAuth(context, kcUrl, kcRealm, kcClientId)
+                }) {
+                    Text("Save & Login")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showKcDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -283,13 +364,37 @@ fun VpnScreen(
             color = if (isConnected) Color(0xFF00FF7F) else Color.Gray
         )
 
-        Spacer(modifier = Modifier.height(48.dp))
+        Spacer(modifier = Modifier.height(32.dp))
 
         if (!isConnected) {
+            // Keycloak Button
+            Button(
+                onClick = { 
+                    if (kcUrl.isEmpty()) {
+                        showKcDialog = true
+                    } else {
+                        OAuthHelper.startAuth(context, kcUrl, kcRealm, kcClientId)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF673AB7)),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Login with Keycloak")
+            }
+            
+            TextButton(onClick = { showKcDialog = true }) {
+                Text("Edit Keycloak Server", color = Color.Gray, fontSize = 12.sp)
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             OutlinedTextField(
                 value = serverIp,
                 onValueChange = { serverIp = it },
-                label = { Text("Server IP", color = Color.Gray) },
+                label = { Text("Server IP / Endpoint", color = Color.Gray) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 colors = OutlinedTextFieldDefaults.colors(
@@ -438,14 +543,14 @@ data class InstalledApp(
 
 @Composable
 fun SettingsScreen(
-    context: Context,
     initialMode: String, // "include" or "exclude"
     initialSelection: String, // comma separated packages
     initialCensorshipResistant: Boolean,
     onBack: (String, String, Boolean) -> Unit
 ) {
-    var mode by remember { mutableStateOf(initialMode) } // "include", "exclude"
-    var censorshipResistant by remember { mutableStateOf(initialCensorshipResistant) }
+    val context = LocalContext.current
+    var mode by remember { mutableStateOf<String>(initialMode) } // "include", "exclude"
+    var censorshipResistant by remember { mutableStateOf<Boolean>(initialCensorshipResistant) }
     
     val selectedPackages = remember { 
         mutableStateListOf<String>().apply { 
@@ -454,7 +559,7 @@ fun SettingsScreen(
     }
     
     var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
+    var isLoading by remember { mutableStateOf<Boolean>(true) }
 
     LaunchedEffect(Unit) {
         // Load apps in background
@@ -547,6 +652,35 @@ fun SettingsScreen(
                     uncheckedTrackColor = Color.DarkGray
                 )
             )
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // --- Battery Optimization Request ---
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
+                .clickable {
+                    (context as? MainActivity)?.requestBatteryOptimizationIgnore()
+                }
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Battery Optimization",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Text(
+                    text = "Ensure the VPN is not killed in the background.",
+                    color = Color.Gray,
+                    fontSize = 12.sp
+                )
+            }
+            Icon(Icons.Default.Lock, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(24.dp))
         }
         
         Spacer(modifier = Modifier.height(24.dp))

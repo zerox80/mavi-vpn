@@ -40,6 +40,7 @@ services:
       - "--providers.docker.exposedbydefault=false"
       # Entry points
       - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.forwardedHeaders.insecure=true"
       - "--entrypoints.websecure.address=:443"
       # (REMOVED) Global HTTP -> HTTPS Redirect (Nginx handles SSL)
       # Let's Encrypt Resolver

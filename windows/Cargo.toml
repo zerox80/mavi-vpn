@@ -32,6 +32,10 @@ wintun = "0.5"
 parking_lot = "0.12"
 ctrlc = "3.4"
 sha2 = "0.10.9"
+rand = "0.8"
+base64 = "0.22"
+url = "2.5"
+webbrowser = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

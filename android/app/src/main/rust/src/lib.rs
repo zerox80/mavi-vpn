@@ -55,6 +55,8 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
                     // Configure log level to balance visibility and performance
                     .with_max_level(log::LevelFilter::Info)
             );
+            // Install Ring as the default crypto provider for the whole process
+            let _ = rustls::crypto::ring::default_provider().install_default();
         });
     
     info!("JNI init called. CR Mode: {}", censorship_resistant);
@@ -348,7 +350,9 @@ async fn connect_and_handshake(
          return Err(anyhow::anyhow!("Invalid Certificate PIN hex string"));
     };
 
-    let mut client_crypto = rustls::ClientConfig::builder()
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
@@ -667,7 +671,7 @@ impl PinnedServerVerifier {
     fn new(expected_hash: Vec<u8>) -> Self {
         Self { 
             expected_hash, 
-            supported: rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+            supported: rustls::crypto::ring::default_provider().signature_verification_algorithms,
         }
     }
 }

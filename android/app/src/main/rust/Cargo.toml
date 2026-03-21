@@ -10,13 +10,13 @@ crate-type = ["cdylib"]
 jni = "0.22"
 tokio = { workspace = true }
 tokio-util = "0.7"
-quinn = { workspace = true, default-features = false, features = ["rustls"] }
+quinn = { workspace = true, default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
 bytes = { workspace = true }
 shared = { workspace = true }
 android_logger = "0.15"
 log = "0.4"
 anyhow = { workspace = true }
-rustls = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 bincode = { workspace = true }
 libc = "0.2"
 serde_json = "1.0"

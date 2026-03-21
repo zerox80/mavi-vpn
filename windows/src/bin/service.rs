@@ -66,6 +66,33 @@ pub fn main() -> Result<(), windows_service::Error> {
         return Ok(());
     }
 
+    // Support uninstallation via CLI
+    if args.iter().any(|arg| arg == "uninstall") {
+        info!("Uninstalling MaviVPNService...");
+
+        // 1. Stop the service first (ignore errors if already stopped)
+        let _ = std::process::Command::new("sc")
+            .args(["stop", SERVICE_NAME])
+            .status();
+        
+        // Brief wait for the service to stop
+        std::thread::sleep(Duration::from_secs(2));
+
+        // 2. Delete the service
+        let status = std::process::Command::new("sc")
+            .args(["delete", SERVICE_NAME])
+            .status();
+        
+        match status {
+            Ok(s) if s.success() => {
+                info!("Service uninstalled successfully.");
+            }
+            Ok(s) => error!("Failed to uninstall service. Did you run as Administrator? (Exit code: {:?})", s.code()),
+            Err(e) => error!("Failed to execute sc command: {}", e),
+        }
+        return Ok(());
+    }
+
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
 }
 

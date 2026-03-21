@@ -10,7 +10,7 @@ use ipc::{Config, IpcRequest, IpcResponse};
 const CONFIG_FILE: &str = "config.json";
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     println!();
     println!("╔══════════════════════════════════════╗");
     println!("║         Mavi VPN - Windows           ║");
@@ -19,29 +19,38 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.is_empty() {
-        interactive_mode().await?;
+    let result = if args.is_empty() {
+        interactive_mode().await
     } else {
         let cmd = args[0].to_lowercase();
         match cmd.as_str() {
             "start" => {
-                let config = load_or_prompt_config()?;
-                send_request(IpcRequest::Start(config)).await?;
+                match load_or_prompt_config() {
+                    Ok(config) => send_request(IpcRequest::Start(config)).await,
+                    Err(e) => Err(e),
+                }
             }
             "stop" => {
-                send_request(IpcRequest::Stop).await?;
+                send_request(IpcRequest::Stop).await
             }
             "status" => {
-                send_request(IpcRequest::Status).await?;
+                send_request(IpcRequest::Status).await
             }
             _ => {
                 println!("Unknown command: {}", cmd);
-                println!("Usage: mavi-vpn [start|stop|status]");
+                println!("Usage: mavi-vpn-client [start|stop|status]");
+                Ok(())
             }
         }
+    };
+
+    if let Err(e) = result {
+        println!("\n❌ Error: {}", e);
     }
 
-    Ok(())
+    // Keep window open when launched via double-click
+    println!("\nPress Enter to exit...");
+    let _ = read_line();
 }
 
 async fn interactive_mode() -> Result<()> {

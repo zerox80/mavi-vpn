@@ -63,8 +63,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        requestBatteryOptimizationIgnore()
-        
         // Load saved credentials
         val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
         val savedIp = prefs.getString("saved_ip", "") ?: ""
@@ -153,6 +151,9 @@ class MainActivity : ComponentActivity() {
         if (data != null && data.scheme == "mavivpn" && data.host == "oauth") {
             val code = data.getQueryParameter("code")
             if (code != null) {
+                // Clear the data so it's not processed again on potentially relaunch/recreate
+                intent.setData(null)
+                
                 val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
                 val kcUrl = prefs.getString("saved_kc_url", "") ?: ""
                 val realm = prefs.getString("saved_kc_realm", "mavi-vpn") ?: "mavi-vpn"
@@ -190,7 +191,7 @@ class MainActivity : ComponentActivity() {
         startService(intent)
     }
 
-    private fun requestBatteryOptimizationIgnore() {
+    fun requestBatteryOptimizationIgnore() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val intent = Intent()
             val packageName = packageName
@@ -651,6 +652,35 @@ fun SettingsScreen(
                     uncheckedTrackColor = Color.DarkGray
                 )
             )
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // --- Battery Optimization Request ---
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
+                .clickable {
+                    (context as? MainActivity)?.requestBatteryOptimizationIgnore()
+                }
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Battery Optimization",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Text(
+                    text = "Ensure the VPN is not killed in the background.",
+                    color = Color.Gray,
+                    fontSize = 12.sp
+                )
+            }
+            Icon(Icons.Default.Lock, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(24.dp))
         }
         
         Spacer(modifier = Modifier.height(24.dp))

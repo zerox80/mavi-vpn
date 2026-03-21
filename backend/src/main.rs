@@ -128,8 +128,8 @@ async fn main() -> Result<()> {
     
     // QUIC Performance Tuning: 
     // Large buffers are critical for throughput on high-latency mobile networks.
-    transport_config.datagram_receive_buffer_size(Some(1024 * 1024)); // 1MB receive buffer
-    transport_config.datagram_send_buffer_size(1024 * 1024); // 1MB send buffer
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB receive buffer
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB send buffer
     transport_config.receive_window(quinn::VarInt::from(4u32 * 1024 * 1024)); // 4MB
     transport_config.stream_receive_window(quinn::VarInt::from(1024u32 * 1024)); // 1MB per stream
     transport_config.send_window(4 * 1024 * 1024); // 4MB send window
@@ -151,8 +151,8 @@ async fn main() -> Result<()> {
     // Manually configure the underlying UDP socket
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
     let socket2_sock = socket2::Socket::from(socket);
-    let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024); // 2MB OS-level buffer
-    let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024); // 2MB OS-level buffer
+    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); // 4MB OS-level buffer
+    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024); // 4MB OS-level buffer
     
     // Enable UDP fragmentation for packets > Path MTU (Handling the 1280 floor on bad paths)
     // This allows the OS to fragment the QUIC packets if needed, rather than dropping them.

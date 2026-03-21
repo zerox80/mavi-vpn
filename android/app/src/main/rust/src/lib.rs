@@ -100,7 +100,8 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
              warn!("Failed to set IPV6_V6ONLY=false: {}", e);
              // We continue, as some OS/kernels might have it disabled by default or fail if bound to IPv4 mapped
         }
-        let buffer_candidates = [1024 * 1024, 512 * 1024];
+        // Set larger socket buffers for high-throughput stability (4MB for GSO bursts)
+        let buffer_candidates = [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024];
         
         for size in buffer_candidates {
             if let Err(e) = socket2_sock.set_recv_buffer_size(size) {
@@ -376,6 +377,10 @@ async fn connect_and_handshake(
 
     // Enable Segmentation Offload (GSO) for higher throughput
     transport_config.enable_segmentation_offload(true);
+
+    // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

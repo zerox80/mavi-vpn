@@ -60,7 +60,25 @@ docker-compose up -d --build --force-recreate
 
 > **⏳ Important:** Keycloak is a large Java application. Once you run the command above, give the server **1 to 2 minutes** to initialize the database and UI. If you access `auth.yourdomain.com` too early, you will see a `502 Bad Gateway` error. Just wait and refresh!
 
-### Step 4: Retrieve the Certificate PIN
+### Step 4: Configure Keycloak (Enterprise Mode Only)
+If you enabled Keycloak, it starts completely empty. You must create the Realm and Client before connecting:
+1. Open your browser and navigate to `https://auth.yourdomain.com/`.
+2. Click **Administration Console** and log in (Default: `admin` / `admin`).
+3. In the top-left dropdown (under the Keycloak logo), click **Create Realm**.
+   - Name it exactly: **`mavi-vpn`** and click Create.
+4. On the left menu, click **Clients** -> **Create client**.
+   - **Client ID**: `mavi-client`
+   - Click Next.
+   - **Client authentication**: `Off` (We use a Public Client with PKCE).
+   - **Standard flow**: `On` (Required for browser-based login).
+   - Click Next.
+   - **Valid redirect URIs**: Enter `http://127.0.0.1:*` and `http://localhost:*` (This allows the Windows CLI to receive the local login callback).
+   - Click Save.
+5. On the left menu, click **Users** -> **Add user**.
+   - Create a user for yourself.
+   - Go to the **Credentials** tab and set a password for this user (turn off "Temporary").
+
+### Step 5: Retrieve the Certificate PIN
 For the VPN client to connect securely via QUIC without MITM attacks, you need the server's unique Certificate PIN:
 ```bash
 cat data/cert_pin.txt

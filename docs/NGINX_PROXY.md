@@ -77,3 +77,22 @@ git reset --hard origin/beta-keycloak
     ```bash
     nginx -t && systemctl reload nginx
     ```
+
+## 🛠 Troubleshooting
+
+### 1. I still see "Welcome to Nginx"
+This means the default Nginx configuration is overriding your custom one.
+1.  **Check if enabled**: Ensure your config is in `sites-enabled`:
+    ```bash
+    ln -s /etc/nginx/sites-available/mavi-vpn /etc/nginx/sites-enabled/
+    ```
+2.  **Disable default**: Remove the default Nginx site:
+    ```bash
+    rm /etc/nginx/sites-enabled/default
+    ```
+3.  **Check Syntax**: Run `nginx -t` to ensure there are no errors.
+4.  **Reload**: `systemctl reload nginx`
+
+### 2. Connection Refused / 502 Bad Gateway
+- Ensure Traefik is actually running and listening on port **11443**.
+- Check `docker ps` to verify the port mapping: `0.0.0.0:11443->443/tcp`.

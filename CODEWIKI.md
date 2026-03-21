@@ -177,6 +177,17 @@ The `quinn` library includes extensive testing:
 3. **iOS Support**: Bringing the Rust Core to iOS via C-FFI and `NEPacketTunnelProvider`.
 
 ---
+
+## 🛠 12. Production Deployment: Behind Nginx
+For enterprise setups where an existing Nginx server handles wildcard certificates (443), Mavi VPN should be configured to run on port **11443**.
+
+### 🔹 12.1 Configuration
+- **Traefik**: Set `TRAEFIK_HTTPS_PORT=11443` and `TRAEFIK_ACME_RESOLVER=""`.
+- **Nginx Proxy**: Use `proxy_pass https://127.0.0.1:11443` with `proxy_ssl_verify off` to bridge the traffic.
+
+For a full Nginx configuration snippet, see [NGINX_PROXY.md](file:///c:/Daten1/mavi-vpn/docs/NGINX_PROXY.md).
+
+---
 **CodeWiki Generation Date**: 2026-03-21 
 **Commit Identity**: Main Branch Technical Deep-Dive
 **Author**: Antigravity Technical Documentation Subagent

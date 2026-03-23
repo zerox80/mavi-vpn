@@ -6,20 +6,23 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::time::Duration;
 use base64::Engine;
 
+/// Fixed callback port — register `http://127.0.0.1:18923/callback` in Keycloak.
+const OAUTH_CALLBACK_PORT: u16 = 18923;
+
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
     // 1. Generate PKCE verifier and challenge
     let mut verifier_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut verifier_bytes);
     let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&verifier_bytes);
-    
+
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
-    // 2. Start local TCP listener
-    let listener = TcpListener::bind("127.0.0.1:0").await.context("Fehler: Konnte keinen lokalen Port binden")?;
-    let local_port = listener.local_addr()?.port();
-    let redirect_uri = format!("http://127.0.0.1:{}/callback", local_port);
+    // 2. Start local TCP listener on fixed port
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT)).await
+        .context(format!("Could not bind callback port {}. Is another instance running?", OAUTH_CALLBACK_PORT))?;
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", OAUTH_CALLBACK_PORT);
 
     // 3. Construct Authorization URL
     let auth_endpoint = format!("{}/realms/{}/protocol/openid-connect/auth", kc_url.trim_end_matches('/'), realm);

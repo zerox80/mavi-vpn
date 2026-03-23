@@ -76,8 +76,8 @@ If you enabled Keycloak, it starts completely empty. You must create the Realm a
    - **Client authentication**: `Off` (We use a Public Client with PKCE).
    - **Standard flow**: `On` (Required for browser-based login).
    - Click Next.
-   - **Valid redirect URIs**: Enter these two lines:
-     1. `http://127.0.0.1:*` (For Windows CLI)
+   - **Valid redirect URIs**: Enter these three lines:
+     1. `http://127.0.0.1:18923/callback` (For Windows/Linux CLI and GUI)
      2. `mavivpn://oauth` (For Android App)
    - Click Save.
 5. On the left menu, click **Users** -> **Add user**.
@@ -93,50 +93,53 @@ cat data/cert_pin.txt
 
 ## 2. Windows Client Installation
 
-The Windows client relies on the QUIC protocol and the WinTUN adapter.
-
 ### Prerequisites
-* **Rust (Cargo)** installed on your Windows machine.
-* `wintun.dll` (Provided in the `windows/` folder or via wintun.net).
+* **Rust (Cargo)** — https://rustup.rs
+* **Python 3** (for the install scripts)
+* **Administrator privileges** (for the Windows Service)
 
-### Step-by-Step Guide
+### Option A: Automated Install (Recommended)
 
-**1. Compile the Client:**
-Open PowerShell in the root directory:
+Open **PowerShell as Administrator** in the project root:
+
 ```powershell
+# 1. Install CLI + Windows Service
+python install_cli_windows.py
+
+# 2. Install Tauri GUI (optional)
+python install_gui_windows.py
+```
+
+The scripts handle everything: building, installing to `C:\Program Files\MaviVPN`, registering and starting the Windows Service, PATH setup, and Desktop shortcuts.
+
+### Option B: Manual Build
+
+```powershell
+# Build CLI + Service
 cargo build --release -p windows-vpn
-```
 
-**2. Assemble the Files:**
-Create a folder (e.g. `C:\MaviVPN\`) and place these three files inside:
-* `target\release\mavi-vpn.exe` (The CLI tool)
-* `target\release\mavi-vpn-service.exe` (The background service)
-* `wintun.dll` (The network driver)
-
-**3. Install the Background Service (Run as Administrator):**
-```powershell
-cd C:\MaviVPN\
-.\mavi-vpn-service.exe install
+# Install service (Administrator required)
+.\target\release\mavi-vpn-service.exe install
 net start MaviVPNService
+
+# Build GUI (requires cargo-tauri)
+cargo install tauri-cli
+cd gui && cargo tauri build
 ```
 
-**4. Connect to the VPN (Normal User):**
-```powershell
-.\mavi-vpn.exe start
-```
-The client will interactivly ask for:
-* Server Endpoint: `your-server-ip:10433`
-* Auth Token: *(From your .env)*
-* Certificate PIN: *(From data/cert_pin.txt)*
+### Usage
 
-To disconnect/check status:
+**GUI:** Launch "Mavi VPN" from the Start Menu or Desktop shortcut. Configure endpoint, certificate PIN, and optionally Keycloak in Settings. Click Connect.
+
+**CLI:**
 ```powershell
-.\mavi-vpn.exe status
-.\mavi-vpn.exe stop
+mavi-vpn-client start     # Connect (prompts for config on first run)
+mavi-vpn-client stop      # Disconnect
+mavi-vpn-client status    # Check connection status
 ```
 
 ### Troubleshooting
-If the client fails, check the Windows service logs by running it manually in an admin console:
+Run the service in console mode to see debug logs:
 ```powershell
 $env:RUST_LOG = "debug"
 .\mavi-vpn-service.exe --console
@@ -144,7 +147,69 @@ $env:RUST_LOG = "debug"
 
 ---
 
-## 3. Android Client Installation
+## 3. Linux Client Installation
+
+### Prerequisites
+* **Rust (Cargo)** — https://rustup.rs
+* **Python 3** (for the install scripts)
+* **root/sudo** (for TUN device and routing)
+
+### Option A: Automated Install (Recommended)
+
+```bash
+# 1. Install CLI + optional systemd service
+python3 install_cli_linux.py
+
+# 2. Install Tauri GUI (optional)
+python3 install_gui_linux.py
+```
+
+The GUI installer auto-detects your distro and installs via RPM (Fedora/RHEL), DEB (Debian/Ubuntu), AppImage, or raw binary fallback.
+
+### Option B: Manual Build
+
+```bash
+# Build CLI
+cargo build --release -p linux-vpn
+
+# Install binary
+sudo install -m 755 target/release/mavi-vpn /usr/local/bin/
+
+# Install systemd service (optional)
+sudo cp linux/mavi-vpn.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mavi-vpn
+```
+
+### Usage
+
+**Direct mode** (no daemon, runs in foreground):
+```bash
+sudo mavi-vpn                          # Interactive config prompt
+sudo mavi-vpn -c /path/to/config.json  # With config file
+```
+
+**Daemon mode** (for GUI and remote CLI control):
+```bash
+sudo mavi-vpn daemon &    # or: sudo systemctl start mavi-vpn
+mavi-vpn start            # Connect via daemon
+mavi-vpn stop             # Disconnect
+mavi-vpn status           # Check connection status
+mavi-vpn-gui              # Launch GUI
+```
+
+### Config File Location
+The CLI searches in order: `./config.json` → `~/.config/mavi-vpn/config.json` → `/etc/mavi-vpn/config.json`
+
+### Troubleshooting
+```bash
+RUST_LOG=debug sudo mavi-vpn           # Debug direct mode
+sudo journalctl -u mavi-vpn -f         # Debug systemd daemon
+```
+
+---
+
+## 4. Android Client Installation
 
 The Android client is built as a native Kotlin app with a bundled Rust core for the VPN logic.
 

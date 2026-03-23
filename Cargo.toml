@@ -5,6 +5,8 @@ members = [
     "shared",
     "android/app/src/main/rust",
     "windows", "quic-tester",
+    "linux",
+    "gui/src-tauri",
 ]
 
 [workspace.dependencies]

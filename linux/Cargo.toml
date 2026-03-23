@@ -1,0 +1,38 @@
+[package]
+name = "linux-vpn"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mavi-vpn"
+path = "src/main.rs"
+
+[dependencies]
+shared = { workspace = true }
+tokio = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+bytes = { workspace = true }
+bincode = { workspace = true }
+anyhow = { workspace = true }
+socket2 = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+etherparse = { workspace = true }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1.0"
+
+sha2 = "0.10.9"
+rand = "0.8"
+base64 = "0.22"
+url = "2.5"
+libc = "0.2"
+nix = { version = "0.29", features = ["ioctl", "net", "fs"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

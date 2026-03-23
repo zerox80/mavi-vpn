@@ -71,6 +71,128 @@ def is_root():
 def sudo(*cmd):
     return run(([] if is_root() else ["sudo"]) + list(cmd))
 
+# ---------------------------------------------------------------------------
+# System dependency installation
+# ---------------------------------------------------------------------------
+
+def detect_distro():
+    """Detect Linux distribution family via /etc/os-release."""
+    try:
+        with open("/etc/os-release") as f:
+            text = f.read().lower()
+    except FileNotFoundError:
+        return None
+    if any(d in text for d in ("fedora", "rhel", "centos", "rocky", "alma")):
+        return "fedora"
+    if any(d in text for d in ("debian", "ubuntu", "mint", "pop!_os", "pop_os")):
+        return "debian"
+    if any(d in text for d in ("arch", "manjaro", "endeavouros", "garuda")):
+        return "arch"
+    if any(d in text for d in ("opensuse", "suse")):
+        return "suse"
+    return None
+
+# Tauri 2 system deps + build toolchain per distro family.
+# webkit2gtk 4.1 is required by Tauri 2 / wry.
+GUI_SYSTEM_DEPS = {
+    "fedora": [
+        # Tauri 2 / WebView
+        "webkit2gtk4.1-devel",
+        "openssl-devel",
+        "gtk3-devel",
+        "libappindicator-gtk3-devel",
+        "librsvg2-devel",
+        # Build toolchain
+        "gcc", "gcc-c++", "make", "pkg-config", "cmake", "perl",
+        # Tauri bundler helpers
+        "file", "curl", "wget",
+        # Runtime (VPN networking)
+        "iproute",
+    ],
+    "debian": [
+        "libwebkit2gtk-4.1-dev",
+        "libssl-dev",
+        "libgtk-3-dev",
+        "libayatana-appindicator3-dev",
+        "librsvg2-dev",
+        "build-essential", "pkg-config", "cmake", "perl",
+        "file", "curl", "wget",
+        "iproute2",
+    ],
+    "arch": [
+        "webkit2gtk-4.1",
+        "openssl",
+        "gtk3",
+        "libappindicator-gtk3",
+        "librsvg",
+        "base-devel", "cmake", "perl",
+        "file", "curl", "wget",
+        "iproute2",
+    ],
+    "suse": [
+        "webkit2gtk3-devel",
+        "libopenssl-devel",
+        "gtk3-devel",
+        "libappindicator3-devel",
+        "librsvg-devel",
+        "gcc", "gcc-c++", "make", "pkg-config", "cmake", "perl",
+        "file", "curl", "wget",
+        "iproute2",
+    ],
+}
+
+_PKG_INSTALL_CMD = {
+    "fedora": ["dnf", "install", "-y"],
+    "debian": ["apt-get", "install", "-y"],
+    "arch":   ["pacman", "-S", "--needed", "--noconfirm"],
+    "suse":   ["zypper", "install", "-y"],
+}
+
+def install_system_deps(dep_table):
+    """Detect distro and install required system packages."""
+    step("System dependencies")
+
+    distro = detect_distro()
+    if not distro:
+        warn("Could not detect Linux distribution.")
+        warn("Please install Tauri 2 system deps manually:")
+        warn("  https://v2.tauri.app/start/prerequisites/#linux")
+        if not ask("Continue anyway?", default="n"):
+            sys.exit(1)
+        return
+
+    pkgs = dep_table.get(distro, [])
+    if not pkgs:
+        warn(f"No package list for '{distro}'. Continuing – build may fail.")
+        return
+
+    info(f"Detected distro family: {distro}")
+    info(f"Packages: {', '.join(pkgs)}")
+
+    if ask("Install system dependencies?"):
+        sudo(*(_PKG_INSTALL_CMD[distro] + pkgs))
+        ok("System dependencies installed")
+    else:
+        warn("Skipped. Build may fail if deps are missing.")
+
+def ensure_rust():
+    """Check for cargo; offer rustup install if missing."""
+    if shutil.which("cargo"):
+        return
+    err("'cargo' not found.")
+    if ask("Install Rust via rustup?"):
+        run(["sh", "-c", "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"])
+        # Source the env so cargo is available in this session
+        cargo_bin = Path.home() / ".cargo" / "bin"
+        os.environ["PATH"] = f"{cargo_bin}:{os.environ['PATH']}"
+        if not shutil.which("cargo"):
+            err("Rust installed but cargo still not found. Please restart your shell and re-run.")
+            sys.exit(1)
+        ok("Rust installed")
+    else:
+        err("cargo is required. Install Rust: https://rustup.rs")
+        sys.exit(1)
+
 def ensure_tauri_cli():
     step("Checking cargo-tauri")
     result = run_capture(["cargo", "tauri", "--version"])

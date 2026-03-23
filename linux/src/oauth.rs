@@ -49,24 +49,23 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .append_pair("code_challenge_method", "S256");
 
     // 4. Open browser
-    //    xdg-open is the standard on Linux (works with both Wayland and X11).
-    //    The webbrowser crate often fails on Wayland/Fedora because it relies
-    //    on heuristics that don't cover all desktop environments.
-    println!("\nOpening web browser for login...");
+    //    Under `sudo` the desktop-session env vars (WAYLAND_DISPLAY,
+    //    XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS) are stripped, so plain
+    //    `xdg-open` silently fails on Wayland/GNOME.  We detect sudo and
+    //    re-launch xdg-open as the original user with the session env
+    //    reconstructed.
     let url_str = auth_url.as_str();
-    let browser_opened = std::process::Command::new("xdg-open")
-        .arg(url_str)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .is_ok();
+    println!("\nOpening web browser for login...");
+    let browser_opened = open_browser_for_user(url_str);
+
+    // Always show the URL — xdg-open can silently fail even when spawn()
+    // returns Ok (e.g. missing portal, wrong session).
+    println!(
+        "\n  Login URL: \x1b[4m{}\x1b[0m\n",
+        url_str
+    );
     if !browser_opened {
-        println!(
-            "\x1b[33mCould not open browser automatically.\x1b[0m\n\
-             Please open this URL manually:\n\n  \x1b[4m{}\x1b[0m\n",
-            url_str
-        );
+        println!("\x1b[33mCould not launch browser. Please open the URL above manually.\x1b[0m\n");
     }
     println!("Waiting for login in browser (timeout: 5 minutes)...");
 
@@ -179,4 +178,56 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .ok_or_else(|| anyhow::anyhow!("No access_token in response"))?;
 
     Ok(access_token.to_string())
+}
+
+/// Open a URL in the user's default browser.
+///
+/// When running under `sudo`, desktop-session env vars are stripped, so plain
+/// `xdg-open` silently fails on Wayland (GNOME, KDE, etc.).  We detect this
+/// via `SUDO_USER` / `SUDO_UID` and re-run xdg-open as the original user
+/// with the session environment reconstructed.
+fn open_browser_for_user(url: &str) -> bool {
+    if let (Ok(sudo_user), Ok(sudo_uid)) = (
+        std::env::var("SUDO_USER"),
+        std::env::var("SUDO_UID"),
+    ) {
+        let runtime_dir = format!("/run/user/{}", sudo_uid);
+
+        // Reconstruct vars that sudo strips but xdg-open/portal needs.
+        let wayland_display = std::env::var("WAYLAND_DISPLAY")
+            .unwrap_or_else(|_| "wayland-0".to_string());
+        let display = std::env::var("DISPLAY")
+            .unwrap_or_else(|_| ":0".to_string());
+        let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS")
+            .unwrap_or_else(|_| format!("unix:path={}/bus", runtime_dir));
+
+        // runuser (util-linux) switches to the target user without a full
+        // login session — we supply the env vars explicitly via `env`.
+        if std::process::Command::new("runuser")
+            .args(["-u", &sudo_user, "--"])
+            .arg("env")
+            .arg(format!("XDG_RUNTIME_DIR={}", runtime_dir))
+            .arg(format!("WAYLAND_DISPLAY={}", wayland_display))
+            .arg(format!("DISPLAY={}", display))
+            .arg(format!("DBUS_SESSION_BUS_ADDRESS={}", dbus_addr))
+            .arg("xdg-open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return true;
+        }
+    }
+
+    // Not under sudo, or runuser failed — try plain xdg-open.
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
 }

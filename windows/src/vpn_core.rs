@@ -49,7 +49,7 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
     let cert_pin_bytes = decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
     let dll_path = extract_wintun_dll()?;
     let wintun = unsafe { wintun::load_from_path(&dll_path) }.context("Failed to load wintun.dll")?;
-    
+
     // 2. Open or create the virtual adapter
     let adapter = get_or_create_adapter(&wintun)?;
 
@@ -57,8 +57,12 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
 
     // 3. Main Connection Loop
     while running.load(Ordering::Relaxed) {
+        // Always clear stale routes before a new session so a previous
+        // (possibly crashed) session does not leave orphaned routing entries.
+        cleanup_routes(None);
+
         let outcome = run_session(&config, &cert_pin_bytes, &adapter, &running).await;
-        
+
         if !running.load(Ordering::Relaxed) { break; }
 
         let (reconnect_delay, next_backoff) = match outcome {
@@ -68,7 +72,7 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
                 Duration::from_secs(RECONNECT_INITIAL_SECS),
             ),
             Err(e) => {
-                warn!("Session failed: {}. Reconnecting...", e);
+                warn!("Session failed: {:#}. Reconnecting...", e);
                 (backoff, (backoff * 2).min(Duration::from_secs(RECONNECT_MAX_SECS)))
             }
         };
@@ -77,7 +81,8 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
         backoff = next_backoff;
     }
 
-    // 4. Cleanup
+    // 4. Cleanup – routes first, then DNS/NRPT
+    cleanup_routes(None);
     remove_nrpt_dns_rule();
     info!("VPN Service Stopped.");
     Ok(())
@@ -272,8 +277,13 @@ async fn connect_and_handshake(
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
 
-    // Use H3 ALPN for censorship resistance to obfuscate the traffic.
-    client_crypto.alpn_protocols = if censorship_resistant { vec![b"h3".to_vec()] } else { vec![b"mavivpn".to_vec()] };
+    // CR mode: only h3 (looks like HTTP/3 to DPI).
+    // Normal mode: try both so it works regardless of server config.
+    client_crypto.alpn_protocols = if censorship_resistant {
+        vec![b"h3".to_vec()]
+    } else {
+        vec![b"mavivpn".to_vec(), b"h3".to_vec()]
+    };
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
@@ -299,7 +309,10 @@ async fn connect_and_handshake(
     // Resolve endpoint and connect
     let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve endpoint")?;
     let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
-    let connection = endpoint.connect(addr, server_name)?.await.context("QUIC Handshake failed")?;
+    info!("Connecting to {} (resolved: {}, SNI: {})", endpoint_str, addr, server_name);
+    let connecting = endpoint.connect(addr, server_name).context("endpoint.connect() failed")?;
+    let connection = connecting.await.context("QUIC handshake failed (TLS/cert error?)")?;
+    info!("QUIC handshake OK, sending auth token ({} bytes)", token.len());
 
     // Perform application-level handshake
     let (mut send, mut recv) = connection.open_bi().await?;
@@ -314,6 +327,30 @@ async fn connect_and_handshake(
     let config: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
 
     Ok((connection, config))
+}
+
+/// Helper: run a command and log its outcome.
+fn run_cmd(program: &str, args: &[&str]) -> bool {
+    let display = format!("{} {}", program, args.join(" "));
+    match std::process::Command::new(program).args(args).output() {
+        Ok(out) if out.status.success() => {
+            let msg = format!("[OK]  {}", display);
+            info!(cmd = %msg);
+            true
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let msg = format!("[FAIL] {} → {} {}", display, stdout, stderr);
+            warn!(cmd = %msg);
+            false
+        }
+        Err(e) => {
+            let msg = format!("[ERR] {} → {}", display, e);
+            warn!(cmd = %msg);
+            false
+        }
+    }
 }
 
 /// Comprehensive helper to apply all Windows networking settings for the VPN.
@@ -332,59 +369,108 @@ fn set_adapter_network_config(
 ) -> Result<()> {
     let adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let adapter_index = adapter.get_adapter_index()?;
-    let prefix_len = netmask_to_prefix_len(netmask)?;
+    let if_str = adapter_index.to_string();
+    let ip_str = ip.to_string();
+    let mask_str = netmask.to_string();
+    let gw_str = gateway.to_string();
+    let dns_str = dns.to_string();
+    let mtu_str = mtu.to_string();
 
-    // 1. Set IPv4 Address (via Windows API)
-    unsafe {
-        use windows_sys::Win32::NetworkManagement::IpHelper::*;
-        use windows_sys::Win32::Networking::WinSock::*;
-        let mut row: MIB_UNICASTIPADDRESS_ROW = std::mem::zeroed();
-        InitializeUnicastIpAddressEntry(&mut row);
-        row.InterfaceLuid = std::mem::transmute(adapter.get_luid());
-        row.Address.si_family = AF_INET as u16;
-        row.Address.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(ip.octets());
-        row.OnLinkPrefixLength = prefix_len;
-        row.DadState = IpDadStatePreferred;
-        CreateUnicastIpAddressEntry(&row);
+    info!("Configuring adapter '{}' (if={}) ip={} mask={} gw={} dns={}",
+        adapter_name, adapter_index, ip, netmask, gateway, dns);
+
+    // 1. Ensure adapter is administratively up
+    run_cmd("netsh", &["interface", "set", "interface", &adapter_name, "admin=enabled"]);
+
+    // 2. Set IPv4 address — positional syntax is the most reliable across Windows versions.
+    //    "netsh interface ipv4 set address <name> static <ip> <mask>"
+    //    Do NOT set gateway here — we add split routes manually.
+    if !run_cmd("netsh", &["interface", "ipv4", "set", "address", &adapter_name, "static", &ip_str, &mask_str]) {
+        // Retry with "add" in case "set" fails on fresh adapter
+        run_cmd("netsh", &["interface", "ipv4", "add", "address", &adapter_name, &ip_str, &mask_str]);
     }
 
-    // 2. Set IPv6 Address if available
-    if let Some(ipv6) = assigned_ipv6 {
-        let _ = set_adapter_ipv6(adapter, ipv6, netmask_v6.unwrap_or(64));
+    // Wait for Windows to register the on-link route for the new IP.
+    info!("Waiting for IP to register on adapter...");
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Verify the IP was actually set
+    let verify = std::process::Command::new("netsh")
+        .args(["interface", "ipv4", "show", "addresses", &adapter_name])
+        .output();
+    if let Ok(out) = verify {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.contains(&ip_str) {
+            info!("IP {} confirmed on adapter", ip);
+        } else {
+            warn!("IP {} NOT visible on adapter! Output: {}", ip, text.trim());
+        }
     }
 
-    // 3. Set DNS (via netsh)
-    // We use netsh because the WinTUN API's DNS setting has issues on some localized versions of Windows.
-    let _ = std::process::Command::new("netsh").args(["interface", "ipv4", "set", "dnsservers", &adapter_name, "static", &dns.to_string(), "primary"]).output();
+    // 3. Set IPv6 address if available
+    if let (Some(ipv6), Some(plen)) = (assigned_ipv6, netmask_v6) {
+        let ipv6_str = format!("{}/{}", ipv6, plen);
+        run_cmd("netsh", &["interface", "ipv6", "add", "address", &adapter_name, &ipv6_str]);
+    }
+
+    // 4. Set DNS
+    run_cmd("netsh", &["interface", "ipv4", "set", "dnsservers", &adapter_name, "static", &dns_str, "primary"]);
     if let Some(dv6) = dns_v6 {
-        let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "add", "dnsservers", &adapter_name, &dv6.to_string(), "index=1"]).output();
+        let dv6_str = dv6.to_string();
+        run_cmd("netsh", &["interface", "ipv6", "add", "dnsservers", &adapter_name, &dv6_str, "index=1"]);
     }
 
-    // 4. Set MTU
+    // 5. Set MTU
     let _ = adapter.set_mtu(mtu as usize);
-    for proto in &["ipv4", "ipv6"] {
-        let _ = std::process::Command::new("netsh").args(["interface", proto, "set", "subinterface", &adapter_name, &format!("mtu={}", mtu), "store=active"]).output();
-    }
+    let mtu_val = format!("mtu={}", mtu_str);
+    run_cmd("netsh", &["interface", "ipv4", "set", "subinterface", &adapter_name, &mtu_val, "store=active"]);
+    run_cmd("netsh", &["interface", "ipv6", "set", "subinterface", &adapter_name, &mtu_val, "store=active"]);
 
-    // 5. Global Routing (Split Routes 0.0.0.0/1 and 128.0.0.0/1)
-    // This is superior to changing the 0.0.0.0/0 default route because it effectively
-    // overrides it without deleting it, making cleanup easier and more robust.
-    for prefix in &["0.0.0.0", "128.0.0.0"] {
-        let _ = std::process::Command::new("route").args(["add", prefix, "mask", "128.0.0.0", &gateway.to_string(), "metric", "1", "if", &adapter_index.to_string()]).output();
-    }
+    // 6. Host exception FIRST — must run before split routes so that
+    //    Get-NetRoute still sees the real physical default route.
+    let endpoint_ip = add_host_route_exception(endpoint);
+
+    // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 — override default route without deleting it.
+    run_cmd("route", &["add", "0.0.0.0",   "mask", "128.0.0.0", &gw_str, "metric", "5", "if", &if_str]);
+    run_cmd("route", &["add", "128.0.0.0", "mask", "128.0.0.0", &gw_str, "metric", "5", "if", &if_str]);
 
     if let Some(gv6) = gateway_v6 {
-        let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "add", "route", "::/1", &adapter_name, &gv6.to_string()]).output();
-        let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "add", "route", "8000::/1", &adapter_name, &gv6.to_string()]).output();
+        let gv6_str = gv6.to_string();
+        run_cmd("netsh", &["interface", "ipv6", "add", "route", "::/1",    &adapter_name, &gv6_str]);
+        run_cmd("netsh", &["interface", "ipv6", "add", "route", "8000::/1", &adapter_name, &gv6_str]);
     }
 
-    // 6. Host Exception (Crucial for preventing routing loops)
-    let _ = add_host_route_exception(endpoint);
+    // Verify routes were added
+    let route_check = std::process::Command::new("route").args(["print", "0.0.0.0"]).output();
+    if let Ok(out) = route_check {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.contains(&gw_str) {
+            info!("Split routes confirmed (gateway {})", gw_str);
+        } else {
+            warn!("Split routes NOT visible! Check 'route print' output");
+        }
+    }
 
-    // 7. DNS Leak Prevention (NRPT + Interface Priority)
+    // 8. DNS leak prevention (NRPT + SMHNR)
     set_nrpt_dns_rule(dns, dns_v6);
 
+    info!("Network config complete: endpoint_exception={}",
+        endpoint_ip.as_deref().unwrap_or("none"));
     Ok(())
+}
+
+/// Remove the two split-tunnel routes and the host exception.
+/// Called both before a new session (stale cleanup) and on disconnect.
+fn cleanup_routes(endpoint_ip: Option<&str>) {
+    let _ = std::process::Command::new("route").args(["delete", "0.0.0.0",   "mask", "128.0.0.0"]).output();
+    let _ = std::process::Command::new("route").args(["delete", "128.0.0.0", "mask", "128.0.0.0"]).output();
+    if let Some(ip) = endpoint_ip {
+        let _ = std::process::Command::new("route").args(["delete", ip]).output();
+    }
+    // Also remove any stored endpoint exception (best-effort, ignore errors)
+    // IPv6 split routes
+    let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "delete", "route", "::/1",    "MaviVPN"]).output();
+    let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "delete", "route", "8000::/1", "MaviVPN"]).output();
 }
 
 fn set_adapter_ipv6(adapter: &Adapter, ip: Ipv6Addr, prefix_len: u8) -> Result<()> {
@@ -404,20 +490,38 @@ fn set_adapter_ipv6(adapter: &Adapter, ip: Ipv6Addr, prefix_len: u8) -> Result<(
 }
 
 /// Routes the VPN server's own IP via the physical gateway rather than the tunnel.
-/// This prevents "VPN inside VPN" loops that would collapse the connection.
-fn add_host_route_exception(endpoint: &str) -> Result<()> {
-    let server_ip = endpoint.split(':').next().unwrap_or(endpoint).trim_start_matches('[').trim_end_matches(']');
-    
-    // Auto-detect the physical gateway via PowerShell
-    let output = std::process::Command::new("powershell")
-        .args(["-Command", "Get-NetRoute -DestinationPrefix 0.0.0.0/0 -AddressFamily IPv4 | Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1 -ExpandProperty NextHop"])
-        .output()?;
+/// Returns the server IP string so the caller can clean it up later.
+/// Must be called BEFORE the split-tunnel routes are installed.
+fn add_host_route_exception(endpoint: &str) -> Option<String> {
+    let server_ip = endpoint
+        .split(':').next().unwrap_or(endpoint)
+        .trim_start_matches('[').trim_end_matches(']')
+        .to_string();
 
-    let gateway = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !gateway.is_empty() {
-        let _ = std::process::Command::new("route").args(["add", server_ip, "mask", "255.255.255.255", &gateway, "metric", "1"]).output();
+    // Find the physical default gateway, explicitly excluding the VPN adapter
+    // (important on reconnect where VPN routes might still exist).
+    let ps = "Get-NetRoute -DestinationPrefix 0.0.0.0/0 -AddressFamily IPv4 \
+        | Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).InterfaceDescription -notlike '*WireGuard*' -and \
+          (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).Name -notlike 'MaviVPN*' } \
+        | Sort-Object { $_.RouteMetric + $_.InterfaceMetric } \
+        | Select-Object -First 1 -ExpandProperty NextHop";
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps])
+        .output();
+
+    if let Ok(out) = output {
+        let gateway = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !gateway.is_empty() && gateway != "0.0.0.0" {
+            let _ = std::process::Command::new("route")
+                .args(["add", &server_ip, "mask", "255.255.255.255", &gateway, "metric", "1"])
+                .output();
+            info!("Host exception: {} → {}", server_ip, gateway);
+            return Some(server_ip);
+        }
     }
-    Ok(())
+    warn!("Could not determine physical gateway for host exception route");
+    None
 }
 
 fn netmask_to_prefix_len(netmask: Ipv4Addr) -> Result<u8> {

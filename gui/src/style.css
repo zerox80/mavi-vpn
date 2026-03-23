@@ -1,0 +1,291 @@
+:root {
+  --bg: #0f1117;
+  --card: #1a1d27;
+  --card-border: #2a2d3a;
+  --text: #e4e6f0;
+  --text-dim: #8b8fa3;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --green: #22c55e;
+  --green-glow: rgba(34, 197, 94, 0.2);
+  --red: #ef4444;
+  --red-glow: rgba(239, 68, 68, 0.2);
+  --yellow: #eab308;
+  --radius: 12px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 24px 20px;
+}
+
+/* Header */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 28px;
+}
+
+header h1 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.badge-online {
+  background: var(--green-glow);
+  color: var(--green);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.badge-offline {
+  background: var(--red-glow);
+  color: var(--red);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Status Card */
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.status-dot {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: all 0.4s ease;
+}
+
+.status-dot.connected {
+  background: var(--green);
+  box-shadow: 0 0 20px var(--green-glow), 0 0 40px var(--green-glow);
+  animation: pulse-green 2s infinite;
+}
+
+.status-dot.disconnected {
+  background: #4b5066;
+  box-shadow: none;
+}
+
+.status-dot.connecting {
+  background: var(--yellow);
+  animation: pulse-yellow 1s infinite;
+}
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 20px var(--green-glow); }
+  50% { box-shadow: 0 0 30px var(--green-glow), 0 0 50px var(--green-glow); }
+}
+
+@keyframes pulse-yellow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.status-label {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.status-detail {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+/* Buttons */
+.btn {
+  width: 100%;
+  padding: 14px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  letter-spacing: 0.3px;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-connect {
+  background: var(--accent);
+  color: white;
+  margin-bottom: 16px;
+}
+
+.btn-connect:hover {
+  background: var(--accent-hover);
+}
+
+.btn-connect.connected {
+  background: var(--red);
+}
+
+.btn-connect.connected:hover {
+  background: #dc2626;
+}
+
+.btn-connect:disabled {
+  background: #4b5066;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.btn-save {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--card-border);
+  margin-top: 12px;
+}
+
+.btn-save:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Settings */
+.settings-toggle {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.settings-toggle:hover {
+  color: var(--text);
+}
+
+#settings-arrow {
+  font-size: 10px;
+  transition: transform 0.2s;
+  display: inline-block;
+}
+
+#settings-arrow.open {
+  transform: rotate(90deg);
+}
+
+.settings {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-top: 4px;
+}
+
+.field {
+  margin-bottom: 14px;
+}
+
+.field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.field input[type="text"],
+.field input[type="password"] {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.field input[type="text"]:focus,
+.field input[type="password"]:focus {
+  border-color: var(--accent);
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-direction: row;
+}
+
+.checkbox-field label {
+  margin-bottom: 0;
+  text-transform: none;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.checkbox-field input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--card-border);
+  margin: 16px 0;
+}
+
+/* Error Box */
+.error-box {
+  background: var(--red-glow);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--red);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+/* Utility */
+.hidden {
+  display: none !important;
+}

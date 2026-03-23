@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mavi VPN</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header>
+      <h1>Mavi VPN</h1>
+      <div id="service-badge" class="badge badge-offline">Service Offline</div>
+    </header>
+
+    <!-- Status Card -->
+    <div id="status-card" class="card">
+      <div id="status-indicator" class="status-dot disconnected"></div>
+      <div class="status-text">
+        <div id="status-label" class="status-label">Disconnected</div>
+        <div id="status-detail" class="status-detail">Not connected to any server</div>
+      </div>
+    </div>
+
+    <!-- Connect Button -->
+    <button id="connect-btn" class="btn btn-connect">Connect</button>
+
+    <!-- Error Display -->
+    <div id="error-box" class="error-box hidden"></div>
+
+    <!-- Settings Toggle -->
+    <button id="settings-toggle" class="settings-toggle">
+      <span id="settings-arrow">&#9654;</span> Settings
+    </button>
+
+    <!-- Settings Panel -->
+    <div id="settings-panel" class="settings hidden">
+      <div class="field">
+        <label for="endpoint">Server Endpoint</label>
+        <input type="text" id="endpoint" placeholder="vpn.example.com:4433" />
+      </div>
+      <div class="field">
+        <label for="token">Auth Token</label>
+        <input type="password" id="token" placeholder="Pre-shared token or JWT" />
+      </div>
+      <div class="field">
+        <label for="cert_pin">Certificate PIN (SHA256)</label>
+        <input type="text" id="cert_pin" placeholder="hex fingerprint" />
+      </div>
+      <div class="field checkbox-field">
+        <input type="checkbox" id="cr_mode" />
+        <label for="cr_mode">Censorship Resistant Mode</label>
+      </div>
+
+      <hr />
+      <div class="field checkbox-field">
+        <input type="checkbox" id="kc_auth" />
+        <label for="kc_auth">Keycloak Authentication</label>
+      </div>
+      <div id="kc-fields" class="hidden">
+        <div class="field">
+          <label for="kc_url">Keycloak URL</label>
+          <input type="text" id="kc_url" placeholder="https://auth.example.com" />
+        </div>
+        <div class="field">
+          <label for="kc_realm">Realm</label>
+          <input type="text" id="kc_realm" placeholder="mavi-vpn" />
+        </div>
+        <div class="field">
+          <label for="kc_client_id">Client ID</label>
+          <input type="text" id="kc_client_id" placeholder="mavi-client" />
+        </div>
+      </div>
+
+      <button id="save-btn" class="btn btn-save">Save Settings</button>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

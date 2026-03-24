@@ -22,7 +22,7 @@ pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
     info!("Daemon listening on {}", LOCAL_IPC_ADDR);
 
     loop {
-        if stop_signal.load(Ordering::SeqCst) {
+        if !stop_signal.load(Ordering::SeqCst) {
             info!("Stop signal received, shutting down daemon...");
             vpn_running.store(false, Ordering::SeqCst);
             if let Some(t) = vpn_task {

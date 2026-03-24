@@ -280,6 +280,28 @@ def create_desktop_entry(exec_path: str):
         subprocess.run(["update-desktop-database", str(desktop_dir)], check=False)
     ok("GNOME-Suche aktualisiert")
 
+def ensure_daemon():
+    """Prüft ob Daemon installiert ist, bietet Installation + Start an."""
+    step("VPN Daemon")
+    if shutil.which("mavi-vpn"):
+        ok("mavi-vpn daemon binary gefunden")
+    else:
+        warn("mavi-vpn daemon nicht gefunden – GUI zeigt 'Service Offline' ohne ihn.")
+        cli_script = ROOT / "install_cli_linux.py"
+        if cli_script.exists() and ask("Daemon jetzt installieren (install_cli_linux.py)?"):
+            run([sys.executable, str(cli_script)])
+        else:
+            warn("Daemon manuell installieren: python install_cli_linux.py")
+            return
+
+    if shutil.which("systemctl"):
+        result = run_capture(["systemctl", "is-active", "mavi-vpn"])
+        if result.stdout.strip() == "active":
+            ok("mavi-vpn.service läuft bereits")
+        elif ask("Daemon jetzt starten (sudo systemctl start mavi-vpn)?"):
+            sudo("systemctl", "start", "mavi-vpn")
+            ok("Daemon gestartet")
+
 def post_install_message(binary_path: str = "mavi-vpn-gui"):
     print()
     ok("GUI installation complete!")
@@ -337,6 +359,7 @@ def main():
         ok("Installed via rpm")
         patch_system_desktop_entry()
         refresh_desktop_integration()
+        ensure_daemon()
         post_install_message()
         return
 
@@ -350,6 +373,7 @@ def main():
         ok("Installed via dpkg")
         patch_system_desktop_entry()
         refresh_desktop_integration()
+        ensure_daemon()
         post_install_message()
         return
 
@@ -365,6 +389,7 @@ def main():
         dest.chmod(0o755)
         ok(f"AppImage installed to {dest}")
         create_desktop_entry(str(dest))
+        ensure_daemon()
         post_install_message(str(dest))
         return
 
@@ -380,6 +405,7 @@ def main():
     sudo("install", "-m", "755", str(binary), str(dest))
     ok(f"Binary installed to {dest}")
     create_desktop_entry(str(dest))
+    ensure_daemon()
     post_install_message(str(dest))
 
 

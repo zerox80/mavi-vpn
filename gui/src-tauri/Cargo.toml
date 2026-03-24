@@ -23,7 +23,7 @@ rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
 url = "2"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 webbrowser = "1.0"
 
 [profile.release]

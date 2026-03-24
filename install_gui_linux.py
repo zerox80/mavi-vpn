@@ -42,7 +42,7 @@ def step(msg):        print(c("1;37", f"\n[{msg}]"))
 
 ROOT    = Path(__file__).resolve().parent
 GUI_DIR = ROOT / "gui"
-BUNDLE  = GUI_DIR / "src-tauri" / "target" / "release" / "bundle"
+BUNDLE  = ROOT / "target" / "release" / "bundle"
 
 def run(cmd, cwd=None, check=True):
     info(f"Running: {' '.join(cmd)}")
@@ -104,8 +104,8 @@ GUI_SYSTEM_DEPS = {
         "librsvg2-devel",
         # Build toolchain
         "gcc", "gcc-c++", "make", "pkg-config", "cmake", "perl",
-        # Tauri bundler helpers
-        "file", "curl", "wget",
+        # Tauri bundler helpers (fuse2 needed by linuxdeploy AppImage)
+        "file", "curl", "wget", "fuse",
         # Runtime (VPN networking)
         "iproute",
     ],
@@ -116,7 +116,7 @@ GUI_SYSTEM_DEPS = {
         "libayatana-appindicator3-dev",
         "librsvg2-dev",
         "build-essential", "pkg-config", "cmake", "perl",
-        "file", "curl", "wget",
+        "file", "curl", "wget", "libfuse2",
         "iproute2",
     ],
     "arch": [
@@ -210,18 +210,66 @@ def find_bundle(pattern):
 DESKTOP_ENTRY = """\
 [Desktop Entry]
 Name=Mavi VPN
-Comment=QUIC-based VPN client
+GenericName=VPN Client
+Comment=QUIC-based VPN client with Keycloak SSO
 Exec={exec}
-Icon=network-vpn
+Icon=mavi-vpn-gui
 Terminal=false
 Type=Application
 Categories=Network;
+Keywords=vpn;network;mavi;secure;quic;tunnel;
 StartupNotify=true
+StartupWMClass=mavi-vpn-gui
 """
+
+def install_icon():
+    """Kopiert das App-Icon ins hicolor-Theme (user-lokal), damit Icon=mavi-vpn-gui aufgelöst wird."""
+    src = ROOT / "gui" / "src-tauri" / "icons" / "128x128.png"
+    if not src.exists():
+        return
+    dest = Path.home() / ".local" / "share" / "icons" / "hicolor" / "128x128" / "apps" / "mavi-vpn-gui.png"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    icon_dir = Path.home() / ".local" / "share" / "icons" / "hicolor"
+    if shutil.which("gtk-update-icon-cache"):
+        subprocess.run(["gtk-update-icon-cache", "-f", "-t", str(icon_dir)], check=False)
+    ok("Icon installiert")
+
+def patch_system_desktop_entry():
+    """Ergänzt Categories/Keywords in der vom Paket installierten .desktop-Datei."""
+    import glob as _glob
+    matches = _glob.glob("/usr/share/applications/*avi*VPN*.desktop") + \
+              _glob.glob("/usr/share/applications/*mavi*.desktop")
+    if not matches:
+        warn("Keine .desktop-Datei in /usr/share/applications gefunden – übersprungen.")
+        return
+    path = matches[0]
+    try:
+        text = open(path).read()
+        if "Keywords=" not in text:
+            text += "Keywords=vpn;network;mavi;secure;quic;tunnel;\n"
+        text = __import__("re").sub(r"Categories=.*", "Categories=Network;", text)
+        if "GenericName=" not in text:
+            text = text.replace("[Desktop Entry]\n", "[Desktop Entry]\nGenericName=VPN Client\n")
+        if "StartupWMClass=" not in text:
+            text += "StartupWMClass=mavi-vpn-gui\n"
+        open(path, "w").write(text)
+        ok(f".desktop gepatcht: {path}")
+    except Exception as e:
+        warn(f".desktop konnte nicht gepatcht werden: {e}")
+
+def refresh_desktop_integration():
+    """Aktualisiert Icon-Cache und Desktop-Datenbank damit GNOME die App sofort findet."""
+    if shutil.which("gtk-update-icon-cache"):
+        sudo("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
+    if shutil.which("update-desktop-database"):
+        sudo("update-desktop-database", "/usr/share/applications")
+    ok("Desktop-Integration aktualisiert")
 
 def create_desktop_entry(exec_path: str):
     if not ask("Create .desktop entry (app menu shortcut)?"):
         return
+    install_icon()
     desktop_dir = Path.home() / ".local" / "share" / "applications"
     desktop_dir.mkdir(parents=True, exist_ok=True)
     dest = desktop_dir / "mavi-vpn.desktop"
@@ -229,7 +277,8 @@ def create_desktop_entry(exec_path: str):
     dest.chmod(0o644)
     ok(f".desktop entry: {dest}")
     if shutil.which("update-desktop-database"):
-        run(["update-desktop-database", str(desktop_dir)], check=False)
+        subprocess.run(["update-desktop-database", str(desktop_dir)], check=False)
+    ok("GNOME-Suche aktualisiert")
 
 def post_install_message(binary_path: str = "mavi-vpn-gui"):
     print()
@@ -262,14 +311,21 @@ def main():
     print(c("1;36", "  ╚══════════════════════════════════════╝"))
     print()
 
-    require_cmd("cargo")
+    ensure_rust()
+    install_system_deps(GUI_SYSTEM_DEPS)
     ensure_tauri_cli()
 
     # ── Build ────────────────────────────────────────────────────────────────
     step("Building GUI (Release)")
-    run(["cargo", "tauri", "build"], cwd=GUI_DIR)
+    build_env = os.environ.copy()
+    build_env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+    info("Running: cargo tauri build")
+    result = subprocess.run(["cargo", "tauri", "build"], cwd=GUI_DIR, env=build_env)
+    if result.returncode != 0:
+        err(f"Command failed (exit {result.returncode})")
+        sys.exit(result.returncode)
 
-    binary = GUI_DIR / "src-tauri" / "target" / "release" / "mavi-vpn-gui"
+    binary = ROOT / "target" / "release" / "mavi-vpn-gui"
 
     # ── Install – try package managers first ─────────────────────────────────
     step("Installing")
@@ -279,6 +335,8 @@ def main():
     if rpm and shutil.which("rpm") and ask(f"Install via RPM ({rpm.name})?"):
         sudo("rpm", "-i", "--force", str(rpm))
         ok("Installed via rpm")
+        patch_system_desktop_entry()
+        refresh_desktop_integration()
         post_install_message()
         return
 
@@ -290,6 +348,8 @@ def main():
         else:
             sudo("dpkg", "-i", str(deb))
         ok("Installed via dpkg")
+        patch_system_desktop_entry()
+        refresh_desktop_integration()
         post_install_message()
         return
 

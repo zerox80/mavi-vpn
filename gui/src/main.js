@@ -161,7 +161,7 @@ function updateUI(status) {
     badge.textContent = 'Service Offline';
     if (!isConnected) {
       btn.disabled = true;
-      btn.title = 'Start the VPN service first:\n  mavi-vpn-service.exe install\n  net start MaviVPNService';
+      btn.title = 'Start the VPN daemon first:\n  sudo systemctl start mavi-vpn\n  or: sudo mavi-vpn daemon &';
     }
     showServiceOfflineHint();
   }
@@ -177,7 +177,7 @@ function showServiceOfflineHint() {
   const box = document.getElementById('error-box');
   // Don't overwrite an existing real error
   if (!box.classList.contains('hidden') && box.dataset.type === 'error') return;
-  box.textContent = 'VPN service is not running. Run: net start MaviVPNService (as Administrator)';
+  box.textContent = 'VPN daemon is not running. Run: sudo systemctl start mavi-vpn';
   box.style.color = 'var(--yellow)';
   box.style.background = 'rgba(234,179,8,0.12)';
   box.style.borderColor = 'rgba(234,179,8,0.3)';
@@ -272,7 +272,7 @@ function showError(msg) {
 function friendlyError(msg) {
   const s = String(msg);
   if (s.includes('10061') || s.includes('connection refused') || s.includes('Verbindung verweigerte'))
-    return 'VPN service is not running. Start it with: net start MaviVPNService';
+    return 'VPN daemon is not running. Start it with: sudo systemctl start mavi-vpn';
   if (s.includes('10060') || s.includes('timed out'))
     return 'Connection timed out. Check the server endpoint and firewall.';
   if (s.includes('cert') || s.includes('certificate'))

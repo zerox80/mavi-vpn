@@ -41,3 +41,4 @@ gui/src-tauri/gen/schemas/acl-manifests.json
 gui/src-tauri/gen/schemas/capabilities.json
 gui/src-tauri/gen/schemas/desktop-schema.json
 gui/src-tauri/gen/schemas/windows-schema.json
+gui/src-tauri/gen/schemas/linux-schema.json

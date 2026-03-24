@@ -154,56 +154,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     Ok(token)
 }
 
-/// Open a URL in the default browser. Works on Windows and Linux (Wayland/X11).
-///
-/// On Linux under `sudo`/root, desktop-session env vars are stripped, so we
-/// detect `SUDO_USER`/`SUDO_UID` and re-launch via `runuser` with the
-/// session environment reconstructed.
+/// Open a URL in the default browser (cross-platform via `webbrowser` crate).
 fn open_browser(url: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        // Use explorer.exe — NOT "cmd /c start" which breaks on & in URLs.
-        let _ = std::process::Command::new("explorer").arg(url).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // Under sudo the Wayland/D-Bus vars are gone — run as original user.
-        if let (Ok(sudo_user), Ok(sudo_uid)) = (
-            std::env::var("SUDO_USER"),
-            std::env::var("SUDO_UID"),
-        ) {
-            let runtime_dir = format!("/run/user/{}", sudo_uid);
-            let wayland = std::env::var("WAYLAND_DISPLAY")
-                .unwrap_or_else(|_| "wayland-0".to_string());
-            let display = std::env::var("DISPLAY")
-                .unwrap_or_else(|_| ":0".to_string());
-            let dbus = std::env::var("DBUS_SESSION_BUS_ADDRESS")
-                .unwrap_or_else(|_| format!("unix:path={}/bus", runtime_dir));
-
-            if std::process::Command::new("runuser")
-                .args(["-u", &sudo_user, "--"])
-                .arg("env")
-                .arg(format!("XDG_RUNTIME_DIR={}", runtime_dir))
-                .arg(format!("WAYLAND_DISPLAY={}", wayland))
-                .arg(format!("DISPLAY={}", display))
-                .arg(format!("DBUS_SESSION_BUS_ADDRESS={}", dbus))
-                .arg("xdg-open")
-                .arg(url)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .is_ok()
-            {
-                return;
-            }
-        }
-
-        let _ = std::process::Command::new("xdg-open")
-            .arg(url)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
+    let _ = webbrowser::open(url);
 }

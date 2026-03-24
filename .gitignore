@@ -37,3 +37,7 @@ android/app/release/output-metadata.json
 android/app/release/baselineProfiles/0/app-release.dm
 android/app/release/baselineProfiles/1/app-release.dm
 mavi-vpn.json
+gui/src-tauri/gen/schemas/acl-manifests.json
+gui/src-tauri/gen/schemas/capabilities.json
+gui/src-tauri/gen/schemas/desktop-schema.json
+gui/src-tauri/gen/schemas/windows-schema.json

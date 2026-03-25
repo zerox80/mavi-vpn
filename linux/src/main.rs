@@ -434,7 +434,7 @@ async fn prompt_new_config() -> Result<Config> {
         saved_kc_realm = Some(realm);
         saved_kc_client_id = Some(client_id);
     } else {
-        print!("Auth token: ");
+        print!("Preshared Key: ");
         stdout.flush()?;
         token = read_line()?;
     }

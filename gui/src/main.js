@@ -84,6 +84,7 @@ function toggleSettings() {
 function toggleKeycloak() {
   const checked = document.getElementById('kc_auth').checked;
   document.getElementById('kc-fields').classList.toggle('hidden', !checked);
+  document.getElementById('token-field').classList.toggle('hidden', checked);
 }
 
 // =============================================================================
@@ -242,6 +243,7 @@ function fillSettings(config) {
   document.getElementById('kc_realm').value    = config.kc_realm    || '';
   document.getElementById('kc_client_id').value= config.kc_client_id|| '';
   document.getElementById('kc-fields').classList.toggle('hidden', !config.kc_auth);
+  document.getElementById('token-field').classList.toggle('hidden', !!config.kc_auth);
 }
 
 async function saveSettings() {

@@ -276,60 +276,20 @@ fun VpnScreen(
     var authToken by remember { mutableStateOf<String>(initialToken) }
     var certPin by remember { mutableStateOf<String>(initialPin) }
     
-    // Keycloak Specific State
+    // Keycloak & auth mode state
     val prefs = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
-    var showKcDialog by remember { mutableStateOf<Boolean>(false) }
+    var useKeycloak by remember { mutableStateOf(prefs.getBoolean("saved_use_keycloak", false)) }
     var kcUrl by remember { mutableStateOf<String>(prefs.getString("saved_kc_url", "") ?: "") }
     var kcRealm by remember { mutableStateOf<String>(prefs.getString("saved_kc_realm", "mavi-vpn") ?: "mavi-vpn") }
     var kcClientId by remember { mutableStateOf<String>(prefs.getString("saved_kc_client_id", "mavi-client") ?: "mavi-client") }
+    var errorMessage by remember { mutableStateOf("") }
 
-    if (showKcDialog) {
-        AlertDialog(
-            onDismissRequest = { showKcDialog = false },
-            title = { Text("Keycloak Settings") },
-            text = {
-                Column {
-                    OutlinedTextField(
-                        value = kcUrl,
-                        onValueChange = { kcUrl = it },
-                        label = { Text("Keycloak Server URL") },
-                        placeholder = { Text("https://auth.example.com") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = kcRealm,
-                        onValueChange = { kcRealm = it },
-                        label = { Text("Realm") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = kcClientId,
-                        onValueChange = { kcClientId = it },
-                        label = { Text("Client ID") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    prefs.edit()
-                        .putString("saved_kc_url", kcUrl)
-                        .putString("saved_kc_realm", kcRealm)
-                        .putString("saved_kc_client_id", kcClientId)
-                        .apply()
-                    showKcDialog = false
-                    OAuthHelper.startAuth(context, kcUrl, kcRealm, kcClientId)
-                }) {
-                    Text("Save & Login")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showKcDialog = false }) { Text("Cancel") }
-            }
-        )
-    }
+    val fieldColors = OutlinedTextFieldDefaults.colors(
+        focusedBorderColor = Color(0xFF007AFF),
+        unfocusedBorderColor = Color.DarkGray,
+        focusedTextColor = Color.White,
+        unfocusedTextColor = Color.White
+    )
 
     Column(
         modifier = Modifier
@@ -367,45 +327,17 @@ fun VpnScreen(
         Spacer(modifier = Modifier.height(32.dp))
 
         if (!isConnected) {
-            // Keycloak Button
-            Button(
-                onClick = { 
-                    if (kcUrl.isEmpty()) {
-                        showKcDialog = true
-                    } else {
-                        OAuthHelper.startAuth(context, kcUrl, kcRealm, kcClientId)
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF673AB7)),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Login with Keycloak")
-            }
-            
-            TextButton(onClick = { showKcDialog = true }) {
-                Text("Edit Keycloak Server", color = Color.Gray, fontSize = 12.sp)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
+            // --- Server fields (always visible) ---
             OutlinedTextField(
                 value = serverIp,
                 onValueChange = { serverIp = it },
                 label = { Text("Server IP / Endpoint", color = Color.Gray) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color(0xFF007AFF),
-                    unfocusedBorderColor = Color.DarkGray,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                )
+                colors = fieldColors
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = serverPort,
@@ -413,32 +345,10 @@ fun VpnScreen(
                 label = { Text("Port", color = Color.Gray) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color(0xFF007AFF),
-                    unfocusedBorderColor = Color.DarkGray,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                )
+                colors = fieldColors
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = authToken,
-                onValueChange = { authToken = it },
-                label = { Text("Auth Token", color = Color.Gray) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color(0xFF007AFF),
-                    unfocusedBorderColor = Color.DarkGray,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                )
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = certPin,
@@ -446,16 +356,136 @@ fun VpnScreen(
                 label = { Text("Certificate PIN (SHA256 Hex)", color = Color.Gray) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color(0xFF007AFF),
-                    unfocusedBorderColor = Color.DarkGray,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                )
+                colors = fieldColors
             )
-            
-            Spacer(modifier = Modifier.height(24.dp))
-            
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Divider(color = Color(0xFF2C2C2C))
+
+            // --- Auth mode toggle ---
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = useKeycloak,
+                    onCheckedChange = { checked ->
+                        if (checked && !useKeycloak) {
+                            // Switching to KC: save current preshared key
+                            prefs.edit().putString("saved_preshared_key", authToken).apply()
+                        } else if (!checked && useKeycloak) {
+                            // Switching to manual: restore saved preshared key
+                            authToken = prefs.getString("saved_preshared_key", "") ?: ""
+                        }
+                        useKeycloak = checked
+                        prefs.edit().putBoolean("saved_use_keycloak", checked).apply()
+                        errorMessage = ""
+                    },
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = Color(0xFF673AB7),
+                        uncheckedColor = Color.Gray,
+                        checkmarkColor = Color.White
+                    )
+                )
+                Text("Keycloak Authentication", color = Color.White, fontSize = 14.sp)
+            }
+
+            if (useKeycloak) {
+                // --- Keycloak fields ---
+                OutlinedTextField(
+                    value = kcUrl,
+                    onValueChange = { kcUrl = it },
+                    label = { Text("Keycloak Server URL", color = Color.Gray) },
+                    placeholder = { Text("https://auth.example.com") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    colors = fieldColors
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = kcRealm,
+                    onValueChange = { kcRealm = it },
+                    label = { Text("Realm", color = Color.Gray) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    colors = fieldColors
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = kcClientId,
+                    onValueChange = { kcClientId = it },
+                    label = { Text("Client ID", color = Color.Gray) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    colors = fieldColors
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Button(
+                    onClick = {
+                        if (kcUrl.isEmpty()) {
+                            errorMessage = "Please enter a Keycloak Server URL."
+                        } else {
+                            prefs.edit()
+                                .putString("saved_kc_url", kcUrl)
+                                .putString("saved_kc_realm", kcRealm)
+                                .putString("saved_kc_client_id", kcClientId)
+                                .apply()
+                            errorMessage = ""
+                            OAuthHelper.startAuth(context, kcUrl, kcRealm, kcClientId)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF673AB7)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Login with Keycloak")
+                }
+
+                // Show authentication status
+                if (authToken.isNotEmpty()) {
+                    Text(
+                        text = "Authenticated",
+                        color = Color(0xFF00FF7F),
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            } else {
+                // --- Preshared Key field (mandatory without Keycloak) ---
+                OutlinedTextField(
+                    value = authToken,
+                    onValueChange = { authToken = it },
+                    label = { Text("Preshared Key", color = Color.Gray) },
+                    placeholder = { Text("Pre-shared token") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    colors = fieldColors
+                )
+            }
+
+            // Error display
+            if (errorMessage.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = errorMessage,
+                    color = Color(0xFFFF3B30),
+                    fontSize = 12.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             // Settings Button
             OutlinedButton(
                 onClick = onOpenSettings,
@@ -490,8 +520,28 @@ fun VpnScreen(
                 if (isConnected) {
                     onDisconnect()
                 } else {
-                    if (serverIp.isNotEmpty() && authToken.isNotEmpty()) {
-                        onConnect(serverIp, serverPort, authToken, certPin)
+                    errorMessage = ""
+                    if (serverIp.isEmpty()) {
+                        errorMessage = "Please enter a server endpoint."
+                    } else if (useKeycloak) {
+                        if (kcUrl.isEmpty()) {
+                            errorMessage = "Please enter Keycloak server details."
+                        } else if (authToken.isEmpty()) {
+                            errorMessage = "Please login with Keycloak first."
+                        } else {
+                            prefs.edit()
+                                .putString("saved_kc_url", kcUrl)
+                                .putString("saved_kc_realm", kcRealm)
+                                .putString("saved_kc_client_id", kcClientId)
+                                .apply()
+                            onConnect(serverIp, serverPort, authToken, certPin)
+                        }
+                    } else {
+                        if (authToken.isEmpty()) {
+                            errorMessage = "Please enter a Preshared Key."
+                        } else {
+                            onConnect(serverIp, serverPort, authToken, certPin)
+                        }
                     }
                 }
             },

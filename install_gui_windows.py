@@ -9,6 +9,7 @@ Usage:
   python install_gui_windows.py
 """
 
+import ctypes
 import os
 import sys
 import shutil
@@ -34,6 +35,24 @@ def step(msg):        print(c("1;37", f"\n[{msg}]"))
 
 ROOT    = Path(__file__).resolve().parent
 GUI_DIR = ROOT / "gui"
+
+def is_admin() -> bool:
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+def run_elevated(exe: Path):
+    """Launch an executable with UAC elevation (RunAs)."""
+    info(f"Requesting admin elevation for: {exe.name}")
+    ret = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", str(exe), "", str(exe.parent), 1  # SW_SHOWNORMAL
+    )
+    # ShellExecuteW returns >32 on success
+    if ret <= 32:
+        warn("UAC elevation was cancelled or failed.")
+        return False
+    return True
 
 def run(cmd, cwd=None, check=True):
     info(f"Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
@@ -169,7 +188,7 @@ def main():
 
     # ── Build ────────────────────────────────────────────────────────────────
     step("Building GUI (Release)")
-    run(["cargo", "tauri", "build"], cwd=GUI_DIR)
+    run(["cargo", "tauri", "build", "--bundles", "nsis"], cwd=GUI_DIR)
 
     # cargo puts output in the workspace root target/ when gui/src-tauri is a
     # workspace member, otherwise in gui/src-tauri/target/release/.
@@ -182,18 +201,33 @@ def main():
 
     ok(f"Build successful: {binary}")
 
+    admin = is_admin()
+    if admin:
+        ok("Running as Administrator")
+    else:
+        warn("Running as normal user (no admin rights)")
+
     # ── NSIS installer (preferred on Windows) ────────────────────────────────
     nsis = _find_nsis()
     if nsis and ask(f"Run NSIS installer ({nsis.name})? (recommended)"):
         step("Running NSIS installer")
-        run([str(nsis)], check=False)
-        ok("NSIS installer finished")
-        _done_message(str(nsis.parent / "mavi-vpn-gui.exe"))
+        if admin:
+            run([str(nsis)], check=False)
+        else:
+            info("NSIS installer needs admin rights — requesting elevation...")
+            if not run_elevated(nsis):
+                err("Could not start installer. Try running this script as Administrator.")
+                sys.exit(1)
+        ok("NSIS installer started")
         return
 
     # ── Manual copy fallback ──────────────────────────────────────────────────
     step("Installing")
-    default_dir = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MaviVPN"
+    if admin:
+        default_dir = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MaviVPN"
+    else:
+        default_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "MaviVPN"
+        info(f"No admin rights — defaulting to user directory")
     raw = input(c("1;37", f"  ? Install to [{default_dir}]: ")).strip()
     dest_dir = Path(raw) if raw else default_dir
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -203,9 +237,14 @@ def main():
     ok(f"GUI installed to {dest}")
 
     # ── PATH ──────────────────────────────────────────────────────────────────
-    if ask("Add install directory to system PATH?"):
-        run(f'setx /M PATH "%PATH%;{dest_dir}"', check=False)
-        ok("PATH updated (restart terminal to take effect)")
+    if admin:
+        if ask("Add install directory to system PATH?"):
+            run(f'setx /M PATH "%PATH%;{dest_dir}"', check=False)
+            ok("System PATH updated (restart terminal to take effect)")
+    else:
+        if ask("Add install directory to user PATH?"):
+            run(f'setx PATH "%PATH%;{dest_dir}"', check=False)
+            ok("User PATH updated (restart terminal to take effect)")
 
     # ── Shortcut ──────────────────────────────────────────────────────────────
     if ask("Create Desktop shortcut?"):

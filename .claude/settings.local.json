@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Daten2/mavi-vpn -type d -name test* -o -type d -name *test)"
+    ]
+  }
+}

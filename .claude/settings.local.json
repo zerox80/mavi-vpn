@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(find /c/Daten2/mavi-vpn -type d -name test* -o -type d -name *test)"
+      "Bash(find /c/Daten2/mavi-vpn -type d -name test* -o -type d -name *test)",
+      "Bash(find /c/Daten2/mavi-vpn/android -type f \\\\\\(-name *.kt -o -name *.xml -o -name *.compose \\\\\\))",
+      "Bash(find /c/Daten2/mavi-vpn/android -type f -name *.kt -o -name *.xml)",
+      "Bash(grep -r \"preshared\\\\|kc_auth\\\\|keycloak.*auth\" /c/Daten2/mavi-vpn/gui/src --include=*.js --include=*.html)",
+      "Bash(git:*)"
     ]
   }
 }

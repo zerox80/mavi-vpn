@@ -38,6 +38,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.Drawable
@@ -295,38 +297,44 @@ fun VpnScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Top
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(48.dp))
-        
-        Icon(
-            imageVector = if (isConnected) Icons.Default.Lock else Icons.Default.Settings,
-            contentDescription = null,
+        // Scrollable content area
+        Column(
             modifier = Modifier
-                .size(80.dp)
-                .clickable { onOpenSettings() }, // Hidden shortcut? No, let's add a real button.
-            tint = if (isConnected) Color(0xFF00FF7F) else Color(0xFF007AFF)
-        )
-        
-        Spacer(modifier = Modifier.height(24.dp))
-        
-        Text(
-            text = "MAVI VPN",
-            fontSize = 32.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color.White
-        )
-        
-        Text(
-            text = if (isConnected) "SECURED CONNECTION" else "READY TO CONNECT",
-            fontSize = 14.sp,
-            color = if (isConnected) Color(0xFF00FF7F) else Color.Gray
-        )
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(modifier = Modifier.height(48.dp))
 
-        Spacer(modifier = Modifier.height(32.dp))
+            Icon(
+                imageVector = if (isConnected) Icons.Default.Lock else Icons.Default.Settings,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(80.dp)
+                    .clickable { onOpenSettings() },
+                tint = if (isConnected) Color(0xFF00FF7F) else Color(0xFF007AFF)
+            )
 
-        if (!isConnected) {
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Text(
+                text = "MAVI VPN",
+                fontSize = 32.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+
+            Text(
+                text = if (isConnected) "SECURED CONNECTION" else "READY TO CONNECT",
+                fontSize = 14.sp,
+                color = if (isConnected) Color(0xFF00FF7F) else Color.Gray
+            )
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            if (!isConnected) {
             // --- Server fields (always visible) ---
             OutlinedTextField(
                 value = serverIp,
@@ -512,8 +520,9 @@ fun VpnScreen(
                 }
             }
         }
+        } // end scrollable content Column
 
-        Spacer(modifier = Modifier.weight(1f))
+        Spacer(modifier = Modifier.height(16.dp))
 
         Button(
             onClick = {

@@ -43,15 +43,18 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     // 2. Bind the fixed callback port, retrying if necessary (in case the old one closing takes a moment)
     let mut listener = None;
     for _ in 0..15 {
-        match TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT)).await {
-            Ok(l) => {
-                listener = Some(l);
-                break;
-            }
-            Err(_) => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+        if let Ok(socket) = tokio::net::TcpSocket::new_v4() {
+            let _ = socket.set_reuseaddr(true);
+            let addr = format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT).parse().unwrap();
+            
+            if let Ok(_) = socket.bind(addr) {
+                if let Ok(l) = socket.listen(1024) {
+                    listener = Some(l);
+                    break;
+                }
             }
         }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let listener = listener.context(format!(
         "Could not bind callback port {}. Is another instance running?",

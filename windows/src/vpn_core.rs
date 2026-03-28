@@ -9,6 +9,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use sha2::{Sha256, Digest};
+use wtransport::{Endpoint, ClientConfig};
 use tracing::{info, warn};
 use shared::{icmp, ControlMessage};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -46,7 +47,11 @@ fn extract_wintun_dll() -> Result<PathBuf> {
 /// Entry point for the VPN runner. Manages the reconnection loop and WinTUN lifecycle.
 pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
     // 1. Prepare environment
-    let cert_pin_bytes = decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
+    let cert_pin_bytes = if config.cert_pin.is_empty() {
+        Vec::new()
+    } else {
+        decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?
+    };
     let dll_path = extract_wintun_dll()?;
     let wintun = unsafe { wintun::load_from_path(&dll_path) }.context("Failed to load wintun.dll")?;
 
@@ -131,11 +136,8 @@ async fn run_session(
         return run_session_tcp(config, cert_pin_bytes, adapter, global_running).await;
     }
 
-    let socket = create_udp_socket()?;
-
     // 1. QUIC Handshake & Auth
     let (connection, server_config) = connect_and_handshake(
-        socket,
         config.token.clone(),
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
@@ -203,7 +205,8 @@ async fn run_session(
                 Ok(Some(packet)) => {
                     let data = Bytes::copy_from_slice(packet.bytes());
                     if let Err(e) = conn_quic.send_datagram(data) {
-                        if matches!(e, quinn::SendDatagramError::TooLarge) {
+                        let e_str = format!("{:?}", e);
+                        if e_str.contains("TooLarge") {
                             // Synthesise ICMP PTB signal back to OS
                             let current_mtu = conn_quic.max_datagram_size().unwrap_or(1200) as u16;
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(packet.bytes(), current_mtu, Some(std::net::IpAddr::V4(gateway))) {
@@ -212,7 +215,7 @@ async fn run_session(
                                     session_tun.send_packet(reply);
                                 }
                             }
-                        } else if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) { break; }
+                        } else if e_str.contains("NotConnected") { break; }
                     }
                 }
                 Ok(None) => std::thread::sleep(Duration::from_micros(100)),
@@ -228,12 +231,13 @@ async fn run_session(
     let quic_to_tun = tokio::spawn(async move {
         loop {
             if !run_quic_in.load(Ordering::Relaxed) || !alive_quic_in.load(Ordering::Relaxed) { break; }
-            match connection.read_datagram().await {
+            match connection.receive_datagram().await {
                 Ok(data) => {
-                    if data.is_empty() { continue; }
-                    match session_quic_in.allocate_send_packet(data.len() as u16) {
+                    let payload = data.payload();
+                    if payload.is_empty() { continue; }
+                    match session_quic_in.allocate_send_packet(payload.len() as u16) {
                         Ok(mut packet) => {
-                            packet.bytes_mut().copy_from_slice(&data);
+                            packet.bytes_mut().copy_from_slice(&payload);
                             session_quic_in.send_packet(packet);
                         }
                         Err(e) if is_wintun_ring_full(&e) => {
@@ -266,60 +270,68 @@ fn is_wintun_ring_full(err: &wintun::Error) -> bool {
 
 /// QUIC connection setup with custom certificate pinning.
 async fn connect_and_handshake(
-    socket: std::net::UdpSocket,
     token: String,
     endpoint_str: String,
     cert_pin: Vec<u8>,
     censorship_resistant: bool,
-) -> Result<(quinn::Connection, ControlMessage)> {
-    let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
-
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-
-    // CR mode: only h3 (looks like HTTP/3 to DPI).
-    // Normal mode: try both so it works regardless of server config.
-    client_crypto.alpn_protocols = if censorship_resistant {
-        vec![b"h3".to_vec()]
-    } else {
-        vec![b"mavivpn".to_vec(), b"h3".to_vec()]
-    };
-
+) -> Result<(wtransport::Connection, ControlMessage)> {
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
     
-    // MTU PINNING: 1360 Wire MTU to support 1280 payload over QUIC/UDP/IP.
-    // GSO (segmentation offload) is enabled for maximum performance as requested.
     transport_config.mtu_discovery_config(None);
     transport_config.initial_mtu(1360);
     transport_config.min_mtu(1360);
     transport_config.enable_segmentation_offload(true);
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     
-    // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
-    client_config.transport_config(Arc::new(transport_config));
-    let mut endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
-    endpoint.set_default_client_config(client_config);
+    let mut client_config = if cert_pin.is_empty() {
+        ClientConfig::builder()
+            .with_bind_default()
+            .with_native_certs()
+            .build()
+    } else {
+        let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
+
+        let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+
+        // CR mode: only h3 (looks like HTTP/3 to DPI).
+        // Normal mode: try both so it works regardless of server config.
+        client_crypto.alpn_protocols = if censorship_resistant {
+            vec![wtransport::tls::WEBTRANSPORT_ALPN.to_vec()]
+        } else {
+            vec![b"mavivpn".to_vec(), wtransport::tls::WEBTRANSPORT_ALPN.to_vec()]
+        };
+
+        ClientConfig::builder()
+            .with_bind_default()
+            .with_custom_tls(client_crypto)
+            .build()
+    };
+
+    client_config.quic_config_mut().transport_config(Arc::new(transport_config));
+        
+    let endpoint = Endpoint::client(client_config)?;
 
     // Resolve endpoint and connect
     let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve endpoint")?;
-    let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
-    info!("Connecting to {} (resolved: {}, SNI: {})", endpoint_str, addr, server_name);
-    let connecting = endpoint.connect(addr, server_name).context("endpoint.connect() failed")?;
-    let connection = connecting.await.context("QUIC handshake failed (TLS/cert error?)")?;
-    info!("QUIC handshake OK, sending auth token ({} bytes)", token.len());
+    let _server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
+    info!("Connecting to WebTransport endpoint {} (resolved: {})", endpoint_str, addr);
+    
+    let connect_url = format!("https://{}/vpn", endpoint_str);
+    let connection = endpoint.connect(&connect_url).await.context("WebTransport handshake failed TLS/Cert error?")?;
+    info!("WebTransport handshake OK, sending auth token ({} bytes)", token.len());
 
     // Perform application-level handshake
-    let (mut send, mut recv) = connection.open_bi().await?;
+    let (mut send, mut recv) = connection.open_bi().await?.await?;
     let auth_msg = ControlMessage::Auth { token };
     let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
     send.write_u32_le(bytes.len() as u32).await?;
@@ -674,13 +686,26 @@ async fn run_session_tcp(
 
     let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
 
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PinnedServerVerifier::new(cert_pin_bytes.to_vec())))
-        .with_no_client_auth();
-    client_crypto.alpn_protocols = vec![b"h2".to_vec()];
+    let client_crypto = if cert_pin_bytes.is_empty() {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let mut cfg = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        cfg.alpn_protocols = vec![b"h2".to_vec()];
+        cfg
+    } else {
+        let mut cfg = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedServerVerifier::new(cert_pin_bytes.to_vec())))
+            .with_no_client_auth();
+        cfg.alpn_protocols = vec![b"h2".to_vec()];
+        cfg
+    };
 
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_crypto));
     let domain = rustls::pki_types::ServerName::try_from(server_name.to_string())

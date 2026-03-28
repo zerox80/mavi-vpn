@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 tokio = { workspace = true }
 quinn = { workspace = true, default-features = false, features = ["rustls"] }
+wtransport = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }

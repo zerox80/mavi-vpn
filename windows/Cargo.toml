@@ -15,6 +15,7 @@ path = "src/bin/service.rs"
 shared = { workspace = true }
 tokio = { workspace = true }
 quinn = { workspace = true }
+wtransport = { workspace = true }
 rustls = { workspace = true }
 bytes = { workspace = true }
 bincode = { workspace = true }

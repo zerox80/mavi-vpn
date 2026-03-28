@@ -15,7 +15,8 @@ use bytes::Bytes;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use quinn::{Endpoint, ServerConfig};
+use wtransport::{Endpoint, ServerConfig};
+use wtransport::tls::{Certificate, CertificateChain, PrivateKey, Identity};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
@@ -99,85 +100,23 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 4. Setup QUIC Server Config
-    // Uses TLS 1.3 exclusively.
-    let mut server_crypto = rustls::ServerConfig::builder_with_provider(
-        rustls::crypto::aws_lc_rs::default_provider().into()
-    )
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
-    .with_no_client_auth()
-        .with_single_cert(certs, key)?;
+    // 4. Setup WebTransport Server Config
+    let w_certs: Vec<Certificate> = certs.clone().into_iter().map(|c| Certificate::from_der(c.to_vec()).expect("Valid DER")).collect();
+    let w_chain = CertificateChain::new(w_certs);
+    let w_key = PrivateKey::from_der_pkcs8(key.secret_der().to_vec());
+    let identity = Identity::new(w_chain, w_key);
     
-    // Obfuscation Layer: If censorship resistant, include both h3 and h2
     if config.censorship_resistant {
-        server_crypto.alpn_protocols = vec![b"h3".to_vec(), b"h2".to_vec()];
-        info!("Censorship Resistant Mode ENABLED. ALPN: h3, h2");
-    } else {
-        server_crypto.alpn_protocols = vec![b"mavivpn".to_vec(), b"h2".to_vec()];
+        info!("Censorship Resistant Mode ENABLED. Only WebTransport will be served.");
     }
     
-    let server_crypto_arc = Arc::new(server_crypto);
-    let quic_server_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(rustls::ServerConfig::clone(&server_crypto_arc))?;
-    let mut server_config = ServerConfig::with_crypto(Arc::new(quic_server_crypto));
-    let transport_config = Arc::get_mut(&mut server_config.transport)
-        .ok_or_else(|| anyhow::anyhow!("Failed to access transport config"))?;
-    
-    // QUIC Timeout settings
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
-    
-    // QUIC Performance Tuning: 
-    // Large buffers are critical for throughput on high-latency mobile networks.
-    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB receive buffer
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB send buffer
-    transport_config.receive_window(quinn::VarInt::from(4u32 * 1024 * 1024)); // 4MB
-    transport_config.stream_receive_window(quinn::VarInt::from(1024u32 * 1024)); // 1MB per stream
-    transport_config.send_window(4 * 1024 * 1024); // 4MB send window
-    
-    // Enable BBR Congestion Control (standard for high bandwidth + lossy environments)
-    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
-    
-    // --- MTU PINNING STRATEGY ---
-    // We disable automatic MTU discovery to prevent Quinn from shrinking the window to 1280
-    // upon detecting the slightest congestion or path restriction. 
-    // By pinning it to 1360 (wire), we ensure 1280 (inner payload) packets always fit.
-    transport_config.mtu_discovery_config(None); 
-    transport_config.initial_mtu(1360); 
-    transport_config.min_mtu(1360);
-    
-    // Enable Generic Segmentation Offload (GSO) for OS-level performance boost
-    transport_config.enable_segmentation_offload(true);
-    
-    // Manually configure the underlying UDP socket
-    let socket = std::net::UdpSocket::bind(config.bind_addr)?;
-    let socket2_sock = socket2::Socket::from(socket);
-    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); // 4MB OS-level buffer
-    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024); // 4MB OS-level buffer
-    
-    // Enable UDP fragmentation for packets > Path MTU (Handling the 1280 floor on bad paths)
-    // This allows the OS to fragment the QUIC packets if needed, rather than dropping them.
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::io::AsRawFd;
-        let fd = socket2_sock.as_raw_fd();
+    let server_config = ServerConfig::builder()
+        .with_bind_address(config.bind_addr)
+        .with_identity(identity)
+        .keep_alive_interval(Some(std::time::Duration::from_secs(2)))
+        .build();
         
-        unsafe {
-            // Disable Path MTU Discovery "Don't Fragment" flag (IP_PMTUDISC_DONT)
-            let val: libc::c_int = 0; 
-            let _ = libc::setsockopt(fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
-            let _ = libc::setsockopt(fd, libc::IPPROTO_IPV6, 23, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
-            info!("UDP Fragmentation enabled (PMTUDISC_DONT) for IPv4/IPv6");
-        }
-    }
-
-    let socket = std::net::UdpSocket::from(socket2_sock);
-    let endpoint = Endpoint::new(
-        quinn::EndpointConfig::default(),
-        Some(server_config),
-        socket,
-        Arc::new(quinn::TokioRuntime),
-    )?;
+    let endpoint = Endpoint::server(server_config)?;
     
     // 5. Setup TUN Interface
     let mut tun_config = tun::Configuration::default();
@@ -297,16 +236,39 @@ async fn main() -> Result<()> {
     let quic_tx_tun = tx_tun.clone();
     let quic_kc = keycloak_validator.clone();
 
+    // 6b. Setup TLS config for TCP fallback
+    let mut server_crypto = rustls::ServerConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into()
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(certs, key)?;
+    
+    server_crypto.alpn_protocols = vec![b"mavivpn".to_vec(), b"h2".to_vec()];
+    let server_crypto_arc = Arc::new(server_crypto);
+
     let quic_task = tokio::spawn(async move {
-        while let Some(conn) = endpoint.accept().await {
+        // endpoint.accept() returns an IncomingSession awaitable.
+        loop {
+            let incoming_session = endpoint.accept().await;
             let state = quic_state.clone();
             let config = quic_config.clone();
             let tx_tun = quic_tx_tun.clone();
             let keycloak = quic_kc.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_quic_connection(conn, state, config, tx_tun, keycloak).await {
-                   warn!("QUIC connection terminated: {}", e);
+                // Wait for the HTTP/3 layer to parse the incoming request
+                let session_req = match incoming_session.await {
+                    Ok(req) => req,
+                    Err(e) => {
+                        warn!("WebTransport handhshake error: {}", e);
+                        return;
+                    }
+                };
+                
+                if let Err(e) = handle_quic_connection(session_req, state, config, tx_tun, keycloak).await {
+                   warn!("WebTransport connection terminated: {}", e);
                 }
             });
         }
@@ -363,18 +325,30 @@ async fn authenticate_user(
     Ok((v4, v6))
 }
 
-/// Handles the lifecycle of a single QUIC client connection.
+/// Handles the lifecycle of a single WebTransport client connection.
 async fn handle_quic_connection(
-    conn: quinn::Incoming,
+    session_req: wtransport::endpoint::SessionRequest,
     state: Arc<AppState>,
     config: Config,
     tx_tun: tokio::sync::mpsc::Sender<Bytes>,
     keycloak: Option<Arc<crate::keycloak::KeycloakValidator>>,
 ) -> Result<()> {
-    // 1. Establish QUIC connection (wait for TLS handshake)
-    let connection = conn.await?;
+    // 1. Establish WebTransport session (Reject non-vpn paths)
+    if session_req.path() != "/vpn" {
+        if config.censorship_resistant {
+           // We can just drop or reject the session cleanly. 
+           // Wtransport sends a normal HTTP error (e.g. 404).
+           session_req.not_found().await;
+           return Err(anyhow::anyhow!("Ignored probe to non-vpn path"));
+        } else {
+           session_req.forbidden().await;
+           return Err(anyhow::anyhow!("Unauthorized access: bad path"));
+        }
+    }
+    
+    let connection = session_req.accept().await?;
     let remote_addr = connection.remote_address();
-    info!("New connection from {}", remote_addr);
+    info!("New WebTransport connection from {}", remote_addr);
 
     // 2. Auth/Config Phase (on the bidirectional stream)
     let (mut send_stream, mut recv_stream) = connection.accept_bi().await?;
@@ -385,12 +359,10 @@ async fn handle_quic_connection(
             .await
             .map_err(|_| anyhow::anyhow!("Handshake timeout"))?? as usize;
         
-        // Increase maximum auth payload size from 1024 to 8192 to support large Keycloak JWTs
         if len > 8192 { anyhow::bail!("Auth message too big (max 8192 bytes for JWT)"); }
         let mut buf = vec![0u8; len];
         recv_stream.read_exact(&mut buf).await?;
         
-        // Decode using bincode
         let msg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
             .map(|(v, _)| v)
             .map_err(|e| anyhow::anyhow!("Protocol error: {}", e))?;
@@ -407,37 +379,7 @@ async fn handle_quic_connection(
     let (assigned_ip, assigned_ip6) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
-            // PROBE RESISTANCE: If the server is in censorship_resistant mode,
-            // we send a fake Nginx HTTP/3 response to any unauthorized probe.
-            if config.censorship_resistant {
-                warn!("Unauthorized probe from {}. Emulating HTTP/3 server.", remote_addr);
-                
-                // Emulate H3 control stream settings
-                if let Ok(mut ctrl) = connection.open_uni().await {
-                    let _ = ctrl.write_all(&[0x00, 0x04, 0x00]).await;
-                    let _ = ctrl.finish();
-                }
-
-                let mut response = Vec::new();
-                // HTTP/3 HEADERS Frame (Fake Nginx)
-                response.push(0x01); 
-                response.push(0x19); 
-                let qpack_bytes: [u8; 25] = [0x00, 0x00, 0xd9, 0x5f, 0x4d, 0x84, 0xaa, 0x63, 0x55, 0xe7, 0x5f, 0x1d, 0x87, 0x49, 0x7c, 0xa5, 0x89, 0xd3, 0x4d, 0x1f, 0x54, 0x03, 0x31, 0x37, 0x33];
-                response.extend_from_slice(&qpack_bytes);
-
-                // HTTP/3 DATA Frame (Fake HTML)
-                let fake_body = b"<html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed.</p></body></html>";
-                response.push(0x00); 
-                response.push(0x40); response.push(0xAD); // Length 173
-                response.extend_from_slice(fake_body);
-
-                let _ = send_stream.write_all(&response).await;
-                let _ = send_stream.finish();
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                return Err(anyhow::anyhow!("HTTP/3 probe response sent to {}", remote_addr));
-            } else {
-                return Err(anyhow::anyhow!("Unauthorized access from {}: {}", remote_addr, e));
-            }
+            return Err(anyhow::anyhow!("Unauthorized access from {}: {}", remote_addr, e));
         }
     };
 
@@ -480,47 +422,17 @@ async fn handle_quic_connection(
     let tun_to_quic = tokio::spawn(async move {
         while let Some(packet) = rx_client.recv().await {
             if let Err(e) = conn_send.send_datagram(packet.clone()) {
-                if matches!(e, quinn::SendDatagramError::TooLarge) {
-                    // PATH MTU DISCOVERY (PTB)
-                    // If the packet exceeds the current path MTU, we synthesise an ICMP
-                    // signal back into the TUN device so the client's stack knows to resize.
-                    let current_mtu = conn_send.max_datagram_size().unwrap_or(1200) as u16;
-                    let version = packet[0] >> 4;
-                    let gw = if version == 4 { std::net::IpAddr::V4(gateway_v4) } else { std::net::IpAddr::V6(gateway_v6) };
-                    
-                    // Report 1280 even if path is smaller (due to our fragmentation support)
-                    let reported_mtu = if version == 6 { std::cmp::max(current_mtu, 1280) } else { current_mtu };
-
-                    if let Some(icmp_packet) = icmp::generate_packet_too_big(&packet, reported_mtu, None) {
-                        let _ = tx_tun_icmp.try_send(Bytes::from(icmp_packet));
-                    }
-                }
+                warn!("WebTransport Datagram error: {}", e);
             }
         }
     });
 
-    // Task: MTU Monitoring
-    // Periodically logs changes in the path MTU (important for debugging).
-    let conn_monitor = connection_arc.clone();
-    tokio::spawn(async move {
-        let mut last_mtu = 0;
-        loop {
-            let current_mtu = conn_monitor.max_datagram_size().unwrap_or(0);
-            if current_mtu != last_mtu {
-                if last_mtu != 0 {
-                    warn!("[MTU] Path MTU changed: {} -> {} bytes", last_mtu, current_mtu);
-                }
-                last_mtu = current_mtu;
-            }
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            if conn_monitor.close_reason().is_some() { break; }
-        }
-    });
+    // Task: MTU Monitoring is natively handled differently in wtransport, skipping for now
 
     // Loop: QUIC Datagram -> Backend Hub (Source-IP filtering)
     // Ensures clients don't spoof their source IP.
     let res = 'outer_loop: loop {
-        let first_packet = match connection_arc.read_datagram().await {
+        let first_packet = match connection_arc.receive_datagram().await {
             Ok(p) => p,
             Err(e) => break Err(anyhow::anyhow!("Connection lost: {}", e)),
         };
@@ -530,21 +442,22 @@ async fn handle_quic_connection(
         batch.push(first_packet);
 
         for _ in 0..63 {
-            if let Some(Ok(p)) = connection_arc.read_datagram().now_or_never() { batch.push(p); } else { break; }
+            if let Some(Ok(p)) = connection_arc.receive_datagram().now_or_never() { batch.push(p); } else { break; }
         }
 
         for data in batch {
              if data.is_empty() { continue; }
 
-             let version = data[0] >> 4;
+             let payload = data.payload();
+             let version = payload[0] >> 4;
              let mut valid = false;
              
              if version == 4 {
-                 if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&data) {
+                 if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&payload) {
                      if ipv4_header.source_addr() == assigned_ip { valid = true; }
                  }
              } else if version == 6 {
-                  if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&data) {
+                  if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&payload) {
                      let src = ipv6_header.source_addr();
                      // Allow assigned IP, Link-Local (fe80::), or Unspecified (::)
                      if src == assigned_ip6 || (src.segments()[0] & 0xffc0 == 0xfe80) || src.is_unspecified() { valid = true; }
@@ -552,7 +465,7 @@ async fn handle_quic_connection(
              }
 
              if valid {
-                  if let Err(_) = tx_tun.send(data).await { break 'outer_loop Err(anyhow::anyhow!("TUN hub closed")); }
+                  if let Err(_) = tx_tun.send(payload.clone()).await { break 'outer_loop Err(anyhow::anyhow!("TUN hub closed")); }
              }
         }
     };

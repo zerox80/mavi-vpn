@@ -27,6 +27,10 @@ ipnetwork = "0.21"
 etherparse = "0.19"
 dashmap = "6.1"
 thiserror = "2.0"
+h2 = "0.4"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+webpki-roots = "0.26"
+http = "1.1"
 
 [patch.crates-io]
 quinn = { path = "external/quinn/quinn" }

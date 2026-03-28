@@ -127,6 +127,10 @@ async fn run_session(
     adapter: &Arc<Adapter>,
     global_running: &Arc<AtomicBool>,
 ) -> Result<SessionEnd> {
+    if config.prefer_tcp {
+        return run_session_tcp(config, cert_pin_bytes, adapter, global_running).await;
+    }
+
     let socket = create_udp_socket()?;
 
     // 1. QUIC Handshake & Auth
@@ -654,4 +658,178 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> { self.supported.supported_schemes() }
+}
+
+async fn run_session_tcp(
+    config: &Config,
+    cert_pin_bytes: &[u8],
+    adapter: &Arc<Adapter>,
+    global_running: &Arc<AtomicBool>,
+) -> Result<SessionEnd> {
+    let endpoint_str = if config.endpoint.contains(':') { config.endpoint.clone() } else { format!("{}:443", config.endpoint) };
+    let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve TCP endpoint")?;
+    
+    let stream = tokio::net::TcpStream::connect(addr).await?;
+    let _ = stream.set_nodelay(true);
+
+    let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
+
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedServerVerifier::new(cert_pin_bytes.to_vec())))
+        .with_no_client_auth();
+    client_crypto.alpn_protocols = vec![b"h2".to_vec()];
+
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_crypto));
+    let domain = rustls::pki_types::ServerName::try_from(server_name.to_string())
+        .map_err(|_| anyhow::anyhow!("Invalid server name"))?;
+    
+    let tls_stream = connector.connect(domain, stream).await?;
+
+    let (mut h2_client, connection) = h2::client::handshake(tls_stream).await?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let request = http::Request::builder().uri("/vpn").method("POST").body(()).unwrap();
+    let (response_future, mut send_stream) = h2_client.send_request(request, false)?;
+
+    let auth_msg = ControlMessage::Auth { token: config.token.clone() };
+    let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
+    
+    let mut auth_frame = Vec::with_capacity(4 + bytes.len());
+    auth_frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    auth_frame.extend_from_slice(&bytes);
+    
+    send_stream.send_data(Bytes::from(auth_frame), false)?;
+
+    let response = response_future.await?;
+    if response.status() != http::StatusCode::OK {
+        return Err(anyhow::anyhow!("Server rejected TCP connection: HTTP {}", response.status()));
+    }
+
+    let mut recv_stream = response.into_body();
+
+    let mut len_buf = [0u8; 4];
+    let mut len_read = 0;
+    while len_read < 4 {
+        if let Some(Ok(chunk)) = recv_stream.data().await {
+            let to_copy = std::cmp::min(4 - len_read, chunk.len());
+            len_buf[len_read..len_read+to_copy].copy_from_slice(&chunk[..to_copy]);
+            len_read += to_copy;
+            let _ = recv_stream.flow_control().release_capacity(chunk.len());
+        } else {
+            return Err(anyhow::anyhow!("Failed to read config length via h2"));
+        }
+    }
+    let msg_len = u32::from_le_bytes(len_buf) as usize;
+    
+    let mut config_buf = Vec::new();
+    while config_buf.len() < msg_len {
+        if let Some(Ok(chunk)) = recv_stream.data().await {
+            config_buf.extend_from_slice(&chunk);
+            let _ = recv_stream.flow_control().release_capacity(chunk.len());
+        } else {
+            return Err(anyhow::anyhow!("Failed to read config payload via h2"));
+        }
+    }
+
+    let server_config: ControlMessage = bincode::serde::decode_from_slice(&config_buf, bincode::config::standard()).map(|(v,_)| v)?;
+
+    let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
+        match server_config {
+            ControlMessage::Config {
+                assigned_ip, netmask, gateway, dns_server, mtu,
+                assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6, ..
+            } => (assigned_ip, netmask, gateway, dns_server, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6),
+            ControlMessage::Error { message } => return Err(anyhow::anyhow!("Server rejected connection: {}", message)),
+            _ => return Err(anyhow::anyhow!("Unexpected server response during TCP handshake")),
+        };
+
+    info!("TCP Handshake successful. Internal IPv4: {}", assigned_ip);
+
+    let endpoint_ip_str = match addr.ip() {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(|v4| v4.to_string()).unwrap_or_else(|| v6.to_string()),
+    };
+
+    set_adapter_network_config(
+        adapter, assigned_ip, netmask, gateway, dns, mtu, &endpoint_ip_str,
+        assigned_ipv6, netmask_v6, gateway_v6, dns_v6,
+    )?;
+
+    let session = Arc::new(adapter.start_session(wintun::MAX_RING_CAPACITY).context("Failed to start WinTUN session")?);
+    let session_alive = Arc::new(AtomicBool::new(true));
+
+    let alive_pump = session_alive.clone();
+    let run_pump = global_running.clone();
+    let session_tun = session.clone();
+    
+    let tun_to_tcp = tokio::spawn(async move {
+        while run_pump.load(Ordering::Relaxed) && alive_pump.load(Ordering::Relaxed) {
+            match session_tun.try_receive() {
+                 Ok(Some(packet)) => {
+                      let data = packet.bytes();
+                      let mut buf = Vec::with_capacity(2 + data.len());
+                      buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
+                      buf.extend_from_slice(data);
+                      
+                      send_stream.reserve_capacity(buf.len());
+                      if send_stream.capacity() >= buf.len() {
+                          if let Err(_) = send_stream.send_data(Bytes::from(buf), false) {
+                              break;
+                          }
+                      }
+                 }
+                 Ok(None) => { tokio::time::sleep(Duration::from_micros(200)).await; }
+                 Err(_) => { alive_pump.store(false, Ordering::SeqCst); break; }
+            }
+        }
+    });
+
+    let alive_tcp_in = session_alive.clone();
+    let run_tcp_in = global_running.clone();
+    let session_tcp_in = session.clone();
+    let tcp_to_tun = tokio::spawn(async move {
+        let mut leftover = bytes::BytesMut::new();
+        while run_tcp_in.load(Ordering::Relaxed) && alive_tcp_in.load(Ordering::Relaxed) {
+             match recv_stream.data().await {
+                 Some(Ok(chunk)) => {
+                     leftover.extend_from_slice(&chunk);
+                     let _ = recv_stream.flow_control().release_capacity(chunk.len());
+                     
+                     while leftover.len() >= 2 {
+                         let pkt_len = u16::from_be_bytes([leftover[0], leftover[1]]) as usize;
+                         if leftover.len() >= 2 + pkt_len {
+                             let packet = leftover.split_to(2 + pkt_len).split_off(2).freeze();
+                             if packet.is_empty() { continue; }
+                             
+                             match session_tcp_in.allocate_send_packet(packet.len() as u16) {
+                                  Ok(mut pt) => {
+                                      pt.bytes_mut().copy_from_slice(&packet);
+                                      session_tcp_in.send_packet(pt);
+                                  }
+                                  Err(e) if is_wintun_ring_full(&e) => {
+                                      tokio::time::sleep(Duration::from_millis(2)).await;
+                                  }
+                                  Err(_) => { alive_tcp_in.store(false, Ordering::SeqCst); break; }
+                             }
+                         } else { break; }
+                     }
+                 }
+                 Some(Err(_)) | None => { alive_tcp_in.store(false, Ordering::SeqCst); break; }
+             }
+        }
+    });
+
+    while global_running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    tun_to_tcp.abort();
+    tcp_to_tun.abort();
+
+    if global_running.load(Ordering::Relaxed) { Ok(SessionEnd::ConnectionLost) } else { Ok(SessionEnd::UserStopped) }
 }

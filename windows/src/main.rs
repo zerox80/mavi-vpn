@@ -272,6 +272,11 @@ async fn prompt_new_config() -> Result<Config> {
     let cr_input = read_line()?.to_lowercase();
     let censorship_resistant = cr_input == "j" || cr_input == "ja" || cr_input == "y" || cr_input == "yes";
 
+    print!("Prefer TCP / HTTP2 Fallback? (For strict networks) [j/N]: ");
+    stdout.flush()?;
+    let tcp_input = read_line()?.to_lowercase();
+    let prefer_tcp = tcp_input == "j" || tcp_input == "ja" || tcp_input == "y" || tcp_input == "yes";
+
     println!();
 
     Ok(Config {
@@ -279,6 +284,7 @@ async fn prompt_new_config() -> Result<Config> {
         token,
         cert_pin,
         censorship_resistant,
+        prefer_tcp,
         kc_auth,
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,

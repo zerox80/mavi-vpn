@@ -304,7 +304,7 @@ async fn connect_and_handshake(
     // Resolve endpoint and connect
     let mut resolved_endpoint = endpoint_str.clone();
     if !resolved_endpoint.contains(':') {
-        resolved_endpoint = format!("{}:4433", resolved_endpoint);
+        resolved_endpoint = format!("{}:10443", resolved_endpoint);
     }
 
     let addr = tokio::net::lookup_host(&resolved_endpoint).await?
@@ -447,6 +447,11 @@ fn set_adapter_network_config(
         let gv6_str = gv6.to_string();
         run_cmd("netsh", &["interface", "ipv6", "add", "route", "::/1",    &adapter_name, &gv6_str]);
         run_cmd("netsh", &["interface", "ipv6", "add", "route", "8000::/1", &adapter_name, &gv6_str]);
+    } else {
+        // Prevent IPv6 leak natively by blackholing IPv6 traffic into the VPN adapter
+        // so it doesn't bypass the tunnel on dual-stack machines.
+        run_cmd("netsh", &["interface", "ipv6", "add", "route", "::/1", &adapter_name]);
+        run_cmd("netsh", &["interface", "ipv6", "add", "route", "8000::/1", &adapter_name]);
     }
 
     // Verify routes were added

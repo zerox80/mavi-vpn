@@ -199,9 +199,22 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     })
 }
 
-/// Open a URL in the default browser (cross-platform via `webbrowser` crate).
+/// Open a URL in the default browser.
+/// On Windows, running a VPN client requires Administrator privileges. Standard tools like `webbrowser::open`
+/// or `cmd /c start` will fail to send IPC messages to an existing, non-elevated browser process.
+/// Calling `explorer.exe <url>` bridges this gap by routing the request through the desktop shell.
 fn open_browser(url: &str) {
-    let _ = webbrowser::open(url);
+    #[cfg(target_os = "windows")]
+    {
+        // explorer requires URLs containing '&' to be quoted, but spawn() handles shell escaping.
+        let _ = std::process::Command::new("explorer")
+            .arg(url)
+            .spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = webbrowser::open(url);
+    }
 }
 
 /// Attempt to silently refresh the access token using a previously saved refresh token.

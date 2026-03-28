@@ -8,6 +8,8 @@ COPY Cargo.toml ./
 # Remove non-server members from workspace for Docker build
 RUN sed -i '/android\/app\/src\/main\/rust/d' Cargo.toml
 RUN sed -i '/\"windows\"/d' Cargo.toml
+RUN sed -i '/\"linux\"/d' Cargo.toml
+RUN sed -i '/gui\/src-tauri/d' Cargo.toml
 
 COPY shared/Cargo.toml ./shared/Cargo.toml
 COPY backend/Cargo.toml ./backend/Cargo.toml

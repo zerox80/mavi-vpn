@@ -22,6 +22,10 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 30
+    groups:
+      all:
+        patterns:
+          - "*"
 
   # Maintain Dockerfile at backend/
   - package-ecosystem: "docker"
@@ -29,6 +33,21 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 30
+    groups:
+      all:
+        patterns:
+          - "*"
+
+  # Maintain Keycloak docker-compose at backend/keycloak/
+  - package-ecosystem: "docker"
+    directory: "/backend/keycloak"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 30
+    groups:
+      all:
+        patterns:
+          - "*"
 
   # Maintain Android dependencies
   - package-ecosystem: "gradle"
@@ -36,5 +55,18 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 30
+    groups:
+      all:
+        patterns:
+          - "*"
 
-
+  # Maintain Tauri GUI / Frontend dependencies
+  - package-ecosystem: "npm"
+    directory: "/gui"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 30
+    groups:
+      all:
+        patterns:
+          - "*"

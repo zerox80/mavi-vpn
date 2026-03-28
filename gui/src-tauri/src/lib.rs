@@ -69,7 +69,7 @@ struct VpnStatus {
 }
 
 #[tauri::command]
-async fn vpn_connect(mut config: Config) -> Result<String, String> {
+async fn vpn_connect(app: AppHandle, mut config: Config) -> Result<String, String> {
     // Keycloak OAuth must run in the GUI process (user session, can open browser).
     // The service runs as SYSTEM and cannot open a browser window.
     if config.kc_auth.unwrap_or(false) {
@@ -81,11 +81,47 @@ async fn vpn_connect(mut config: Config) -> Result<String, String> {
             return Err("Keycloak URL is not configured.".into());
         }
 
-        let token = oauth::start_oauth_flow(&kc_url, &realm, &client_id)
-            .await
-            .map_err(|e| format!("Keycloak login failed: {}", e))?;
+        let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+        let _ = std::fs::create_dir_all(&config_dir);
+        let session_file = config_dir.join("kc_session.json");
+        
+        let mut saved_refresh = None;
+        if let Ok(content) = std::fs::read_to_string(&session_file) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(r) = json["refresh_token"].as_str() {
+                    saved_refresh = Some(r.to_string());
+                }
+            }
+        }
 
-        config.token = token;
+        let token_pair = match saved_refresh {
+            Some(refresh) => {
+                match oauth::refresh_oauth_token(&kc_url, &realm, &client_id, &refresh).await {
+                    Ok(tp) => tp,
+                    Err(_) => {
+                        // refresh failed or expired, fallback to browser
+                        oauth::start_oauth_flow(&kc_url, &realm, &client_id).await
+                            .map_err(|e| format!("Keycloak login failed: {}", e))?
+                    }
+                }
+            }
+            None => {
+                oauth::start_oauth_flow(&kc_url, &realm, &client_id).await
+                    .map_err(|e| format!("Keycloak login failed: {}", e))?
+            }
+        };
+
+        if let Some(new_refresh) = token_pair.refresh_token {
+            let json = serde_json::json!({ "refresh_token": new_refresh });
+            let _ = std::fs::write(&session_file, json.to_string());
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&session_file, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+
+        config.token = token_pair.access_token;
     }
 
     match send_ipc_request(&IpcRequest::Start(config)).await? {

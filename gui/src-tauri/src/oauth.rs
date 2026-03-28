@@ -14,12 +14,18 @@ const OAUTH_CALLBACK_PORT: u16 = 18923;
 
 static CANCEL_TX: Mutex<Option<oneshot::Sender<()>>> = Mutex::const_new(None);
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct TokenPair {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+}
+
 /// Run the Keycloak PKCE OAuth2 flow in the user's browser session.
 ///
 /// This must be called from the GUI process (not the service) because it needs
 /// to open a browser window in the user's desktop session.
-/// Returns the access token string on success.
-pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
+/// Returns the TokenPair on success.
+pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<TokenPair> {
     // 0. Setup cancellation of any previous flow
     let (tx, mut cancel_rx) = oneshot::channel::<()>();
     {
@@ -75,7 +81,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .append_pair("client_id", client_id)
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("response_type", "code")
-        .append_pair("scope", "openid")
+        .append_pair("scope", "openid offline_access")
         .append_pair("code_challenge", &code_challenge)
         .append_pair("code_challenge_method", "S256");
 
@@ -180,15 +186,69 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     }
 
     let json: serde_json::Value = res.json().await?;
-    let token = json["access_token"]
+    let access_token = json["access_token"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No access_token in response"))?
         .to_string();
+    
+    let refresh_token = json["refresh_token"].as_str().map(|s| s.to_string());
 
-    Ok(token)
+    Ok(TokenPair {
+        access_token,
+        refresh_token,
+    })
 }
 
 /// Open a URL in the default browser (cross-platform via `webbrowser` crate).
 fn open_browser(url: &str) {
     let _ = webbrowser::open(url);
+}
+
+/// Attempt to silently refresh the access token using a previously saved refresh token.
+pub async fn refresh_oauth_token(
+    kc_url: &str,
+    realm: &str,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<TokenPair> {
+    let token_endpoint = format!(
+        "{}/realms/{}/protocol/openid-connect/token",
+        kc_url.trim_end_matches('/'),
+        realm
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+
+    let params = [
+        ("client_id", client_id),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+    ];
+
+    let res = client
+        .post(&token_endpoint)
+        .form(&params)
+        .send()
+        .await
+        .context("Could not reach Keycloak to refresh token")?;
+
+    if !res.status().is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Token refresh failed: {}", body));
+    }
+
+    let json: serde_json::Value = res.json().await?;
+    let access_token = json["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No access_token in refresh response"))?
+        .to_string();
+
+    let new_refresh_token = json["refresh_token"].as_str().map(|s| s.to_string());
+
+    Ok(TokenPair {
+        access_token,
+        refresh_token: new_refresh_token.or_else(|| Some(refresh_token.to_string())),
+    })
 }

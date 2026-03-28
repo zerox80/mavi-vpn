@@ -14,16 +14,10 @@ services:
       - /dev/net/tun:/dev/net/tun
     volumes:
       - ./data:/app/data # Persist internal state
-      - /etc/letsencrypt:/etc/letsencrypt:ro # Direct access to Let's Encrypt certs
+      - /etc/letsencrypt:/etc/letsencrypt # Let's Encrypt certs (rw for cert_pin.txt)
+    env_file: .env
     environment:
-      - RUST_LOG=info
-      - VPN_AUTH_TOKEN=${VPN_AUTH_TOKEN:-change_me}
-      - VPN_BIND_ADDR=${VPN_BIND_ADDR:-0.0.0.0:${VPN_PORT:-10443}}
-      - VPN_NETWORK=10.8.0.0/24
-      - VPN_DNS=1.1.1.1
-      - VPN_MTU=1280
-      - VPN_CENSORSHIP_RESISTANT=${VPN_CENSORSHIP_RESISTANT:-false}
-      - VPN_MSS_CLAMPING=${VPN_MSS_CLAMPING:-true}
+      - RUST_LOG=${RUST_LOG:-info}
     healthcheck:
       test: ["CMD-SHELL", "ip addr show tun0 || exit 1"]
       interval: 30s

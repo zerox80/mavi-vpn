@@ -144,6 +144,16 @@ async fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn import_config_code(code: String) -> Result<Config, String> {
+    shared::config_code::decode_config_code(&code).map_err(|e| format!("{}", e))
+}
+
+#[tauri::command]
+fn export_config_code(config: Config) -> Result<String, String> {
+    Ok(shared::config_code::encode_config_code(&config))
+}
+
+#[tauri::command]
 async fn load_config(app: AppHandle) -> Result<Option<Config>, String> {
     let config_dir = app
         .path()
@@ -230,6 +240,8 @@ pub fn run() {
             vpn_status,
             save_config,
             load_config,
+            import_config_code,
+            export_config_code,
         ])
         .setup(|app| {
             setup_tray(app)?;

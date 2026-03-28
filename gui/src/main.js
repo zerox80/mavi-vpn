@@ -48,6 +48,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('settings-toggle').addEventListener('click', () => toggleSettings());
   document.getElementById('save-btn').addEventListener('click', () => saveSettings());
   document.getElementById('kc_auth').addEventListener('change', () => toggleKeycloak());
+  document.getElementById('import-btn').addEventListener('click', () => importConfig());
+  document.getElementById('export-btn').addEventListener('click', () => exportConfig());
+  document.getElementById('copy-btn').addEventListener('click', () => copyConfigCode());
 
   // Load saved config into settings fields
   try {
@@ -296,4 +299,50 @@ function showSuccess(msg) {
 
 function hideError() {
   document.getElementById('error-box').classList.add('hidden');
+}
+
+// =============================================================================
+// Config Code Import / Export
+// =============================================================================
+
+async function importConfig() {
+  const code = document.getElementById('config_code_input').value.trim();
+  if (!code) { showError('Please paste a config code (mavi://...).'); return; }
+
+  try {
+    const config = await invoke('import_config_code', { code });
+    fillSettings(config);
+    await invoke('save_config', { config });
+    document.getElementById('config_code_input').value = '';
+    if (config.kc_auth) {
+      showSuccess('Config imported! Click Connect to log in via Keycloak.');
+    } else {
+      showSuccess('Config imported! Enter your token, then click Connect.');
+      document.getElementById('token').focus();
+    }
+  } catch (e) {
+    showError('Import failed: ' + e);
+  }
+}
+
+async function exportConfig() {
+  const config = readSettings();
+  try {
+    const code = await invoke('export_config_code', { config });
+    document.getElementById('config_code_output').value = code;
+    document.getElementById('export-output').classList.remove('hidden');
+  } catch (e) {
+    showError('Export failed: ' + e);
+  }
+}
+
+async function copyConfigCode() {
+  const code = document.getElementById('config_code_output').value;
+  try {
+    await navigator.clipboard.writeText(code);
+    showSuccess('Config code copied to clipboard!');
+  } catch (_) {
+    // Fallback: select text for manual copy
+    document.getElementById('config_code_output').select();
+  }
 }

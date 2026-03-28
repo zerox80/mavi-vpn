@@ -37,9 +37,15 @@ async fn main() {
             "status" => {
                 send_request(IpcRequest::Status).await
             }
+            "import" => {
+                import_config(&args).await
+            }
+            "export" => {
+                export_config()
+            }
             _ => {
                 println!("Unknown command: {}", cmd);
-                println!("Usage: mavi-vpn-client [start|stop|status]");
+                println!("Usage: mavi-vpn-client [start|stop|status|import|export]");
                 Ok(())
             }
         }
@@ -290,6 +296,34 @@ async fn prompt_new_config() -> Result<Config> {
         kc_realm: saved_kc_realm,
         kc_client_id: saved_kc_client_id,
     })
+}
+
+async fn import_config(args: &[String]) -> Result<()> {
+    let code = args.get(1).ok_or_else(|| {
+        anyhow::anyhow!("Usage: mavi-vpn-client import <mavi://...>")
+    })?;
+    let config = shared::config_code::decode_config_code(code)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    save_config(&config)?;
+    println!("Config imported successfully!");
+    println!("  Endpoint:  {}", config.endpoint);
+    println!("  Cert PIN:  {}...", &config.cert_pin.chars().take(16).collect::<String>());
+    if config.kc_auth.unwrap_or(false) {
+        println!("  Auth:      Keycloak (SSO)");
+    } else {
+        println!("  Auth:      Token (enter it when connecting)");
+    }
+    println!("\nRun 'mavi-vpn-client start' to connect.");
+    Ok(())
+}
+
+fn export_config() -> Result<()> {
+    let config = load_config().ok_or_else(|| {
+        anyhow::anyhow!("No saved config found")
+    })?;
+    let code = shared::config_code::encode_config_code(&config);
+    println!("{}", code);
+    Ok(())
 }
 
 fn read_line() -> Result<String> {

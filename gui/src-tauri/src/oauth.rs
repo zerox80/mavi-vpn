@@ -5,10 +5,14 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 
 /// Fixed callback port so the redirect URI is predictable and can be registered
 /// once in Keycloak: `http://127.0.0.1:18923/callback`
 const OAUTH_CALLBACK_PORT: u16 = 18923;
+
+static CANCEL_TX: Mutex<Option<oneshot::Sender<()>>> = Mutex::const_new(None);
 
 /// Run the Keycloak PKCE OAuth2 flow in the user's browser session.
 ///
@@ -16,6 +20,15 @@ const OAUTH_CALLBACK_PORT: u16 = 18923;
 /// to open a browser window in the user's desktop session.
 /// Returns the access token string on success.
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
+    // 0. Setup cancellation of any previous flow
+    let (tx, mut cancel_rx) = oneshot::channel::<()>();
+    {
+        let mut tx_lock = CANCEL_TX.lock().await;
+        if let Some(old_tx) = tx_lock.replace(tx) {
+            let _ = old_tx.send(());
+        }
+    }
+
     // 1. Generate PKCE verifier and challenge
     let mut verifier_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut verifier_bytes);
@@ -27,13 +40,24 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     let code_challenge =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
-    // 2. Bind the fixed callback port
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
-        .await
-        .context(format!(
-            "Could not bind callback port {}. Is another instance running?",
-            OAUTH_CALLBACK_PORT
-        ))?;
+    // 2. Bind the fixed callback port, retrying if necessary (in case the old one closing takes a moment)
+    let mut listener = None;
+    for _ in 0..15 {
+        match TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT)).await {
+            Ok(l) => {
+                listener = Some(l);
+                break;
+            }
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    let listener = listener.context(format!(
+        "Could not bind callback port {}. Is another instance running?",
+        OAUTH_CALLBACK_PORT
+    ))?;
+
     let redirect_uri = format!("http://127.0.0.1:{}/callback", OAUTH_CALLBACK_PORT);
 
     // 3. Build the Keycloak authorization URL
@@ -59,57 +83,64 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     // 5. Wait for the redirect callback (5 minute timeout)
     let auth_code = tokio::time::timeout(Duration::from_secs(300), async {
         loop {
-            let (mut socket, _) = listener.accept().await?;
-            let mut buf = [0u8; 4096];
-            let n = socket.read(&mut buf).await?;
-            if n == 0 {
-                continue;
-            }
-
-            let request = String::from_utf8_lossy(&buf[..n]);
-            let first_line = request.lines().next().unwrap_or("");
-            if !first_line.starts_with("GET ") {
-                continue;
-            }
-
-            let path = first_line.split_whitespace().nth(1).unwrap_or("/");
-            let parsed =
-                url::Url::parse(&format!("http://localhost{}", path)).ok();
-
-            if let Some(u) = parsed {
-                if let Some(code) = u
-                    .query_pairs()
-                    .find(|(k, _)| k == "code")
-                    .map(|(_, v)| v.into_owned())
-                {
-                    let html = "<html><head><title>Login successful</title></head>\
-                        <body style='font-family:sans-serif;text-align:center;padding-top:50px'>\
-                        <h1 style='color:green'>Login successful!</h1>\
-                        <p>You can close this window and return to Mavi VPN.</p>\
-                        <script>setTimeout(()=>window.close(),3000)</script></body></html>";
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
-                        html
-                    );
-                    let _ = socket.write_all(resp.as_bytes()).await;
-                    return Ok::<String, anyhow::Error>(code);
+            tokio::select! {
+                _ = &mut cancel_rx => {
+                    return Err(anyhow::anyhow!("Cancelled by new login attempt"));
                 }
+                accept_res = listener.accept() => {
+                    let (mut socket, _) = accept_res?;
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await?;
+                    if n == 0 {
+                        continue;
+                    }
 
-                if let Some(err) = u
-                    .query_pairs()
-                    .find(|(k, _)| k == "error")
-                    .map(|(_, v)| v.into_owned())
-                {
-                    let html = format!(
-                        "<html><body><h1 style='color:red'>Login failed</h1><p>{}</p></body></html>",
-                        err
-                    );
-                    let resp = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n{}",
-                        html
-                    );
-                    let _ = socket.write_all(resp.as_bytes()).await;
-                    return Err(anyhow::anyhow!("Keycloak error: {}", err));
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = request.lines().next().unwrap_or("");
+                    if !first_line.starts_with("GET ") {
+                        continue;
+                    }
+
+                    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+                    let parsed =
+                        url::Url::parse(&format!("http://localhost{}", path)).ok();
+
+                    if let Some(u) = parsed {
+                        if let Some(code) = u
+                            .query_pairs()
+                            .find(|(k, _)| k == "code")
+                            .map(|(_, v)| v.into_owned())
+                        {
+                            let html = "<html><head><title>Login successful</title></head>\
+                                <body style='font-family:sans-serif;text-align:center;padding-top:50px'>\
+                                <h1 style='color:green'>Login successful!</h1>\
+                                <p>You can close this window and return to Mavi VPN.</p>\
+                                <script>setTimeout(()=>window.close(),3000)</script></body></html>";
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
+                                html
+                            );
+                            let _ = socket.write_all(resp.as_bytes()).await;
+                            return Ok::<String, anyhow::Error>(code);
+                        }
+
+                        if let Some(err) = u
+                            .query_pairs()
+                            .find(|(k, _)| k == "error")
+                            .map(|(_, v)| v.into_owned())
+                        {
+                            let html = format!(
+                                "<html><body><h1 style='color:red'>Login failed</h1><p>{}</p></body></html>",
+                                err
+                            );
+                            let resp = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n{}",
+                                html
+                            );
+                            let _ = socket.write_all(resp.as_bytes()).await;
+                            return Err(anyhow::anyhow!("Keycloak error: {}", err));
+                        }
+                    }
                 }
             }
         }

@@ -440,7 +440,9 @@ fn set_adapter_network_config(
     let endpoint_ip = add_host_route_exception(endpoint);
 
     // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 — override default route without deleting it.
-    run_cmd("route", &["add", "0.0.0.0",   "mask", "128.0.0.0", &gw_str, "metric", "5", "if", &if_str]);
+    if !run_cmd("route", &["add", "0.0.0.0",   "mask", "128.0.0.0", &gw_str, "metric", "5", "if", &if_str]) {
+        return Err(anyhow::anyhow!("Failed to apply routing rules. Please make sure to run Mavi VPN as Administrator!"));
+    }
     run_cmd("route", &["add", "128.0.0.0", "mask", "128.0.0.0", &gw_str, "metric", "5", "if", &if_str]);
 
     if let Some(gv6) = gateway_v6 {

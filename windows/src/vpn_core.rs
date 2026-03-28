@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use sha2::{Sha256, Digest};
 use wtransport::{Endpoint, ClientConfig};
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 use shared::{icmp, ControlMessage};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
@@ -256,7 +256,7 @@ async fn connect_and_handshake(
     token: String,
     endpoint_str: String,
     cert_pin: Vec<u8>,
-    censorship_resistant: bool,
+    _censorship_resistant: bool,
 ) -> Result<(wtransport::Connection, ControlMessage)> {
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
@@ -286,13 +286,10 @@ async fn connect_and_handshake(
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
 
-        // CR mode: only h3 (looks like HTTP/3 to DPI).
-        // Normal mode: try both so it works regardless of server config.
-        client_crypto.alpn_protocols = if censorship_resistant {
-            vec![wtransport::tls::WEBTRANSPORT_ALPN.to_vec()]
-        } else {
-            vec![b"mavivpn".to_vec(), wtransport::tls::WEBTRANSPORT_ALPN.to_vec()]
-        };
+        // wtransport server (H3) only accepts the WebTransport ALPN. 
+        // We MUST propose WEBTRANSPORT_ALPN for a successful handshake.
+        client_crypto.alpn_protocols = vec![wtransport::tls::WEBTRANSPORT_ALPN.to_vec()];
+
 
         ClientConfig::builder()
             .with_bind_default()
@@ -305,12 +302,25 @@ async fn connect_and_handshake(
     let endpoint = Endpoint::client(client_config)?;
 
     // Resolve endpoint and connect
-    let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve endpoint")?;
-    let _server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
-    info!("Connecting to WebTransport endpoint {} (resolved: {})", endpoint_str, addr);
+    let mut resolved_endpoint = endpoint_str.clone();
+    if !resolved_endpoint.contains(':') {
+        resolved_endpoint = format!("{}:4433", resolved_endpoint);
+    }
+
+    let addr = tokio::net::lookup_host(&resolved_endpoint).await?
+        .next()
+        .context("Failed to resolve endpoint")?;
     
-    let connect_url = format!("https://{}/vpn", endpoint_str);
-    let connection = endpoint.connect(&connect_url).await.context("WebTransport handshake failed TLS/Cert error?")?;
+    info!("Connecting to WebTransport endpoint {} (resolved: {})", resolved_endpoint, addr);
+    
+    let connect_url = format!("https://{}/vpn", resolved_endpoint);
+    let connection = endpoint.connect(&connect_url).await
+        .map_err(|e| {
+            error!("WebTransport handshake failed: {}. Ensure your Certificate PIN is correct and the server is reachable.", e);
+            e
+        })
+        .context("WebTransport handshake failed")?;
+
     info!("WebTransport handshake OK, sending auth token ({} bytes)", token.len());
 
     // Perform application-level handshake

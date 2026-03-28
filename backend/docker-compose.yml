@@ -13,7 +13,8 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
-      - ./data:/app/data # Persist certificates
+      - ./data:/app/data # Persist internal state
+      - /etc/letsencrypt:/etc/letsencrypt:ro # Direct access to Let's Encrypt certs
     environment:
       - RUST_LOG=info
       - VPN_AUTH_TOKEN=${VPN_AUTH_TOKEN:-change_me}

@@ -2,9 +2,62 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+
+    <!-- Shield body with cat ears -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M30,30h48v48h-48z" />
+        android:fillColor="#3b82f6"
+        android:pathData="M118,16 L192,138 Q256,96 320,138 L394,16 L440,108 L440,300 Q440,438 256,496 Q72,438 72,300 L72,108 Z" />
+
+    <!-- Inner ear shading left -->
+    <path
+        android:fillColor="#1e40af"
+        android:fillAlpha="0.5"
+        android:pathData="M140,46 L190,138 L156,104 Z" />
+    <!-- Inner ear shading right -->
+    <path
+        android:fillColor="#1e40af"
+        android:fillAlpha="0.5"
+        android:pathData="M372,46 L322,138 L356,104 Z" />
+
+    <!-- Face area -->
+    <path
+        android:fillColor="#1e3a8a"
+        android:fillAlpha="0.3"
+        android:pathData="M256,316m-140,0a140,128 0,1 1,280 0a140,128 0,1 1,-280 0" />
+
+    <!-- Left eye -->
+    <path
+        android:fillColor="#93c5fd"
+        android:pathData="M130,264 Q196,212 256,264 Q196,316 130,264 Z" />
+    <!-- Right eye -->
+    <path
+        android:fillColor="#93c5fd"
+        android:pathData="M256,264 Q316,212 382,264 Q316,316 256,264 Z" />
+
+    <!-- Left pupil -->
+    <path
+        android:fillColor="#0c1629"
+        android:pathData="M188,240 Q196,230 204,240 L204,288 Q196,298 188,288 Z" />
+    <!-- Right pupil -->
+    <path
+        android:fillColor="#0c1629"
+        android:pathData="M308,240 Q316,230 324,240 L324,288 Q316,298 308,288 Z" />
+
+    <!-- Eye highlights -->
+    <path
+        android:fillColor="#ffffff"
+        android:fillAlpha="0.8"
+        android:pathData="M210,248m-7,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+    <path
+        android:fillColor="#ffffff"
+        android:fillAlpha="0.8"
+        android:pathData="M330,248m-7,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+
+    <!-- Nose -->
+    <path
+        android:fillColor="#93c5fd"
+        android:fillAlpha="0.7"
+        android:pathData="M246,354 Q256,344 266,354 L256,368 Z" />
 </vector>

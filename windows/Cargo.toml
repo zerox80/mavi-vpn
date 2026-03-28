@@ -22,7 +22,7 @@ anyhow = { workspace = true }
 socket2 = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 etherparse = { workspace = true }
-reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls", "form"], default-features = false }
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

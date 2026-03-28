@@ -103,7 +103,7 @@ async function toggleConnection() {
 async function connect() {
   const config = readSettings();
   if (!config.endpoint) { showError('Please enter a server endpoint in Settings.'); return; }
-  if (!config.cert_pin) { showError('Please enter a certificate PIN in Settings.'); return; }
+  // cert_pin is optional. If empty, native system root CAs are used.
   if (!config.token && !config.kc_auth) { showError('Please provide an auth token or enable Keycloak.'); return; }
 
   hideError();

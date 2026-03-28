@@ -6,7 +6,7 @@ members = [
     "android/app/src/main/rust",
     "windows", "quic-tester",
     "linux",
-    "gui/src-tauri", "%TEMP%/wtransport_test",
+    "gui/src-tauri",
 ]
 
 [workspace.dependencies]

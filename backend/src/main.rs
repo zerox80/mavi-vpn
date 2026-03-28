@@ -31,10 +31,10 @@ use crate::state::AppState;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
 use tun::AbstractDevice;
 use constant_time_eq::constant_time_eq;
-use shared::icmp;
+
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::Duration;
+
 use shared::ControlMessage;
 use futures_util::FutureExt;
 
@@ -416,9 +416,7 @@ async fn handle_quic_connection(
     // Pulls packets meant for this specific client from the internal hub
     // and sends them as unreliable QUIC datagrams.
     let conn_send = connection_arc.clone();
-    let tx_tun_icmp = tx_tun.clone();
-    let gateway_v4 = state.gateway_ip();
-    let gateway_v6 = state.gateway_ip_v6();
+
     let tun_to_quic = tokio::spawn(async move {
         while let Some(packet) = rx_client.recv().await {
             if let Err(e) = conn_send.send_datagram(packet.clone()) {
@@ -482,7 +480,7 @@ fn cleanup_legacy_rules() {
 
 /// Handles a single TCP/HTTP2 fallback connection
 async fn handle_h2_connection(
-    mut stream: tokio::net::TcpStream,
+    stream: tokio::net::TcpStream,
     remote_addr: std::net::SocketAddr,
     tls_acceptor: tokio_rustls::TlsAcceptor,
     state: Arc<AppState>,

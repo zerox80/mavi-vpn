@@ -1,19 +1,17 @@
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use anyhow::{Context, Result};
-use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 pub struct KeycloakValidator {
     url: String,
     realm: String,
-    pub client_id: String,
     jwks: RwLock<Option<JwkSet>>,
 }
 
 impl KeycloakValidator {
-    pub fn new(url: String, realm: String, client_id: String) -> Self {
-        Self { url, realm, client_id, jwks: RwLock::new(None) }
+    pub fn new(url: String, realm: String, _client_id: String) -> Self {
+        Self { url, realm, jwks: RwLock::new(None) }
     }
 
     pub async fn init_and_fetch(&self) -> Result<()> {

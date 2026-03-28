@@ -107,23 +107,7 @@ fn get_or_create_adapter(wintun: &wintun::Wintun) -> Result<Arc<Adapter>> {
         .context("Failed to create WinTUN adapter. Admin privileges required.")
 }
 
-/// Creates a UDP socket configured for both IPv4 and IPv6 (dual-stack).
-fn create_udp_socket() -> Result<std::net::UdpSocket> {
-    let socket2_sock = socket2::Socket::new(
-        socket2::Domain::IPV6,
-        socket2::Type::DGRAM,
-        Some(socket2::Protocol::UDP),
-    )?;
 
-    // V6ONLY = false allows this socket to receive IPv4 traffic as well.
-    socket2_sock.set_only_v6(false)?;
-    socket2_sock.bind(&socket2::SockAddr::from(std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0)))?;
-    // Set larger socket buffers for high-throughput stability on Windows (4MB for GSO bursts)
-    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024); 
-    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); 
-
-    Ok(socket2_sock.into())
-}
 
 /// Manages a single active VPN session (handshake + packet pumping).
 async fn run_session(
@@ -205,8 +189,7 @@ async fn run_session(
                 Ok(Some(packet)) => {
                     let data = Bytes::copy_from_slice(packet.bytes());
                     if let Err(e) = conn_quic.send_datagram(data) {
-                        let e_str = format!("{:?}", e);
-                        if e_str.contains("TooLarge") {
+                        if let wtransport::error::SendDatagramError::TooLarge = e {
                             // Synthesise ICMP PTB signal back to OS
                             let current_mtu = conn_quic.max_datagram_size().unwrap_or(1200) as u16;
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(packet.bytes(), current_mtu, Some(std::net::IpAddr::V4(gateway))) {
@@ -215,7 +198,7 @@ async fn run_session(
                                     session_tun.send_packet(reply);
                                 }
                             }
-                        } else if e_str.contains("NotConnected") { break; }
+                        } else if let wtransport::error::SendDatagramError::NotConnected = e { break; }
                     }
                 }
                 Ok(None) => std::thread::sleep(Duration::from_micros(100)),
@@ -489,21 +472,7 @@ fn cleanup_routes(endpoint_ip: Option<&str>) {
     let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "delete", "route", "8000::/1", "MaviVPN"]).output();
 }
 
-fn set_adapter_ipv6(adapter: &Adapter, ip: Ipv6Addr, prefix_len: u8) -> Result<()> {
-    unsafe {
-        use windows_sys::Win32::NetworkManagement::IpHelper::*;
-        use windows_sys::Win32::Networking::WinSock::*;
-        let mut row: MIB_UNICASTIPADDRESS_ROW = std::mem::zeroed();
-        InitializeUnicastIpAddressEntry(&mut row);
-        row.InterfaceLuid = std::mem::transmute(adapter.get_luid());
-        row.Address.si_family = AF_INET6 as u16;
-        row.Address.Ipv6.sin6_addr.u.Byte = ip.octets();
-        row.OnLinkPrefixLength = prefix_len;
-        row.DadState = IpDadStatePreferred;
-        CreateUnicastIpAddressEntry(&row);
-    }
-    Ok(())
-}
+
 
 /// Routes the VPN server's own IP via the physical gateway rather than the tunnel.
 /// Returns the server IP string so the caller can clean it up later.
@@ -540,11 +509,7 @@ fn add_host_route_exception(endpoint: &str) -> Option<String> {
     None
 }
 
-fn netmask_to_prefix_len(netmask: Ipv4Addr) -> Result<u8> {
-    let mask = u32::from_be_bytes(netmask.octets());
-    let prefix = mask.count_ones() as u8;
-    Ok(prefix)
-}
+
 
 const NRPT_COMMENT: &str = "MaviVPN";
 

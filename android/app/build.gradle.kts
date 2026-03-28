@@ -67,6 +67,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.browser:browser:1.8.0")
+    implementation("androidx.browser:browser:1.10.0")
     implementation("com.squareup.okhttp3:okhttp:5.3.2") // For token exchange
 }

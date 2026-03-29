@@ -4,10 +4,13 @@ WORKDIR /app
 
 # Copy workspace files
 # 1. Prepare Metadata for Caching
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 # Remove non-server members from workspace for Docker build
 RUN sed -i '/android\/app\/src\/main\/rust/d' Cargo.toml
-RUN sed -i '/\"windows\"/d' Cargo.toml
+RUN sed -i '/"windows"/d' Cargo.toml
+RUN sed -i '/"linux"/d' Cargo.toml
+RUN sed -i '/"gui\/src-tauri"/d' Cargo.toml
+RUN sed -i '/"quic-tester"/d' Cargo.toml
 
 COPY shared/Cargo.toml ./shared/Cargo.toml
 COPY backend/Cargo.toml ./backend/Cargo.toml

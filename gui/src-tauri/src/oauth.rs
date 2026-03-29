@@ -206,8 +206,12 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
 fn open_browser(url: &str) {
     #[cfg(target_os = "windows")]
     {
-        // explorer requires URLs containing '&' to be quoted, but spawn() handles shell escaping.
-        let _ = std::process::Command::new("explorer")
+        // Using 'cmd /c start' is the most robust way to open URLs from an elevated process
+        // while ensuring they open in the user's default, non-elevated browser session.
+        let _ = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("start")
+            .arg("") // empty title for start command
             .arg(url)
             .spawn();
     }

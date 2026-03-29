@@ -86,53 +86,67 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
 
     info!("Initializing VPN Session. Endpoint: {}", endpoint);
 
-        // 1. Create Socket and Protect it
-        // We bind to [::]:0 to allow both IPv4 and IPv6 (Dual Stack)
-        let socket = match std::net::UdpSocket::bind("[::]:0") {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to bind UDP socket: {}", e);
-                return 0;
-            }
-        };
-        
-        // Initialize socket buffers
-        let socket2_sock = socket2::Socket::from(socket);
-        
-        // Ensure Dual Stack is enabled (IPV6_V6ONLY = 0)
-        if let Err(e) = socket2_sock.set_only_v6(false) {
-             warn!("Failed to set IPV6_V6ONLY=false: {}", e);
-             // We continue, as some OS/kernels might have it disabled by default or fail if bound to IPv4 mapped
+    // 1. Resolve Endpoint and Bind to Correct Family
+    use std::net::ToSocketAddrs;
+    let addr = match endpoint.to_socket_addrs() {
+        Ok(mut addrs) => addrs.next(),
+        Err(e) => {
+            error!("Failed to resolve endpoint {}: {}", endpoint, e);
+            return 0;
         }
-        // Set larger socket buffers for high-throughput stability (4MB for GSO bursts)
-        let buffer_candidates = [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024];
-        
-        for size in buffer_candidates {
-            if let Err(e) = socket2_sock.set_recv_buffer_size(size) {
-                 warn!("Could not set receive buffer to {}: {}", size, e);
+    };
+    
+    let target_addr = match addr {
+        Some(a) => a,
+        None => {
+            error!("No address found for endpoint {}", endpoint);
+            return 0;
+        }
+    };
+
+    // Bind to the correct family based on the target address
+    let bind_addr = if target_addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let socket = match std::net::UdpSocket::bind(bind_addr) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to bind UDP socket to {}: {}", bind_addr, e);
+            return 0;
+        }
+    };
+    
+    // Initialize socket
+    let socket2_sock = socket2::Socket::from(socket);
+    
+    // Set larger socket buffers for high-throughput stability (4MB for GSO bursts)
+    let buffer_candidates = [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024];
+    
+    for size in buffer_candidates {
+        if let Err(e) = socket2_sock.set_recv_buffer_size(size) {
+                warn!("Could not set receive buffer to {}: {}", size, e);
+        } else {
+                info!("Socket receive buffer: {}", size);
+                break;
+        }
+    }
+    for size in buffer_candidates {
+            if let Err(e) = socket2_sock.set_send_buffer_size(size) {
+                warn!("Could not set send buffer to {}: {}", size, e);
             } else {
-                 info!("Socket receive buffer: {}", size);
-                 break;
+                info!("Socket send buffer: {}", size);
+                break;
             }
-        }
-        for size in buffer_candidates {
-             if let Err(e) = socket2_sock.set_send_buffer_size(size) {
-                 warn!("Could not set send buffer to {}: {}", size, e);
-             } else {
-                 info!("Socket send buffer: {}", size);
-                 break;
-             }
-        }
+    }
 
-        // Allow Fragmentation (OS-level fragmentation)
-        // If the cellular network has MTU 1280 or 1300, and we send 1360 (wire), the OS must fragment it.
-        // We switch to IP_PMTUDISC_DONT (MTU_DISCOVER_DONT) to ensure connectivity on restricted networks.
-        #[cfg(target_os = "android")]
-        unsafe {
-            use std::os::unix::io::AsRawFd;
-            let fd = socket2_sock.as_raw_fd();
-            let val: libc::c_int = 0; // 0 is DONT for both IPv4 and IPv6/Linux
+    // Allow Fragmentation (OS-level fragmentation)
+    // If the cellular network has MTU 1280 or 1300, and we send 1360 (wire), the OS must fragment it.
+    // We switch to IP_PMTUDISC_DONT (MTU_DISCOVER_DONT) to ensure connectivity on restricted networks.
+    #[cfg(target_os = "android")]
+    unsafe {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket2_sock.as_raw_fd();
+        let val: libc::c_int = 0; // 0 is DONT for both IPv4 and IPv6/Linux
 
+        if target_addr.is_ipv4() {
             // IPv4: IP_MTU_DISCOVER = 10, IP_PMTUDISC_DONT = 0
             let _ = libc::setsockopt(
                 fd,
@@ -141,7 +155,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
                 &val as *const _ as *const libc::c_void,
                 std::mem::size_of_val(&val) as libc::socklen_t,
             );
-
+        } else {
             // IPv6: IPV6_MTU_DISCOVER = 23, IPV6_PMTUDISC_DONT = 0
             let _ = libc::setsockopt(
                 fd,
@@ -150,9 +164,10 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
                 &val as *const _ as *const libc::c_void,
                 std::mem::size_of_val(&val) as libc::socklen_t,
             );
-            
-            info!("UDP Fragmentation enabled (PMTUDISC_DONT) for Android socket");
         }
+        
+        info!("UDP Fragmentation enabled (PMTUDISC_DONT) for Android socket");
+    }
 
         let socket = std::net::UdpSocket::from(socket2_sock);
 

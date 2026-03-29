@@ -57,13 +57,14 @@ class MainActivity : ComponentActivity() {
     private var lastPort = ""
     private var lastToken = ""
     private var lastPin = ""
+    private var lastTransportMode = 0
 
     private val vpnPrepareLauncher = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
              val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
              val splitMode = prefs.getString("temp_split_mode", "exclude") ?: "exclude"
              val splitPackages = prefs.getString("temp_split_packages", "") ?: ""
-             startVpnService(lastIp, lastPort, lastToken, lastPin, splitMode, splitPackages)
+             startVpnService(lastIp, lastPort, lastToken, lastPin, splitMode, splitPackages, lastTransportMode)
         }
     }
 
@@ -102,7 +103,7 @@ class MainActivity : ComponentActivity() {
                         initialSplitMode = savedSplitMode,
                         initialSplitPackages = savedSplitPackages,
                         initialTransportMode = prefs.getInt("saved_transport_mode", 0),
-                        onConnect = { ip, port, token, pin, splitMode, splitPackages -> 
+                        onConnect = { ip, port, token, pin, splitMode, splitPackages, tMode -> 
                             // Save credentials
                             val editor = prefs.edit()
                             editor.putString("saved_ip", ip)
@@ -111,9 +112,10 @@ class MainActivity : ComponentActivity() {
                             editor.putString("saved_pin", pin)
                             editor.putString("saved_split_mode", splitMode)
                             editor.putString("saved_split_packages", splitPackages)
+                            editor.putInt("saved_transport_mode", tMode)
                             editor.apply()
                             
-                            prepareAndStartVpn(ip, port, token, pin, splitMode, splitPackages) 
+                            prepareAndStartVpn(ip, port, token, pin, splitMode, splitPackages, tMode) 
                         },
                         onDisconnect = { stopVpn() }
                     )
@@ -122,18 +124,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun prepareAndStartVpn(ip: String, port: String, token: String, pin: String, splitMode: String, splitPackages: String) {
+    private fun prepareAndStartVpn(ip: String, port: String, token: String, pin: String, splitMode: String, splitPackages: String, tMode: Int) {
         val intent = VpnService.prepare(this)
         if (intent != null) {
             lastIp = ip
             lastPort = port
             lastToken = token
             lastPin = pin
-            // Hacky way to pass split config through result launcher, usually we'd use a ViewModel or Prefs refetch
-            // But since we save to prefs before calling this, we can rely on startVpnService reading from prefs?
-            // Actually startVpnService takes args. Let's update the class vars.
-            // But wait, lastIp etc are used in the callback.
-            // I'll update startVpnService to take new args too.
+            lastTransportMode = tMode
+            
             getSharedPreferences("MaviVPN", Context.MODE_PRIVATE).edit()
                 .putString("temp_split_mode", splitMode)
                 .putString("temp_split_packages", splitPackages)
@@ -141,7 +140,7 @@ class MainActivity : ComponentActivity() {
                 
             vpnPrepareLauncher.launch(intent)
         } else {
-            startVpnService(ip, port, token, pin, splitMode, splitPackages)
+            startVpnService(ip, port, token, pin, splitMode, splitPackages, tMode)
         }
     }
     
@@ -224,7 +223,7 @@ fun AppNavigation(
     initialSplitMode: String,
     initialSplitPackages: String,
     initialTransportMode: Int,
-    onConnect: (String, String, String, String, String, String) -> Unit,
+    onConnect: (String, String, String, String, String, String, Int) -> Unit,
     onDisconnect: () -> Unit
 ) {
     val context = LocalContext.current
@@ -335,7 +334,7 @@ fun AppNavigation(
                             transportMode = tMode
                             val prefs = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
                             prefs.edit().putInt("saved_transport_mode", tMode).apply()
-                            onConnect(ip, port, token, pin, splitMode, splitPackages)
+                            onConnect(ip, port, token, pin, splitMode, splitPackages, tMode)
                         },
                         onDisconnect = onDisconnect
                     )
@@ -669,7 +668,6 @@ fun VpnScreen(
                 }
             }
         }
-        } // end scrollable content Column
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -692,7 +690,7 @@ fun VpnScreen(
                                 .putString("saved_kc_realm", kcRealm)
                                 .putString("saved_kc_client_id", kcClientId)
                                 .apply()
-                            onConnect(serverIp, serverPort, authToken, certPin)
+                            onConnect(serverIp, serverPort, authToken, certPin, transportMode)
                         }
                     } else {
                         if (authToken.isEmpty()) {
@@ -785,7 +783,6 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf<String>(initialMode) } // "include", "exclude"
-    var transportMode by remember { mutableStateOf<Int>(initialTransportMode) }
     
     val selectedPackages = remember { 
         mutableStateListOf<String>().apply { 
@@ -837,13 +834,12 @@ fun SettingsScreen(
             .padding(16.dp)
     ) {
         // Header
-            Text(
-                text = "Split Tunneling",
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
-        }
+        Text(
+            text = "Split Tunneling",
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
         
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -983,7 +979,7 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(16.dp))
         
         Button(
-            onClick = { onBack(mode, selectedPackages.joinToString(","), transportMode) },
+            onClick = { onBack(mode, selectedPackages.joinToString(",")) },
             modifier = Modifier.fillMaxWidth().height(50.dp),
             shape = RoundedCornerShape(12.dp)
         ) {

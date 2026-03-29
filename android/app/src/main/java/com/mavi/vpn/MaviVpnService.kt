@@ -109,14 +109,16 @@ class MaviVpnService : VpnService() {
         }
 
         // 2. Unregister previous Network Callback to avoid leaks
-        try {
-            if (connectivityManager != null && networkCallback != null) {
-                connectivityManager?.unregisterNetworkCallback(networkCallback!!)
+        synchronized(vpnLock) {
+            try {
+                if (connectivityManager != null && networkCallback != null) {
+                    connectivityManager?.unregisterNetworkCallback(networkCallback!!)
+                }
+            } catch (e: Exception) {
+                Log.w("MaviVPN", "Failed to unregister previous callback: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.w("MaviVPN", "Failed to unregister previous callback: ${e.message}")
+            networkCallback = null
         }
-        networkCallback = null
 
         // 3. Register New Network Callback
         try {
@@ -124,8 +126,10 @@ class MaviVpnService : VpnService() {
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     Log.d("MaviVPN", "Network available: $network")
-                    if (vpnSessionHandle != 0L) {
-                         networkChanged(vpnSessionHandle)
+                    synchronized(vpnLock) {
+                        if (vpnSessionHandle != 0L) {
+                            networkChanged(vpnSessionHandle)
+                        }
                     }
                 }
             }
@@ -168,6 +172,7 @@ class MaviVpnService : VpnService() {
                     // 1. Init / Handshake
                     val crMode = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
                         .getBoolean("saved_censorship_resistant", false)
+                    
                     val handle = init(this, token, "$ip:$port", certPin, crMode)
                     if (handle == 0L) {
                         Log.e("MaviVPN", "Handshake failed. Retrying in 500ms...")
@@ -175,7 +180,7 @@ class MaviVpnService : VpnService() {
                         continue
                     }
                     
-                    // Bug Fix: Update global handle immediately to ensure cleanup in finally block
+                    // Bug Fix: Store handle IMMEDIATELY after creation to prevent leak if thread is interrupted
                     synchronized(vpnLock) {
                         vpnSessionHandle = handle
                     }
@@ -298,10 +303,15 @@ class MaviVpnService : VpnService() {
                         Log.d("MaviVPN", "Cleaning up VPN session for retry/stop")
                         
                         // Clean native memory safely
+                        // Bug Fix: Only free the handle that THIS thread was using
                         synchronized(vpnLock) {
-                             if (vpnSessionHandle != 0L) {
-                                  free(vpnSessionHandle)
+                             if (vpnSessionHandle == handle) {
+                                  free(handle)
                                   vpnSessionHandle = 0
+                             } else if (handle != 0L) {
+                                  // This shouldn't happen often, but if 'handle' was never assigned 
+                                  // or already superseded, we still need to free it.
+                                  free(handle)
                              }
                         }
                     }

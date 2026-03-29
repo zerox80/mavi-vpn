@@ -36,7 +36,7 @@ class MaviVpnService : VpnService() {
     }
 
     // Native methods implemented in Rust
-    private external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String, censorshipResistant: Boolean): Long
+    private external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String, censorshipResistant: Boolean, preferTcp: Boolean): Long
     private external fun getConfig(handle: Long): String
     private external fun startLoop(handle: Long, fd: Int)
     private external fun stop(handle: Long)
@@ -158,7 +158,9 @@ class MaviVpnService : VpnService() {
                     // 1. Init / Handshake
                     val crMode = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
                         .getBoolean("saved_censorship_resistant", false)
-                    val handle = init(this, token, "$ip:$port", certPin, crMode)
+                    val preferTcp = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+                        .getBoolean("saved_prefer_tcp", false)
+                    val handle = init(this, token, "$ip:$port", certPin, crMode, preferTcp)
                     if (handle == 0L) {
                         Log.e("MaviVPN", "Handshake failed. Retrying in 500ms...")
                         Thread.sleep(500)

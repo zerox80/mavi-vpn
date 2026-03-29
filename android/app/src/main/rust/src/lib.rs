@@ -17,14 +17,25 @@ use sha2::{Sha256, Digest};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use futures_util::FutureExt;
 use wtransport::{ClientConfig, Endpoint};
+use anyhow::Context;
 
 use std::sync::Once;
 
 // Global stop flag removed. We use per-session flags.
 
+pub enum ActiveConnection {
+    Quic(wtransport::Connection),
+    Tcp {
+        send_stream: h2::SendStream<Bytes>,
+        recv_stream: h2::RecvStream,
+        leftover: bytes::BytesMut,
+    },
+    Consumed,
+}
+
 struct VpnSession {
     runtime: tokio::runtime::Runtime,
-    connection: wtransport::Connection,
+    connection: ActiveConnection,
     config: ControlMessage,
     stop_flag: Arc<AtomicBool>,
 }
@@ -41,6 +52,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
     endpoint: JString<'local>,
     cert_pin: JString<'local>,
     censorship_resistant: jni::sys::jboolean, // New Argument
+    prefer_tcp: jni::sys::jboolean, // New Argument
 ) -> jlong {
     // EnvUnowned is #[repr(transparent)] and FFI-safe.
     // We must convert it to a usable Env via AttachGuard.
@@ -61,6 +73,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
         });
     
     info!("JNI init called. CR Mode: {}", censorship_resistant);
+    let prefer_tcp_bool = prefer_tcp;
     
     // Helper to extract string safely
     #[allow(deprecated)]
@@ -168,9 +181,13 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
             }
         };
 
-        // 3. Connect and Handshake via WebTransport (with protected socket)
+        // 3. Connect and Handshake via WebTransport or TCP (with protected socket)
         let result = rt.block_on(async {
-            connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant).await
+            if prefer_tcp_bool {
+                connect_and_handshake_tcp(socket, token, endpoint, cert_pin_str, censorship_resistant).await
+            } else {
+                connect_and_handshake_quic(socket, token, endpoint, cert_pin_str, censorship_resistant).await
+            }
         });
 
         match result {
@@ -243,7 +260,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop<'local>(
         info!("Starting VPN Loop with TUN FD: {}", tun_fd);
         
         let stop_flag = session.stop_flag.clone();
-        let conn = session.connection.clone();
+        let conn = std::mem::replace(&mut session.connection, ActiveConnection::Consumed);
 
         let config = session.config.clone();
         session.runtime.block_on(async {
@@ -300,34 +317,34 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_networkChanged<'local>(
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *mut VpnSession) };
         info!("Network Event: Triggering Rebind/Migration Ping");
-        
-        let conn = session.connection.clone();
-        
-        // Spawn a task to send a burst of pings/datagrams to force migration
-        session.runtime.spawn(async move {
-            info!("Starting migration burst (5 packets)...");
-            for i in 0..5 {
-                match conn.send_datagram(Bytes::from_static(&[])) {
-                     Ok(_) => info!("Migration datagram {}/5 sent", i+1),
-                     Err(e) => error!("Failed to send migration datagram {}/5: {}", i+1, e),
+        // We only migrate over QUIC
+        if let ActiveConnection::Quic(ref conn) = session.connection {
+            let conn_clone = conn.clone();
+            // Spawn a task to send a burst of pings/datagrams to force migration
+            session.runtime.spawn(async move {
+                info!("Starting migration burst (5 packets)...");
+                for i in 0..5 {
+                    match conn_clone.send_datagram(Bytes::from_static(&[])) {
+                         Ok(_) => info!("Migration datagram {}/5 sent", i+1),
+                         Err(e) => error!("Failed to send migration datagram {}/5: {}", i+1, e),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 }
-                // Small delay to ensure they are spaced out slightly but cover the network switch window
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            }
-            info!("Migration burst completed.");
-        });
+                info!("Migration burst completed.");
+            });
+        }
     }));
 }
 
 // --- Internal Logic ---
 
-async fn connect_and_handshake(
+async fn connect_and_handshake_quic(
     socket: std::net::UdpSocket,
     token: String, 
     endpoint_str: String, 
     cert_pin: String,
     _censorship_resistant: bool,
-) -> anyhow::Result<(wtransport::Connection, ControlMessage)> {
+) -> anyhow::Result<(ActiveConnection, ControlMessage)> {
     
     info!("Connect and Handshake started. Pin: {}", cert_pin);
 
@@ -418,12 +435,108 @@ async fn connect_and_handshake(
         return Err(anyhow::anyhow!("Server Error: {}", message));
     }
     
-    Ok((connection, config))
+    Ok((ActiveConnection::Quic(connection), config))
+}
+
+async fn connect_and_handshake_tcp(
+    socket: std::net::UdpSocket,
+    token: String, 
+    endpoint_str: String, 
+    cert_pin: String,
+    _censorship_resistant: bool,
+) -> anyhow::Result<(ActiveConnection, ControlMessage)> {
+    info!("Connect and Handshake TCP started. Pin: {}", cert_pin);
+
+    // Convert UdpSocket to TcpStream by creating a new TCP connection
+    let endpoint_str_resolved = if endpoint_str.contains(':') { endpoint_str.clone() } else { format!("{}:443", endpoint_str) };
+    let addr = tokio::net::lookup_host(&endpoint_str_resolved).await?.next().context("Failed to resolve TCP endpoint")?;
+    
+    // We create a completely new TcpSocket so that Android VpnService protects it (since we can't reuse UDP socket for TCP)
+    // Actually, on Android, VpnService protects Sockets via java side.
+    // Wait! The passed UDP socket is already protected by Java, but TCP is a new socket. We must connect normally.
+    // If the Java tunnel is not yet active (because we haven't read config), then `lookup_host` and `TcpSocket` connection
+    // will just go through the normal network! VpnService only intercepts AFTER TUN is created. 
+    // And Java `Builder().establish()` happens AFTER this returns.
+    // So TCP does not need `protect()` call here explicitly!
+    let stream = tokio::net::TcpStream::connect(addr).await?;
+    let _ = stream.set_nodelay(true);
+
+    let server_name = endpoint_str_resolved.split(':').next().unwrap_or(&endpoint_str_resolved);
+
+    let cert_pin_bytes = if let Some(bytes) = decode_hex(&cert_pin) { bytes } else { return Err(anyhow::anyhow!("Invalid PIN")); };
+
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedServerVerifier::new(cert_pin_bytes)))
+        .with_no_client_auth();
+    client_crypto.alpn_protocols = vec![b"h2".to_vec()];
+
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_crypto));
+    let domain = rustls::pki_types::ServerName::try_from(server_name.to_string())
+        .map_err(|_| anyhow::anyhow!("Invalid server name"))?;
+    
+    let tls_stream = connector.connect(domain, stream).await?;
+
+    let (mut h2_client, connection) = h2::client::Builder::new()
+        .initial_window_size(4 * 1024 * 1024)
+        .initial_connection_window_size(4 * 1024 * 1024)
+        .handshake(tls_stream)
+        .await?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let request = http::Request::builder().uri("/vpn").method("POST").body(()).unwrap();
+    let (response_future, mut send_stream) = h2_client.send_request(request, false)?;
+
+    let auth_msg = ControlMessage::Auth { token: token };
+    let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
+    
+    let mut auth_frame = Vec::with_capacity(4 + bytes.len());
+    auth_frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    auth_frame.extend_from_slice(&bytes);
+    send_stream.send_data(Bytes::from(auth_frame), false)?;
+
+    let response = response_future.await?;
+    if response.status() != http::StatusCode::OK {
+        return Err(anyhow::anyhow!("Server rejected TCP connection"));
+    }
+    let mut recv_stream = response.into_body();
+
+    let mut buffer = bytes::BytesMut::new();
+    while buffer.len() < 4 {
+        if let Some(Ok(chunk)) = recv_stream.data().await {
+            buffer.extend_from_slice(&chunk);
+            let _ = recv_stream.flow_control().release_capacity(chunk.len());
+        } else {
+            return Err(anyhow::anyhow!("Failed to read h2 payload"));
+        }
+    }
+    
+    let msg_len = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+    let _ = buffer.split_to(4);
+    if msg_len > 8192 * 4 { return Err(anyhow::anyhow!("Payload too large")); }
+    
+    while buffer.len() < msg_len {
+        if let Some(Ok(chunk)) = recv_stream.data().await {
+            buffer.extend_from_slice(&chunk);
+            let _ = recv_stream.flow_control().release_capacity(chunk.len());
+        } else {
+            return Err(anyhow::anyhow!("Failed to read h2 payload"));
+        }
+    }
+
+    let config: ControlMessage = bincode::serde::decode_from_slice(&buffer[..msg_len], bincode::config::standard()).map(|(v,_)| v)?;
+    let _ = buffer.split_to(msg_len);
+
+    Ok((ActiveConnection::Tcp { send_stream, recv_stream, leftover: buffer }, config))
 }
 
 
 #[cfg(target_os = "android")]
-async fn run_vpn_loop(connection: wtransport::Connection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage) {
+async fn run_vpn_loop(connection: ActiveConnection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage) {
     let raw_fd = fd as RawFd;
 
     // Extract Gateway IPs for ICMP signaling
@@ -459,173 +572,260 @@ async fn run_vpn_loop(connection: wtransport::Connection, fd: jint, stop_flag: A
         Err(e) => { error!("Failed to create AsyncFd: {}", e); return; }
     };
 
-    let connection_arc = Arc::new(connection);
-    
-    // TUN -> QUIC (via WebTransport datagrams)
-    let conn_send = connection_arc.clone();
-    let stop_check = stop_flag.clone();
-    let read_fd = dup_fd; // Use the duplicated FD for reads
-
     // Channel for ICMP loopback packets
     let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
 
-    let tun_to_quic = tokio::spawn(async move {
-        let mut buf = BytesMut::with_capacity(65536); 
-        loop {
-            if stop_check.load(Ordering::Relaxed) { break; }
-            
-            let mut guard = match tun_reader.readable().await {
-                Ok(g) => g,
-                Err(_) => break,
-            };
+    match connection {
+        ActiveConnection::Quic(quic_conn) => {
+            let connection_arc = Arc::new(quic_conn);
+            let conn_send = connection_arc.clone();
+            let stop_check = stop_flag.clone();
+            let read_fd = dup_fd;
 
-            // Read ONE packet from TUN
-            let packet = match guard.try_io(|_inner| {
-                 if buf.capacity() < 2048 {
-                     buf.reserve(2048);
-                 }
-                 let chunk = buf.chunk_mut();
-                 let max_len = 2048.min(chunk.len());
-                 
-                 let n = unsafe { libc::read(read_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
-                 
-                 if n < 0 {
-                     let err = std::io::Error::last_os_error();
-                     return Err(err);
-                 }
-                 let n = n as usize;
-                 if n == 0 { return Ok(None); } 
-                 
-                 unsafe { buf.advance_mut(n); }
-                 let packet = buf.split_to(n).freeze();
-                 Ok(Some(packet))
-            }) {
-                Ok(Ok(Some(p))) => p,
-                Ok(Ok(None)) => break,
-                Ok(Err(e)) => {
-                    if e.kind() != std::io::ErrorKind::WouldBlock {
-                        error!("TUN Read Error: {}", e);
-                        break;
+            let tun_to_quic = tokio::spawn(async move {
+                let mut buf = BytesMut::with_capacity(65536); 
+                loop {
+                    if stop_check.load(Ordering::Relaxed) { break; }
+                    
+                    let mut guard = match tun_reader.readable().await {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+
+                    let packet = match guard.try_io(|_inner| {
+                         if buf.capacity() < 2048 {
+                             buf.reserve(2048);
+                         }
+                         let chunk = buf.chunk_mut();
+                         let max_len = 2048.min(chunk.len());
+                         
+                         let n = unsafe { libc::read(read_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
+                         
+                         if n < 0 {
+                             let err = std::io::Error::last_os_error();
+                             return Err(err);
+                         }
+                         let n = n as usize;
+                         if n == 0 { return Ok(None); } 
+                         
+                         unsafe { buf.advance_mut(n); }
+                         let packet = buf.split_to(n).freeze();
+                         Ok(Some(packet))
+                    }) {
+                        Ok(Ok(Some(p))) => p,
+                        Ok(Ok(None)) => break,
+                        Ok(Err(e)) => {
+                            if e.kind() != std::io::ErrorKind::WouldBlock {
+                                error!("TUN Read Error: {}", e);
+                                break;
+                            }
+                            continue;
+                        },
+                        Err(_) => continue,
+                    };
+
+                    let packet_len = packet.len();
+                    let packet_bytes = packet.clone(); 
+
+                    match conn_send.send_datagram(packet) {
+                        Ok(_) => {},
+                        Err(e) => {
+                            use wtransport::error::SendDatagramError;
+                            match e {
+                                SendDatagramError::NotConnected => {
+                                    error!("Connection lost during send");
+                                    stop_check.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                                SendDatagramError::TooLarge => {
+                                    let current_mtu = conn_send.max_datagram_size().unwrap_or(1200) as u16;
+                                    let version = (packet_bytes[0] >> 4) & 0xF;
+                                    let gw = if version == 4 { 
+                                        std::net::IpAddr::V4(gateway_v4) 
+                                    } else { 
+                                        std::net::IpAddr::V6(gateway_v6_opt.unwrap_or("2001:db8::1".parse().unwrap())) 
+                                    };
+                                    warn!("Packet too large ({} bytes). Exceeds QUIC Path MTU ({} bytes). Sending ICMP Signal from {}.", packet_len, current_mtu, gw);
+                                    if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, current_mtu, Some(gw)) {
+                                        let _ = tx_tun.try_send(icmp_packet);
+                                    }
+                                },
+                            }
+                        }
                     }
-                    continue;
-                },
-                Err(_) => continue, // WouldBlock
-            };
+                }
+            });
 
-            let packet_len = packet.len();
-            let packet_bytes = packet.clone(); 
+            loop {
+                if stop_flag.load(Ordering::Relaxed) { break; }
+                tokio::select! {
+                     Some(icmp_pkt) = rx_tun.recv() => {
+                         let mut guard = match tun_writer.writable().await {
+                             Ok(g) => g,
+                             Err(_) => break,
+                         };
+                         let _ = guard.try_io(|_inner| {
+                             unsafe { libc::write(dup_fd, icmp_pkt.as_ptr() as *const libc::c_void, icmp_pkt.len()) };
+                             Ok(())
+                         });
+                     }
+                     res = connection_arc.receive_datagram() => {
+                         match res {
+                             Ok(first_datagram) => {
+                                let first_packet = first_datagram.payload();
+                                let mut batch: Vec<Bytes> = Vec::with_capacity(64);
+                                batch.push(first_packet.clone());
 
-            // Send to QUIC via WebTransport datagram
-            match conn_send.send_datagram(packet) {
-                Ok(_) => {},
-                Err(e) => {
-                    use wtransport::error::SendDatagramError;
-                    match e {
-                        SendDatagramError::NotConnected => {
-                            error!("Connection lost during send");
+                                for _ in 0..63 {
+                                     match connection_arc.receive_datagram().now_or_never() {
+                                         Some(Ok(dgram)) => batch.push(dgram.payload().clone()),
+                                         _ => break,
+                                     }
+                                }
+
+                                let mut batch_idx = 0;
+                                while batch_idx < batch.len() {
+                                    let mut guard = match tun_writer.writable().await {
+                                         Ok(g) => g,
+                                         Err(_) => break,
+                                    };
+                                    
+                                    let res = guard.try_io(|_inner| {
+                                        while batch_idx < batch.len() {
+                                             let packet = &batch[batch_idx];
+                                             let n = unsafe { libc::write(dup_fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
+                                             if n < 0 {
+                                                 let err = std::io::Error::last_os_error();
+                                                 if err.kind() == std::io::ErrorKind::WouldBlock { return Err(err); }
+                                                 return Err(err);
+                                             }
+                                             batch_idx += 1;
+                                        }
+                                        Ok(())
+                                    });
+                                    
+                                    match res {
+                                        Ok(Ok(())) => {}, 
+                                        Ok(Err(e)) => {
+                                             error!("TUN Write Error (Critical): {}", e);
+                                             break; 
+                                        },
+                                        Err(_) => {},
+                                    }
+                                }
+                             }
+                             Err(e) => { error!("Connection lost: {}", e); break; }
+                         }
+                     }
+                }
+            }
+            stop_flag.store(true, Ordering::SeqCst);
+            tun_to_quic.abort();
+        },
+        ActiveConnection::Tcp { mut send_stream, mut recv_stream, mut leftover } => {
+            let stop_check = stop_flag.clone();
+            let read_fd = dup_fd;
+
+            let tun_to_tcp = tokio::spawn(async move {
+                let mut buf = BytesMut::with_capacity(65536); 
+                loop {
+                    if stop_check.load(Ordering::Relaxed) { break; }
+                    
+                    let mut guard = match tun_reader.readable().await {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+
+                    let packet = match guard.try_io(|_inner| {
+                         if buf.capacity() < 2048 {
+                             buf.reserve(2048);
+                         }
+                         let chunk = buf.chunk_mut();
+                         let max_len = 2048.min(chunk.len());
+                         
+                         let n = unsafe { libc::read(read_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
+                         
+                         if n < 0 {
+                             let err = std::io::Error::last_os_error();
+                             return Err(err);
+                         }
+                         let n = n as usize;
+                         if n == 0 { return Ok(None); } 
+                         
+                         unsafe { buf.advance_mut(n); }
+                         let packet = buf.split_to(n).freeze();
+                         Ok(Some(packet))
+                    }) {
+                        Ok(Ok(Some(p))) => p,
+                        Ok(Ok(None)) => break,
+                        Ok(Err(e)) => {
+                            if e.kind() != std::io::ErrorKind::WouldBlock {
+                                error!("TUN Read Error: {}", e);
+                                break;
+                            }
+                            continue;
+                        },
+                        Err(_) => continue,
+                    };
+
+                    let mut frame = Vec::with_capacity(2 + packet.len());
+                    frame.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+                    frame.extend_from_slice(&packet);
+                    
+                    send_stream.reserve_capacity(frame.len());
+                    if send_stream.capacity() >= frame.len() {
+                        if let Err(_) = send_stream.send_data(Bytes::from(frame), false) {
                             stop_check.store(true, Ordering::SeqCst);
                             break;
                         }
-                        SendDatagramError::TooLarge => {
-                            let current_mtu = conn_send.max_datagram_size().unwrap_or(1200) as u16;
-                            
-                            // Determine correct gateway for the packet version
-                            let version = (packet_bytes[0] >> 4) & 0xF;
-                            let gw = if version == 4 { 
-                                std::net::IpAddr::V4(gateway_v4) 
-                            } else { 
-                                std::net::IpAddr::V6(gateway_v6_opt.unwrap_or("2001:db8::1".parse().unwrap())) 
-                            };
+                    } else {
+                        // Drop packet if saturated
+                    }
+                }
+            });
 
-                            warn!("Packet too large ({} bytes). Exceeds QUIC Path MTU ({} bytes). Sending ICMP Signal from {}.", packet_len, current_mtu, gw);
-                            
-                            if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, current_mtu, Some(gw)) {
-                                // Feed back to TUN via channel
-                                let _ = tx_tun.try_send(icmp_packet);
-                            }
-                        },
+            loop {
+                if stop_flag.load(Ordering::Relaxed) { break; }
+                
+                while leftover.len() >= 2 {
+                    let pkt_len = u16::from_be_bytes([leftover[0], leftover[1]]) as usize;
+                    if leftover.len() >= 2 + pkt_len {
+                        let packet = leftover.split_to(2 + pkt_len).split_off(2).freeze();
+                        if packet.is_empty() { continue; }
+                        
+                        let mut guard = match tun_writer.writable().await {
+                             Ok(g) => g,
+                             Err(_) => break,
+                        };
+                        let _ = guard.try_io(|_inner| {
+                             unsafe { libc::write(dup_fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
+                             Ok(())
+                        });
+                    } else { break; }
+                }
+                
+                match recv_stream.data().await {
+                    Some(Ok(chunk)) => {
+                        leftover.extend_from_slice(&chunk);
+                        let _ = recv_stream.flow_control().release_capacity(chunk.len());
+                    }
+                    Some(Err(_)) | None => { 
+                        error!("TCP Connection lost");
+                        break; 
                     }
                 }
             }
-        }
-    });
-
-    // QUIC -> TUN (via WebTransport datagrams)
-    loop {
-        if stop_flag.load(Ordering::Relaxed) { break; }
-        
-        tokio::select! {
-             Some(icmp_pkt) = rx_tun.recv() => {
-                 let mut guard = match tun_writer.writable().await {
-                     Ok(g) => g,
-                     Err(_) => break,
-                 };
-                 let _ = guard.try_io(|_inner| {
-                     unsafe { libc::write(dup_fd, icmp_pkt.as_ptr() as *const libc::c_void, icmp_pkt.len()) };
-                     Ok(())
-                 });
-             }
-             res = connection_arc.receive_datagram() => {
-                 match res {
-                     Ok(first_datagram) => {
-                        let first_packet = first_datagram.payload();
-                        let mut batch: Vec<Bytes> = Vec::with_capacity(64);
-                        batch.push(first_packet.clone());
-
-                        for _ in 0..63 {
-                             match connection_arc.receive_datagram().now_or_never() {
-                                 Some(Ok(dgram)) => batch.push(dgram.payload().clone()),
-                                 _ => break,
-                             }
-                        }
-
-                        let mut batch_idx = 0;
-                        while batch_idx < batch.len() {
-                            let mut guard = match tun_writer.writable().await {
-                                 Ok(g) => g,
-                                 Err(_) => break,
-                            };
-                            
-                            let res = guard.try_io(|_inner| {
-                                while batch_idx < batch.len() {
-                                     let packet = &batch[batch_idx];
-                                     let n = unsafe { libc::write(dup_fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
-                                     if n < 0 {
-                                         let err = std::io::Error::last_os_error();
-                                         if err.kind() == std::io::ErrorKind::WouldBlock {
-                                             return Err(err); 
-                                         }
-                                         return Err(err);
-                                     }
-                                     batch_idx += 1;
-                                }
-                                Ok(())
-                            });
-                            
-                            match res {
-                                Ok(Ok(())) => {}, 
-                                Ok(Err(e)) => {
-                                     error!("TUN Write Error (Critical): {}", e);
-                                     break; 
-                                },
-                                Err(_) => {}, // WouldBlock: wait for writable again
-                            }
-                        }
-                     }
-                     Err(e) => { error!("Connection lost: {}", e); break; }
-                 }
-             }
-        }
+            
+            stop_flag.store(true, Ordering::SeqCst);
+            tun_to_tcp.abort();
+        },
+        ActiveConnection::Consumed => {}
     }
-    
-    // Cleanup
-    stop_flag.store(true, Ordering::SeqCst);
-    tun_to_quic.abort();
 
 }
 
 #[cfg(not(target_os = "android"))]
-async fn run_vpn_loop(_connection: wtransport::Connection, _fd: jint, _stop_flag: Arc<AtomicBool>, _config: ControlMessage) {
+async fn run_vpn_loop(_connection: ActiveConnection, _fd: jint, _stop_flag: Arc<AtomicBool>, _config: ControlMessage) {
     error!("VPN Loop not supported on this platform");
 }
 

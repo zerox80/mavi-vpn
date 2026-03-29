@@ -57,8 +57,8 @@ async fn main() -> Result<()> {
     // Initialise logging with tracing-subscriber (defaulting to info level)
     tracing_subscriber::fmt::init();
     
-    // Install the global crypto provider for jsonwebtoken (required for 10.3.0+)
-    let _ = jsonwebtoken::crypto::aws_lc_rs::default_provider().install_default();
+    // Install the global crypto provider (required for rustls 0.23+ and jsonwebtoken 10.3+)
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     // 1. Load Configuration
     // Combines .env files, standard environment variables, and CLI arguments.
     let config = config::load();
@@ -191,9 +191,8 @@ async fn main() -> Result<()> {
               .up();
 
     #[cfg(target_os = "linux")]
-    tun_config.platform_config(|config| {
-        // Disable packet information (PI) header for raw IP data
-        config.packet_information(false); 
+    tun_config.platform_config(|_config| {
+        // PI header is now disabled by default or ignored in newer tun versions
     });
 
     if let Some(dev_path) = &config.tun_device_path {
@@ -447,7 +446,7 @@ async fn handle_connection(
                     // signal back into the TUN device so the client's stack knows to resize.
                     let current_mtu = conn_send.max_datagram_size().unwrap_or(1200) as u16;
                     let version = packet[0] >> 4;
-                    let gw = if version == 4 { std::net::IpAddr::V4(gateway_v4) } else { std::net::IpAddr::V6(gateway_v6) };
+                    let _gw = if version == 4 { std::net::IpAddr::V4(gateway_v4) } else { std::net::IpAddr::V6(gateway_v6) };
                     
                     // Report 1280 even if path is smaller (due to our fragmentation support)
                     let reported_mtu = if version == 6 { std::cmp::max(current_mtu, 1280) } else { current_mtu };

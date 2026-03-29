@@ -570,35 +570,43 @@ async fn handle_h2_connection(
         }
     });
 
-    // 1. Auth Phase (Length-prefixed bincode)
-    let mut len_buf = [0u8; 4];
-    let mut len_read = 0;
-    while len_read < 4 {
-        match recv_stream.data().await {
-            Some(Ok(bytes)) => {
-                let to_copy = std::cmp::min(4 - len_read, bytes.len());
-                len_buf[len_read..len_read+to_copy].copy_from_slice(&bytes[..to_copy]);
-                let _ = recv_stream.flow_control().release_capacity(bytes.len());
-                len_read += to_copy;
+    // We must accumulate data properly because h2 stream chunks can arrive in sizes
+    // that don't nicely match our protocol boundaries.
+    let mut buffer = bytes::BytesMut::new();
+
+    // Helper closure to read N bytes into buffer
+    let mut read_exact = |n: usize| {
+        let mut rs = recv_stream.clone(); // Flow control handle doesn't drop
+        async move {
+            while buffer.len() < n {
+                match rs.data().await {
+                    Some(Ok(chunk)) => {
+                        buffer.extend_from_slice(&chunk);
+                        let _ = rs.flow_control().release_capacity(chunk.len());
+                    }
+                    _ => return false,
+                }
             }
-            _ => anyhow::bail!("Failed to read auth length"),
+            true
         }
+    };
+
+    // 1. Auth Phase (Length-prefixed bincode)
+    if !read_exact(4).await {
+        anyhow::bail!("Failed to read auth length");
     }
-    let msg_len = u32::from_le_bytes(len_buf) as usize;
+    
+    let msg_len = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+    buffer.advance(4); // Consume length
+    
     if msg_len > 8192 { anyhow::bail!("Auth payload too large"); }
 
-    let mut auth_buf = Vec::new();
-    while auth_buf.len() < msg_len {
-        match recv_stream.data().await {
-            Some(Ok(bytes)) => {
-               auth_buf.extend_from_slice(&bytes);
-               let _ = recv_stream.flow_control().release_capacity(bytes.len());
-            }
-            _ => anyhow::bail!("Failed to read auth payload"),
-        }
+    if !read_exact(msg_len).await {
+        anyhow::bail!("Failed to read auth payload");
     }
-    let auth_msg: ControlMessage = bincode::serde::decode_from_slice(&auth_buf, bincode::config::standard()).map(|(v,_)| v)?;
 
+    let auth_msg: ControlMessage = bincode::serde::decode_from_slice(&buffer[..msg_len], bincode::config::standard()).map(|(v,_)| v)?;
+    buffer.advance(msg_len);
     let token = match auth_msg {
         ControlMessage::Auth { token } => token,
         _ => anyhow::bail!("Expected Auth message"),

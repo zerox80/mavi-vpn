@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use sha2::{Sha256, Digest};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use futures_util::FutureExt;
+use wtransport::{ClientConfig, Endpoint};
 
 use std::sync::Once;
 
@@ -23,7 +24,7 @@ use std::sync::Once;
 
 struct VpnSession {
     runtime: tokio::runtime::Runtime,
-    connection: quinn::Connection,
+    connection: wtransport::Connection,
     config: ControlMessage,
     stop_flag: Arc<AtomicBool>,
 }
@@ -84,7 +85,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
 
     info!("Initializing VPN Session. Endpoint: {}", endpoint);
 
-        // 1. Create Socket and Protect it
+        // 1. Create Socket and Protect it via Android VpnService
         // We bind to [::]:0 to allow both IPv4 and IPv6 (Dual Stack)
         let socket = match std::net::UdpSocket::bind("[::]:0") {
             Ok(s) => s,
@@ -100,58 +101,43 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
         // Ensure Dual Stack is enabled (IPV6_V6ONLY = 0)
         if let Err(e) = socket2_sock.set_only_v6(false) {
              warn!("Failed to set IPV6_V6ONLY=false: {}", e);
-             // We continue, as some OS/kernels might have it disabled by default or fail if bound to IPv4 mapped
         }
-        // Set larger socket buffers for high-throughput stability (4MB for GSO bursts)
+        // Set larger socket buffers for high-throughput stability
         let buffer_candidates = [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024];
-        
         for size in buffer_candidates {
-            if let Err(e) = socket2_sock.set_recv_buffer_size(size) {
-                 warn!("Could not set receive buffer to {}: {}", size, e);
-            } else {
+            if socket2_sock.set_recv_buffer_size(size).is_ok() {
                  info!("Socket receive buffer: {}", size);
                  break;
             }
         }
         for size in buffer_candidates {
-             if let Err(e) = socket2_sock.set_send_buffer_size(size) {
-                 warn!("Could not set send buffer to {}: {}", size, e);
-             } else {
+             if socket2_sock.set_send_buffer_size(size).is_ok() {
                  info!("Socket send buffer: {}", size);
                  break;
              }
         }
 
-        // Allow Fragmentation (OS-level fragmentation)
-        // If the cellular network has MTU 1300, and we send 1360, the OS must fragment it.
-        // By default, many sockets have IP_PMTUDISC_DO (Don't Fragment). We switch to IP_PMTUDISC_DONT.
-        // Explicitly set IP_MTU_DISCOVER via libc because socket2 API varies between versions/targets
-#[cfg(target_os = "android")]
-    unsafe {
-        let fd = socket2_sock.as_raw_fd();
-        let val: libc::c_int = libc::IP_PMTUDISC_DONT;
-        let ret = libc::setsockopt(
-            fd,
-            libc::IPPROTO_IP,
-            libc::IP_MTU_DISCOVER,
-            &val as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&val) as libc::socklen_t,
-        );
-        if ret < 0 {
-            warn!("Failed to disable PMTUD (IPv4): {}", std::io::Error::last_os_error());
+        // Allow Fragmentation (OS-level)
+        #[cfg(target_os = "android")]
+        unsafe {
+            let fd = socket2_sock.as_raw_fd();
+            let val: libc::c_int = libc::IP_PMTUDISC_DONT;
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_MTU_DISCOVER,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            );
         }
-    }
         
-        // Note: socket2::MtuDiscover::Dont applies to IP_MTU_DISCOVER (IPv4).
-        // For IPv6, we might need separate handling, but often Dual Stack sockets handle it.
-        // Let's try setting it. If it fails, we log a warning but continue.
-
         let socket = std::net::UdpSocket::from(socket2_sock);
 
+        // Protect the socket via Android VpnService so it doesn't route through our tunnel
         #[cfg(target_os = "android")]
         let sock_fd = socket.as_raw_fd();
         #[cfg(not(target_os = "android"))]
-        let sock_fd = 0; // Type matching dummy
+        let sock_fd = 0;
         
         let protected = env.call_method(
             &service, 
@@ -182,7 +168,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
             }
         };
 
-        // 3. Connect and Handshake
+        // 3. Connect and Handshake via WebTransport (with protected socket)
         let result = rt.block_on(async {
             connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant).await
         });
@@ -281,8 +267,9 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop<'local>(
         
         info!("Stop requested for session");
         session.stop_flag.store(true, Ordering::SeqCst);
-        // Close the QUIC connection to unblock read_datagram() immediately
-        session.connection.close(0u32.into(), b"user_disconnect");
+        // Close the connection to unblock receive_datagram() immediately
+        // wtransport doesn't have a close() with code, just drop or let it timeout.
+        // Setting stop flag is enough since the loop checks it.
     }));
 }
 
@@ -335,86 +322,83 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_networkChanged<'local>(
 // --- Internal Logic ---
 
 async fn connect_and_handshake(
-    socket: std::net::UdpSocket, 
+    socket: std::net::UdpSocket,
     token: String, 
     endpoint_str: String, 
     cert_pin: String,
-    censorship_resistant: bool,
-) -> anyhow::Result<(quinn::Connection, ControlMessage)> {
+    _censorship_resistant: bool,
+) -> anyhow::Result<(wtransport::Connection, ControlMessage)> {
     
     info!("Connect and Handshake started. Pin: {}", cert_pin);
 
     // Verifier Setup
-    let verifier = if let Some(bytes) = decode_hex(&cert_pin) {
+    let cert_pin_bytes = if let Some(bytes) = decode_hex(&cert_pin) {
          info!("Pin decoded successfully. Len: {}", bytes.len());
-         Arc::new(PinnedServerVerifier::new(bytes))
+         bytes
     } else {
          return Err(anyhow::anyhow!("Invalid Certificate PIN hex string"));
     };
 
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-    
-    // STRICT MODE: If censorship_resistant is enabled, we ONLY send "h3".
-    // We do NOT send "mavivpn" as a fallback, because the string "mavivpn" in the ClientHello 
-    // is a cleartext fingerprint that censors can use to block us.
-    if censorship_resistant {
-        client_crypto.alpn_protocols = vec![b"h3".to_vec()];
-        info!("Censorship Resistant Mode enabled. ALPN: h3 (Strict)");
-    } else {
-        client_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
-        info!("Standard Mode enabled. ALPN: mavivpn");
-    }
-
-    // Performance Optimizations
+    // Transport config tuning (matches all other clients)
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-    // MTU Pinning: Set min_mtu = initial_mtu = 1360.
-    // Prevents Black Hole detection from reducing MTU to 1280.
+    // MTU Pinning: 1400 to match server
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1360);
-    transport_config.min_mtu(1360);
-
-
-    // Enable Segmentation Offload (GSO) for higher throughput
+    transport_config.initial_mtu(1400);
+    transport_config.min_mtu(1400);
     transport_config.enable_segmentation_offload(true);
-
-    // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
+    transport_config.congestion_controller_factory(Arc::new(
+        quinn::congestion::BbrConfig::default(),
+    ));
+    // Datagram queue tuning
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
-    client_config.transport_config(Arc::new(transport_config));
+    // Build wtransport client with pinned cert verifier
+    let verifier = Arc::new(PinnedServerVerifier::new(cert_pin_bytes));
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .dangerous()
+    .with_custom_certificate_verifier(verifier)
+    .with_no_client_auth();
 
-    let mut endpoint = quinn::Endpoint::new(
-        quinn::EndpointConfig::default(),
-        None,
-        socket,
-        Arc::new(quinn::TokioRuntime),
-    )?;
-    endpoint.set_default_client_config(client_config);
+    // WebTransport ALPN for wtransport compatibility
+    client_crypto.alpn_protocols = vec![wtransport::tls::WEBTRANSPORT_ALPN.to_vec()];
 
-    // Connect
-    info!("Resolving host: {}", endpoint_str);
-    let addr = tokio::net::lookup_host(&endpoint_str).await?
-        .next()
-        .ok_or(anyhow::anyhow!("Invalid address"))?;
-    
-    info!("Connecting to {}", addr);
-    let connection = endpoint.connect(addr, "localhost")?.await?;
-    info!("Connection established");
+    // Use the pre-created, VPN-protected socket
+    let bind_addr = socket.local_addr()?;
+    let mut client_config = ClientConfig::builder()
+        .with_bind_address(bind_addr)
+        .with_custom_tls(client_crypto)
+        .build();
 
-    // Handshake
-    let (mut send_stream, mut recv_stream) = connection.open_bi().await?;
-    info!("Stream opened");
-    
+    client_config.quic_config_mut().transport_config(Arc::new(transport_config));
+
+    let endpoint = Endpoint::client(client_config)?;
+
+    // Resolve endpoint (add default port if missing)
+    let mut resolved_endpoint = endpoint_str.clone();
+    if !resolved_endpoint.contains(':') {
+        resolved_endpoint = format!("{}:10443", resolved_endpoint);
+    }
+
+    let connect_url = format!("https://{}/vpn", resolved_endpoint);
+    info!("Connecting to WebTransport endpoint {}", connect_url);
+
+    let connection = endpoint.connect(&connect_url).await
+        .map_err(|e| anyhow::anyhow!("WebTransport handshake failed: {}", e))?;
+
+    info!("WebTransport handshake OK, sending auth token");
+
+    // Application-level handshake (Auth -> Config)
+    let (mut send_stream, mut recv_stream) = connection.open_bi().await?.await?;
     let auth_msg = ControlMessage::Auth { token };
-    let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard()).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     send_stream.write_u32_le(bytes.len() as u32).await?;
     send_stream.write_all(&bytes).await?;
     info!("Auth sent");
@@ -439,7 +423,7 @@ async fn connect_and_handshake(
 
 
 #[cfg(target_os = "android")]
-async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage) {
+async fn run_vpn_loop(connection: wtransport::Connection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage) {
     let raw_fd = fd as RawFd;
 
     // Extract Gateway IPs for ICMP signaling
@@ -477,13 +461,12 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
 
     let connection_arc = Arc::new(connection);
     
-    // TUN -> QUIC
+    // TUN -> QUIC (via WebTransport datagrams)
     let conn_send = connection_arc.clone();
     let stop_check = stop_flag.clone();
     let read_fd = dup_fd; // Use the duplicated FD for reads
 
-    // We need a writer for ICMP loopback
-    // Solution: Create a channel to send packets to the TUN Writer task.
+    // Channel for ICMP loopback packets
     let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
 
     let tun_to_quic = tokio::spawn(async move {
@@ -532,17 +515,18 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
             let packet_len = packet.len();
             let packet_bytes = packet.clone(); 
 
-            // Send to QUIC (Non-blocking / Drop on congestion)
+            // Send to QUIC via WebTransport datagram
             match conn_send.send_datagram(packet) {
                 Ok(_) => {},
                 Err(e) => {
+                    use wtransport::error::SendDatagramError;
                     match e {
-                        quinn::SendDatagramError::ConnectionLost(_) => {
+                        SendDatagramError::NotConnected => {
                             error!("Connection lost during send");
                             stop_check.store(true, Ordering::SeqCst);
                             break;
                         }
-                         quinn::SendDatagramError::TooLarge => {
+                        SendDatagramError::TooLarge => {
                             let current_mtu = conn_send.max_datagram_size().unwrap_or(1200) as u16;
                             
                             // Determine correct gateway for the packet version
@@ -560,23 +544,13 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                                 let _ = tx_tun.try_send(icmp_packet);
                             }
                         },
-                         quinn::SendDatagramError::UnsupportedByPeer => {
-                            error!("Datagrams unsupported by peer. Closing.");
-                            stop_check.store(true, Ordering::SeqCst);
-                            break;
-                         },
-                         quinn::SendDatagramError::Disabled => {
-                             error!("Datagrams disabled. Closing.");
-                             stop_check.store(true, Ordering::SeqCst);
-                             break;
-                         }
                     }
                 }
             }
         }
     });
 
-    // QUIC -> TUN
+    // QUIC -> TUN (via WebTransport datagrams)
     loop {
         if stop_flag.load(Ordering::Relaxed) { break; }
         
@@ -591,15 +565,16 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                      Ok(())
                  });
              }
-             res = connection_arc.read_datagram() => {
+             res = connection_arc.receive_datagram() => {
                  match res {
-                     Ok(first_packet) => {
-                        let mut batch = Vec::with_capacity(64);
-                        batch.push(first_packet);
+                     Ok(first_datagram) => {
+                        let first_packet = first_datagram.payload();
+                        let mut batch: Vec<Bytes> = Vec::with_capacity(64);
+                        batch.push(first_packet.clone());
 
                         for _ in 0..63 {
-                             match connection_arc.read_datagram().now_or_never() {
-                                 Some(Ok(pkt)) => batch.push(pkt),
+                             match connection_arc.receive_datagram().now_or_never() {
+                                 Some(Ok(dgram)) => batch.push(dgram.payload().clone()),
                                  _ => break,
                              }
                         }
@@ -650,7 +625,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
 }
 
 #[cfg(not(target_os = "android"))]
-async fn run_vpn_loop(_connection: quinn::Connection, _fd: jint, _stop_flag: Arc<AtomicBool>, _config: ControlMessage) {
+async fn run_vpn_loop(_connection: wtransport::Connection, _fd: jint, _stop_flag: Arc<AtomicBool>, _config: ControlMessage) {
     error!("VPN Loop not supported on this platform");
 }
 

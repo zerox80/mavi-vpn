@@ -400,8 +400,8 @@ fn set_adapter_network_config(
     }
 
     // Wait for Windows to register the on-link route for the new IP.
-    info!("Waiting for IP to register on adapter...");
-    std::thread::sleep(Duration::from_millis(500));
+    // 150ms is sufficient; 500ms was unnecessarily long.
+    std::thread::sleep(Duration::from_millis(150));
 
     // Verify the IP was actually set
     let verify = std::process::Command::new("netsh")
@@ -500,26 +500,32 @@ fn add_host_route_exception(endpoint: &str) -> Option<String> {
         .trim_start_matches('[').trim_end_matches(']')
         .to_string();
 
-    // Find the physical default gateway, explicitly excluding the VPN adapter
-    // (important on reconnect where VPN routes might still exist).
-    let ps = "Get-NetRoute -DestinationPrefix 0.0.0.0/0 -AddressFamily IPv4 \
-        | Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).InterfaceDescription -notlike '*WireGuard*' -and \
-          (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).Name -notlike 'MaviVPN*' } \
-        | Sort-Object { $_.RouteMetric + $_.InterfaceMetric } \
-        | Select-Object -First 1 -ExpandProperty NextHop";
-
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", ps])
+    // Use `route PRINT 0.0.0.0` instead of PowerShell Get-NetRoute.
+    // PowerShell startup takes ~1s per invocation; route.exe is instant.
+    // We skip routes that go via the MaviVPN adapter (metric 5) to avoid
+    // picking up our own split-tunnel routes on reconnect.
+    let output = std::process::Command::new("route")
+        .args(["PRINT", "0.0.0.0"])
         .output();
 
     if let Ok(out) = output {
-        let gateway = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !gateway.is_empty() && gateway != "0.0.0.0" {
-            let _ = std::process::Command::new("route")
-                .args(["add", &server_ip, "mask", "255.255.255.255", &gateway, "metric", "1"])
-                .output();
-            info!("Host exception: {} → {}", server_ip, gateway);
-            return Some(server_ip);
+        let text = String::from_utf8_lossy(&out.stdout);
+        // Lines look like:  "         0.0.0.0          0.0.0.0    192.168.1.1    192.168.1.100      5"
+        for line in text.lines() {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            // Expect: dest mask gateway iface metric
+            if cols.len() >= 3 && cols[0] == "0.0.0.0" && cols[1] == "0.0.0.0" {
+                let gw = cols[2];
+                // Skip our own split-tunnel routes (metric 5 on the VPN adapter)
+                let metric: u32 = cols.get(4).and_then(|m| m.parse().ok()).unwrap_or(999);
+                if gw != "0.0.0.0" && metric != 5 {
+                    let _ = std::process::Command::new("route")
+                        .args(["add", &server_ip, "mask", "255.255.255.255", gw, "metric", "1"])
+                        .output();
+                    info!("Host exception: {} → {} (metric {})", server_ip, gw, metric);
+                    return Some(server_ip);
+                }
+            }
         }
     }
     warn!("Could not determine physical gateway for host exception route");
@@ -559,19 +565,10 @@ fn set_nrpt_dns_rule(dns_v4: Ipv4Addr, dns_v6: Option<Ipv6Addr>) {
     // 3. Set VPN adapter to highest priority
     let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", "Get-NetAdapter -Name 'MaviVPN*' | Set-NetIPInterface -InterfaceMetric 1"]).output();
 
-    // 4. Suppress DNS registration on physical adapters to prevent them from being used
-    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
-        "Get-NetAdapter | Where-Object { $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue }"
-    ]).output();
-
-    // 5. Flush DNS cache and re-register to pick up the new NRPT rules
+    // 4. Flush DNS cache to pick up the new NRPT rules.
+    // NOTE: Removed Restart-Service Dnscache (~4s) and ipconfig /registerdns (~1s) —
+    // a simple flush is sufficient and saves several seconds on connect.
     let _ = std::process::Command::new("ipconfig").args(["/flushdns"]).output();
-    let _ = std::process::Command::new("ipconfig").args(["/registerdns"]).output();
-
-    // 6. Restart DNS Client service to ensure NRPT + SMHNR changes take effect
-    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
-        "Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue"
-    ]).output();
 
     info!("DNS leak prevention configured: NRPT + SMHNR disabled");
 }

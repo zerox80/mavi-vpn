@@ -2,7 +2,7 @@
 //!
 //! Implements the core VPN logic for Linux, including:
 //! - TUN device management via /dev/net/tun.
-//! - QUIC transport via Quinn.
+//! - WebTransport (HTTP/3 over QUIC) transport via wtransport — matching the Windows client.
 //! - Linux-specific routing and DNS leak prevention.
 //! - Dual-stack (IPv4/IPv6) support.
 
@@ -15,7 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
+use wtransport::{ClientConfig, Endpoint};
+use wtransport::tls::Certificate;
 
 use crate::network::NetworkConfig;
 use crate::tun::TunDevice;
@@ -31,8 +33,11 @@ const TUN_DEVICE_NAME: &str = "mavi0";
 
 /// Entry point for the VPN runner. Manages the reconnection loop and TUN lifecycle.
 pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
-    let cert_pin_bytes =
-        decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
+    let cert_pin_bytes = if config.cert_pin.is_empty() {
+        Vec::new()
+    } else {
+        decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?
+    };
 
     let mut backoff = Duration::from_secs(RECONNECT_INITIAL_SECS);
 
@@ -71,58 +76,14 @@ enum SessionEnd {
     ConnectionLost,
 }
 
-/// Creates a dual-stack UDP socket for QUIC transport.
-fn create_udp_socket() -> Result<std::net::UdpSocket> {
-    let socket = socket2::Socket::new(
-        socket2::Domain::IPV6,
-        socket2::Type::DGRAM,
-        Some(socket2::Protocol::UDP),
-    )?;
-
-    socket.set_only_v6(false)?;
-    socket.bind(&socket2::SockAddr::from(
-        std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0),
-    ))?;
-
-    // Large socket buffers for high-throughput stability (try 4MB, fall back gracefully)
-    for size in [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024] {
-        if socket.set_send_buffer_size(size).is_ok() && socket.set_recv_buffer_size(size).is_ok() {
-            break;
-        }
-    }
-
-    // Disable PMTU discovery on the UDP socket to let QUIC handle it
-    // (prevents the kernel from dropping packets that exceed path MTU)
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        let fd = socket.as_raw_fd();
-        let val: libc::c_int = libc::IP_PMTUDISC_DONT;
-        unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_MTU_DISCOVER,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&val) as libc::socklen_t,
-            );
-        }
-    }
-
-    Ok(socket.into())
-}
-
 /// Manages a single active VPN session (handshake + packet pumping).
 async fn run_session(
     config: &Config,
     cert_pin_bytes: &[u8],
     global_running: &Arc<AtomicBool>,
 ) -> Result<SessionEnd> {
-    let socket = create_udp_socket()?;
-
-    // 1. QUIC Handshake & Auth
+    // 1. WebTransport Handshake & Auth
     let (connection, server_config) = connect_and_handshake(
-        socket,
         config.token.clone(),
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
@@ -156,10 +117,7 @@ async fn run_session(
                 dns_server_v6,
             ),
             ControlMessage::Error { message } => {
-                return Err(anyhow::anyhow!(
-                    "Server rejected connection: {}",
-                    message
-                ))
+                return Err(anyhow::anyhow!("Server rejected connection: {}", message))
             }
             _ => return Err(anyhow::anyhow!("Unexpected server response")),
         };
@@ -221,7 +179,7 @@ async fn run_session(
         }
     });
 
-    // Task: TUN -> QUIC (Read from TUN, send via QUIC)
+    // Task: TUN -> QUIC (Read from TUN, send via WebTransport datagram)
     let tun_reader = async_tun.clone();
     let conn_sender = connection.clone();
     let alive_tun = session_alive.clone();
@@ -236,19 +194,23 @@ async fn run_session(
                 Ok(n) if n > 0 => {
                     let data = Bytes::copy_from_slice(&buf[..n]);
                     if let Err(e) = conn_sender.send_datagram(data) {
-                        if matches!(e, quinn::SendDatagramError::TooLarge) {
-                            let current_mtu =
-                                conn_sender.max_datagram_size().unwrap_or(1200) as u16;
-                            if let Some(icmp_packet) = icmp::generate_packet_too_big(
-                                &buf[..n],
-                                current_mtu,
-                                Some(std::net::IpAddr::V4(gateway)),
-                            ) {
-                                let _ = tun_reader.write(&icmp_packet).await;
+                        use wtransport::error::SendDatagramError;
+                        match e {
+                            SendDatagramError::TooLarge => {
+                                let current_mtu =
+                                    conn_sender.max_datagram_size().unwrap_or(1200) as u16;
+                                if let Some(icmp_packet) = icmp::generate_packet_too_big(
+                                    &buf[..n],
+                                    current_mtu,
+                                    Some(std::net::IpAddr::V4(gateway)),
+                                ) {
+                                    let _ = tun_reader.write(&icmp_packet).await;
+                                }
                             }
-                        } else if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) {
-                            alive_tun.store(false, Ordering::SeqCst);
-                            break;
+                            SendDatagramError::NotConnected => {
+                                alive_tun.store(false, Ordering::SeqCst);
+                                break;
+                            }
                         }
                     }
                 }
@@ -262,7 +224,7 @@ async fn run_session(
         }
     });
 
-    // Task: QUIC -> TUN (Read from QUIC, write to TUN)
+    // Task: QUIC -> TUN (Read WebTransport datagrams, write to TUN)
     let tun_writer = async_tun.clone();
     let alive_quic = session_alive.clone();
     let run_quic = global_running.clone();
@@ -271,12 +233,13 @@ async fn run_session(
             if !run_quic.load(Ordering::Relaxed) || !alive_quic.load(Ordering::Relaxed) {
                 break;
             }
-            match connection.read_datagram().await {
-                Ok(data) => {
-                    if data.is_empty() {
+            match connection.receive_datagram().await {
+                Ok(datagram) => {
+                    let payload = datagram.payload();
+                    if payload.is_empty() {
                         continue;
                     }
-                    if let Err(e) = tun_writer.write(&data).await {
+                    if let Err(e) = tun_writer.write(&payload).await {
                         warn!("TUN write error: {}", e);
                         alive_quic.store(false, Ordering::SeqCst);
                         break;
@@ -308,76 +271,78 @@ async fn run_session(
     }
 }
 
-/// QUIC connection setup with custom certificate pinning.
+/// WebTransport connection setup — identical strategy to the Windows client.
 async fn connect_and_handshake(
-    socket: std::net::UdpSocket,
     token: String,
     endpoint_str: String,
     cert_pin: Vec<u8>,
-    censorship_resistant: bool,
-) -> Result<(quinn::Connection, ControlMessage)> {
-    let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
-
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(
-        rustls::crypto::aws_lc_rs::default_provider().into(),
-    )
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
-    .dangerous()
-    .with_custom_certificate_verifier(verifier)
-    .with_no_client_auth();
-
-    client_crypto.alpn_protocols = if censorship_resistant {
-        vec![b"h3".to_vec()]
-    } else {
-        vec![b"mavivpn".to_vec(), b"h3".to_vec()]
-    };
-
+    _censorship_resistant: bool,
+) -> Result<(wtransport::Connection, ControlMessage)> {
+    // Transport tuning (matches Windows client + server config)
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(
         Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap(),
     ));
     transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
-
-    // MTU PINNING: 1360 wire MTU to support 1280 payload over QUIC/UDP/IP.
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1360);
-    transport_config.min_mtu(1360);
+    transport_config.initial_mtu(1400);
+    transport_config.min_mtu(1400);
     transport_config.enable_segmentation_offload(true);
     transport_config.congestion_controller_factory(Arc::new(
         quinn::congestion::BbrConfig::default(),
     ));
-
-    // Datagram queue tuning (match Windows/Android: 2MB each direction)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
-    ));
-    client_config.transport_config(Arc::new(transport_config));
+    // Build wtransport ClientConfig
+    let mut client_config = if cert_pin.is_empty() {
+        // Trust native system certificates (Let's Encrypt etc.)
+        ClientConfig::builder()
+            .with_bind_default()
+            .with_native_certs()
+            .build()
+    } else {
+        // Custom pinned certificate verifier
+        let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
+        let mut client_crypto = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::aws_lc_rs::default_provider().into(),
+        )
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
 
-    let mut endpoint = quinn::Endpoint::new(
-        quinn::EndpointConfig::default(),
-        None,
-        socket,
-        Arc::new(quinn::TokioRuntime),
-    )?;
-    endpoint.set_default_client_config(client_config);
+        client_crypto.alpn_protocols = vec![wtransport::tls::WEBTRANSPORT_ALPN.to_vec()];
 
-    // Resolve endpoint and connect
-    let addr = tokio::net::lookup_host(&endpoint_str)
-        .await?
-        .next()
-        .context("Failed to resolve endpoint")?;
-    let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
+        ClientConfig::builder()
+            .with_bind_default()
+            .with_custom_tls(client_crypto)
+            .build()
+    };
+
+    client_config.quic_config_mut().transport_config(Arc::new(transport_config));
+
+    let endpoint = Endpoint::client(client_config)?;
+
+    // Resolve endpoint (add default port if missing)
+    let mut resolved_endpoint = endpoint_str.clone();
+    if !resolved_endpoint.contains(':') {
+        resolved_endpoint = format!("{}:10443", resolved_endpoint);
+    }
+
+    let connect_url = format!("https://{}/vpn", resolved_endpoint);
+    info!("Connecting to WebTransport endpoint {}", connect_url);
+
     let connection = endpoint
-        .connect(addr, server_name)?
+        .connect(&connect_url)
         .await
-        .context("QUIC handshake failed")?;
+        .context("WebTransport handshake failed")?;
 
-    // Application-level handshake (Auth -> Config)
-    let (mut send, mut recv) = connection.open_bi().await?;
+    info!("WebTransport handshake OK, sending auth token ({} bytes)", token.len());
+
+    // Application-level handshake (Auth → Config)
+    let (mut send, mut recv) = connection.open_bi().await?.await?;
     let auth_msg = ControlMessage::Auth { token };
     let encoded = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
     send.write_u32_le(encoded.len() as u32).await?;

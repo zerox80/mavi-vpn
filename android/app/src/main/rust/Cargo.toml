@@ -11,6 +11,7 @@ jni = "0.22"
 tokio = { workspace = true }
 tokio-util = "0.7"
 quinn = { workspace = true, default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
+wtransport = { workspace = true }
 bytes = { workspace = true }
 shared = { workspace = true }
 android_logger = "0.15"

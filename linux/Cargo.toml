@@ -25,11 +25,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_json = "1.0"
 
 sha2 = "0.11.0"
-rand = "0.8"
+rand = "0.10"
 base64 = "0.22"
 url = "2.5"
 libc = "0.2"
-nix = { version = "0.29", features = ["ioctl", "net", "fs"] }
+nix = { version = "0.31", features = ["ioctl", "net", "fs"] }
 wtransport = { workspace = true }
 h2 = { workspace = true }
 tokio-rustls = { workspace = true }

@@ -113,29 +113,66 @@ async fn main() -> Result<()> {
         info!("Censorship Resistant Mode ENABLED. Only WebTransport will be served.");
     }
     
-    // Server-side QUIC transport tuning (matches client-side config)
+    // Server-side QUIC transport tuning (ported from main branch, MTU=1400)
     let mut transport_config = quinn::TransportConfig::default();
-    // BBR outperforms NewReno/Cubic (default) on Wi-Fi and high-latency paths.
-    // Without this the server-side congestion window collapses to ~50Mbps on jittery links.
-    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
-    // Pin MTU to avoid fragmentation issues on mobile/VPN paths
-    transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1360);
-    transport_config.min_mtu(1360);
-    // Large datagram buffers prevent drops during download bursts
-    transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); // 4MB
-    transport_config.datagram_send_buffer_size(4 * 1024 * 1024);          // 4MB
+    // Idle timeout & keepalive
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
+    // Large buffers are critical for throughput on high-latency / mobile networks
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024);          // 2MB
+    transport_config.receive_window(quinn::VarInt::from(4u32 * 1024 * 1024)); // 4MB
+    transport_config.stream_receive_window(quinn::VarInt::from(1024u32 * 1024)); // 1MB
+    transport_config.send_window(4 * 1024 * 1024); // 4MB
+    // BBR congestion control
+    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    // MTU pinned to 1400
+    transport_config.mtu_discovery_config(None);
+    transport_config.initial_mtu(1400);
+    transport_config.min_mtu(1400);
+    // Generic Segmentation Offload
+    transport_config.enable_segmentation_offload(true);
 
     let mut server_config = ServerConfig::builder()
         .with_bind_address(config.bind_addr)
         .with_identity(identity)
-        .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
+        .keep_alive_interval(Some(std::time::Duration::from_secs(2)))
         .build();
 
     server_config.quic_config_mut().transport_config(Arc::new(transport_config));
 
+    // OS-level UDP socket: 4MB buffers + disable PMTUD "Don't Fragment" bit
+    // (Linux-only — the server always runs on Linux)
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let socket = std::net::UdpSocket::bind(config.bind_addr)?;
+        let socket2_sock = socket2::Socket::from(socket);
+        let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
+        let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
+        unsafe {
+            let fd = socket2_sock.as_raw_fd();
+            let val: libc::c_int = libc::IP_PMTUDISC_DONT;
+            let _ = libc::setsockopt(
+                fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            );
+            // IPv6 IPV6_MTU_DISCOVER = 23
+            let _ = libc::setsockopt(
+                fd, libc::IPPROTO_IPV6, 23,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            );
+        }
+        info!("UDP socket tuned: 4MB OS buffers, PMTUDISC_DONT enabled");
+        // drop socket — wtransport creates its own socket for the endpoint
+        drop(socket2_sock);
+    }
+
     let endpoint = Endpoint::server(server_config)?;
+
+
     
     // 5. Setup TUN Interface
     let mut tun_config = tun::Configuration::default();

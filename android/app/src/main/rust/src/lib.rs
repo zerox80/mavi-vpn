@@ -399,11 +399,10 @@ async fn connect_and_handshake(
         .next()
         .ok_or(anyhow::anyhow!("Invalid address"))?;
 
-    // Rule 2: Outgoing MTU MUST NOT exceed 1360 (Wire Size).
-    // IPv6 Overhead (40) + UDP (8) = 48. Target (1360) - 48 = 1312 (Safe QUIC Payload).
-    // Using 1312 for both IPv4 and IPv6 for maximum compatibility and consistency.
-    let quic_mtu = 1312;
-    info!("Address family: {}. Setting safe QUIC MTU: 1312 (Target Wire: 1360)", if addr.is_ipv4() { "IPv4" } else { "IPv6" });
+    // Rule 2: Hard-pinned to 1360 Payload as requested.
+    // This allows 1280 TUN packets to pass with zero overhead issues on 1460 networks.
+    let quic_mtu = 1360;
+    info!("Hard-pinning QUIC MTU: 1360 (Target Wire: 1388-1408)");
 
     // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();
@@ -412,8 +411,8 @@ async fn connect_and_handshake(
     
     // MTU Pinning
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(quic_mtu);
-    transport_config.min_mtu(quic_mtu);
+    transport_config.initial_mtu(1360); 
+    transport_config.min_mtu(1360);
 
     // Enable Segmentation Offload (GSO) for higher throughput
     transport_config.enable_segmentation_offload(true);
@@ -545,9 +544,8 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                                  break;
                              }
                              quinn::SendDatagramError::TooLarge => {
-                                 // BUG FIX (Bug 4): MTU Clamping to 1280 (TUN MTU limit)
-                                 let raw_mtu = connection_arc.max_datagram_size().unwrap_or(1200);
-                                 let current_mtu = 1280.min(raw_mtu) as u16;
+                                 // PATH MTU DISCOVERY: Use the actual QUIC limit for the ICMP signal
+                                 let current_limit = connection_arc.max_datagram_size().unwrap_or(1200);
                                  
                                  let version = (packet_bytes[0] >> 4) & 0xF;
                                  let gw = if version == 4 { 
@@ -556,8 +554,8 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                                      std::net::IpAddr::V6(gateway_v6_opt.unwrap_or("2001:db8::1".parse().unwrap())) 
                                  };
 
-                                 warn!("Packet too large ({} bytes). Local Limit: 1280. Sending ICMP.", packet_len);
-                                 if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, current_mtu, Some(gw)) {
+                                 warn!("mavivpn: Datagram rejected (MTU too small). Packet: {}, Limit: {}. Sending ICMP.", packet_len, current_limit);
+                                 if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, current_limit as u16, Some(gw)) {
                                      let _ = tx_tun.try_send(icmp_packet);
                                  }
                              },

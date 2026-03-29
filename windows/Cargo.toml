@@ -50,8 +50,4 @@ windows-sys = { version = "0.61", features = [
     "Win32_Networking_WinSock",
 ] }
 
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
+

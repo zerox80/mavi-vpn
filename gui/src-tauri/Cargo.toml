@@ -26,8 +26,4 @@ url = "2"
 reqwest = { version = "0.13", features = ["json", "rustls", "form"], default-features = false }
 webbrowser = "1.0"
 
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
+

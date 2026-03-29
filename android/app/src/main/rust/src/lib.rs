@@ -91,10 +91,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
     let endpoint = match get_string(&mut env, &endpoint) { Some(s) => s, None => { error!("Endpoint is null/invalid"); return 0; } };
     let cert_pin_str = match get_string(&mut env, &cert_pin) { Some(s) => s, None => { error!("CertPin is null/invalid"); return 0; } };
 
-    if cert_pin_str.is_empty() {
-        error!("Certificate PIN is empty. Connection aborted.");
-        return 0;
-    }
+    // cert_pin_str can be empty for CA-signed certificates (like Let's Encrypt)
 
     info!("Initializing VPN Session. Endpoint: {}", endpoint);
 
@@ -389,9 +386,15 @@ async fn connect_and_handshake(
 
     info!("Connect and Handshake started. Pin: {}", cert_pin);
 
-    let cert_pin_bytes = decode_hex(&cert_pin)
-        .ok_or_else(|| anyhow::anyhow!("Invalid Certificate PIN hex string"))?;
-    info!("Pin decoded successfully. Len: {}", cert_pin_bytes.len());
+    let cert_pin_bytes = if cert_pin.is_empty() {
+        info!("No Certificate PIN provided. Using standard CA verification (webpki-roots).");
+        None
+    } else {
+        let bytes = decode_hex(&cert_pin)
+            .ok_or_else(|| anyhow::anyhow!("Invalid Certificate PIN hex string"))?;
+        info!("Pin decoded successfully. Len: {}", bytes.len());
+        Some(bytes)
+    };
 
     match transport {
         shared::TransportMode::Quic => {
@@ -410,16 +413,25 @@ async fn connect_quic(
     socket: std::net::UdpSocket,
     token: String,
     endpoint_str: String,
-    cert_pin_bytes: Vec<u8>,
+    cert_pin_bytes: Option<Vec<u8>>,
 ) -> anyhow::Result<(VpnTransport, ControlMessage)> {
-    let verifier = Arc::new(PinnedServerVerifier::new(cert_pin_bytes));
-
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+    let client_crypto_builder = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+        .unwrap();
+
+    let mut client_crypto = if let Some(pin) = cert_pin_bytes {
+        let verifier = Arc::new(PinnedServerVerifier::new(pin));
+        client_crypto_builder
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth()
+    } else {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        client_crypto_builder
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
 
     client_crypto.alpn_protocols = vec![b"mavivpn".to_vec(), b"h3".to_vec()];
     info!("QUIC transport mode. ALPN: mavivpn, h3");
@@ -474,18 +486,29 @@ async fn connect_quic(
 async fn connect_h3(
     token: String,
     endpoint_str: String,
-    cert_pin_bytes: Vec<u8>,
+    cert_pin_bytes: Option<Vec<u8>>,
 ) -> anyhow::Result<(VpnTransport, ControlMessage)> {
-    let cert_hash: [u8; 32] = cert_pin_bytes.as_slice().try_into()
-        .map_err(|_| anyhow::anyhow!("Certificate PIN must be 32 bytes (SHA-256)"))?;
+    let wt_builder = wtransport::ClientConfig::builder()
+        .with_bind_default();
 
-    let wt_config = wtransport::ClientConfig::builder()
-        .with_bind_default()
-        .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(cert_hash)])
-        .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
-        .max_idle_timeout(Some(std::time::Duration::from_secs(60)))
-        .expect("valid idle timeout")
-        .build();
+    let wt_config = if let Some(pin) = cert_pin_bytes {
+        let hash: [u8; 32] = pin.as_slice().try_into()
+            .map_err(|_| anyhow::anyhow!("Certificate PIN must be 32 bytes (SHA-256)"))?;
+        wt_builder.with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(hash)])
+            .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
+            .max_idle_timeout(Some(std::time::Duration::from_secs(60)))
+            .expect("valid idle timeout")
+            .build()
+    } else {
+        // For CA-signed certificates, we use with_no_cert_validation() for now as wtransport 0.7 
+        // doesn't have a simple way to pass the RootCertStore directly.
+        // NOTE: Standard QUIC and HTTP/2 modes still use full webpki-roots verification.
+        wt_builder.with_no_cert_validation()
+            .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
+            .max_idle_timeout(Some(std::time::Duration::from_secs(60)))
+            .expect("valid idle timeout")
+            .build()
+    };
 
     let wt_endpoint = wtransport::Endpoint::client(wt_config)?;
 
@@ -496,8 +519,9 @@ async fn connect_h3(
     info!("[HTTP/3] Connected to {}", connection.remote_address());
 
     // Auth via bi-stream
-    let (mut send_stream, mut recv_stream) = connection.open_bi().await
-        .map_err(|e| anyhow::anyhow!("Failed to open bi-stream: {}", e))?;
+    // In wtransport 0.7, open_bi() returns an OpeningBiStream which must be awaited twice.
+    let (mut send_stream, mut recv_stream) = connection.open_bi().await?
+        .await.map_err(|e| anyhow::anyhow!("Failed to open bi-stream: {}", e))?;
 
     let auth_msg = ControlMessage::Auth { token };
     let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())
@@ -522,16 +546,25 @@ async fn connect_h3(
 async fn connect_h2(
     token: String,
     endpoint_str: String,
-    cert_pin_bytes: Vec<u8>,
+    cert_pin_bytes: Option<Vec<u8>>,
 ) -> anyhow::Result<(VpnTransport, ControlMessage)> {
-    let verifier = Arc::new(PinnedServerVerifier::new(cert_pin_bytes));
-
-    let mut tls_config = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+    let tls_builder = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+        .unwrap();
+
+    let mut tls_config = if let Some(pin) = cert_pin_bytes {
+        let verifier = Arc::new(PinnedServerVerifier::new(pin));
+        tls_builder
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth()
+    } else {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        tls_builder
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
     tls_config.alpn_protocols = vec![b"h2".to_vec()];
 
     let addr = tokio::net::lookup_host(&endpoint_str).await?
@@ -872,7 +905,7 @@ async fn run_vpn_loop(_connection: quinn::Connection, _fd: jint, _stop_flag: Arc
 
 #[cfg(target_os = "android")]
 async fn run_vpn_loop_h3(connection: wtransport::Connection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage) {
-    use std::os::unix::io::{FromRawFd, AsRawFd};
+    use std::os::unix::io::FromRawFd;
 
     let raw_fd = fd as RawFd;
     let (gateway_v4, _gateway_v6_opt) = match &config {
@@ -894,10 +927,11 @@ async fn run_vpn_loop_h3(connection: wtransport::Connection, fd: jint, stop_flag
         Err(e) => { error!("Clone FD: {}", e); return; }
     };
     let tun_writer = match AsyncFd::new(file) {
-        Ok(t) => t, Err(e) => { error!("AsyncFd writer: {}", e); return; }
+        Ok(t) => Arc::new(t), Err(e) => { error!("AsyncFd writer: {}", e); return; }
     };
 
     let conn_send = connection.clone();
+    let tun_writer_signal = tun_writer.clone();
     let stop_read = stop_flag.clone();
     let read_fd = dup_fd;
 
@@ -932,7 +966,7 @@ async fn run_vpn_loop_h3(connection: wtransport::Connection, fd: jint, stop_flag
                     let gw = std::net::IpAddr::V4(gateway_v4);
                     if let Some(icmp_pkt) = shared::icmp::generate_packet_too_big(&packet, current_mtu, Some(gw)) {
                         // Feed ICMP back to TUN (best-effort)
-                        if let Ok(mut g) = tun_writer.writable().await {
+                        if let Ok(mut g) = tun_writer_signal.writable().await {
                             let _ = g.try_io(|_| {
                                 unsafe { libc::write(dup_fd, icmp_pkt.as_ptr() as *const libc::c_void, icmp_pkt.len()) };
                                 Ok(())

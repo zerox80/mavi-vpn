@@ -26,6 +26,7 @@ struct VpnSession {
     connection: quinn::Connection,
     config: ControlMessage,
     stop_flag: Arc<AtomicBool>,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 
@@ -213,11 +214,13 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
         match result {
             Ok((connection, config)) => {
                 info!("Handshake successful. IP: {:?}", config);
+                let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
                 let session = VpnSession {
                     runtime: rt,
                     connection,
                     config,
                     stop_flag: Arc::new(AtomicBool::new(false)),
+                    shutdown_tx,
                 };
                 Box::into_raw(Box::new(session)) as jlong
             },
@@ -283,8 +286,9 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop<'local>(
         let conn = session.connection.clone();
  
         let config = session.config.clone();
+        let shutdown_rx = session.shutdown_tx.subscribe();
         session.runtime.block_on(async {
-            run_vpn_loop(conn, tun_fd, stop_flag, config).await;
+            run_vpn_loop(conn, tun_fd, stop_flag, config, shutdown_rx).await;
         });
         
         info!("VPN Loop terminated.");
@@ -304,6 +308,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_stop<'local>(
         
         info!("Stop requested for session");
         session.stop_flag.store(true, Ordering::SeqCst);
+        let _ = session.shutdown_tx.send(());
         // Close the QUIC connection to unblock read_datagram() immediately
         session.connection.close(0u32.into(), b"user_disconnect");
     }));
@@ -403,7 +408,7 @@ async fn connect_and_handshake(
     // IPv4 Wire: 1360 + 20 (IP) + 8 (UDP) = 1388 bytes.
     // IPv6 Wire: 1360 + 40 (IP) + 8 (UDP) = 1408 bytes.
     let quic_mtu = 1360;
-    info!("Hard-pinning QUIC MTU: 1360 (Target Wire: 1388-1408)");
+    info!("Hard-pinning QUIC MTU: {} (Target Wire: 1388-1408)", quic_mtu);
 
     // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();
@@ -412,8 +417,8 @@ async fn connect_and_handshake(
     
     // MTU Pinning
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1360); 
-    transport_config.min_mtu(1360);
+    transport_config.initial_mtu(quic_mtu); 
+    transport_config.min_mtu(quic_mtu);
 
     // Enable Segmentation Offload (GSO) for higher throughput
     transport_config.enable_segmentation_offload(true);
@@ -471,7 +476,7 @@ async fn connect_and_handshake(
 
 
 #[cfg(target_os = "android")]
-async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage) {
+async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage, mut shutdown_rx: tokio::sync::broadcast::Receiver<()>) {
     let raw_fd = fd as RawFd;
 
     // Extract Gateway IPs for ICMP signaling
@@ -517,9 +522,12 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
         loop {
             if stop_upload.load(Ordering::Relaxed) { break; }
             
-            let readable_guard = match tun_upload.readable().await {
-                Ok(g) => g,
-                Err(_) => break,
+            let mut readable_guard = tokio::select! {
+                res = tun_upload.readable() => match res {
+                    Ok(g) => g,
+                    Err(_) => break,
+                },
+                _ = shutdown_rx.recv() => break,
             };
             
             let res = readable_guard.try_io(|inner| {
@@ -559,9 +567,18 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                                 } else { 
                                     std::net::IpAddr::V6(gateway_v6_opt.unwrap_or("2001:db8::1".parse().unwrap())) 
                                 };
-                                if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet, current_limit as u16, Some(gw)) {
-                                    let _ = tx_feedback.try_send(icmp_packet);
-                                }
+                                    // RFC 8200: IPv6 Minimum MTU is 1280. 
+                                    // If Quinn reports < 1280, we still report 1280 to the stack
+                                    // and let the backend/OS handle the fragmentation if possible.
+                                    let reported_mtu = if version == 6 {
+                                        std::cmp::max(current_limit as u16, 1280)
+                                    } else {
+                                        current_limit as u16
+                                    };
+
+                                    if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet, reported_mtu, Some(gw)) {
+                                        let _ = tx_feedback.try_send(icmp_packet);
+                                    }
                             },
                             _ => {}
                         }
@@ -596,7 +613,16 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                     if let Ok(mut guard) = tun_download.writable().await {
                          let _ = guard.try_io(|inner| {
                              for packet in &batch {
-                                  let _ = unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) };
+                                  match unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) } {
+                                      n if n < 0 => {
+                                          let err = std::io::Error::last_os_error();
+                                          if err.kind() != std::io::ErrorKind::WouldBlock {
+                                              error!("TUN Write error: {}", err);
+                                          }
+                                          break; // Stop batch on error
+                                      }
+                                      _ => {}
+                                  }
                              }
                              Ok(())
                          });

@@ -5,7 +5,20 @@
       "Bash(find /c/Daten2/mavi-vpn/android -type f \\\\\\(-name *.kt -o -name *.xml -o -name *.compose \\\\\\))",
       "Bash(find /c/Daten2/mavi-vpn/android -type f -name *.kt -o -name *.xml)",
       "Bash(grep -r \"preshared\\\\|kc_auth\\\\|keycloak.*auth\" /c/Daten2/mavi-vpn/gui/src --include=*.js --include=*.html)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(python3:*)",
+      "Bash(dir:*)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(tee /tmp/mavi_branches2.txt)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(printf:*)",
+      "Bash(cargo check:*)",
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(echo \"TEMP=$TEMP\")",
+      "Bash(echo \"PWD=$PWD\")",
+      "Bash(cargo --version)",
+      "Bash(where cargo:*)"
     ]
   }
 }

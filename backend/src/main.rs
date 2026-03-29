@@ -290,20 +290,64 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 7. Accept incoming QUIC connections
-    while let Some(conn) = endpoint.accept().await {
-        let state = state.clone();
-        let config = config.clone();
-        let tx_tun = tx_tun.clone();
-        let keycloak = keycloak_validator.clone();
+    // 7. Accept incoming QUIC connections (always active)
+    let quic_state = state.clone();
+    let quic_config = config.clone();
+    let quic_tx = tx_tun.clone();
+    let quic_kc = keycloak_validator.clone();
+    let quic_task = tokio::spawn(async move {
+        while let Some(conn) = endpoint.accept().await {
+            let state = quic_state.clone();
+            let config = quic_config.clone();
+            let tx_tun = quic_tx.clone();
+            let keycloak = quic_kc.clone();
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn, state, config, tx_tun, keycloak).await {
-               // fine to fail, client disconnected or bad auth
-               warn!("Connection terminated: {}", e);
+            tokio::spawn(async move {
+                if let Err(e) = handle_connection(conn, state, config, tx_tun, keycloak).await {
+                   warn!("[QUIC] Connection terminated: {}", e);
+                }
+            });
+        }
+    });
+
+    // 8. HTTP/3 (WebTransport) listener (optional)
+    let h3_task = if config.enable_h3 {
+        info!("HTTP/3 (WebTransport) endpoint enabled on {}", config.bind_addr_h3);
+        let h3_state = state.clone();
+        let h3_config = config.clone();
+        let h3_tx = tx_tun.clone();
+        let h3_kc = keycloak_validator.clone();
+        let h3_certs = cert::load_or_generate_certs(config.cert_path.clone(), config.key_path.clone())?;
+        Some(tokio::spawn(async move {
+            if let Err(e) = run_h3_listener(h3_state, h3_config, h3_tx, h3_kc, h3_certs).await {
+                error!("[HTTP/3] Listener failed: {}", e);
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
+
+    // 9. HTTP/2 (TCP) listener (optional)
+    let h2_task = if config.enable_h2 {
+        info!("HTTP/2 (TCP) endpoint enabled on {}", config.bind_addr_tcp);
+        let h2_state = state.clone();
+        let h2_config = config.clone();
+        let h2_tx = tx_tun.clone();
+        let h2_kc = keycloak_validator.clone();
+        let h2_certs = cert::load_or_generate_certs(config.cert_path.clone(), config.key_path.clone())?;
+        Some(tokio::spawn(async move {
+            if let Err(e) = run_h2_listener(h2_state, h2_config, h2_tx, h2_kc, h2_certs).await {
+                error!("[HTTP/2] Listener failed: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Wait for all listeners (QUIC always runs, H3/H2 optional)
+    let _ = quic_task.await;
+    if let Some(h3) = h3_task { let _ = h3.await; }
+    if let Some(h2) = h2_task { let _ = h2.await; }
 
     Ok(())
 }
@@ -319,7 +363,7 @@ async fn handle_connection(
     // 1. Establish QUIC connection (wait for TLS handshake)
     let connection = conn.await?;
     let remote_addr = connection.remote_address();
-    info!("New connection from {}", remote_addr);
+    info!("New connection from {} [QUIC]", remote_addr);
 
     // 2. Auth/Config Phase (on the bidirectional stream)
     let (mut send_stream, mut recv_stream) = connection.accept_bi().await?;
@@ -524,4 +568,396 @@ async fn handle_connection(
 fn cleanup_legacy_rules() {
     let _ = std::process::Command::new("iptables").args(&["-t", "mangle", "-F", "MAVI_CLAMP"]).output();
     let _ = std::process::Command::new("iptables").args(&["-t", "mangle", "-X", "MAVI_CLAMP"]).output();
+}
+
+// =============================================================================
+// HTTP/3 (WebTransport) Listener
+// =============================================================================
+
+/// Runs the WebTransport/HTTP3 anti-censorship endpoint.
+/// Accepts WebTransport sessions on path `/vpn` and tunnels VPN traffic
+/// over QUIC datagrams, but wrapped in the HTTP/3 protocol layer so DPI
+/// sees legitimate HTTPS traffic.
+async fn run_h3_listener(
+    state: Arc<AppState>,
+    config: Config,
+    tx_tun: tokio::sync::mpsc::Sender<Bytes>,
+    keycloak: Option<Arc<crate::keycloak::KeycloakValidator>>,
+    (certs, key): (Vec<rustls::pki_types::CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>),
+) -> Result<()> {
+    use wtransport::{Endpoint, ServerConfig as WtServerConfig};
+
+    let wt_config = WtServerConfig::builder()
+        .with_bind_address(config.bind_addr_h3)
+        .with_certificate(
+            wtransport::tls::Certificate::new(
+                certs.into_iter().map(|c| c.into_owned().to_vec()).collect::<Vec<_>>(),
+                key.secret_der().to_vec(),
+            )
+        )
+        .keep_alive_interval(Some(Duration::from_secs(2)))
+        .max_idle_timeout(Some(Duration::from_secs(60)))
+        .expect("valid idle timeout")
+        .build();
+
+    let server = Endpoint::server(wt_config)?;
+    info!("[HTTP/3] WebTransport server listening on {}", config.bind_addr_h3);
+
+    loop {
+        let incoming = server.accept().await;
+        let state = state.clone();
+        let config = config.clone();
+        let tx_tun = tx_tun.clone();
+        let keycloak = keycloak.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = handle_h3_session(incoming, state, config, tx_tun, keycloak).await {
+                warn!("[HTTP/3] Session ended: {}", e);
+            }
+        });
+    }
+}
+
+/// Handles a single HTTP/3 WebTransport session.
+async fn handle_h3_session(
+    incoming: wtransport::endpoint::IncomingSession,
+    state: Arc<AppState>,
+    config: Config,
+    tx_tun: tokio::sync::mpsc::Sender<Bytes>,
+    keycloak: Option<Arc<crate::keycloak::KeycloakValidator>>,
+) -> Result<()> {
+    let session_request = incoming.await?;
+    let path = session_request.path().to_string();
+    let authority = session_request.authority().to_string();
+
+    if path != "/vpn" {
+        // Probe resistance: return 404 for non-VPN paths
+        info!("[HTTP/3] Probe from {} on path '{}' -> 404", authority, path);
+        session_request.not_found().await;
+        return Ok(());
+    }
+
+    let connection = session_request.accept().await?;
+    let remote_addr = connection.remote_address();
+    info!("New connection from {} [HTTP/3]", remote_addr);
+
+    // Auth phase: open bi-stream for auth exchange
+    let (mut send_stream, mut recv_stream) = connection.accept_bi().await?.await?;
+
+    let len = tokio::time::timeout(Duration::from_secs(5), recv_stream.read_u32_le())
+        .await
+        .map_err(|_| anyhow::anyhow!("H3 auth timeout"))?? as usize;
+    if len > 8192 { anyhow::bail!("H3 auth message too big"); }
+    let mut buf = vec![0u8; len];
+    recv_stream.read_exact(&mut buf).await?;
+
+    let msg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow::anyhow!("H3 protocol error: {}", e))?;
+
+    let (assigned_ip, assigned_ip6) = match msg {
+        ControlMessage::Auth { token } => {
+            authenticate_user(&token, &config, &keycloak, &state).await?
+        }
+        _ => anyhow::bail!("H3: expected Auth message"),
+    };
+
+    let _ip_guard = IpGuard { state: state.clone(), ip4: assigned_ip, ip6: assigned_ip6 };
+
+    // Send config back
+    let success_msg = ControlMessage::Config {
+        assigned_ip,
+        netmask: state.network.mask(),
+        gateway: state.gateway_ip(),
+        dns_server: config.dns,
+        mtu: config.mtu as u16,
+        assigned_ipv6: Some(assigned_ip6),
+        netmask_v6: Some(64),
+        gateway_v6: Some(state.gateway_ip_v6()),
+        dns_server_v6: Some("2001:4860:4860::8888".parse().unwrap()),
+        whitelist_domains: Some(config.whitelist_domains.clone()),
+    };
+    let bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
+    send_stream.write_u32_le(bytes.len() as u32).await?;
+    send_stream.write_all(&bytes).await?;
+
+    info!("[HTTP/3] Authenticated {} -> IPv4: {}, IPv6: {}", remote_addr, assigned_ip, assigned_ip6);
+
+    // Packet pumping via datagrams (same as QUIC path)
+    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(1024);
+    state.register_client(assigned_ip, assigned_ip6, tx_client);
+
+    let gateway_v4 = state.gateway_ip();
+    let gateway_v6 = state.gateway_ip_v6();
+    let tx_tun_icmp = tx_tun.clone();
+
+    // Hub -> WebTransport datagram
+    let conn_send = connection.clone();
+    let tun_to_wt = tokio::spawn(async move {
+        while let Some(packet) = rx_client.recv().await {
+            if let Err(e) = conn_send.send_datagram(packet.clone()) {
+                if let wtransport::error::SendDatagramError::TooLarge = e {
+                    let current_mtu = 1200u16; // wtransport doesn't expose max_datagram_size directly
+                    let version = packet[0] >> 4;
+                    let gw = if version == 4 { std::net::IpAddr::V4(gateway_v4) } else { std::net::IpAddr::V6(gateway_v6) };
+                    let reported_mtu = if version == 6 { std::cmp::max(current_mtu, 1280) } else { current_mtu };
+                    if let Some(icmp_packet) = icmp::generate_packet_too_big(&packet, reported_mtu, None) {
+                        let _ = tx_tun_icmp.try_send(Bytes::from(icmp_packet));
+                    }
+                }
+            }
+        }
+    });
+
+    // WebTransport datagram -> Hub (with source-IP validation)
+    let res = loop {
+        match connection.receive_datagram().await {
+            Ok(datagram) => {
+                let data = Bytes::copy_from_slice(datagram.payload());
+                if data.is_empty() { continue; }
+
+                let version = data[0] >> 4;
+                let valid = if version == 4 {
+                    Ipv4HeaderSlice::from_slice(&data).map(|h| h.source_addr() == assigned_ip).unwrap_or(false)
+                } else if version == 6 {
+                    Ipv6HeaderSlice::from_slice(&data).map(|h| {
+                        let src = h.source_addr();
+                        src == assigned_ip6 || (src.segments()[0] & 0xffc0 == 0xfe80) || src.is_unspecified()
+                    }).unwrap_or(false)
+                } else { false };
+
+                if valid {
+                    if tx_tun.send(data).await.is_err() {
+                        break Err(anyhow::anyhow!("TUN hub closed"));
+                    }
+                }
+            }
+            Err(e) => break Err(anyhow::anyhow!("[HTTP/3] Connection lost: {}", e)),
+        }
+    };
+
+    tun_to_wt.abort();
+    res
+}
+
+// =============================================================================
+// HTTP/2 (TCP) Listener
+// =============================================================================
+
+/// Runs the HTTP/2 over TCP anti-censorship endpoint.
+/// Uses TLS 1.3 + HTTP/2 framing to tunnel VPN packets as length-prefixed
+/// data on an H2 stream. This looks like normal HTTPS to any observer.
+async fn run_h2_listener(
+    state: Arc<AppState>,
+    config: Config,
+    tx_tun: tokio::sync::mpsc::Sender<Bytes>,
+    keycloak: Option<Arc<crate::keycloak::KeycloakValidator>>,
+    (certs, key): (Vec<rustls::pki_types::CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>),
+) -> Result<()> {
+    // Setup TLS acceptor
+    let mut tls_config = rustls::ServerConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into()
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(certs, key)?;
+
+    tls_config.alpn_protocols = vec![b"h2".to_vec()];
+
+    let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
+    let listener = tokio::net::TcpListener::bind(config.bind_addr_tcp).await?;
+    info!("[HTTP/2] TCP server listening on {}", config.bind_addr_tcp);
+
+    loop {
+        let (tcp_stream, peer_addr) = listener.accept().await?;
+        let tls_acceptor = tls_acceptor.clone();
+        let state = state.clone();
+        let config = config.clone();
+        let tx_tun = tx_tun.clone();
+        let keycloak = keycloak.clone();
+
+        tokio::spawn(async move {
+            match tls_acceptor.accept(tcp_stream).await {
+                Ok(tls_stream) => {
+                    if let Err(e) = handle_h2_connection(tls_stream, peer_addr, state, config, tx_tun, keycloak).await {
+                        warn!("[HTTP/2] Session ended: {}", e);
+                    }
+                }
+                Err(e) => warn!("[HTTP/2] TLS handshake failed from {}: {}", peer_addr, e),
+            }
+        });
+    }
+}
+
+/// Handles a single HTTP/2 connection.
+/// VPN packets are framed as `[u16 big-endian length][raw IP packet]` on the H2 data stream.
+async fn handle_h2_connection(
+    tls_stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    peer_addr: std::net::SocketAddr,
+    state: Arc<AppState>,
+    config: Config,
+    tx_tun: tokio::sync::mpsc::Sender<Bytes>,
+    keycloak: Option<Arc<crate::keycloak::KeycloakValidator>>,
+) -> Result<()> {
+    info!("New connection from {} [HTTP/2]", peer_addr);
+
+    let mut h2_conn = h2::server::Builder::new()
+        .initial_window_size(4 * 1024 * 1024)
+        .initial_connection_window_size(4 * 1024 * 1024)
+        .handshake(tls_stream)
+        .await?;
+
+    // Accept the first H2 stream (the VPN tunnel)
+    let (request, mut respond) = match h2_conn.accept().await {
+        Some(Ok(pair)) => pair,
+        Some(Err(e)) => return Err(anyhow::anyhow!("H2 accept error: {}", e)),
+        None => return Ok(()),
+    };
+
+    let (_, mut recv_body) = request.into_parts();
+
+    // Auth: read length-prefixed bincode from the H2 body
+    let auth_data = match recv_body.data().await {
+        Some(Ok(chunk)) => chunk,
+        _ => return Err(anyhow::anyhow!("H2: no auth data")),
+    };
+    let _ = recv_body.flow_control().release_capacity(auth_data.len());
+
+    if auth_data.len() < 4 { anyhow::bail!("H2: auth too short"); }
+    let len = u32::from_le_bytes([auth_data[0], auth_data[1], auth_data[2], auth_data[3]]) as usize;
+    if len > 8192 || 4 + len > auth_data.len() { anyhow::bail!("H2: auth message invalid length"); }
+    let msg_bytes = &auth_data[4..4 + len];
+
+    let msg: ControlMessage = bincode::serde::decode_from_slice(msg_bytes, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow::anyhow!("H2 protocol error: {}", e))?;
+
+    let (assigned_ip, assigned_ip6) = match msg {
+        ControlMessage::Auth { token } => {
+            authenticate_user(&token, &config, &keycloak, &state).await?
+        }
+        _ => anyhow::bail!("H2: expected Auth message"),
+    };
+
+    let _ip_guard = IpGuard { state: state.clone(), ip4: assigned_ip, ip6: assigned_ip6 };
+
+    // Send config response
+    let success_msg = ControlMessage::Config {
+        assigned_ip,
+        netmask: state.network.mask(),
+        gateway: state.gateway_ip(),
+        dns_server: config.dns,
+        mtu: config.mtu as u16,
+        assigned_ipv6: Some(assigned_ip6),
+        netmask_v6: Some(64),
+        gateway_v6: Some(state.gateway_ip_v6()),
+        dns_server_v6: Some("2001:4860:4860::8888".parse().unwrap()),
+        whitelist_domains: Some(config.whitelist_domains.clone()),
+    };
+    let config_bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
+
+    // Send response headers
+    let response = http::Response::builder().status(200).body(()).unwrap();
+    let mut send_stream = respond.send_response(response, false)?;
+
+    // Send config as length-prefixed data
+    let mut config_frame = Vec::with_capacity(4 + config_bytes.len());
+    config_frame.extend_from_slice(&(config_bytes.len() as u32).to_le_bytes());
+    config_frame.extend_from_slice(&config_bytes);
+    send_stream.send_data(Bytes::from(config_frame), false)?;
+
+    info!("[HTTP/2] Authenticated {} -> IPv4: {}, IPv6: {}", peer_addr, assigned_ip, assigned_ip6);
+
+    // Register client for packet routing
+    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(1024);
+    state.register_client(assigned_ip, assigned_ip6, tx_client);
+
+    // Hub -> H2 stream (send VPN packets to client)
+    let h2_send_task = tokio::spawn(async move {
+        while let Some(packet) = rx_client.recv().await {
+            // Frame: [u16 BE length][raw IP packet]
+            let len = packet.len() as u16;
+            let mut frame = Vec::with_capacity(2 + packet.len());
+            frame.extend_from_slice(&len.to_be_bytes());
+            frame.extend_from_slice(&packet);
+
+            if send_stream.send_data(Bytes::from(frame), false).is_err() {
+                break;
+            }
+        }
+    });
+
+    // H2 stream -> Hub (receive VPN packets from client)
+    loop {
+        match recv_body.data().await {
+            Some(Ok(chunk)) => {
+                let _ = recv_body.flow_control().release_capacity(chunk.len());
+                // Parse framed packets: [u16 BE length][raw IP packet]
+                let mut offset = 0;
+                while offset + 2 <= chunk.len() {
+                    let pkt_len = u16::from_be_bytes([chunk[offset], chunk[offset + 1]]) as usize;
+                    offset += 2;
+                    if offset + pkt_len > chunk.len() { break; }
+
+                    let data = Bytes::copy_from_slice(&chunk[offset..offset + pkt_len]);
+                    offset += pkt_len;
+
+                    if data.is_empty() { continue; }
+
+                    // Source-IP validation
+                    let version = data[0] >> 4;
+                    let valid = if version == 4 {
+                        Ipv4HeaderSlice::from_slice(&data).map(|h| h.source_addr() == assigned_ip).unwrap_or(false)
+                    } else if version == 6 {
+                        Ipv6HeaderSlice::from_slice(&data).map(|h| {
+                            let src = h.source_addr();
+                            src == assigned_ip6 || (src.segments()[0] & 0xffc0 == 0xfe80) || src.is_unspecified()
+                        }).unwrap_or(false)
+                    } else { false };
+
+                    if valid {
+                        if tx_tun.send(data).await.is_err() {
+                            h2_send_task.abort();
+                            return Err(anyhow::anyhow!("TUN hub closed"));
+                        }
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                h2_send_task.abort();
+                return Err(anyhow::anyhow!("[HTTP/2] Stream error: {}", e));
+            }
+            None => {
+                h2_send_task.abort();
+                return Ok(());
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Shared Authentication Helper
+// =============================================================================
+
+/// Authenticates a user with either Keycloak JWT or static token.
+/// Returns assigned IPv4 and IPv6 addresses on success.
+async fn authenticate_user(
+    token: &str,
+    config: &Config,
+    keycloak: &Option<Arc<crate::keycloak::KeycloakValidator>>,
+    state: &Arc<AppState>,
+) -> Result<(Ipv4Addr, Ipv6Addr)> {
+    if let Some(kc) = keycloak {
+        if !kc.validate_token(token).await? {
+            anyhow::bail!("Access Denied: Invalid Keycloak JWT Token");
+        }
+    } else {
+        if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
+            anyhow::bail!("Access Denied: Invalid Token");
+        }
+    }
+    let v4 = state.assign_ip()?;
+    let v6 = state.assign_ipv6()?;
+    Ok((v4, v6))
 }

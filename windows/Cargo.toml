@@ -36,6 +36,10 @@ rand = "0.8"
 base64 = "0.22"
 url = "2.5"
 webbrowser = "1.0"
+wtransport = { workspace = true }
+h2 = { workspace = true }
+tokio-rustls = { workspace = true }
+http = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

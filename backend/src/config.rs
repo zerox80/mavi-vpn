@@ -59,6 +59,30 @@ pub struct Config {
     #[arg(long, env = "VPN_CENSORSHIP_RESISTANT", default_value = "false")]
     pub censorship_resistant: bool,
 
+    /// Enable HTTP/3 (WebTransport) anti-censorship endpoint.
+    ///
+    /// When enabled, the server listens on a separate UDP port using the
+    /// WebTransport protocol. Clients connecting with `TransportMode::Http3`
+    /// use this endpoint.
+    #[arg(long, env = "VPN_ENABLE_H3", default_value = "false")]
+    pub enable_h3: bool,
+
+    /// Bind address for the HTTP/3 (WebTransport) endpoint.
+    #[arg(long, env = "VPN_BIND_ADDR_H3", default_value = "0.0.0.0:443")]
+    pub bind_addr_h3: SocketAddr,
+
+    /// Enable HTTP/2 (TCP/TLS) anti-censorship endpoint.
+    ///
+    /// When enabled, the server listens on a TCP port for HTTP/2 connections.
+    /// Clients connecting with `TransportMode::Http2` use this endpoint.
+    /// Useful for networks that block all UDP traffic.
+    #[arg(long, env = "VPN_ENABLE_H2", default_value = "false")]
+    pub enable_h2: bool,
+
+    /// Bind address for the HTTP/2 (TCP) endpoint.
+    #[arg(long, env = "VPN_BIND_ADDR_TCP", default_value = "0.0.0.0:443")]
+    pub bind_addr_tcp: SocketAddr,
+
     /// Enable TCP MSS Clamping.
     ///
     /// Rewrites the Maximum Segment Size (MSS) in TCP headers to ensure TCP

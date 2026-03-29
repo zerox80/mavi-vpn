@@ -357,10 +357,7 @@ async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Config>
                 &saved.token.chars().take(8).collect::<String>()
             );
         }
-        println!(
-            "  CR Mode: {}",
-            if saved.censorship_resistant { "Yes" } else { "No" }
-        );
+        println!("  Transport: {}", saved.transport_mode);
         println!();
 
         print!("Use this configuration? [Y/n]: ");
@@ -443,10 +440,18 @@ async fn prompt_new_config() -> Result<Config> {
     stdout.flush()?;
     let cert_pin = read_line()?;
 
-    print!("Censorship resistant mode? [y/N]: ");
+    println!("Transport mode:");
+    println!("  1) QUIC     [Default - fastest connection]");
+    println!("  2) HTTP/3   [Anti-censorship - looks like normal web traffic]");
+    println!("  3) HTTP/2   [Anti-censorship - TCP fallback when UDP is blocked]");
+    print!("Selection [1]: ");
     stdout.flush()?;
-    let cr_input = read_line()?.to_lowercase();
-    let censorship_resistant = cr_input == "y" || cr_input == "yes";
+    let transport_input = read_line()?;
+    let transport_mode = match transport_input.as_str() {
+        "2" => shared::TransportMode::Http3,
+        "3" => shared::TransportMode::Http2,
+        _ => shared::TransportMode::Quic,
+    };
 
     println!();
 
@@ -454,7 +459,7 @@ async fn prompt_new_config() -> Result<Config> {
         endpoint,
         token,
         cert_pin,
-        censorship_resistant,
+        transport_mode,
         kc_auth,
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,

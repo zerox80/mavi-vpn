@@ -221,11 +221,13 @@ function setConnectingUI() {
 
 function readSettings() {
   const kcAuth = document.getElementById('kc_auth').checked;
+  const transportSelect = document.getElementById('transport_mode');
+  const transportMode = transportSelect ? transportSelect.value : 'Quic';
   return {
     endpoint:              document.getElementById('endpoint').value.trim(),
     token:                 document.getElementById('token').value.trim(),
     cert_pin:              document.getElementById('cert_pin').value.trim(),
-    censorship_resistant:  document.getElementById('cr_mode').checked,
+    transport_mode:        transportMode,
     kc_auth:               kcAuth || null,
     kc_url:                kcAuth ? document.getElementById('kc_url').value.trim()       || null : null,
     kc_realm:              kcAuth ? document.getElementById('kc_realm').value.trim()     || null : null,
@@ -237,7 +239,17 @@ function fillSettings(config) {
   document.getElementById('endpoint').value    = config.endpoint  || '';
   document.getElementById('token').value       = config.token     || '';
   document.getElementById('cert_pin').value    = config.cert_pin  || '';
-  document.getElementById('cr_mode').checked   = !!config.censorship_resistant;
+  const transportSelect = document.getElementById('transport_mode');
+  if (transportSelect) {
+    // Handle both new transport_mode and legacy censorship_resistant
+    if (config.transport_mode) {
+      transportSelect.value = config.transport_mode;
+    } else if (config.censorship_resistant) {
+      transportSelect.value = 'Http3';
+    } else {
+      transportSelect.value = 'Quic';
+    }
+  }
   document.getElementById('kc_auth').checked   = !!config.kc_auth;
   document.getElementById('kc_url').value      = config.kc_url      || '';
   document.getElementById('kc_realm').value    = config.kc_realm    || '';

@@ -181,7 +181,7 @@ async fn load_or_prompt_config() -> Result<Config> {
         } else {
             println!("  Token: {}...", &saved.token.chars().take(8).collect::<String>());
         }
-        println!("  CR Mode: {}", if saved.censorship_resistant { "Ja" } else { "Nein" });
+        println!("  Transport: {}", saved.transport_mode);
         println!();
         
         print!("Diese Konfiguration verwenden? [J/n]: ");
@@ -267,10 +267,18 @@ async fn prompt_new_config() -> Result<Config> {
     stdout.flush()?;
     let cert_pin = read_line()?;
 
-    print!("Censorship Resistant Mode? [j/N]: ");
+    println!("Transport Modus:");
+    println!("  1) QUIC     [Standard - schnellste Verbindung]");
+    println!("  2) HTTP/3   [Anti-Zensur - sieht aus wie normaler Web-Traffic]");
+    println!("  3) HTTP/2   [Anti-Zensur - TCP-Fallback wenn UDP geblockt]");
+    print!("Auswahl [1]: ");
     stdout.flush()?;
-    let cr_input = read_line()?.to_lowercase();
-    let censorship_resistant = cr_input == "j" || cr_input == "ja" || cr_input == "y" || cr_input == "yes";
+    let transport_input = read_line()?;
+    let transport_mode = match transport_input.as_str() {
+        "2" => shared::TransportMode::Http3,
+        "3" => shared::TransportMode::Http2,
+        _ => shared::TransportMode::Quic,
+    };
 
     println!();
 
@@ -278,7 +286,7 @@ async fn prompt_new_config() -> Result<Config> {
         endpoint,
         token,
         cert_pin,
-        censorship_resistant,
+        transport_mode,
         kc_auth,
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,

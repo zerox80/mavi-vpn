@@ -95,7 +95,7 @@ class MainActivity : ComponentActivity() {
                         initialPin = savedPin,
                         initialSplitMode = savedSplitMode,
                         initialSplitPackages = savedSplitPackages,
-                        initialCensorshipResistant = prefs.getBoolean("saved_censorship_resistant", false),
+                        initialTransportMode = prefs.getInt("saved_transport_mode", 0),
                         onConnect = { ip, port, token, pin, splitMode, splitPackages -> 
                             // Save credentials
                             val editor = prefs.edit()
@@ -216,7 +216,7 @@ fun AppNavigation(
     initialPin: String,
     initialSplitMode: String,
     initialSplitPackages: String,
-    initialCensorshipResistant: Boolean,
+    initialTransportMode: Int, // 0=QUIC, 1=HTTP/3, 2=HTTP/2
     onConnect: (String, String, String, String, String, String) -> Unit,
     onDisconnect: () -> Unit
 ) {
@@ -226,7 +226,7 @@ fun AppNavigation(
     // State to hold settings between screens
     var splitMode by remember { mutableStateOf<String>(initialSplitMode) }
     var splitPackages by remember { mutableStateOf<String>(initialSplitPackages) }
-    var censorshipResistant by remember { mutableStateOf<Boolean>(initialCensorshipResistant) }
+    var transportMode by remember { mutableStateOf<Int>(initialTransportMode) }
 
     if (currentScreen == "home") {
         VpnScreen(
@@ -244,15 +244,15 @@ fun AppNavigation(
         SettingsScreen(
             initialMode = splitMode,
             initialSelection = splitPackages,
-            initialCensorshipResistant = censorshipResistant,
-            onBack = { mode, pkgs, crMode -> 
+            initialTransportMode = transportMode,
+            onBack = { mode, pkgs, tMode ->
                 splitMode = mode
                 splitPackages = pkgs
-                censorshipResistant = crMode
-                
-                // Save CR Mode to Prefs
+                transportMode = tMode
+
+                // Save Transport Mode to Prefs
                 val prefs = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
-                prefs.edit().putBoolean("saved_censorship_resistant", crMode).apply()
+                prefs.edit().putInt("saved_transport_mode", tMode).apply()
                 
                 currentScreen = "home"
             }
@@ -604,12 +604,12 @@ data class InstalledApp(
 fun SettingsScreen(
     initialMode: String, // "include" or "exclude"
     initialSelection: String, // comma separated packages
-    initialCensorshipResistant: Boolean,
-    onBack: (String, String, Boolean) -> Unit
+    initialTransportMode: Int, // 0=QUIC, 1=HTTP/3, 2=HTTP/2
+    onBack: (String, String, Int) -> Unit
 ) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf<String>(initialMode) } // "include", "exclude"
-    var censorshipResistant by remember { mutableStateOf<Boolean>(initialCensorshipResistant) }
+    var transportMode by remember { mutableStateOf<Int>(initialTransportMode) }
     
     val selectedPackages = remember { 
         mutableStateListOf<String>().apply { 
@@ -667,7 +667,7 @@ fun SettingsScreen(
                 .fillMaxWidth()
                 .padding(bottom = 16.dp)
         ) {
-            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant) }) {
+            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), transportMode) }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
             Text(
@@ -690,27 +690,37 @@ fun SettingsScreen(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Censorship Resistant Mode",
+                    text = "Transport Mode",
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
                     fontSize = 16.sp
                 )
-                Text(
-                    text = "Obfuscate traffic as HTTP/3 to bypass firewalls.",
-                    color = Color.Gray,
-                    fontSize = 12.sp
-                )
+                val transportLabels = listOf("QUIC (Standard)", "HTTP/3 (Anti-Censorship)", "HTTP/2 (Anti-Censorship/TCP)")
+                transportLabels.forEachIndexed { index, label ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { transportMode = index }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = transportMode == index,
+                            onClick = { transportMode = index },
+                            colors = RadioButtonDefaults.colors(
+                                selectedColor = Color(0xFF007AFF),
+                                unselectedColor = Color.Gray
+                            )
+                        )
+                        Text(
+                            text = label,
+                            color = if (transportMode == index) Color.White else Color.Gray,
+                            fontSize = 14.sp,
+                            modifier = Modifier.padding(start = 4.dp)
+                        )
+                    }
+                }
             }
-            Switch(
-                checked = censorshipResistant,
-                onCheckedChange = { censorshipResistant = it },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = Color(0xFF007AFF),
-                    uncheckedThumbColor = Color.Gray,
-                    uncheckedTrackColor = Color.DarkGray
-                )
-            )
         }
         
         Spacer(modifier = Modifier.height(16.dp))
@@ -851,7 +861,7 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(16.dp))
         
         Button(
-            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant) },
+            onClick = { onBack(mode, selectedPackages.joinToString(","), transportMode) },
             modifier = Modifier.fillMaxWidth().height(50.dp),
             shape = RoundedCornerShape(12.dp)
         ) {

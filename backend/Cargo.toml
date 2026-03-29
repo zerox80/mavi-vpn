@@ -34,4 +34,8 @@ mimalloc = "0.1.48"
 jsonwebtoken = "10.3"
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 serde_json = "1.0"
+wtransport = { workspace = true }
+h2 = { workspace = true }
+tokio-rustls = { workspace = true }
+http = { workspace = true }
 

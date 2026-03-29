@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 
 use crate::network::NetworkConfig;
 use crate::tun::TunDevice;
@@ -121,14 +121,23 @@ async fn run_session(
     let socket = create_udp_socket()?;
 
     // 1. QUIC Handshake & Auth
-    let (connection, server_config) = connect_and_handshake(
-        socket,
-        config.token.clone(),
-        config.endpoint.clone(),
-        cert_pin_bytes.to_vec(),
-        config.censorship_resistant,
-    )
-    .await?;
+    let (connection, server_config) = match config.transport_mode {
+        shared::TransportMode::Quic => {
+            connect_and_handshake(
+                socket,
+                config.token.clone(),
+                config.endpoint.clone(),
+                cert_pin_bytes.to_vec(),
+            )
+            .await?
+        }
+        shared::TransportMode::Http3 => {
+            return run_session_h3(config, cert_pin_bytes, global_running).await;
+        }
+        shared::TransportMode::Http2 => {
+            return run_session_h2(config, cert_pin_bytes, global_running).await;
+        }
+    };
 
     // 2. Extract Network Configuration
     let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
@@ -314,7 +323,6 @@ async fn connect_and_handshake(
     token: String,
     endpoint_str: String,
     cert_pin: Vec<u8>,
-    censorship_resistant: bool,
 ) -> Result<(quinn::Connection, ControlMessage)> {
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
@@ -327,11 +335,9 @@ async fn connect_and_handshake(
     .with_custom_certificate_verifier(verifier)
     .with_no_client_auth();
 
-    client_crypto.alpn_protocols = if censorship_resistant {
-        vec![b"h3".to_vec()]
-    } else {
-        vec![b"mavivpn".to_vec(), b"h3".to_vec()]
-    };
+    // QUIC mode: advertise both protocols so we can connect to servers
+    // regardless of their censorship_resistant setting.
+    client_crypto.alpn_protocols = vec![b"mavivpn".to_vec(), b"h3".to_vec()];
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(
@@ -390,6 +396,352 @@ async fn connect_and_handshake(
         bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
 
     Ok((connection, config))
+}
+
+// =============================================================================
+// HTTP/3 (WebTransport) Client Session
+// =============================================================================
+
+async fn run_session_h3(
+    config: &Config,
+    cert_pin_bytes: &[u8],
+    global_running: &Arc<AtomicBool>,
+) -> Result<SessionEnd> {
+    // 1. Connect via WebTransport with certificate pinning
+    let cert_hash: [u8; 32] = cert_pin_bytes.try_into()
+        .map_err(|_| anyhow::anyhow!("Certificate PIN must be 32 bytes (SHA-256)"))?;
+
+    let wt_config = wtransport::ClientConfig::builder()
+        .with_bind_default()
+        .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(cert_hash)])
+        .keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)))
+        .max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS)))
+        .expect("valid idle timeout")
+        .build();
+
+    let wt_endpoint = wtransport::Endpoint::client(wt_config)?;
+
+    let url = format!("https://{}/vpn", config.endpoint);
+    info!("[HTTP/3] Connecting to {}", url);
+    let connection = wt_endpoint.connect(&url).await
+        .context("WebTransport connection failed")?;
+    let remote_addr = connection.remote_address();
+    info!("[HTTP/3] Connected to {}", remote_addr);
+
+    // 2. Auth handshake via bi-stream
+    let (mut send_stream, mut recv_stream) = connection.open_bi().await
+        .context("Failed to open bi-stream")?;
+
+    let auth_msg = ControlMessage::Auth { token: config.token.clone() };
+    let encoded = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
+    send_stream.write_u32_le(encoded.len() as u32).await?;
+    send_stream.write_all(&encoded).await?;
+
+    let len = recv_stream.read_u32_le().await? as usize;
+    let mut buf = vec![0u8; len];
+    recv_stream.read_exact(&mut buf).await?;
+    let server_config: ControlMessage =
+        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
+
+    // 3. Extract Network Configuration
+    let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
+        match server_config {
+            ControlMessage::Config {
+                assigned_ip, netmask, gateway, dns_server, mtu,
+                assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6, ..
+            } => (assigned_ip, netmask, gateway, dns_server, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6),
+            ControlMessage::Error { message } => return Err(anyhow::anyhow!("Server rejected: {}", message)),
+            _ => return Err(anyhow::anyhow!("Unexpected server response")),
+        };
+
+    info!("[HTTP/3] Handshake successful. IPv4: {}", assigned_ip);
+
+    // 4. Create TUN device and configure networking
+    let tun = TunDevice::create(TUN_DEVICE_NAME)?;
+    let tun_name = tun.name().to_string();
+
+    let remote_ip = remote_addr.ip();
+    let endpoint_ip_str = match remote_ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped()
+            .map(|v4| v4.to_string())
+            .unwrap_or_else(|| v6.to_string()),
+    };
+
+    let net_config = NetworkConfig::apply(
+        &tun_name, assigned_ip, netmask, gateway, dns, mtu, &endpoint_ip_str,
+        assigned_ipv6, netmask_v6, gateway_v6, dns_v6,
+    )?;
+
+    // 5. Start async TUN I/O
+    let async_tun = Arc::new(tun.into_async()?);
+    let session_alive = Arc::new(AtomicBool::new(true));
+
+    // Task: TUN -> WebTransport datagram
+    let tun_reader = async_tun.clone();
+    let conn_send = connection.clone();
+    let alive_tun = session_alive.clone();
+    let run_tun = global_running.clone();
+    let tun_to_h3 = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        loop {
+            if !run_tun.load(Ordering::Relaxed) || !alive_tun.load(Ordering::Relaxed) { break; }
+            match tun_reader.read(&mut buf).await {
+                Ok(n) if n > 0 => {
+                    let data = buf[..n].to_vec();
+                    if let Err(e) = conn_send.send_datagram(data) {
+                        if matches!(e, wtransport::error::SendDatagramError::TooLarge) {
+                            let current_mtu = 1200u16;
+                            if let Some(icmp_packet) = icmp::generate_packet_too_big(
+                                &buf[..n], current_mtu, Some(std::net::IpAddr::V4(gateway)),
+                            ) {
+                                let _ = tun_reader.write(&icmp_packet).await;
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("[HTTP/3] TUN read error: {}", e);
+                    alive_tun.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Task: WebTransport datagram -> TUN
+    let tun_writer = async_tun.clone();
+    let alive_wt = session_alive.clone();
+    let run_wt = global_running.clone();
+    let h3_to_tun = tokio::spawn(async move {
+        loop {
+            if !run_wt.load(Ordering::Relaxed) || !alive_wt.load(Ordering::Relaxed) { break; }
+            match connection.receive_datagram().await {
+                Ok(datagram) => {
+                    let data = datagram.payload();
+                    if data.is_empty() { continue; }
+                    if let Err(e) = tun_writer.write(data).await {
+                        warn!("[HTTP/3] TUN write error: {}", e);
+                        alive_wt.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
+                Err(_) => {
+                    alive_wt.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Wait for termination
+    while global_running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    tun_to_h3.abort();
+    h3_to_tun.abort();
+    net_config.cleanup();
+
+    if global_running.load(Ordering::Relaxed) { Ok(SessionEnd::ConnectionLost) } else { Ok(SessionEnd::UserStopped) }
+}
+
+// =============================================================================
+// HTTP/2 (TCP) Client Session
+// =============================================================================
+
+async fn run_session_h2(
+    config: &Config,
+    cert_pin_bytes: &[u8],
+    global_running: &Arc<AtomicBool>,
+) -> Result<SessionEnd> {
+    // 1. TCP + TLS connect
+    let addr = tokio::net::lookup_host(&config.endpoint).await?
+        .next().context("Failed to resolve endpoint")?;
+    let host = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
+
+    info!("[HTTP/2] Connecting to {} (resolved: {})", config.endpoint, addr);
+    let tcp_stream = tokio::net::TcpStream::connect(addr).await
+        .context("TCP connection failed")?;
+
+    let verifier = Arc::new(PinnedServerVerifier::new(cert_pin_bytes.to_vec()));
+    let mut tls_config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into()
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .dangerous()
+    .with_custom_certificate_verifier(verifier)
+    .with_no_client_auth();
+    tls_config.alpn_protocols = vec![b"h2".to_vec()];
+
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| anyhow::anyhow!("Invalid server name: {}", e))?;
+    let tls_stream = connector.connect(server_name, tcp_stream).await
+        .context("TLS handshake failed")?;
+
+    info!("[HTTP/2] TLS handshake complete");
+
+    // 2. H2 handshake
+    let (h2_send_req, h2_conn) = h2::client::Builder::new()
+        .initial_window_size(4 * 1024 * 1024)
+        .initial_connection_window_size(4 * 1024 * 1024)
+        .handshake(tls_stream).await
+        .context("H2 handshake failed")?;
+
+    tokio::spawn(async move {
+        if let Err(e) = h2_conn.await {
+            error!("[HTTP/2] Connection driver error: {}", e);
+        }
+    });
+
+    // 3. Open stream and authenticate
+    let mut h2_send_req = h2_send_req.ready().await
+        .context("H2 send not ready")?;
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/vpn")
+        .body(())
+        .unwrap();
+    let (response_future, mut send_stream) = h2_send_req.send_request(request, false)?;
+
+    // Send auth: [u32 LE len][bincode]
+    let auth_msg = ControlMessage::Auth { token: config.token.clone() };
+    let encoded = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
+    let mut auth_frame = Vec::with_capacity(4 + encoded.len());
+    auth_frame.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+    auth_frame.extend_from_slice(&encoded);
+    send_stream.send_data(Bytes::from(auth_frame), false)?;
+
+    let response = response_future.await?;
+    if response.status() != 200 {
+        return Err(anyhow::anyhow!("[HTTP/2] Server returned status {}", response.status()));
+    }
+    let mut recv_body = response.into_body();
+
+    // Read config: [u32 LE len][bincode]
+    let config_data = recv_body.data().await
+        .context("No config data")?.context("Error reading config")?;
+    let _ = recv_body.flow_control().release_capacity(config_data.len());
+
+    if config_data.len() < 4 { return Err(anyhow::anyhow!("[HTTP/2] Config too short")); }
+    let len = u32::from_le_bytes([config_data[0], config_data[1], config_data[2], config_data[3]]) as usize;
+    if 4 + len > config_data.len() { return Err(anyhow::anyhow!("[HTTP/2] Config length mismatch")); }
+
+    let server_config: ControlMessage = bincode::serde::decode_from_slice(
+        &config_data[4..4 + len], bincode::config::standard()
+    ).map(|(v, _)| v)?;
+
+    // 4. Extract Network Configuration
+    let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
+        match server_config {
+            ControlMessage::Config {
+                assigned_ip, netmask, gateway, dns_server, mtu,
+                assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6, ..
+            } => (assigned_ip, netmask, gateway, dns_server, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6),
+            ControlMessage::Error { message } => return Err(anyhow::anyhow!("Server rejected: {}", message)),
+            _ => return Err(anyhow::anyhow!("Unexpected server response")),
+        };
+
+    info!("[HTTP/2] Handshake successful. IPv4: {}", assigned_ip);
+
+    // 5. Create TUN and configure networking
+    let tun = TunDevice::create(TUN_DEVICE_NAME)?;
+    let tun_name = tun.name().to_string();
+
+    let endpoint_ip_str = match addr.ip() {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped()
+            .map(|v4| v4.to_string())
+            .unwrap_or_else(|| v6.to_string()),
+    };
+
+    let net_config = NetworkConfig::apply(
+        &tun_name, assigned_ip, netmask, gateway, dns, mtu, &endpoint_ip_str,
+        assigned_ipv6, netmask_v6, gateway_v6, dns_v6,
+    )?;
+
+    // 6. Start async TUN I/O
+    let async_tun = Arc::new(tun.into_async()?);
+    let session_alive = Arc::new(AtomicBool::new(true));
+
+    // Task: TUN -> H2 (read from TUN, frame as [u16 BE len][packet], send)
+    let tun_reader = async_tun.clone();
+    let alive_send = session_alive.clone();
+    let run_send = global_running.clone();
+    let tun_to_h2 = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        loop {
+            if !run_send.load(Ordering::Relaxed) || !alive_send.load(Ordering::Relaxed) { break; }
+            match tun_reader.read(&mut buf).await {
+                Ok(n) if n > 0 => {
+                    let pkt_len = n as u16;
+                    let mut frame = Vec::with_capacity(2 + n);
+                    frame.extend_from_slice(&pkt_len.to_be_bytes());
+                    frame.extend_from_slice(&buf[..n]);
+                    if send_stream.send_data(Bytes::from(frame), false).is_err() {
+                        alive_send.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("[HTTP/2] TUN read error: {}", e);
+                    alive_send.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Task: H2 -> TUN (parse [u16 BE len][packet] frames, write to TUN)
+    let tun_writer = async_tun.clone();
+    let alive_recv = session_alive.clone();
+    let run_recv = global_running.clone();
+    let h2_to_tun = tokio::spawn(async move {
+        let mut partial = Vec::new();
+        loop {
+            if !run_recv.load(Ordering::Relaxed) || !alive_recv.load(Ordering::Relaxed) { break; }
+            match recv_body.data().await {
+                Some(Ok(chunk)) => {
+                    let _ = recv_body.flow_control().release_capacity(chunk.len());
+                    partial.extend_from_slice(&chunk);
+
+                    while partial.len() >= 2 {
+                        let pkt_len = u16::from_be_bytes([partial[0], partial[1]]) as usize;
+                        if partial.len() < 2 + pkt_len { break; }
+
+                        let data = &partial[2..2 + pkt_len];
+                        if !data.is_empty() {
+                            if let Err(e) = tun_writer.write(data).await {
+                                warn!("[HTTP/2] TUN write error: {}", e);
+                                alive_recv.store(false, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                        partial.drain(..2 + pkt_len);
+                    }
+                }
+                Some(Err(_)) | None => {
+                    alive_recv.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Wait for termination
+    while global_running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    tun_to_h2.abort();
+    h2_to_tun.abort();
+    net_config.cleanup();
+
+    if global_running.load(Ordering::Relaxed) { Ok(SessionEnd::ConnectionLost) } else { Ok(SessionEnd::UserStopped) }
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {

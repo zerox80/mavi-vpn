@@ -1,8 +1,38 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 pub mod icmp;
 pub mod ipc;
+
+/// Transport mode for the VPN connection.
+///
+/// Clients select which transport to use. The server supports all modes
+/// simultaneously on separate endpoints.
+///
+/// - **Quic** (default): Raw QUIC datagrams via Quinn with ALPN `mavivpn`.
+///   Fastest, lowest overhead. Suitable for non-censored networks.
+/// - **Http3**: WebTransport over HTTP/3 (via `wtransport`). Looks like
+///   standard HTTPS traffic to DPI. Anti-censorship mode.
+/// - **Http2**: HTTP/2 over TCP/TLS. Fallback for networks that block all
+///   UDP traffic. Anti-censorship mode.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum TransportMode {
+    #[default]
+    Quic,
+    Http3,
+    Http2,
+}
+
+impl fmt::Display for TransportMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TransportMode::Quic => write!(f, "QUIC"),
+            TransportMode::Http3 => write!(f, "HTTP/3"),
+            TransportMode::Http2 => write!(f, "HTTP/2"),
+        }
+    }
+}
 
 /// Control-plane messages exchanged over the QUIC bidirectional stream during
 /// connection setup (the "handshake phase").

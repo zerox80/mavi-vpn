@@ -9,6 +9,7 @@
 //! Transport: TCP on `127.0.0.1:14433`.
 
 use serde::{Deserialize, Serialize};
+use crate::TransportMode;
 
 /// Address for the local TCP IPC server.
 pub const LOCAL_IPC_ADDR: &str = "127.0.0.1:14433";
@@ -23,8 +24,13 @@ pub struct Config {
     pub token: String,
     /// SHA-256 fingerprint (hex) of the server's TLS certificate.
     pub cert_pin: String,
-    /// Enable Layer 7 obfuscation (pretend to be HTTP/3).
-    pub censorship_resistant: bool,
+    /// Transport mode selection.
+    ///
+    /// - `Quic` (default): Raw QUIC, fastest, no obfuscation.
+    /// - `Http3`: WebTransport over HTTP/3, anti-censorship.
+    /// - `Http2`: HTTP/2 over TCP/TLS, for UDP-blocked networks.
+    #[serde(default)]
+    pub transport_mode: TransportMode,
     /// Was Keycloak authentication used?
     pub kc_auth: Option<bool>,
     /// Keycloak Server URL.

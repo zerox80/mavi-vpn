@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use sha2::{Sha256, Digest};
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 use shared::{icmp, ControlMessage};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
@@ -130,21 +130,30 @@ async fn run_session(
     let socket = create_udp_socket()?;
 
     // 1. QUIC Handshake & Auth
-    let (connection, server_config) = connect_and_handshake(
-        socket,
-        config.token.clone(),
-        config.endpoint.clone(),
-        cert_pin_bytes.to_vec(),
-        config.censorship_resistant,
-    ).await?;
+    let (connection, server_config) = match config.transport_mode {
+        shared::TransportMode::Quic => {
+            connect_and_handshake(
+                socket,
+                config.token.clone(),
+                config.endpoint.clone(),
+                cert_pin_bytes.to_vec(),
+            ).await?
+        }
+        shared::TransportMode::Http3 => {
+            return run_session_h3(config, cert_pin_bytes, adapter, global_running).await;
+        }
+        shared::TransportMode::Http2 => {
+            return run_session_h2(config, cert_pin_bytes, adapter, global_running).await;
+        }
+    };
 
     // 2. Extract Network Configuration
-    let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
+    let (assigned_ip, netmask, gateway, dns, _mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
         match server_config {
             ControlMessage::Config {
-                assigned_ip, netmask, gateway, dns_server, mtu,
+                assigned_ip, netmask, gateway, dns_server, mtu: _mtu,
                 assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6, ..
-            } => (assigned_ip, netmask, gateway, dns_server, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6),
+            } => (assigned_ip, netmask, gateway, dns_server, _mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6),
             ControlMessage::Error { message } => return Err(anyhow::anyhow!("Server rejected connection: {}", message)),
             _ => return Err(anyhow::anyhow!("Unexpected server response during handshake")),
         };
@@ -159,7 +168,7 @@ async fn run_session(
     };
 
     set_adapter_network_config(
-        adapter, assigned_ip, netmask, gateway, dns, mtu, &endpoint_ip_str,
+        adapter, assigned_ip, netmask, gateway, dns, 1280, &endpoint_ip_str,
         assigned_ipv6, netmask_v6, gateway_v6, dns_v6,
     )?;
 
@@ -266,7 +275,6 @@ async fn connect_and_handshake(
     token: String,
     endpoint_str: String,
     cert_pin: Vec<u8>,
-    censorship_resistant: bool,
 ) -> Result<(quinn::Connection, ControlMessage)> {
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
@@ -277,13 +285,9 @@ async fn connect_and_handshake(
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
 
-    // CR mode: only h3 (looks like HTTP/3 to DPI).
-    // Normal mode: try both so it works regardless of server config.
-    client_crypto.alpn_protocols = if censorship_resistant {
-        vec![b"h3".to_vec()]
-    } else {
-        vec![b"mavivpn".to_vec(), b"h3".to_vec()]
-    };
+    // QUIC mode: advertise both protocols so we can connect to servers
+    // regardless of their censorship_resistant setting.
+    client_crypto.alpn_protocols = vec![b"mavivpn".to_vec(), b"h3".to_vec()];
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
@@ -327,6 +331,368 @@ async fn connect_and_handshake(
     let config: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
 
     Ok((connection, config))
+}
+
+// =============================================================================
+// HTTP/3 (WebTransport) Client Session
+// =============================================================================
+
+/// Manages a VPN session over HTTP/3 (WebTransport).
+/// Uses datagrams for packet transport (same pattern as QUIC, but wrapped in HTTP/3).
+async fn run_session_h3(
+    config: &Config,
+    cert_pin_bytes: &[u8],
+    adapter: &Arc<Adapter>,
+    global_running: &Arc<AtomicBool>,
+) -> Result<SessionEnd> {
+    // 1. Connect via WebTransport with certificate pinning
+    let cert_hash: [u8; 32] = cert_pin_bytes.try_into()
+        .map_err(|_| anyhow::anyhow!("Certificate PIN must be 32 bytes (SHA-256)"))?;
+
+    let wt_config = wtransport::ClientConfig::builder()
+        .with_bind_default()
+        .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(cert_hash)])
+        .keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)))
+        .max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS)))
+        .expect("valid idle timeout")
+        .build();
+
+    let wt_endpoint = wtransport::Endpoint::client(wt_config)?;
+
+    let url = format!("https://{}/vpn", config.endpoint);
+    info!("[HTTP/3] Connecting to {}", url);
+    let connection = wt_endpoint.connect(&url).await
+        .context("WebTransport connection failed")?;
+    let remote_addr = connection.remote_address();
+    info!("[HTTP/3] Connected to {}", remote_addr);
+
+    // 2. Auth handshake via bi-stream (same bincode protocol as QUIC)
+    let (mut send_stream, mut recv_stream) = connection.open_bi().await?
+        .await.context("Failed to open bi-stream for auth")?;
+
+    let auth_msg = ControlMessage::Auth { token: config.token.clone() };
+    let encoded = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
+    send_stream.write_u32_le(encoded.len() as u32).await?;
+    send_stream.write_all(&encoded).await?;
+
+    let len = recv_stream.read_u32_le().await? as usize;
+    let mut buf = vec![0u8; len];
+    recv_stream.read_exact(&mut buf).await?;
+    let server_config: ControlMessage =
+        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
+
+    // 3. Extract Network Configuration
+    let (assigned_ip, netmask, gateway, dns, _mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
+        match server_config {
+            ControlMessage::Config {
+                assigned_ip, netmask, gateway, dns_server, mtu: _mtu,
+                assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6, ..
+            } => (assigned_ip, netmask, gateway, dns_server, _mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6),
+            ControlMessage::Error { message } => return Err(anyhow::anyhow!("Server rejected: {}", message)),
+            _ => return Err(anyhow::anyhow!("Unexpected server response")),
+        };
+
+    info!("[HTTP/3] Handshake successful. IPv4: {}", assigned_ip);
+
+    // 4. Configure Windows Networking
+    let endpoint_ip_str = match remote_addr.ip() {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(|v4| v4.to_string()).unwrap_or_else(|| v6.to_string()),
+    };
+    set_adapter_network_config(
+        adapter, assigned_ip, netmask, gateway, dns, 1280, &endpoint_ip_str,
+        assigned_ipv6, netmask_v6, gateway_v6, dns_v6,
+    )?;
+
+    // 5. Start WinTUN Session
+    let session = Arc::new(adapter.start_session(wintun::MAX_RING_CAPACITY)
+        .context("Failed to start WinTUN session")?);
+    let session_alive = Arc::new(AtomicBool::new(true));
+
+    // 6. Packet Pumping (datagram-based, same pattern as QUIC)
+
+    // Thread: TUN -> WebTransport datagram
+    let session_tun = session.clone();
+    let conn_send = connection.clone();
+    let alive_pump = session_alive.clone();
+    let run_pump = global_running.clone();
+    let tun_to_h3 = std::thread::spawn(move || {
+        loop {
+            if !run_pump.load(Ordering::Relaxed) || !alive_pump.load(Ordering::Relaxed) { break; }
+            match session_tun.try_receive() {
+                Ok(Some(packet)) => {
+                    let data = packet.bytes().to_vec();
+                    if let Err(e) = conn_send.send_datagram(data) {
+                        if matches!(e, wtransport::error::SendDatagramError::TooLarge) {
+                            // ICMP PTB feedback (wtransport doesn't expose max_datagram_size)
+                            let current_mtu = 1200u16;
+                            if let Some(icmp_pkt) = icmp::generate_packet_too_big(
+                                packet.bytes(), current_mtu, Some(std::net::IpAddr::V4(gateway))
+                            ) {
+                                if let Ok(mut reply) = session_tun.allocate_send_packet(icmp_pkt.len() as u16) {
+                                    reply.bytes_mut().copy_from_slice(&icmp_pkt);
+                                    session_tun.send_packet(reply);
+                                }
+                            }
+                        }
+                        // Other errors (NotConnected) -> receive side will catch the disconnect
+                    }
+                }
+                Ok(None) => std::thread::sleep(Duration::from_micros(100)),
+                Err(_) => { alive_pump.store(false, Ordering::SeqCst); break; }
+            }
+        }
+    });
+
+    // Task: WebTransport datagram -> TUN
+    let session_recv = session.clone();
+    let alive_recv = session_alive.clone();
+    let run_recv = global_running.clone();
+    let h3_to_tun = tokio::spawn(async move {
+        loop {
+            if !run_recv.load(Ordering::Relaxed) || !alive_recv.load(Ordering::Relaxed) { break; }
+            match connection.receive_datagram().await {
+                Ok(datagram) => {
+                    let data = datagram.payload();
+                    if data.is_empty() { continue; }
+                    match session_recv.allocate_send_packet(data.len() as u16) {
+                        Ok(mut packet) => {
+                            packet.bytes_mut().copy_from_slice(&data);
+                            session_recv.send_packet(packet);
+                        }
+                        Err(e) if is_wintun_ring_full(&e) => {
+                            tokio::time::sleep(Duration::from_millis(2)).await;
+                        }
+                        Err(_) => { alive_recv.store(false, Ordering::SeqCst); break; }
+                    }
+                }
+                Err(_) => { alive_recv.store(false, Ordering::SeqCst); break; }
+            }
+        }
+    });
+
+    // Wait for termination
+    while global_running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    h3_to_tun.abort();
+    let _ = tun_to_h3.join();
+
+    if global_running.load(Ordering::Relaxed) { Ok(SessionEnd::ConnectionLost) } else { Ok(SessionEnd::UserStopped) }
+}
+
+// =============================================================================
+// HTTP/2 (TCP) Client Session
+// =============================================================================
+
+/// Manages a VPN session over HTTP/2 (TCP/TLS).
+/// Uses length-prefixed framing `[u16 BE len][IP packet]` on an H2 data stream.
+async fn run_session_h2(
+    config: &Config,
+    cert_pin_bytes: &[u8],
+    adapter: &Arc<Adapter>,
+    global_running: &Arc<AtomicBool>,
+) -> Result<SessionEnd> {
+    // 1. TCP + TLS connect with certificate pinning
+    let addr = tokio::net::lookup_host(&config.endpoint).await?
+        .next().context("Failed to resolve endpoint")?;
+    let host = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
+
+    info!("[HTTP/2] Connecting to {} (resolved: {})", config.endpoint, addr);
+    let tcp_stream = tokio::net::TcpStream::connect(addr).await
+        .context("TCP connection failed")?;
+
+    let verifier = Arc::new(PinnedServerVerifier::new(cert_pin_bytes.to_vec()));
+    let mut tls_config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into()
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .dangerous()
+    .with_custom_certificate_verifier(verifier)
+    .with_no_client_auth();
+    tls_config.alpn_protocols = vec![b"h2".to_vec()];
+
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| anyhow::anyhow!("Invalid server name: {}", e))?;
+    let tls_stream = connector.connect(server_name, tcp_stream).await
+        .context("TLS handshake failed")?;
+
+    info!("[HTTP/2] TLS handshake complete");
+
+    // 2. H2 handshake
+    let (h2_send_req, h2_conn) = h2::client::Builder::new()
+        .initial_window_size(4 * 1024 * 1024)
+        .initial_connection_window_size(4 * 1024 * 1024)
+        .handshake(tls_stream).await
+        .context("H2 handshake failed")?;
+
+    // Drive H2 connection in background
+    tokio::spawn(async move {
+        if let Err(e) = h2_conn.await {
+            error!("[HTTP/2] Connection driver error: {}", e);
+        }
+    });
+
+    // 3. Open stream and authenticate
+    let mut h2_send_req = h2_send_req.ready().await
+        .context("H2 send not ready")?;
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/vpn")
+        .body(())
+        .unwrap();
+    let (response_future, mut send_stream) = h2_send_req.send_request(request, false)?;
+
+    // Send auth: [u32 LE len][bincode]
+    let auth_msg = ControlMessage::Auth { token: config.token.clone() };
+    let encoded = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
+    let mut auth_frame = Vec::with_capacity(4 + encoded.len());
+    auth_frame.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+    auth_frame.extend_from_slice(&encoded);
+    send_stream.send_data(Bytes::from(auth_frame), false)?;
+
+    // Wait for response
+    let response = response_future.await?;
+    if response.status() != 200 {
+        return Err(anyhow::anyhow!("[HTTP/2] Server returned status {}", response.status()));
+    }
+    let mut recv_body = response.into_body();
+
+    // Read config: [u32 LE len][bincode]
+    let config_data = recv_body.data().await
+        .context("No config data from server")?
+        .context("Error reading config data")?;
+    let _ = recv_body.flow_control().release_capacity(config_data.len());
+
+    if config_data.len() < 4 { return Err(anyhow::anyhow!("[HTTP/2] Config response too short")); }
+    let len = u32::from_le_bytes([config_data[0], config_data[1], config_data[2], config_data[3]]) as usize;
+    if 4 + len > config_data.len() { return Err(anyhow::anyhow!("[HTTP/2] Config length mismatch")); }
+
+    let server_config: ControlMessage = bincode::serde::decode_from_slice(
+        &config_data[4..4 + len], bincode::config::standard()
+    ).map(|(v, _)| v)?;
+
+    // 4. Extract Network Configuration
+    let (assigned_ip, netmask, gateway, dns, _mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
+        match server_config {
+            ControlMessage::Config {
+                assigned_ip, netmask, gateway, dns_server, mtu: _mtu,
+                assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6, ..
+            } => (assigned_ip, netmask, gateway, dns_server, _mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6),
+            ControlMessage::Error { message } => return Err(anyhow::anyhow!("Server rejected: {}", message)),
+            _ => return Err(anyhow::anyhow!("Unexpected server response")),
+        };
+
+    info!("[HTTP/2] Handshake successful. IPv4: {}", assigned_ip);
+
+    // 5. Configure Windows Networking
+    let endpoint_ip_str = match addr.ip() {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(|v4| v4.to_string()).unwrap_or_else(|| v6.to_string()),
+    };
+    set_adapter_network_config(
+        adapter, assigned_ip, netmask, gateway, dns, 1280, &endpoint_ip_str,
+        assigned_ipv6, netmask_v6, gateway_v6, dns_v6,
+    )?;
+
+    // 6. Start WinTUN Session
+    let session = Arc::new(adapter.start_session(wintun::MAX_RING_CAPACITY)
+        .context("Failed to start WinTUN session")?);
+    let session_alive = Arc::new(AtomicBool::new(true));
+
+    // 7. Packet Pumping (stream-based framing)
+    // Channel bridges blocking TUN reads to async H2 sender
+    let (tx_packets, mut rx_packets) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+
+    // Thread: TUN -> Channel
+    let session_tun = session.clone();
+    let alive_pump = session_alive.clone();
+    let run_pump = global_running.clone();
+    let tun_reader = std::thread::spawn(move || {
+        loop {
+            if !run_pump.load(Ordering::Relaxed) || !alive_pump.load(Ordering::Relaxed) { break; }
+            match session_tun.try_receive() {
+                Ok(Some(packet)) => {
+                    if tx_packets.blocking_send(packet.bytes().to_vec()).is_err() { break; }
+                }
+                Ok(None) => std::thread::sleep(Duration::from_micros(100)),
+                Err(_) => { alive_pump.store(false, Ordering::SeqCst); break; }
+            }
+        }
+    });
+
+    // Task: Channel -> H2 SendStream (frame as [u16 BE len][packet])
+    let alive_send = session_alive.clone();
+    let run_send = global_running.clone();
+    let h2_sender = tokio::spawn(async move {
+        while let Some(packet) = rx_packets.recv().await {
+            if !run_send.load(Ordering::Relaxed) || !alive_send.load(Ordering::Relaxed) { break; }
+            let pkt_len = packet.len() as u16;
+            let mut frame = Vec::with_capacity(2 + packet.len());
+            frame.extend_from_slice(&pkt_len.to_be_bytes());
+            frame.extend_from_slice(&packet);
+            if send_stream.send_data(Bytes::from(frame), false).is_err() {
+                alive_send.store(false, Ordering::SeqCst);
+                break;
+            }
+        }
+    });
+
+    // Task: H2 RecvBody -> TUN (parse [u16 BE len][packet] frames)
+    let session_recv = session.clone();
+    let alive_recv = session_alive.clone();
+    let run_recv = global_running.clone();
+    let h2_receiver = tokio::spawn(async move {
+        let mut partial = Vec::new();
+        loop {
+            if !run_recv.load(Ordering::Relaxed) || !alive_recv.load(Ordering::Relaxed) { break; }
+            match recv_body.data().await {
+                Some(Ok(chunk)) => {
+                    let _ = recv_body.flow_control().release_capacity(chunk.len());
+                    partial.extend_from_slice(&chunk);
+
+                    // Parse complete frames from the buffer
+                    while partial.len() >= 2 {
+                        let pkt_len = u16::from_be_bytes([partial[0], partial[1]]) as usize;
+                        if partial.len() < 2 + pkt_len { break; }
+
+                        let data = &partial[2..2 + pkt_len];
+                        if !data.is_empty() {
+                            match session_recv.allocate_send_packet(data.len() as u16) {
+                                Ok(mut pkt) => {
+                                    pkt.bytes_mut().copy_from_slice(data);
+                                    session_recv.send_packet(pkt);
+                                }
+                                Err(e) if is_wintun_ring_full(&e) => {
+                                    tokio::time::sleep(Duration::from_millis(2)).await;
+                                }
+                                Err(_) => { alive_recv.store(false, Ordering::SeqCst); break; }
+                            }
+                        }
+                        partial.drain(..2 + pkt_len);
+                    }
+                }
+                Some(Err(_)) | None => {
+                    alive_recv.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Wait for termination
+    while global_running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    h2_sender.abort();
+    h2_receiver.abort();
+    let _ = tun_reader.join();
+
+    if global_running.load(Ordering::Relaxed) { Ok(SessionEnd::ConnectionLost) } else { Ok(SessionEnd::UserStopped) }
 }
 
 /// Helper: run a command and log its outcome.

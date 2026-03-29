@@ -49,9 +49,13 @@
         <label for="cert_pin">Certificate PIN (SHA256)</label>
         <input type="text" id="cert_pin" placeholder="hex fingerprint" />
       </div>
-      <div class="field checkbox-field">
-        <input type="checkbox" id="cr_mode" />
-        <label for="cr_mode">Censorship Resistant Mode</label>
+      <div class="field">
+        <label for="transport_mode">Transport Mode</label>
+        <select id="transport_mode">
+          <option value="Quic">QUIC (Standard)</option>
+          <option value="Http3">HTTP/3 (Anti-Censorship)</option>
+          <option value="Http2">HTTP/2 (Anti-Censorship / TCP)</option>
+        </select>
       </div>
 
       <hr />

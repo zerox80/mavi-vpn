@@ -27,6 +27,10 @@ ipnetwork = "0.21"
 etherparse = "0.19"
 dashmap = "6.1"
 thiserror = "2.0"
+wtransport = "0.7"
+h2 = "0.4"
+tokio-rustls = "0.26"
+http = "1.1"
 
 [patch.crates-io]
 quinn = { path = "external/quinn/quinn" }

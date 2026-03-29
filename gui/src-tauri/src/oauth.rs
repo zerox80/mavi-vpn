@@ -206,12 +206,30 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
 fn open_browser(url: &str) {
     #[cfg(target_os = "windows")]
     {
-        // The webbrowser crate uses `cmd /c start` internally, which treats `&` as a
-        // command separator and truncates the OAuth2 URL. Using explorer.exe directly
-        // correctly handles full URLs with query parameters.
-        let _ = std::process::Command::new("explorer.exe")
-            .arg(url)
-            .spawn();
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        // Encode strings as null-terminated UTF-16 for WinAPI
+        fn to_wide(s: &str) -> Vec<u16> {
+            OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        }
+
+        let operation = to_wide("open");
+        let file = to_wide(url);
+
+        // SAFETY: ShellExecuteW is a standard Win32 call.
+        // Using it directly avoids cmd.exe which truncates URLs at '&'.
+        // It also correctly bridges elevated → normal user sessions via the shell.
+        unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            );
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {

@@ -26,6 +26,9 @@ url = "2"
 reqwest = { version = "0.13", features = ["json", "rustls", "form"], default-features = false }
 webbrowser = "1.0"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

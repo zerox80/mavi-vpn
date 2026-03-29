@@ -6,7 +6,7 @@
 //! ## Performance Highlights
 //! - **Zero-Copy Architecture**: Uses `BytesMut` and `split_to` for packet handling without memory copies.
 //! - **Batched I/O**: Packets are queued and written to the TUN device in batches to reduce syscall overhead.
-//! - **Pinned MTU**: Forces a stable MTU strategy (1280 payload / 1360 wire) to minimize mobile fragmentation issues.
+//! - **Pinned MTU**: Forces a stable MTU strategy (1280 Tun / 1360 QUIC Payload / ~1400 Wire) to minimize mobile fragmentation issues.
 //! - **Async Pipeline**: Fully non-blocking architecture using `tokio` and `quinn`.
 
 use anyhow::{Context, Result};
@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
     // Enable BBR Congestion Control (standard for high bandwidth + lossy environments)
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     
-    // --- USER REQUESTED MTU PINNING (Target: 1360 Payload) ---
+    // --- USER REQUESTED MTU PINNING (Target: 1360 QUIC Payload) ---
     // User confirmed 1460 MTU at Vodafone. 1360 Payload + 28/48 Header = 1388/1408 Wire.
     // This is safe for 1460 networks and provides maximum throughput for 1280 TUN packets.
     transport_config.mtu_discovery_config(None); 

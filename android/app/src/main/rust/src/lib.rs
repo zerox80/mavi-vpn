@@ -129,6 +129,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
 #[cfg(target_os = "android")]
     unsafe {
         let fd = socket2_sock.as_raw_fd();
+        // IPv4 Fragmentation
         let val: libc::c_int = libc::IP_PMTUDISC_DONT;
         let ret = libc::setsockopt(
             fd,
@@ -139,6 +140,20 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
         );
         if ret < 0 {
             warn!("Failed to disable PMTUD (IPv4): {}", std::io::Error::last_os_error());
+        }
+
+        // IPv6 Fragmentation (Ensure dual-stack consistency)
+        let val_v6: libc::c_int = 0; // IPV6_PMTUDISC_DONT = 0 on many systems, but let's be explicit if possible
+        // IPV6_MTU_DISCOVER is 23 on Android
+        let ret_v6 = libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            23, // IPV6_MTU_DISCOVER
+            &val_v6 as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&val_v6) as libc::socklen_t,
+        );
+        if ret_v6 < 0 {
+             warn!("Failed to disable PMTUD (IPv6): {}", std::io::Error::last_os_error());
         }
     }
         
@@ -374,11 +389,11 @@ async fn connect_and_handshake(
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-    // MTU Pinning: Set min_mtu = initial_mtu = 1360.
-    // Prevents Black Hole detection from reducing MTU to 1280.
+    // MTU Pinning: Set min_mtu = initial_mtu = 1332.
+    // This ensures that the total IP packet (including IP/UDP headers) is exactly 1360 bytes.
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1360);
-    transport_config.min_mtu(1360);
+    transport_config.initial_mtu(1332);
+    transport_config.min_mtu(1332);
 
 
     // Enable Segmentation Offload (GSO) for higher throughput

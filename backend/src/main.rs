@@ -140,14 +140,12 @@ async fn main() -> Result<()> {
     // Enable BBR Congestion Control (standard for high bandwidth + lossy environments)
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     
-    // --- MTU PINNING STRATEGY ---
-    // Rule: Wire size MUST NOT exceed 1360 bytes.
-    // IPv6 Overhead (40) + UDP (8) = 48. Target (1360) - 48 = 1312 (Safe QUIC Payload).
-    // By pinning it to 1312 (Safe Payload), we ensure we hit exactly 1360 wire for IPv6
-    // and stay slightly below (1340 wire) for IPv4.
+    // --- USER REQUESTED MTU PINNING (Target: 1360 Payload) ---
+    // User confirmed 1460 MTU at Vodafone. 1360 Payload + 28/48 Header = 1388/1408 Wire.
+    // This is safe for 1460 networks and provides maximum throughput for 1280 TUN packets.
     transport_config.mtu_discovery_config(None); 
-    transport_config.initial_mtu(1312); 
-    transport_config.min_mtu(1312);
+    transport_config.initial_mtu(1360); 
+    transport_config.min_mtu(1360);
     
     // Enable Generic Segmentation Offload (GSO) for OS-level performance boost
     transport_config.enable_segmentation_offload(true);

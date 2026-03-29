@@ -168,22 +168,43 @@ class MaviVpnService : VpnService() {
             
             while (isRunning) {
                 try {
-                    Log.d("MaviVPN", "Attempting connection to $ip:$port")
-                    // 1. Init / Handshake
+                    var retryCount = 0
                     val crMode = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
                         .getBoolean("saved_censorship_resistant", false)
-                    
-                    val handle = init(this, token, "$ip:$port", certPin, crMode)
-                    if (handle == 0L) {
-                        Log.e("MaviVPN", "Handshake failed. Retrying in 500ms...")
-                        Thread.sleep(500)
-                        continue
+                        
+                    while (isRunning) {
+                        Log.d("MaviVPN", "Attempting connection to $ip:$port (Attempt ${++retryCount})")
+                        
+                        // Update notification to show we are trying
+                        if (retryCount > 1) {
+                            val updatedNotification = Notification.Builder(this, channelId)
+                                .setContentTitle("Mavi VPN")
+                                .setContentText("Retrying connection to $ip (Attempt $retryCount)...")
+                                .setSmallIcon(android.R.drawable.ic_lock_lock)
+                                .build()
+                            val manager = getSystemService(NotificationManager::class.java)
+                            manager.notify(1, updatedNotification)
+                        }
+
+                        val handle = init(this, token, "$ip:$port", certPin, crMode)
+                        if (handle == 0L) {
+                            Log.e("MaviVPN", "Handshake failed. Retrying in 2 seconds...")
+                            Thread.sleep(2000) // Longer interval to be kind to the network
+                            continue
+                        }
+                        
+                        // Reset retry count on success
+                        retryCount = 0
+                        
+                        // Bug Fix: Store handle IMMEDIATELY after creation to prevent leak if thread is interrupted
+                        synchronized(vpnLock) {
+                            vpnSessionHandle = handle
+                        }
+                        break // Exit retry loop
                     }
                     
-                    // Bug Fix: Store handle IMMEDIATELY after creation to prevent leak if thread is interrupted
-                    synchronized(vpnLock) {
-                        vpnSessionHandle = handle
-                    }
+                    if (!isRunning) continue // Handle case where we stopped during retries
+                    val handle = vpnSessionHandle
 
                     try {
                         // 2. Get Config

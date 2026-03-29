@@ -57,6 +57,8 @@ async fn main() -> Result<()> {
     // Initialise logging with tracing-subscriber (defaulting to info level)
     tracing_subscriber::fmt::init();
     
+    // Install the global crypto provider for jsonwebtoken (required for 10.3.0+)
+    let _ = jsonwebtoken::crypto::aws_lc_rs::default_provider().install_default();
     // 1. Load Configuration
     // Combines .env files, standard environment variables, and CLI arguments.
     let config = config::load();

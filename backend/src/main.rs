@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
     // Implements BATCHED writes to reduce transition overhead.
     tokio::spawn(async move {
         let mut batch: Vec<Bytes> = Vec::with_capacity(64);
-        loop {
+        'writer_loop: loop {
             match rx_tun.recv().await {
                 Some(packet) => batch.push(packet),
                 None => break,
@@ -259,10 +259,8 @@ async fn main() -> Result<()> {
             
             for packet in batch.drain(..) {
                 if let Err(e) = tun_writer.write_all(&packet).await {
-                    error!("CRITICAL: Failed to write to TUN: {}. Potential bridge/MTU issue.", e);
-                    // Do not exit(1) in a shared task if possible, but if TUN is dead, 
-                    // this task will naturally terminate.
-                    break;
+                    error!("CRITICAL: Failed to write to TUN: {}. Interface might be down. Terminatiing task.", e);
+                    break 'writer_loop;
                 }
             }
         }
@@ -424,7 +422,7 @@ async fn handle_connection(
     // RAII Guard: Release IPs back to state if this task ends for any reason.
     let _ip_guard = IpGuard { state: state.clone(), ip4: assigned_ip, ip6: assigned_ip6 };
 
-    // 3. Send successful configuration back to client
+    // 4. Send successful configuration back to client
     let success_msg = ControlMessage::Config {
         assigned_ip,
         netmask: state.network.mask(),
@@ -526,8 +524,8 @@ async fn handle_connection(
              } else if version == 6 {
                   if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&data) {
                      let src = ipv6_header.source_addr();
-                     // Allow assigned IP, Link-Local (fe80::), or Unspecified (::)
-                     if src == assigned_ip6 || (src.segments()[0] & 0xffc0 == 0xfe80) || src.is_unspecified() { valid = true; }
+                     // Only allow the specifically assigned IPv6 or unspecified (for DAD) to prevent client-to-client spoofing
+                     if src == assigned_ip6 || src.is_unspecified() { valid = true; }
                  }
              }
 

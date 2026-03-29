@@ -251,12 +251,6 @@ install_docker() {
 check_prerequisites() {
     local missing=()
 
-    # Check root
-    if [ "$(id -u)" -ne 0 ]; then
-        print_err "This script must be run as root (use sudo)."
-        exit 1
-    fi
-
     # Docker
     if ! command -v docker &>/dev/null; then
         print_warn "Docker is not installed."
@@ -446,7 +440,7 @@ setup_letsencrypt() {
     fi
 
     print_info "Requesting certificate for ${domain}..."
-    if certbot certonly --standalone -d "$domain" --email "$email" --agree-tos --non-interactive 2>&1 | tail -3; then
+    if certbot certonly --standalone -d "$domain" --email "$email" --agree-tos --non-interactive --no-eff-email 2>&1 | tail -3; then
         print_ok "Certificate obtained for ${domain}"
     else
         print_err "Failed to obtain certificate. Check DNS and firewall settings."
@@ -610,6 +604,14 @@ run_questionnaire() {
     CFG_TCP_PORT=$(ask "TCP fallback port" "4443")
 
     # Check for port conflicts
+    if ss -ulnp 2>/dev/null | grep -q ":${CFG_QUIC_PORT} "; then
+        print_warn "Port ${CFG_QUIC_PORT}/udp appears to be in use!"
+        print_info "Check with: ss -ulnp | grep :${CFG_QUIC_PORT}"
+        if ! ask_yn "Continue anyway?"; then
+            CFG_QUIC_PORT=$(ask "Alternative QUIC port" "4433")
+        fi
+    fi
+
     if ss -tlnp 2>/dev/null | grep -q ":${CFG_TCP_PORT} "; then
         print_warn "Port ${CFG_TCP_PORT}/tcp appears to be in use!"
         print_info "Check with: ss -tlnp | grep :${CFG_TCP_PORT}"
@@ -843,7 +845,7 @@ get_cert_pin() {
 
     # Try reading from docker logs
     if [ -z "$pin" ]; then
-        pin=$(docker logs mavi-vpn 2>&1 | grep -oP 'Certificate PIN: \K[a-f0-9]+' | tail -1)
+        pin=$(docker logs mavi-vpn 2>&1 | grep -o 'Certificate PIN: [a-f0-9]*' | tail -1 | sed 's/Certificate PIN: //')
     fi
 
     echo "$pin"
@@ -970,7 +972,9 @@ main() {
     check_existing_install
 
     # Check prerequisites
-    print_step 0 9 "Prerequisites"
+    echo ""
+    echo -e "${BLUE}${BOLD}[Setup] Prerequisites${NC}"
+    echo -e "${DIM}─────────────────────────────────────────────${NC}"
     check_prerequisites
 
     # Run the 9-step questionnaire
@@ -1041,7 +1045,7 @@ SYSCTLEOF
         fi
     fi
 
-    # 4. Configure firewall
+    # 5. Configure firewall
     print_info "Configuring firewall..."
     configure_firewall "$CFG_QUIC_PORT" "$CFG_TCP_PORT"
     # Also open port 80 for Let's Encrypt renewals
@@ -1055,10 +1059,10 @@ SYSCTLEOF
         fi
     fi
 
-    # 5. Build and start
+    # 6. Build and start
     build_and_start
 
-    # 6. Get certificate PIN
+    # 7. Get certificate PIN
     print_info "Retrieving certificate PIN..."
     sleep 3 # Give the server a moment to write cert_pin.txt
     local cert_pin
@@ -1070,7 +1074,7 @@ SYSCTLEOF
         cert_pin="<check docker logs>"
     fi
 
-    # 7. Generate config code
+    # 8. Generate config code
     local config_code=""
     if [ "$cert_pin" != "<check docker logs>" ]; then
         config_code=$(generate_config_code "$cert_pin")
@@ -1078,7 +1082,7 @@ SYSCTLEOF
         config_code="<generate after obtaining cert pin>"
     fi
 
-    # 8. Show success
+    # 9. Show success
     print_success_banner "$cert_pin" "$config_code"
 }
 

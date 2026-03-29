@@ -32,6 +32,7 @@ h2 = "0.4"
 tokio-rustls = "0.26"
 http = "1.1"
 webpki-roots = "0.26"
+jsonwebtoken = { version = "10.3", default-features = false, features = ["aws_lc_rs"] }
 
 [patch.crates-io]
 quinn = { path = "external/quinn/quinn" }

@@ -131,8 +131,8 @@ async fn main() -> Result<()> {
     
     // QUIC Performance Tuning: 
     // Large buffers are critical for throughput on high-latency mobile networks.
-    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB receive buffer
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB send buffer
+    transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); // 4MB receive buffer
+    transport_config.datagram_send_buffer_size(4 * 1024 * 1024); // 4MB send buffer
     transport_config.receive_window(quinn::VarInt::from(4u32 * 1024 * 1024)); // 4MB
     transport_config.stream_receive_window(quinn::VarInt::from(1024u32 * 1024)); // 1MB per stream
     transport_config.send_window(4 * 1024 * 1024); // 4MB send window

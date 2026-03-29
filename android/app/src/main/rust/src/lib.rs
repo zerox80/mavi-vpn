@@ -281,7 +281,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_startLoop<'local>(
         
         let stop_flag = session.stop_flag.clone();
         let conn = session.connection.clone();
-
+ 
         let config = session.config.clone();
         session.runtime.block_on(async {
             run_vpn_loop(conn, tun_fd, stop_flag, config).await;
@@ -501,136 +501,135 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     };
 
     let connection_arc = Arc::new(connection);
-    let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
+    let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Vec<u8>>(256); // Increased capacity
 
-    // Buffer for reading from TUN
-    let mut tun_read_buf = bytes::BytesMut::with_capacity(65536);
+    info!("Entering concurrent VPN Loop Hub");
 
-    info!("Entering unified VPN Loop");
-
-    loop {
-        if stop_flag.load(Ordering::Relaxed) { break; }
-        
-        tokio::select! {
-             // 1. TUN -> QUIC (Outgoing Traffic)
-             readable_guard = tun_async_fd.readable() => {
-                 let mut guard = match readable_guard {
-                     Ok(g) => g,
-                     Err(_) => break,
-                 };
-                 
-                 let packet_opt = guard.try_io(|inner| {
-                     if tun_read_buf.remaining_mut() < 2048 {
-                         tun_read_buf.reserve(2048);
-                     }
-                     let chunk = tun_read_buf.chunk_mut();
-                     let max_len = 2048.min(chunk.len());
-                     let n = unsafe { libc::read(inner.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
-                     
-                     if n < 0 {
-                         return Err(std::io::Error::last_os_error());
-                     }
-                     let n = n as usize;
-                     if n == 0 { return Ok(None); } 
-                     
-                     unsafe { tun_read_buf.advance_mut(n); }
-                     Ok(Some(tun_read_buf.split_to(n).freeze()))
-                 });
-
-                 if let Ok(Ok(Some(packet))) = packet_opt {
-                     let packet_len = packet.len();
-                     let packet_bytes = packet.clone();
-
-                     if let Err(e) = connection_arc.send_datagram(packet) {
-                         match e {
-                             quinn::SendDatagramError::ConnectionLost(_) => {
-                                 error!("Connection lost during send");
-                                 stop_flag.store(true, Ordering::SeqCst);
-                                 break;
-                             }
-                             quinn::SendDatagramError::TooLarge => {
-                                 // PATH MTU DISCOVERY: Use the actual QUIC limit for the ICMP signal
-                                 let current_limit = connection_arc.max_datagram_size().unwrap_or(1200);
-                                 
-                                 let version = (packet_bytes[0] >> 4) & 0xF;
-                                 let gw = if version == 4 { 
-                                     std::net::IpAddr::V4(gateway_v4) 
-                                 } else { 
-                                     std::net::IpAddr::V6(gateway_v6_opt.unwrap_or("2001:db8::1".parse().unwrap())) 
-                                 };
-
-                                 warn!("mavivpn: Datagram rejected (MTU too small). Packet: {}, Limit: {}. Sending ICMP.", packet_len, current_limit);
-                                 if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, current_limit as u16, Some(gw)) {
-                                     let _ = tx_tun.try_send(icmp_packet);
-                                 }
-                             },
-                             _ => warn!("Send datagram failed: {:?}", e),
-                         }
-                     }
-                 }
-             }
-
-             // 2. Feedback Loop (ICMP Signals -> TUN)
-             Some(icmp_pkt) = rx_tun.recv() => {
-                 let mut guard = match tun_async_fd.writable().await {
-                     Ok(g) => g,
-                     Err(_) => break,
-                 };
-                 let _ = guard.try_io(|inner| {
-                     unsafe { libc::write(inner.as_raw_fd(), icmp_pkt.as_ptr() as *const libc::c_void, icmp_pkt.len()) };
-                     Ok(())
-                 });
-             }
-
-             // 3. QUIC -> TUN (Incoming Traffic)
-             res = connection_arc.read_datagram() => {
-                 match res {
-                     Ok(first_packet) => {
-                         let mut batch = Vec::with_capacity(64);
-                         batch.push(first_packet);
-
-                         for _ in 0..63 {
-                              match connection_arc.read_datagram().now_or_never() {
-                                  Some(Ok(pkt)) => batch.push(pkt),
-                                  _ => break,
-                              }
-                         }
-
-                         let mut batch_idx = 0;
-                         while batch_idx < batch.len() {
-                             let mut guard = match tun_async_fd.writable().await {
-                                  Ok(g) => g,
-                                  Err(_) => break,
-                             };
-                             
-                             let res = guard.try_io(|inner| {
-                                 while batch_idx < batch.len() {
-                                      let packet = &batch[batch_idx];
-                                      let n = unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) };
-                                      if n < 0 {
-                                          let err = std::io::Error::last_os_error();
-                                          if err.kind() == std::io::ErrorKind::WouldBlock {
-                                              return Err(err); 
-                                          }
-                                          return Err(err);
-                                      }
-                                      batch_idx += 1;
-                                 }
-                                 Ok(())
-                             });
-                             
-                             if let Ok(Err(_)) = res { break; } 
-                         }
-                     }
-                     Err(e) => { error!("Connection lost: {}", e); break; }
-                 }
-             }
-        }
-    }
+    // --- TASK 1: TUN -> QUIC (Outgoing / Upload) ---
+    // Optimised with BATCHED reads to reduce syscall/tokio overhead.
+    let stop_upload = stop_flag.clone();
+    let tun_upload = tun_async_fd.clone();
+    let conn_upload = connection_arc.clone();
+    let tx_feedback = tx_tun.clone();
     
-    // Cleanup
-    stop_flag.store(true, Ordering::SeqCst);
+    let upload_task = tokio::spawn(async move {
+        let mut read_buf = bytes::BytesMut::with_capacity(65536);
+        loop {
+            if stop_upload.load(Ordering::Relaxed) { break; }
+            
+            let readable_guard = match tun_upload.readable().await {
+                Ok(g) => g,
+                Err(_) => break,
+            };
+            
+            let res = readable_guard.try_io(|inner| {
+                let mut packets = Vec::with_capacity(32);
+                loop {
+                    if read_buf.remaining_mut() < 2048 { read_buf.reserve(2048); }
+                    let chunk = read_buf.chunk_mut();
+                    let n = unsafe { libc::read(inner.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, 2048) };
+                    
+                    if n < 0 {
+                        let err = std::io::Error::last_os_error();
+                        if err.kind() == std::io::ErrorKind::WouldBlock { break; }
+                        return Err(err);
+                    }
+                    if n == 0 { break; }
+                    
+                    unsafe { read_buf.advance_mut(n as usize); }
+                    packets.push(read_buf.split_to(n as usize).freeze());
+                    if packets.len() >= 32 { break; } // Moderate batch size for responsiveness
+                }
+                Ok(packets)
+            });
 
+            if let Ok(Ok(packets)) = res {
+                for packet in packets {
+                    if let Err(e) = conn_upload.send_datagram(packet.clone()) {
+                        match e {
+                            quinn::SendDatagramError::ConnectionLost(_) => {
+                                stop_upload.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                            quinn::SendDatagramError::TooLarge => {
+                                let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
+                                let version = (packet[0] >> 4) & 0xF;
+                                let gw = if version == 4 { 
+                                    std::net::IpAddr::V4(gateway_v4) 
+                                } else { 
+                                    std::net::IpAddr::V6(gateway_v6_opt.unwrap_or("2001:db8::1".parse().unwrap())) 
+                                };
+                                if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet, current_limit as u16, Some(gw)) {
+                                    let _ = tx_feedback.try_send(icmp_packet);
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        info!("Upload task exited.");
+    });
+
+    // --- TASK 2: QUIC -> TUN (Incoming / Download) ---
+    // Already supports batching via read_datagram().now_or_never().
+    let stop_download = stop_flag.clone();
+    let tun_download = tun_async_fd.clone();
+    let conn_download = connection_arc.clone();
+    
+    let download_task = tokio::spawn(async move {
+        loop {
+            if stop_download.load(Ordering::Relaxed) { break; }
+            
+            match conn_download.read_datagram().await {
+                Ok(first_packet) => {
+                    let mut batch = Vec::with_capacity(32);
+                    batch.push(first_packet);
+
+                    for _ in 0..31 {
+                         if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
+                             batch.push(pkt);
+                         } else { break; }
+                    }
+
+                    if let Ok(mut guard) = tun_download.writable().await {
+                         let _ = guard.try_io(|inner| {
+                             for packet in &batch {
+                                  let _ = unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) };
+                             }
+                             Ok(())
+                         });
+                    }
+                }
+                Err(_) => {
+                    stop_download.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+        info!("Download task exited.");
+    });
+
+    // --- TASK 3: ICMP Feedback -> TUN ---
+    let stop_icmp = stop_flag.clone();
+    let tun_icmp = tun_async_fd.clone();
+    let icmp_task = tokio::spawn(async move {
+        while let Some(icmp_pkt) = rx_tun.recv().await {
+            if stop_icmp.load(Ordering::Relaxed) { break; }
+            if let Ok(mut guard) = tun_icmp.writable().await {
+                let _ = guard.try_io(|inner| {
+                    let _ = unsafe { libc::write(inner.as_raw_fd(), icmp_pkt.as_ptr() as *const libc::c_void, icmp_pkt.len()) };
+                    Ok(())
+                });
+            }
+        }
+    });
+
+    // Wait for critical tasks to terminate
+    let _ = tokio::join!(upload_task, download_task, icmp_task);
+    
+    info!("VPN Loop tasks terminated.");
 }
 
 #[cfg(not(target_os = "android"))]

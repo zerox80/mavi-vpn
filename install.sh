@@ -466,13 +466,12 @@ CFG_NETWORK="10.8.0.0/24"
 CFG_DNS="1.1.1.1"
 CFG_QUIC_PORT="10443"
 CFG_TCP_PORT="4443"
-CFG_CENSORSHIP_RESISTANT=false
 CFG_MSS_CLAMPING=true
 
 run_questionnaire() {
 
     # --- Step 1: Domain ---
-    print_step 1 9 "Server Domain"
+    print_step 1 8 "Server Domain"
     echo -e "  ${DIM}Enter the domain name or IP address that clients will connect to.${NC}"
     echo -e "  ${DIM}Example: vpn.example.com or 203.0.113.10${NC}"
     echo ""
@@ -491,7 +490,7 @@ run_questionnaire() {
     print_ok "Domain: ${CFG_DOMAIN}"
 
     # --- Step 2: Let's Encrypt ---
-    print_step 2 9 "TLS Certificates"
+    print_step 2 8 "TLS Certificates"
     echo -e "  ${DIM}Let's Encrypt provides free, trusted TLS certificates.${NC}"
     echo -e "  ${DIM}Requires: a valid domain name (not an IP) and port 80 open.${NC}"
     echo -e "  ${DIM}If you skip this, the server will generate a self-signed certificate.${NC}"
@@ -511,7 +510,7 @@ run_questionnaire() {
     fi
 
     # --- Step 3: Keycloak ---
-    print_step 3 9 "Authentication Method"
+    print_step 3 8 "Authentication Method"
     echo -e "  ${DIM}Keycloak provides Single Sign-On (SSO) with user management.${NC}"
     echo -e "  ${DIM}Users get their own accounts with passwords.${NC}"
     echo -e "  ${DIM}Without Keycloak, all users share a single pre-shared key.${NC}"
@@ -544,7 +543,7 @@ run_questionnaire() {
     fi
 
     # --- Step 4: Auth Token ---
-    print_step 4 9 "VPN Authentication Token"
+    print_step 4 8 "VPN Authentication Token"
     if [ "$CFG_KEYCLOAK" = true ]; then
         echo -e "  ${DIM}Since Keycloak is enabled, users will log in with their accounts.${NC}"
         echo -e "  ${DIM}A fallback token is still generated for emergency access.${NC}"
@@ -564,7 +563,7 @@ run_questionnaire() {
     fi
 
     # --- Step 5: Network ---
-    print_step 5 9 "VPN Network"
+    print_step 5 8 "VPN Network"
     echo -e "  ${DIM}The private IP range used inside the VPN tunnel.${NC}"
     echo -e "  ${DIM}Default is fine for most setups. Change only if it conflicts${NC}"
     echo -e "  ${DIM}with your existing local network.${NC}"
@@ -574,7 +573,7 @@ run_questionnaire() {
     print_ok "Network: ${CFG_NETWORK}"
 
     # --- Step 6: DNS ---
-    print_step 6 9 "DNS Server"
+    print_step 6 8 "DNS Server"
     echo -e "  ${DIM}The DNS server that connected clients will use.${NC}"
     echo ""
     echo "  1) Cloudflare   (1.1.1.1)     - Fast, privacy-focused"
@@ -595,7 +594,7 @@ run_questionnaire() {
     print_ok "DNS: ${CFG_DNS}"
 
     # --- Step 7: Ports ---
-    print_step 7 9 "Ports"
+    print_step 7 8 "Ports"
     echo -e "  ${DIM}QUIC port (UDP): The primary VPN transport, very fast.${NC}"
     echo -e "  ${DIM}TCP port:  HTTP/2 fallback for strict firewalls.${NC}"
     echo ""
@@ -622,22 +621,8 @@ run_questionnaire() {
 
     print_ok "QUIC: ${CFG_QUIC_PORT}/udp, TCP: ${CFG_TCP_PORT}/tcp"
 
-    # --- Step 8: Censorship Resistance ---
-    print_step 8 9 "Censorship Resistance"
-    echo -e "  ${DIM}When enabled, the VPN server disguises itself as a normal${NC}"
-    echo -e "  ${DIM}HTTP/3 web server. Helps bypass deep packet inspection.${NC}"
-    echo -e "  ${DIM}Only enable if you're in a censored network.${NC}"
-    echo ""
-
-    if ask_yn "Enable censorship resistance?" "n"; then
-        CFG_CENSORSHIP_RESISTANT=true
-    else
-        CFG_CENSORSHIP_RESISTANT=false
-    fi
-    print_ok "Censorship resistance: ${CFG_CENSORSHIP_RESISTANT}"
-
-    # --- Step 9: MSS Clamping ---
-    print_step 9 9 "TCP MSS Clamping"
+    # --- Step 8: MSS Clamping ---
+    print_step 8 8 "TCP MSS Clamping"
     echo -e "  ${DIM}Prevents fragmentation issues in the VPN tunnel.${NC}"
     echo -e "  ${DIM}Recommended to keep enabled.${NC}"
     echo ""
@@ -674,7 +659,6 @@ print_summary() {
     printf "  │  %-20s %-35s│\n" "Network:" "$CFG_NETWORK"
     printf "  │  %-20s %-35s│\n" "DNS:" "$CFG_DNS"
     printf "  │  %-20s %-35s│\n" "Ports:" "QUIC ${CFG_QUIC_PORT}/udp, TCP ${CFG_TCP_PORT}/tcp"
-    printf "  │  %-20s %-35s│\n" "Censorship Resist.:" "$CFG_CENSORSHIP_RESISTANT"
     printf "  │  %-20s %-35s│\n" "MSS Clamping:" "$CFG_MSS_CLAMPING"
     echo "  └────────────────────────────────────────────────────────┘"
     echo -e "${NC}"
@@ -742,7 +726,6 @@ VPN_CERT=${cert_path}
 VPN_KEY=${key_path}
 
 # Features
-VPN_CENSORSHIP_RESISTANT=${CFG_CENSORSHIP_RESISTANT}
 VPN_MSS_CLAMPING=${CFG_MSS_CLAMPING}
 
 # Domain (used by Traefik/Keycloak)
@@ -864,8 +847,8 @@ generate_config_code() {
     fi
 
     local json
-    json=$(printf '{"v":1,"endpoint":"%s:%s","cert_pin":"%s","cr":%s,"tcp":false,"kc":%s%s}' \
-        "$CFG_DOMAIN" "$CFG_QUIC_PORT" "$cert_pin" "$CFG_CENSORSHIP_RESISTANT" "$kc_bool" "$kc_fields")
+    json=$(printf '{"v":1,"endpoint":"%s:%s","cert_pin":"%s","tcp":false,"kc":%s%s}' \
+        "$CFG_DOMAIN" "$CFG_QUIC_PORT" "$cert_pin" "$kc_bool" "$kc_fields")
 
     # Base64url encode (URL-safe, no padding)
     local encoded

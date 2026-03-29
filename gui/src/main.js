@@ -228,7 +228,6 @@ function readSettings() {
     endpoint:              document.getElementById('endpoint').value.trim(),
     token:                 document.getElementById('token').value.trim(),
     cert_pin:              document.getElementById('cert_pin').value.trim(),
-    censorship_resistant:  document.getElementById('cr_mode').checked,
     prefer_tcp:            document.getElementById('prefer_tcp').checked,
     kc_auth:               kcAuth || null,
     kc_url:                kcAuth ? document.getElementById('kc_url').value.trim()       || null : null,
@@ -241,7 +240,6 @@ function fillSettings(config) {
   document.getElementById('endpoint').value    = config.endpoint  || '';
   document.getElementById('token').value       = config.token     || '';
   document.getElementById('cert_pin').value    = config.cert_pin  || '';
-  document.getElementById('cr_mode').checked   = !!config.censorship_resistant;
   document.getElementById('prefer_tcp').checked= !!config.prefer_tcp;
   document.getElementById('kc_auth').checked   = !!config.kc_auth;
   document.getElementById('kc_url').value      = config.kc_url      || '';

@@ -109,10 +109,6 @@ async fn main() -> Result<()> {
     let w_key = PrivateKey::from_der_pkcs8(key.secret_der().to_vec());
     let identity = Identity::new(w_chain, w_key);
     
-    if config.censorship_resistant {
-        info!("Censorship Resistant Mode ENABLED. Only WebTransport will be served.");
-    }
-    
     // Server-side QUIC transport tuning (ported from main branch, MTU=1400)
     let mut transport_config = quinn::TransportConfig::default();
     // Idle timeout & keepalive
@@ -391,15 +387,8 @@ async fn handle_quic_connection(
 ) -> Result<()> {
     // 1. Establish WebTransport session (Reject non-vpn paths)
     if session_req.path() != "/vpn" {
-        if config.censorship_resistant {
-           // We can just drop or reject the session cleanly. 
-           // Wtransport sends a normal HTTP error (e.g. 404).
-           session_req.not_found().await;
-           return Err(anyhow::anyhow!("Ignored probe to non-vpn path"));
-        } else {
-           session_req.forbidden().await;
-           return Err(anyhow::anyhow!("Unauthorized access: bad path"));
-        }
+        session_req.forbidden().await;
+        return Err(anyhow::anyhow!("Unauthorized access: bad path"));
     }
     
     let connection = session_req.accept().await?;

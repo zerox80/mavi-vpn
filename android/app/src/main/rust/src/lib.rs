@@ -51,8 +51,7 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
     token: JString<'local>,
     endpoint: JString<'local>,
     cert_pin: JString<'local>,
-    censorship_resistant: jni::sys::jboolean, // New Argument
-    prefer_tcp: jni::sys::jboolean, // New Argument
+    prefer_tcp: jni::sys::jboolean,
 ) -> jlong {
     // EnvUnowned is #[repr(transparent)] and FFI-safe.
     // We must convert it to a usable Env via AttachGuard.
@@ -72,7 +71,6 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
             let _ = rustls::crypto::ring::default_provider().install_default();
         });
     
-    info!("JNI init called. CR Mode: {}", censorship_resistant);
     let prefer_tcp_bool = prefer_tcp;
     
     // Helper to extract string safely
@@ -184,9 +182,9 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
         // 3. Connect and Handshake via WebTransport or TCP (with protected socket)
         let result = rt.block_on(async {
             if prefer_tcp_bool {
-                connect_and_handshake_tcp(socket, token, endpoint, cert_pin_str, censorship_resistant).await
+                connect_and_handshake_tcp(socket, token, endpoint, cert_pin_str).await
             } else {
-                connect_and_handshake_quic(socket, token, endpoint, cert_pin_str, censorship_resistant).await
+                connect_and_handshake_quic(socket, token, endpoint, cert_pin_str).await
             }
         });
 
@@ -340,10 +338,9 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_networkChanged<'local>(
 
 async fn connect_and_handshake_quic(
     socket: std::net::UdpSocket,
-    token: String, 
-    endpoint_str: String, 
+    token: String,
+    endpoint_str: String,
     cert_pin: String,
-    _censorship_resistant: bool,
 ) -> anyhow::Result<(ActiveConnection, ControlMessage)> {
     
     info!("Connect and Handshake started. Pin: {}", cert_pin);
@@ -440,10 +437,9 @@ async fn connect_and_handshake_quic(
 
 async fn connect_and_handshake_tcp(
     socket: std::net::UdpSocket,
-    token: String, 
-    endpoint_str: String, 
+    token: String,
+    endpoint_str: String,
     cert_pin: String,
-    _censorship_resistant: bool,
 ) -> anyhow::Result<(ActiveConnection, ControlMessage)> {
     info!("Connect and Handshake TCP started. Pin: {}", cert_pin);
 

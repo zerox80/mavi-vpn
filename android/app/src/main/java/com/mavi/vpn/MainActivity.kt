@@ -95,7 +95,6 @@ class MainActivity : ComponentActivity() {
                         initialPin = savedPin,
                         initialSplitMode = savedSplitMode,
                         initialSplitPackages = savedSplitPackages,
-                        initialCensorshipResistant = prefs.getBoolean("saved_censorship_resistant", false),
                         onConnect = { ip, port, token, pin, splitMode, splitPackages -> 
                             // Save credentials
                             val editor = prefs.edit()
@@ -216,17 +215,14 @@ fun AppNavigation(
     initialPin: String,
     initialSplitMode: String,
     initialSplitPackages: String,
-    initialCensorshipResistant: Boolean,
     onConnect: (String, String, String, String, String, String) -> Unit,
     onDisconnect: () -> Unit
 ) {
-    val context = LocalContext.current
     var currentScreen by remember { mutableStateOf<String>("home") }
-    
+
     // State to hold settings between screens
     var splitMode by remember { mutableStateOf<String>(initialSplitMode) }
     var splitPackages by remember { mutableStateOf<String>(initialSplitPackages) }
-    var censorshipResistant by remember { mutableStateOf<Boolean>(initialCensorshipResistant) }
 
     if (currentScreen == "home") {
         VpnScreen(
@@ -234,7 +230,7 @@ fun AppNavigation(
             initialPort = initialPort,
             initialToken = initialToken,
             initialPin = initialPin,
-            onConnect = { ip, port, token, pin -> 
+            onConnect = { ip, port, token, pin ->
                 onConnect(ip, port, token, pin, splitMode, splitPackages)
             },
             onDisconnect = onDisconnect,
@@ -244,16 +240,9 @@ fun AppNavigation(
         SettingsScreen(
             initialMode = splitMode,
             initialSelection = splitPackages,
-            initialCensorshipResistant = censorshipResistant,
-            onBack = { mode, pkgs, crMode -> 
+            onBack = { mode, pkgs ->
                 splitMode = mode
                 splitPackages = pkgs
-                censorshipResistant = crMode
-                
-                // Save CR Mode to Prefs
-                val prefs = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
-                prefs.edit().putBoolean("saved_censorship_resistant", crMode).apply()
-                
                 currentScreen = "home"
             }
         )
@@ -604,12 +593,10 @@ data class InstalledApp(
 fun SettingsScreen(
     initialMode: String, // "include" or "exclude"
     initialSelection: String, // comma separated packages
-    initialCensorshipResistant: Boolean,
-    onBack: (String, String, Boolean) -> Unit
+    onBack: (String, String) -> Unit
 ) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf<String>(initialMode) } // "include", "exclude"
-    var censorshipResistant by remember { mutableStateOf<Boolean>(initialCensorshipResistant) }
     
     val selectedPackages = remember { 
         mutableStateListOf<String>().apply { 
@@ -667,7 +654,7 @@ fun SettingsScreen(
                 .fillMaxWidth()
                 .padding(bottom = 16.dp)
         ) {
-            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant) }) {
+            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(",")) }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
             Text(
@@ -679,42 +666,6 @@ fun SettingsScreen(
             )
         }
         
-        // --- Censorship Resistant Toggle ---
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Censorship Resistant Mode",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-                Text(
-                    text = "Obfuscate traffic as HTTP/3 to bypass firewalls.",
-                    color = Color.Gray,
-                    fontSize = 12.sp
-                )
-            }
-            Switch(
-                checked = censorshipResistant,
-                onCheckedChange = { censorshipResistant = it },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = Color(0xFF007AFF),
-                    uncheckedThumbColor = Color.Gray,
-                    uncheckedTrackColor = Color.DarkGray
-                )
-            )
-        }
-        
-        Spacer(modifier = Modifier.height(16.dp))
-
         // --- Battery Optimization Request ---
         Row(
             modifier = Modifier
@@ -851,7 +802,7 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(16.dp))
         
         Button(
-            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant) },
+            onClick = { onBack(mode, selectedPackages.joinToString(",")) },
             modifier = Modifier.fillMaxWidth().height(50.dp),
             shape = RoundedCornerShape(12.dp)
         ) {

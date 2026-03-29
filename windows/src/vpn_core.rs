@@ -125,7 +125,6 @@ async fn run_session(
         config.token.clone(),
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
-        config.censorship_resistant,
     ).await?;
 
     // 2. Extract Network Configuration
@@ -256,7 +255,6 @@ async fn connect_and_handshake(
     token: String,
     endpoint_str: String,
     cert_pin: Vec<u8>,
-    _censorship_resistant: bool,
 ) -> Result<(wtransport::Connection, ControlMessage)> {
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));

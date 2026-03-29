@@ -92,7 +92,6 @@ async fn run_session(
         config.token.clone(),
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
-        config.censorship_resistant,
     )
     .await?;
 
@@ -472,7 +471,6 @@ async fn connect_and_handshake(
     token: String,
     endpoint_str: String,
     cert_pin: Vec<u8>,
-    _censorship_resistant: bool,
 ) -> Result<(wtransport::Connection, ControlMessage)> {
     // Transport tuning (matches Windows client + server config)
     let mut transport_config = quinn::TransportConfig::default();

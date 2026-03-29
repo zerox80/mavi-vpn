@@ -30,8 +30,6 @@ struct ConfigCodeV1 {
     endpoint: String,
     /// SHA-256 certificate fingerprint (hex).
     cert_pin: String,
-    /// Censorship resistant mode.
-    cr: bool,
     /// Prefer HTTP/2 TCP fallback.
     tcp: bool,
     /// Keycloak authentication enabled.
@@ -84,7 +82,6 @@ pub fn encode_config_code(config: &Config) -> String {
         v: 1,
         endpoint: config.endpoint.clone(),
         cert_pin: config.cert_pin.clone(),
-        cr: config.censorship_resistant,
         tcp: config.prefer_tcp,
         kc,
         kc_url: if kc { config.kc_url.clone() } else { None },
@@ -124,7 +121,6 @@ pub fn decode_config_code(code: &str) -> Result<Config, ConfigCodeError> {
         endpoint: v1.endpoint,
         token: String::new(),
         cert_pin: v1.cert_pin,
-        censorship_resistant: v1.cr,
         prefer_tcp: v1.tcp,
         kc_auth: if v1.kc { Some(true) } else { Some(false) },
         kc_url: v1.kc_url,
@@ -143,7 +139,6 @@ mod tests {
             endpoint: "vpn.example.com:4433".into(),
             token: "secret_token".into(),
             cert_pin: "abcdef1234567890".into(),
-            censorship_resistant: false,
             prefer_tcp: false,
             kc_auth: Some(false),
             kc_url: None,
@@ -157,7 +152,6 @@ mod tests {
         let decoded = decode_config_code(&code).unwrap();
         assert_eq!(decoded.endpoint, config.endpoint);
         assert_eq!(decoded.cert_pin, config.cert_pin);
-        assert_eq!(decoded.censorship_resistant, config.censorship_resistant);
         assert_eq!(decoded.prefer_tcp, config.prefer_tcp);
         assert_eq!(decoded.kc_auth, Some(false));
         // Token must be empty after decode
@@ -170,7 +164,6 @@ mod tests {
             endpoint: "vpn.mycompany.de:4433".into(),
             token: "jwt_would_be_here".into(),
             cert_pin: "ff00ff00".into(),
-            censorship_resistant: true,
             prefer_tcp: true,
             kc_auth: Some(true),
             kc_url: Some("https://auth.mycompany.de".into()),
@@ -183,7 +176,6 @@ mod tests {
 
         assert_eq!(decoded.endpoint, config.endpoint);
         assert_eq!(decoded.cert_pin, config.cert_pin);
-        assert!(decoded.censorship_resistant);
         assert!(decoded.prefer_tcp);
         assert_eq!(decoded.kc_auth, Some(true));
         assert_eq!(decoded.kc_url.as_deref(), Some("https://auth.mycompany.de"));

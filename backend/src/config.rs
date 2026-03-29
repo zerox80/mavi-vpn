@@ -55,15 +55,6 @@ pub struct Config {
     #[arg(long, env = "VPN_MTU", default_value = "1280")]
     pub mtu: u16,
 
-    /// Enable Layer 7 Obfuscation (Probe Resistance).
-    ///
-    /// When enabled:
-    /// 1. The server uses ALPN `h3` (pretending to be standard HTTP/3).
-    /// 2. Unauthorized access attempts receive a fake `nginx` welcome page (HTTP/3 200 OK)
-    ///    instead of a simple connection reset. This defeats active probing from firewalls.
-    #[arg(long, env = "VPN_CENSORSHIP_RESISTANT", default_value = "false")]
-    pub censorship_resistant: bool,
-
     /// Enable TCP MSS Clamping.
     ///
     /// Rewrites the Maximum Segment Size (MSS) in TCP headers to ensure TCP

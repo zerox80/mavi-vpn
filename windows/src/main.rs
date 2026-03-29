@@ -187,7 +187,6 @@ async fn load_or_prompt_config() -> Result<Config> {
         } else {
             println!("  Token: {}...", &saved.token.chars().take(8).collect::<String>());
         }
-        println!("  CR Mode: {}", if saved.censorship_resistant { "Ja" } else { "Nein" });
         println!();
         
         print!("Diese Konfiguration verwenden? [J/n]: ");
@@ -273,11 +272,6 @@ async fn prompt_new_config() -> Result<Config> {
     stdout.flush()?;
     let cert_pin = read_line()?;
 
-    print!("Censorship Resistant Mode? [j/N]: ");
-    stdout.flush()?;
-    let cr_input = read_line()?.to_lowercase();
-    let censorship_resistant = cr_input == "j" || cr_input == "ja" || cr_input == "y" || cr_input == "yes";
-
     print!("Prefer TCP / HTTP2 Fallback? (For strict networks) [j/N]: ");
     stdout.flush()?;
     let tcp_input = read_line()?.to_lowercase();
@@ -289,7 +283,6 @@ async fn prompt_new_config() -> Result<Config> {
         endpoint,
         token,
         cert_pin,
-        censorship_resistant,
         prefer_tcp,
         kc_auth,
         kc_url: saved_kc_url,

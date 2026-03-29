@@ -396,10 +396,6 @@ async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Config>
                 &saved.token.chars().take(8).collect::<String>()
             );
         }
-        println!(
-            "  CR Mode: {}",
-            if saved.censorship_resistant { "Yes" } else { "No" }
-        );
         println!();
 
         print!("Use this configuration? [Y/n]: ");
@@ -482,18 +478,13 @@ async fn prompt_new_config() -> Result<Config> {
     stdout.flush()?;
     let cert_pin = read_line()?;
 
-    print!("Censorship resistant mode? [y/N]: ");
-    stdout.flush()?;
-    let cr_input = read_line()?.to_lowercase();
-    let censorship_resistant = cr_input == "y" || cr_input == "yes";
-
     println!();
 
     Ok(Config {
         endpoint,
         token,
         cert_pin,
-        censorship_resistant,
+        prefer_tcp: false,
         kc_auth,
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,

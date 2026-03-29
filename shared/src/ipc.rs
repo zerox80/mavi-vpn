@@ -23,8 +23,6 @@ pub struct Config {
     pub token: String,
     /// SHA-256 fingerprint (hex) of the server's TLS certificate.
     pub cert_pin: String,
-    /// Enable Layer 7 obfuscation (pretend to be HTTP/3).
-    pub censorship_resistant: bool,
     /// Prefer HTTP/2 over TCP instead of QUIC over UDP.
     #[serde(default)]
     pub prefer_tcp: bool,

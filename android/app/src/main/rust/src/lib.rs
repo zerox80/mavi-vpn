@@ -399,8 +399,9 @@ async fn connect_and_handshake(
         .next()
         .ok_or(anyhow::anyhow!("Invalid address"))?;
 
-    // Rule 2: Hard-pinned to 1360 Payload as requested.
-    // This allows 1280 TUN packets to pass with zero overhead issues on 1460 networks.
+    // Rule 2: Outgoing QUIC Payload (Initial MTU) MUST be 1360.
+    // IPv4 Wire: 1360 + 20 (IP) + 8 (UDP) = 1388 bytes.
+    // IPv6 Wire: 1360 + 40 (IP) + 8 (UDP) = 1408 bytes.
     let quic_mtu = 1360;
     info!("Hard-pinning QUIC MTU: 1360 (Target Wire: 1388-1408)");
 
@@ -417,9 +418,13 @@ async fn connect_and_handshake(
     // Enable Segmentation Offload (GSO) for higher throughput
     transport_config.enable_segmentation_offload(true);
 
+    // Congestion Control: Use BBR for higher bandwidth and resistance to loss/jitter
+    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+
     // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
-    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
+    // Increased to 4MB to match Backend and prevent bottlenecks during bursts
+    transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); // 4MB
+    transport_config.datagram_send_buffer_size(4 * 1024 * 1024); // 4MB
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

@@ -2,7 +2,7 @@ use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, V
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 pub struct KeycloakValidator {
     url: String,

@@ -15,7 +15,8 @@ set -euo pipefail
 # Constants
 # =============================================================================
 
-REPO_URL="https://github.com/mavi-vpn/mavi-vpn.git"
+REPO_URL="https://github.com/zerox80/mavi-vpn.git"
+REPO_BRANCH="beta"
 INSTALL_DIR="/opt/mavi-vpn"
 BACKEND_DIR="${INSTALL_DIR}/backend"
 
@@ -469,8 +470,8 @@ CFG_KC_AUTH_DOMAIN=""
 CFG_AUTH_TOKEN=""
 CFG_NETWORK="10.8.0.0/24"
 CFG_DNS="1.1.1.1"
-CFG_QUIC_PORT="4433"
-CFG_TCP_PORT="443"
+CFG_QUIC_PORT="10443"
+CFG_TCP_PORT="4443"
 CFG_CENSORSHIP_RESISTANT=false
 CFG_MSS_CLAMPING=true
 
@@ -605,8 +606,8 @@ run_questionnaire() {
     echo -e "  ${DIM}TCP port:  HTTP/2 fallback for strict firewalls.${NC}"
     echo ""
 
-    CFG_QUIC_PORT=$(ask "QUIC port (UDP)" "4433")
-    CFG_TCP_PORT=$(ask "TCP fallback port" "443")
+    CFG_QUIC_PORT=$(ask "QUIC port (UDP)" "10443")
+    CFG_TCP_PORT=$(ask "TCP fallback port" "4443")
 
     # Check for port conflicts
     if ss -tlnp 2>/dev/null | grep -q ":${CFG_TCP_PORT} "; then
@@ -685,13 +686,15 @@ setup_directory() {
     if [ -d "$INSTALL_DIR/.git" ]; then
         print_info "Repository already exists, pulling latest changes..."
         cd "$INSTALL_DIR"
-        git pull 2>/dev/null || print_warn "Git pull failed, using existing code"
+        git fetch origin 2>/dev/null
+        git checkout "$REPO_BRANCH" 2>/dev/null || true
+        git pull origin "$REPO_BRANCH" 2>/dev/null || print_warn "Git pull failed, using existing code"
     else
-        print_info "Cloning Mavi VPN repository..."
+        print_info "Cloning Mavi VPN repository (branch: ${REPO_BRANCH})..."
         rm -rf "$INSTALL_DIR" 2>/dev/null || true
-        git clone "$REPO_URL" "$INSTALL_DIR" 2>&1 | tail -2
+        git clone --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>&1 | tail -2
     fi
-    print_ok "Source code ready at ${INSTALL_DIR}"
+    print_ok "Source code ready at ${INSTALL_DIR} (branch: ${REPO_BRANCH})"
 }
 
 generate_env_file() {
@@ -706,6 +709,13 @@ generate_env_file() {
         cert_path="data/cert.pem"
         key_path="data/key.pem"
     fi
+    # If Traefik/Keycloak is active it occupies port 443 => TCP fallback on localhost only
+    local tcp_bind_addr
+    if [ "$CFG_KEYCLOAK" = true ]; then
+        tcp_bind_addr="127.0.0.1:${CFG_TCP_PORT}"
+    else
+        tcp_bind_addr="0.0.0.0:${CFG_TCP_PORT}"
+    fi
 
     cat > "$env_file" << ENVEOF
 # Mavi VPN Server Configuration
@@ -716,7 +726,7 @@ RUST_LOG=info
 
 # VPN Bind Addresses
 VPN_BIND_ADDR=0.0.0.0:${CFG_QUIC_PORT}
-VPN_BIND_ADDR_TCP=0.0.0.0:${CFG_TCP_PORT}
+VPN_BIND_ADDR_TCP=${tcp_bind_addr}
 
 # Authentication
 VPN_AUTH_TOKEN=${CFG_AUTH_TOKEN}
@@ -987,7 +997,28 @@ main() {
     print_info "Generating configuration..."
     generate_env_file
 
-    # 3. Let's Encrypt (if enabled)
+    # 3. Kernel tuning — persistent IP forwarding + large UDP buffers for QUIC
+    print_info "Applying kernel performance settings..."
+    # Enable IP forwarding (required for VPN NAT) — survive reboots
+    grep -qxF 'net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null \
+        || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+    grep -qxF 'net.ipv6.conf.all.forwarding=1' /etc/sysctl.conf 2>/dev/null \
+        || echo 'net.ipv6.conf.all.forwarding=1' >> /etc/sysctl.conf
+    # Large OS UDP socket buffers — critical for QUIC/WebTransport throughput
+    if ! grep -q 'net.core.rmem_max' /etc/sysctl.conf 2>/dev/null; then
+        cat >> /etc/sysctl.conf <<'SYSCTLEOF'
+# Mavi VPN: large UDP buffers for QUIC/WebTransport throughput
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.core.rmem_default=1048576
+net.core.wmem_default=1048576
+net.core.netdev_max_backlog=5000
+SYSCTLEOF
+    fi
+    sysctl -p /etc/sysctl.conf > /dev/null 2>&1 || true
+    print_ok "Kernel settings applied (ip_forward + QUIC UDP buffers)"
+
+    # 4. Let's Encrypt (if enabled)
     if [ "$CFG_LETSENCRYPT" = true ]; then
         print_info "Setting up Let's Encrypt..."
         if ! setup_letsencrypt "$CFG_DOMAIN" "$CFG_ACME_EMAIL"; then
@@ -995,6 +1026,18 @@ main() {
             # Update .env to use self-signed certs
             sed -i "s|VPN_CERT=.*|VPN_CERT=data/cert.pem|" "${BACKEND_DIR}/.env"
             sed -i "s|VPN_KEY=.*|VPN_KEY=data/key.pem|" "${BACKEND_DIR}/.env"
+        else
+            # Enable automatic certificate renewal
+            if systemctl list-timers 2>/dev/null | grep -q certbot; then
+                systemctl enable --now certbot.timer > /dev/null 2>&1
+                print_ok "Certbot auto-renewal timer enabled"
+            else
+                # Fallback: add cron job (runs daily at 03:00, restarts VPN after renewal)
+                if ! crontab -l 2>/dev/null | grep -q 'certbot renew'; then
+                    (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --post-hook 'cd ${BACKEND_DIR} && docker compose restart mavi-vpn'") | crontab -
+                    print_ok "Certbot auto-renewal cron job added (daily 03:00)"
+                fi
+            fi
         fi
     fi
 

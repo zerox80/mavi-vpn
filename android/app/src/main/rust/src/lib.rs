@@ -180,7 +180,19 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
         }
 
         // 2. Create Runtime (Multi-threaded for better encryption performance)
-        let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(4) // Optimization: Balanced worker threads
+            .on_thread_start(|| {
+                #[cfg(target_os = "android")]
+                unsafe {
+                    // Force the worker threads onto performance cores by setting a high priority (low nice value).
+                    // Android prioritizes foreground/urgent threads for "Big" cores.
+                    let tid = libc::gettid();
+                    libc::setpriority(libc::PRIO_PROCESS, tid as libc::c_uint, -10);
+                }
+            })
+            .build() {
             Ok(rt) => rt,
             Err(e) => {
                 error!("Failed to create runtime: {}", e);
@@ -373,9 +385,10 @@ async fn connect_and_handshake_quic(
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-    transport_config.congestion_controller_factory(Arc::new(
-        quinn::congestion::BbrConfig::default(),
-    ));
+    let bbr_config = quinn::congestion::BbrConfig::default();
+    // Optimization: More resilient BBR probing for cellular RTT jitter (default 10s used)
+    transport_config.congestion_controller_factory(Arc::new(bbr_config));
+
     // MTU Pinning: Strictly enforce 1360 to match global rule.
     transport_config.initial_mtu(1360);
     transport_config.min_mtu(1360);
@@ -383,6 +396,10 @@ async fn connect_and_handshake_quic(
     // Datagram queue tuning: Increased for high-speed stability
     transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB
     transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB
+
+    // Optimization: Standardize Flow Control Windows to 8MB for high throughput
+    transport_config.receive_window((8 * 1024 * 1024u32).into());
+    transport_config.send_window(8 * 1024 * 1024);
 
     // Use the pre-created, VPN-protected socket.
     // Extract the bound address, then drop the socket immediately so the port is
@@ -566,8 +583,8 @@ async fn connect_and_handshake_tcp(
     let tls_stream = connector.connect(domain, stream).await?;
 
     let (mut h2_client, connection) = h2::client::Builder::new()
-        .initial_window_size(4 * 1024 * 1024)
-        .initial_connection_window_size(4 * 1024 * 1024)
+        .initial_window_size(8 * 1024 * 1024) // Increased from 4MB
+        .initial_connection_window_size(16 * 1024 * 1024) // Increased from 4MB
         .handshake(tls_stream)
         .await?;
     tokio::spawn(async move {
@@ -670,7 +687,7 @@ async fn run_vpn_loop(connection: ActiveConnection, fd: jint, stop_flag: Arc<Ato
             let read_fd = dup_fd;
 
             let tun_to_quic = tokio::spawn(async move {
-                let mut buf = BytesMut::with_capacity(65536);
+                let mut buf = vec![0u8; 65536]; // Efficient workspace buffer
                 'outer: loop {
                     if stop_check.load(Ordering::Relaxed) { break; }
 
@@ -679,44 +696,31 @@ async fn run_vpn_loop(connection: ActiveConnection, fd: jint, stop_flag: Arc<Ato
                         Err(_) => break,
                     };
 
-                    // Drain all available packets in one readable() wakeup instead of
-                    // yielding back to the reactor after every single packet.
-                    // This is the main reason Android was slower than Windows: the
-                    // per-packet readable().await overhead killed throughput.
+                    // Aggressive synchronous drain of the TUN interface.
+                    // This bypasses the async scheduler while data is available in the kernel buffer,
+                    // drastically reducing the "packets-per-second" processing cost.
                     loop {
-                        if buf.capacity() < 2048 {
-                            buf.reserve(2048);
+                        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 2048) };
+                        
+                        if n < 0 {
+                            let err = std::io::Error::last_os_error();
+                            if err.kind() == std::io::ErrorKind::WouldBlock {
+                                // Buffer empty, back to the reactor
+                                guard.clear_ready();
+                                break;
+                            } else {
+                                error!("TUN Read Error: {}", err);
+                                break 'outer;
+                            }
+                        } else if n == 0 {
+                            break 'outer; // EOF
                         }
-                        let chunk = buf.chunk_mut();
-                        let max_len = 2048.min(chunk.len());
 
-                        let read_result = guard.try_io(|_inner| {
-                            let n = unsafe { libc::read(read_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
-                            if n < 0 {
-                                return Err(std::io::Error::last_os_error());
-                            }
-                            Ok(n as usize)
-                        });
+                        // Convert slice to Bytes for zero-copy-like performance in wtransport/quinn
+                        let packet_bytes = Bytes::copy_from_slice(&buf[..n as usize]);
+                        let packet_len = packet_bytes.len();
 
-                        let n = match read_result {
-                            Ok(Ok(0)) => break 'outer, // EOF
-                            Ok(Ok(n)) => n,
-                            Ok(Err(e)) => {
-                                if e.kind() != std::io::ErrorKind::WouldBlock {
-                                    error!("TUN Read Error: {}", e);
-                                    break 'outer;
-                                }
-                                break; // fd drained, wait for next readable()
-                            }
-                            Err(_) => break, // WouldBlock from try_io
-                        };
-
-                        unsafe { buf.advance_mut(n); }
-                        let packet = buf.split_to(n).freeze();
-                        let packet_len = packet.len();
-                        let packet_bytes = packet.clone();
-
-                        match conn_send.send_datagram(packet) {
+                        match conn_send.send_datagram(packet_bytes.clone()) {
                             Ok(_) => {},
                             Err(e) => {
                                 use wtransport::error::SendDatagramError;

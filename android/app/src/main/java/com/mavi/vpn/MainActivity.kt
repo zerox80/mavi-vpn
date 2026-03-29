@@ -44,9 +44,15 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.Drawable
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        /** Updated after OAuth without requiring activity recreate */
+        val freshTokenFlow = MutableStateFlow("")
+    }
 
     private var lastIp = ""
     private var lastPort = ""
@@ -166,8 +172,7 @@ class MainActivity : ComponentActivity() {
                     val token = OAuthHelper.exchangeCodeForToken(code, kcUrl, realm, clientId)
                     if (token != null) {
                         prefs.edit().putString("saved_token", token).apply()
-                        // Restart the UI with the new token
-                        recreate()
+                        MainActivity.freshTokenFlow.value = token
                     }
                 }
             }
@@ -276,10 +281,14 @@ fun VpnScreen(
     var serverIp by remember { mutableStateOf<String>(initialIp) }
     var serverPort by remember { mutableStateOf<String>(initialPort) }
     var authToken by remember { mutableStateOf<String>(initialToken) }
+    val freshToken by MainActivity.freshTokenFlow.collectAsState()
+    LaunchedEffect(freshToken) {
+        if (freshToken.isNotEmpty()) authToken = freshToken
+    }
     var certPin by remember { mutableStateOf<String>(initialPin) }
-    
-    // Keycloak & auth mode state
-    val prefs = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+
+    // Keycloak & auth mode state — wrapped in remember so it's not re-fetched on every recomposition
+    val prefs = remember { context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE) }
     var useKeycloak by remember { mutableStateOf(prefs.getBoolean("saved_use_keycloak", false)) }
     var kcUrl by remember { mutableStateOf<String>(prefs.getString("saved_kc_url", "") ?: "") }
     var kcRealm by remember { mutableStateOf<String>(prefs.getString("saved_kc_realm", "mavi-vpn") ?: "mavi-vpn") }
@@ -574,17 +583,19 @@ fun VpnScreen(
     }
 }
 
-// --- Helper to convert any Drawable to Bitmap ---
+// --- Helper to convert any Drawable to Bitmap, capped at ICON_SIZE_PX ---
+private const val ICON_SIZE_PX = 48
+
 fun drawableToBitmap(drawable: Drawable): Bitmap? {
     return try {
-        if (drawable is BitmapDrawable) {
-            return drawable.bitmap
+        if (drawable is BitmapDrawable && drawable.bitmap != null) {
+            val src = drawable.bitmap
+            return if (src.width == ICON_SIZE_PX && src.height == ICON_SIZE_PX) src
+            else Bitmap.createScaledBitmap(src, ICON_SIZE_PX, ICON_SIZE_PX, true)
         }
-        val width = if (drawable.intrinsicWidth > 0) drawable.intrinsicWidth else 48
-        val height = if (drawable.intrinsicHeight > 0) drawable.intrinsicHeight else 48
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val bitmap = Bitmap.createBitmap(ICON_SIZE_PX, ICON_SIZE_PX, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
-        drawable.setBounds(0, 0, canvas.width, canvas.height)
+        drawable.setBounds(0, 0, ICON_SIZE_PX, ICON_SIZE_PX)
         drawable.draw(canvas)
         bitmap
     } catch (e: Exception) {

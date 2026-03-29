@@ -18,7 +18,9 @@
       "Bash(powershell.exe -Command \"Set-Location 'C:\\\\Daten2\\\\mavi-vpn'; git show main:android/app/src/main/rust/src/lib.rs | Select-String -Pattern 'run_vpn_loop|tun_to_quic|readable|writable|receive_datagram|batch' | Select-Object -First 40\")",
       "Bash(cmd.exe /c \"cd /d C:\\\\Daten2\\\\mavi-vpn && git show main:android/app/src/main/rust/src/lib.rs 2>&1 | findstr /i readable\")",
       "Bash(cmd.exe /c \"cd /d C:\\\\Daten2\\\\mavi-vpn && git log --oneline -5 main 2>&1\")",
-      "Bash(cmd.exe /c \"where git 2>&1 && echo GIT_FOUND\")"
+      "Bash(cmd.exe /c \"where git 2>&1 && echo GIT_FOUND\")",
+      "Bash(find . -maxdepth 2 -type f -name *.md -o -name *.toml -o -name *.json -o -name *.yaml -o -name *.yml -o -name Makefile -o -name .cursorrules)",
+      "Bash(dir:*)"
     ]
   }
 }

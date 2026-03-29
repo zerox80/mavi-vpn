@@ -3,10 +3,12 @@ package com.mavi.vpn
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
+import android.util.Log
 import androidx.browser.customtabs.CustomTabsIntent
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -14,14 +16,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 object OAuthHelper {
-    private var codeVerifier: String? = null
+    @Volatile private var codeVerifier: String? = null
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .build()
+    }
     
     fun generatePKCE(): String {
         val sr = SecureRandom()
         val code = ByteArray(32)
         sr.nextBytes(code)
         val verifier = Base64.encodeToString(code, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-        codeVerifier = verifier
+        synchronized(OAuthHelper) { codeVerifier = verifier }
         
         val bytes = verifier.toByteArray(Charsets.US_ASCII)
         val md = MessageDigest.getInstance("SHA-256")
@@ -52,12 +61,15 @@ object OAuthHelper {
     }
 
     suspend fun exchangeCodeForToken(code: String, kcUrl: String, realm: String, clientId: String): String? = withContext(Dispatchers.IO) {
-        val verifier = codeVerifier ?: return@withContext null
+        val verifier = synchronized(OAuthHelper) {
+            val v = codeVerifier
+            codeVerifier = null
+            v
+        } ?: return@withContext null
         val redirectUri = "mavivpn://oauth"
-        
+
         val tokenUrl = "$kcUrl/realms/$realm/protocol/openid-connect/token"
-        
-        val client = OkHttpClient()
+
         val formBody = FormBody.Builder()
             .add("grant_type", "authorization_code")
             .add("client_id", clientId)
@@ -65,22 +77,19 @@ object OAuthHelper {
             .add("redirect_uri", redirectUri)
             .add("code_verifier", verifier)
             .build()
-            
+
         val request = Request.Builder()
             .url(tokenUrl)
             .post(formBody)
             .build()
-            
+
         try {
-            val response = client.newCall(request).execute()
-            val body = response.body?.string() ?: return@withContext null
-            if (response.isSuccessful) {
-                val json = JSONObject(body)
-                return@withContext json.getString("access_token")
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: return@withContext null
+                if (response.isSuccessful) JSONObject(body).getString("access_token") else null
             }
-            null
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("OAuthHelper", "Token exchange failed", e)
             null
         }
     }

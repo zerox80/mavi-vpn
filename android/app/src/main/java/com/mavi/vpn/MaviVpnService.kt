@@ -19,7 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 class MaviVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var thread: Thread? = null
+    @Volatile private var thread: Thread? = null
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var vpnSessionHandle: Long = 0
@@ -108,14 +108,27 @@ class MaviVpnService : VpnService() {
             thread = null
         }
 
+        // Unregister any previous callback to avoid leaks on re-entry
+        try {
+            if (connectivityManager != null && networkCallback != null) {
+                connectivityManager?.unregisterNetworkCallback(networkCallback!!)
+            }
+        } catch (e: Exception) {
+            Log.w("MaviVPN", "Error unregistering previous network callback", e)
+        }
+        networkCallback = null
+
         // Register Network Callback
         try {
             connectivityManager = getSystemService(ConnectivityManager::class.java)
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     Log.d("MaviVPN", "Network available: $network")
-                    if (vpnSessionHandle != 0L) {
-                         networkChanged(vpnSessionHandle)
+                    synchronized(vpnLock) {
+                        val handle = vpnSessionHandle
+                        if (handle != 0L) {
+                            networkChanged(handle)
+                        }
                     }
                 }
             }
@@ -144,24 +157,27 @@ class MaviVpnService : VpnService() {
         // Acquire WakeLock to keep VPN running during sleep
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MaviVPN::ServiceWakeLock")
-        wakeLock?.acquire(10 * 60 * 60 * 1000L) // 10 hour timeout as safety net
+        wakeLock?.acquire() // Released explicitly in stopVpn() / onDestroy()
 
         isRunning = true
         startForeground(1, notification)
 
         thread = Thread {
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
-            Log.d("MaviVPN", "Starting VPN Thread with high priority")
-            
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_FOREGROUND)
+            Log.d("MaviVPN", "VPN thread started")
+            // Read prefs once — values don't change during a session
+            val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+            val crMode = prefs.getBoolean("saved_censorship_resistant", false)
+            val preferTcp = prefs.getBoolean("saved_prefer_tcp", false)
+            val endpoint = "$ip:$port"
+            val splitPackagesList = splitPackages.split(",")
+                .mapNotNull { it.trim().takeIf { s -> s.isNotEmpty() } }
+
             while (isRunning) {
                 try {
-                    Log.d("MaviVPN", "Attempting connection to $ip:$port")
+                    Log.d("MaviVPN", "Attempting connection to $endpoint")
                     // 1. Init / Handshake
-                    val crMode = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
-                        .getBoolean("saved_censorship_resistant", false)
-                    val preferTcp = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
-                        .getBoolean("saved_prefer_tcp", false)
-                    val handle = init(this, token, "$ip:$port", certPin, crMode, preferTcp)
+                    val handle = init(this, token, endpoint, certPin, crMode, preferTcp)
                     if (handle == 0L) {
                         Log.e("MaviVPN", "Handshake failed. Retrying in 500ms...")
                         Thread.sleep(500)
@@ -174,7 +190,7 @@ class MaviVpnService : VpnService() {
                     try {
                         // 2. Get Config
                         val configJson = getConfig(handle)
-                        Log.d("MaviVPN", "Config Received: $configJson")
+                        Log.d("MaviVPN", "Config received (${configJson.length} bytes)")
                         val root = org.json.JSONObject(configJson)
                         // Check if wrapped in Config (which it is due to Rust Enum serialization)
                         val config = if (root.has("Config")) root.getJSONObject("Config") else root
@@ -217,10 +233,9 @@ class MaviVpnService : VpnService() {
 
                              // Split Tunneling (App based)
                              if (splitMode == "include" || splitMode == "exclude") {
-                                 val packages = splitPackages.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-                                 Log.d("MaviVPN", "Applying Split Tunneling: Mode=$splitMode, Packages=$packages")
-                                 
-                                 for (pkg in packages) {
+                                 Log.d("MaviVPN", "Applying Split Tunneling: Mode=$splitMode, Packages=$splitPackagesList")
+
+                                 for (pkg in splitPackagesList) {
                                      try {
                                           if (splitMode == "include") {
                                               builder.addAllowedApplication(pkg)
@@ -284,8 +299,7 @@ class MaviVpnService : VpnService() {
                         }
 
                     } catch (e: Exception) {
-                        Log.e("MaviVPN", "Error during VPN session: ${e.message}")
-                        e.printStackTrace()
+                        Log.e("MaviVPN", "Error during VPN session: ${e.message}", e)
                     } finally {
                         Log.d("MaviVPN", "Cleaning up VPN session for retry/stop")
                         
@@ -332,7 +346,7 @@ class MaviVpnService : VpnService() {
              try {
                  vpnInterface?.close()
              } catch (e: Exception) {
-                 e.printStackTrace()
+                 Log.w("MaviVPN", "Error closing VPN interface", e)
              }
              vpnInterface = null
         }

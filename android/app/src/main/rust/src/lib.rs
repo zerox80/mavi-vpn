@@ -14,7 +14,7 @@ use bytes::{Bytes, BytesMut, BufMut};
 use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use sha2::{Sha256, Digest};
-use tokio::io;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 #[cfg(target_os = "android")]
 use futures_util::FutureExt;
 use wtransport::{ClientConfig, Endpoint};

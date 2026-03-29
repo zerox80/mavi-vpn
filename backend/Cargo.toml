@@ -6,12 +6,16 @@ edition = "2021"
 [dependencies]
 tokio = { workspace = true }
 quinn = { workspace = true, default-features = false, features = ["rustls"] }
+wtransport = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
 tun = { version = "0.8", features = ["async"] }
 anyhow = { workspace = true }
 dotenv = "0.15"
+h2 = { workspace = true }
+tokio-rustls = { workspace = true }
+http = { workspace = true }
 bytes = { workspace = true }
 futures-util = "0.3"
 base64 = "0.22"
@@ -26,12 +30,12 @@ bincode = { workspace = true }
 etherparse = { workspace = true }
 constant_time_eq = "0.4"
 shared = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 socket2 = { workspace = true }
 libc = "0.2"
 mimalloc = "0.1.48"
-jsonwebtoken = "9.2"
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 serde_json = "1.0"
 

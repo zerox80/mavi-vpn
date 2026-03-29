@@ -25,6 +25,9 @@ pub struct Config {
     pub cert_pin: String,
     /// Enable Layer 7 obfuscation (pretend to be HTTP/3).
     pub censorship_resistant: bool,
+    /// Prefer HTTP/2 over TCP instead of QUIC over UDP.
+    #[serde(default)]
+    pub prefer_tcp: bool,
     /// Was Keycloak authentication used?
     pub kc_auth: Option<bool>,
     /// Keycloak Server URL.

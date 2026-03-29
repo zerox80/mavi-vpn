@@ -36,7 +36,7 @@ class MaviVpnService : VpnService() {
     }
 
     // Native methods implemented in Rust
-    private external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String, censorshipResistant: Boolean): Long
+    private external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String, censorshipResistant: Boolean, preferTcp: Boolean): Long
     private external fun getConfig(handle: Long): String
     private external fun startLoop(handle: Long, fd: Int)
     private external fun stop(handle: Long)
@@ -150,7 +150,8 @@ class MaviVpnService : VpnService() {
         startForeground(1, notification)
 
         thread = Thread {
-            Log.d("MaviVPN", "Starting VPN Thread")
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
+            Log.d("MaviVPN", "Starting VPN Thread with high priority")
             
             while (isRunning) {
                 try {
@@ -158,7 +159,9 @@ class MaviVpnService : VpnService() {
                     // 1. Init / Handshake
                     val crMode = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
                         .getBoolean("saved_censorship_resistant", false)
-                    val handle = init(this, token, "$ip:$port", certPin, crMode)
+                    val preferTcp = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+                        .getBoolean("saved_prefer_tcp", false)
+                    val handle = init(this, token, "$ip:$port", certPin, crMode, preferTcp)
                     if (handle == 0L) {
                         Log.e("MaviVPN", "Handshake failed. Retrying in 500ms...")
                         Thread.sleep(500)
@@ -232,7 +235,8 @@ class MaviVpnService : VpnService() {
 
 
                              builder.setSession("MaviVPN")
-                             // Set inner MTU to 1280 to comply with IPv6 minimum requirements
+                             // Inner tunnel MTU: 1280 (IPv6 minimum).
+                             // Outer QUIC/UDP packet = 1360 (strictly enforced in Rust).
                              builder.setMtu(1280)
 
                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

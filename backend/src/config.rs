@@ -12,6 +12,11 @@ pub struct Config {
     #[arg(long, env = "VPN_BIND_ADDR", default_value = "0.0.0.0:4433")]
     pub bind_addr: SocketAddr,
 
+    /// The public address and port the TCP HTTP/2 fallback server will listen on.
+    /// Often this is 443 to evade firewalls.
+    #[arg(long, env = "VPN_BIND_ADDR_TCP", default_value = "0.0.0.0:443")]
+    pub bind_addr_tcp: SocketAddr,
+
     /// Pre-shared authentication token. Clients must provide this exact string
     /// during the handshake to gain access. Use a long, random string for security.
     #[arg(long, env = "VPN_AUTH_TOKEN")]

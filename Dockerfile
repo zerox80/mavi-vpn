@@ -1,5 +1,5 @@
 # Builder Stage
-FROM rust:1.93-slim AS builder
+FROM rust:1.94-slim AS builder
 WORKDIR /app
 
 # Copy workspace files
@@ -8,6 +8,8 @@ COPY Cargo.toml ./
 # Remove non-server members from workspace for Docker build
 RUN sed -i '/android\/app\/src\/main\/rust/d' Cargo.toml
 RUN sed -i '/\"windows\"/d' Cargo.toml
+RUN sed -i '/\"linux\"/d' Cargo.toml
+RUN sed -i '/gui\/src-tauri/d' Cargo.toml
 
 COPY shared/Cargo.toml ./shared/Cargo.toml
 COPY backend/Cargo.toml ./backend/Cargo.toml

@@ -5,7 +5,20 @@
       "Bash(find /c/Daten2/mavi-vpn/android -type f \\\\\\(-name *.kt -o -name *.xml -o -name *.compose \\\\\\))",
       "Bash(find /c/Daten2/mavi-vpn/android -type f -name *.kt -o -name *.xml)",
       "Bash(grep -r \"preshared\\\\|kc_auth\\\\|keycloak.*auth\" /c/Daten2/mavi-vpn/gui/src --include=*.js --include=*.html)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(find /c/Daten/mavi-vpn/gui -type f \\\\\\(-name *.ts -o -name *.tsx -o -name *.vue -o -name *.js -o -name *.jsx \\\\\\))",
+      "Bash(xargs ls:*)",
+      "Bash(wc:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(python -c \"import sys,json; pkgs=json.load\\(sys.stdin\\)[''''packages'''']; [print\\(p[''''name'''']\\) for p in pkgs]\")",
+      "Bash(git.exe -C \"C:/Daten2/mavi-vpn\" log --oneline -10)",
+      "Bash(powershell.exe -Command \"cd 'C:\\\\Daten2\\\\mavi-vpn'; git log --oneline -10; git branch -a\")",
+      "Bash(powershell.exe -Command \"Set-Location 'C:\\\\Daten2\\\\mavi-vpn'; git show main:android/app/src/main/rust/src/lib.rs | Select-String -Pattern 'run_vpn_loop|tun_to_quic|readable|writable|receive_datagram|batch' | Select-Object -First 40\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\Daten2\\\\mavi-vpn && git show main:android/app/src/main/rust/src/lib.rs 2>&1 | findstr /i readable\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\Daten2\\\\mavi-vpn && git log --oneline -5 main 2>&1\")",
+      "Bash(cmd.exe /c \"where git 2>&1 && echo GIT_FOUND\")"
     ]
   }
 }

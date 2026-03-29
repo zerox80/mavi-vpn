@@ -1,6 +1,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 use serde::{Deserialize, Serialize};
 
+pub mod config_code;
 pub mod icmp;
 pub mod ipc;
 

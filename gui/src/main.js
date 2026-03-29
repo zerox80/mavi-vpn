@@ -48,6 +48,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('settings-toggle').addEventListener('click', () => toggleSettings());
   document.getElementById('save-btn').addEventListener('click', () => saveSettings());
   document.getElementById('kc_auth').addEventListener('change', () => toggleKeycloak());
+  document.getElementById('import-btn').addEventListener('click', () => importConfig());
+  document.getElementById('export-btn').addEventListener('click', () => exportConfig());
+  document.getElementById('copy-btn').addEventListener('click', () => copyConfigCode());
 
   // Load saved config into settings fields
   try {
@@ -100,7 +103,7 @@ async function toggleConnection() {
 async function connect() {
   const config = readSettings();
   if (!config.endpoint) { showError('Please enter a server endpoint in Settings.'); return; }
-  if (!config.cert_pin) { showError('Please enter a certificate PIN in Settings.'); return; }
+  // cert_pin is optional. If empty, native system root CAs are used.
   if (!config.token && !config.kc_auth) { showError('Please provide an auth token or enable Keycloak.'); return; }
 
   hideError();
@@ -226,6 +229,7 @@ function readSettings() {
     token:                 document.getElementById('token').value.trim(),
     cert_pin:              document.getElementById('cert_pin').value.trim(),
     censorship_resistant:  document.getElementById('cr_mode').checked,
+    prefer_tcp:            document.getElementById('prefer_tcp').checked,
     kc_auth:               kcAuth || null,
     kc_url:                kcAuth ? document.getElementById('kc_url').value.trim()       || null : null,
     kc_realm:              kcAuth ? document.getElementById('kc_realm').value.trim()     || null : null,
@@ -238,6 +242,7 @@ function fillSettings(config) {
   document.getElementById('token').value       = config.token     || '';
   document.getElementById('cert_pin').value    = config.cert_pin  || '';
   document.getElementById('cr_mode').checked   = !!config.censorship_resistant;
+  document.getElementById('prefer_tcp').checked= !!config.prefer_tcp;
   document.getElementById('kc_auth').checked   = !!config.kc_auth;
   document.getElementById('kc_url').value      = config.kc_url      || '';
   document.getElementById('kc_realm').value    = config.kc_realm    || '';
@@ -294,4 +299,50 @@ function showSuccess(msg) {
 
 function hideError() {
   document.getElementById('error-box').classList.add('hidden');
+}
+
+// =============================================================================
+// Config Code Import / Export
+// =============================================================================
+
+async function importConfig() {
+  const code = document.getElementById('config_code_input').value.trim();
+  if (!code) { showError('Please paste a config code (mavi://...).'); return; }
+
+  try {
+    const config = await invoke('import_config_code', { code });
+    fillSettings(config);
+    await invoke('save_config', { config });
+    document.getElementById('config_code_input').value = '';
+    if (config.kc_auth) {
+      showSuccess('Config imported! Click Connect to log in via Keycloak.');
+    } else {
+      showSuccess('Config imported! Enter your token, then click Connect.');
+      document.getElementById('token').focus();
+    }
+  } catch (e) {
+    showError('Import failed: ' + e);
+  }
+}
+
+async function exportConfig() {
+  const config = readSettings();
+  try {
+    const code = await invoke('export_config_code', { config });
+    document.getElementById('config_code_output').value = code;
+    document.getElementById('export-output').classList.remove('hidden');
+  } catch (e) {
+    showError('Export failed: ' + e);
+  }
+}
+
+async function copyConfigCode() {
+  const code = document.getElementById('config_code_output').value;
+  try {
+    await navigator.clipboard.writeText(code);
+    showSuccess('Config code copied to clipboard!');
+  } catch (_) {
+    // Fallback: select text for manual copy
+    document.getElementById('config_code_output').select();
+  }
 }

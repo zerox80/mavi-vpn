@@ -10,6 +10,7 @@
   <div id="app">
     <!-- Header -->
     <header>
+      <img src="logo.svg" alt="Mavi VPN" class="header-logo" />
       <h1>Mavi VPN</h1>
       <div id="service-badge" class="badge badge-offline">Service Offline</div>
     </header>
@@ -52,6 +53,10 @@
         <input type="checkbox" id="cr_mode" />
         <label for="cr_mode">Censorship Resistant Mode</label>
       </div>
+      <div class="field checkbox-field">
+        <input type="checkbox" id="prefer_tcp" />
+        <label for="prefer_tcp">Use HTTP/2 TCP Fallback</label>
+      </div>
 
       <hr />
       <div class="field checkbox-field">
@@ -74,6 +79,25 @@
       </div>
 
       <button id="save-btn" class="btn btn-save">Save Settings</button>
+
+      <hr />
+      <div class="quick-setup">
+        <h3>Quick Setup</h3>
+        <div class="field">
+          <label for="config_code_input">Config Code</label>
+          <div class="import-row">
+            <input type="text" id="config_code_input" placeholder="mavi://..." />
+            <button id="import-btn" class="btn btn-small">Import</button>
+          </div>
+        </div>
+        <div class="field">
+          <button id="export-btn" class="btn btn-small btn-secondary">Export Config</button>
+          <div id="export-output" class="export-output hidden">
+            <input type="text" id="config_code_output" readonly />
+            <button id="copy-btn" class="btn btn-small">Copy</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 

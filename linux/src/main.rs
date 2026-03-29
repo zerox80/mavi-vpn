@@ -91,6 +91,41 @@ fn main() {
             Ok(())
         }
 
+        Some("import") => {
+            let code = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!("Usage: mavi-vpn import <mavi://...>")
+            })?;
+            let config = shared::config_code::decode_config_code(code)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let config_path = default_config_path();
+            save_config(&config, &config_path)?;
+            println!("\x1b[1;32mConfig imported successfully!\x1b[0m");
+            println!("  Endpoint:  {}", config.endpoint);
+            println!("  Cert PIN:  {}...", &config.cert_pin.chars().take(16).collect::<String>());
+            if config.kc_auth.unwrap_or(false) {
+                println!("  Auth:      Keycloak (SSO)");
+            } else {
+                println!("  Auth:      Token (enter it when connecting)");
+            }
+            println!("\nRun \x1b[1mmavi-vpn connect\x1b[0m to connect.");
+            Ok(())
+        }
+
+        Some("export") => {
+            let config_path = args
+                .iter()
+                .position(|a| a == "-c" || a == "--config")
+                .and_then(|i| args.get(i + 1))
+                .map(PathBuf::from)
+                .unwrap_or_else(default_config_path);
+            let config = load_config(&config_path).ok_or_else(|| {
+                anyhow::anyhow!("No config found at {}", config_path.display())
+            })?;
+            let code = shared::config_code::encode_config_code(&config);
+            println!("{}", code);
+            Ok(())
+        }
+
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
             Ok(())
@@ -270,6 +305,10 @@ fn print_help() {
     println!("  daemon                Start IPC daemon (requires root)");
     println!("  start                 Send connect to running daemon");
     println!("  stop                  Send disconnect to running daemon");
+    println!();
+    println!("Config sharing:");
+    println!("  import <mavi://...>   Import config from a config code");
+    println!("  export                Export current config as a config code");
     println!();
     println!("Other:");
     println!("  status                Check VPN status");

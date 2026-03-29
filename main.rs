@@ -1,4 +1,4 @@
-//! # Mavi VPN Windows Core
+﻿//! # Mavi VPN Windows Core
 //! 
 //! Implements the core VPN logic for Windows, including:
 //! - WinTUN adapter management.
@@ -9,8 +9,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use sha2::{Sha256, Digest};
-use wtransport::{Endpoint, ClientConfig};
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 use shared::{icmp, ControlMessage};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
@@ -47,11 +46,7 @@ fn extract_wintun_dll() -> Result<PathBuf> {
 /// Entry point for the VPN runner. Manages the reconnection loop and WinTUN lifecycle.
 pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
     // 1. Prepare environment
-    let cert_pin_bytes = if config.cert_pin.is_empty() {
-        Vec::new()
-    } else {
-        decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?
-    };
+    let cert_pin_bytes = decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
     let dll_path = extract_wintun_dll()?;
     let wintun = unsafe { wintun::load_from_path(&dll_path) }.context("Failed to load wintun.dll")?;
 
@@ -86,7 +81,7 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
         backoff = next_backoff;
     }
 
-    // 4. Cleanup – routes first, then DNS/NRPT
+    // 4. Cleanup ÔÇô routes first, then DNS/NRPT
     cleanup_routes(None);
     remove_nrpt_dns_rule();
     info!("VPN Service Stopped.");
@@ -107,7 +102,23 @@ fn get_or_create_adapter(wintun: &wintun::Wintun) -> Result<Arc<Adapter>> {
         .context("Failed to create WinTUN adapter. Admin privileges required.")
 }
 
+/// Creates a UDP socket configured for both IPv4 and IPv6 (dual-stack).
+fn create_udp_socket() -> Result<std::net::UdpSocket> {
+    let socket2_sock = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
 
+    // V6ONLY = false allows this socket to receive IPv4 traffic as well.
+    socket2_sock.set_only_v6(false)?;
+    socket2_sock.bind(&socket2::SockAddr::from(std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0)))?;
+    // Set larger socket buffers for high-throughput stability on Windows (4MB for GSO bursts)
+    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024); 
+    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); 
+
+    Ok(socket2_sock.into())
+}
 
 /// Manages a single active VPN session (handshake + packet pumping).
 async fn run_session(
@@ -116,12 +127,11 @@ async fn run_session(
     adapter: &Arc<Adapter>,
     global_running: &Arc<AtomicBool>,
 ) -> Result<SessionEnd> {
-    if config.prefer_tcp {
-        return run_session_tcp(config, cert_pin_bytes, adapter, global_running).await;
-    }
+    let socket = create_udp_socket()?;
 
     // 1. QUIC Handshake & Auth
     let (connection, server_config) = connect_and_handshake(
+        socket,
         config.token.clone(),
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
@@ -189,7 +199,7 @@ async fn run_session(
                 Ok(Some(packet)) => {
                     let data = Bytes::copy_from_slice(packet.bytes());
                     if let Err(e) = conn_quic.send_datagram(data) {
-                        if let wtransport::error::SendDatagramError::TooLarge = e {
+                        if matches!(e, quinn::SendDatagramError::TooLarge) {
                             // Synthesise ICMP PTB signal back to OS
                             let current_mtu = conn_quic.max_datagram_size().unwrap_or(1200) as u16;
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(packet.bytes(), current_mtu, Some(std::net::IpAddr::V4(gateway))) {
@@ -198,7 +208,7 @@ async fn run_session(
                                     session_tun.send_packet(reply);
                                 }
                             }
-                        } else if let wtransport::error::SendDatagramError::NotConnected = e { break; }
+                        } else if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) { break; }
                     }
                 }
                 Ok(None) => std::thread::sleep(Duration::from_micros(100)),
@@ -214,13 +224,12 @@ async fn run_session(
     let quic_to_tun = tokio::spawn(async move {
         loop {
             if !run_quic_in.load(Ordering::Relaxed) || !alive_quic_in.load(Ordering::Relaxed) { break; }
-            match connection.receive_datagram().await {
+            match connection.read_datagram().await {
                 Ok(data) => {
-                    let payload = data.payload();
-                    if payload.is_empty() { continue; }
-                    match session_quic_in.allocate_send_packet(payload.len() as u16) {
+                    if data.is_empty() { continue; }
+                    match session_quic_in.allocate_send_packet(data.len() as u16) {
                         Ok(mut packet) => {
-                            packet.bytes_mut().copy_from_slice(&payload);
+                            packet.bytes_mut().copy_from_slice(&data);
                             session_quic_in.send_packet(packet);
                         }
                         Err(e) if is_wintun_ring_full(&e) => {
@@ -253,78 +262,60 @@ fn is_wintun_ring_full(err: &wintun::Error) -> bool {
 
 /// QUIC connection setup with custom certificate pinning.
 async fn connect_and_handshake(
+    socket: std::net::UdpSocket,
     token: String,
     endpoint_str: String,
     cert_pin: Vec<u8>,
-    _censorship_resistant: bool,
-) -> Result<(wtransport::Connection, ControlMessage)> {
+    censorship_resistant: bool,
+) -> Result<(quinn::Connection, ControlMessage)> {
+    let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
+
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+
+    // CR mode: only h3 (looks like HTTP/3 to DPI).
+    // Normal mode: try both so it works regardless of server config.
+    client_crypto.alpn_protocols = if censorship_resistant {
+        vec![b"h3".to_vec()]
+    } else {
+        vec![b"mavivpn".to_vec(), b"h3".to_vec()]
+    };
+
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
     
+    // MTU PINNING: 1360 Wire MTU to support 1280 payload over QUIC/UDP/IP.
+    // GSO (segmentation offload) is enabled for maximum performance as requested.
     transport_config.mtu_discovery_config(None);
     transport_config.initial_mtu(1360);
     transport_config.min_mtu(1360);
     transport_config.enable_segmentation_offload(true);
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     
+    // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
 
-    let mut client_config = if cert_pin.is_empty() {
-        ClientConfig::builder()
-            .with_bind_default()
-            .with_native_certs()
-            .build()
-    } else {
-        let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
-
-        let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .dangerous()
-            .with_custom_certificate_verifier(verifier)
-            .with_no_client_auth();
-
-        // wtransport server (H3) only accepts the WebTransport ALPN. 
-        // We MUST propose WEBTRANSPORT_ALPN for a successful handshake.
-        client_crypto.alpn_protocols = vec![wtransport::tls::WEBTRANSPORT_ALPN.to_vec()];
-
-
-        ClientConfig::builder()
-            .with_bind_default()
-            .with_custom_tls(client_crypto)
-            .build()
-    };
-
-    client_config.quic_config_mut().transport_config(Arc::new(transport_config));
-        
-    let endpoint = Endpoint::client(client_config)?;
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
+    client_config.transport_config(Arc::new(transport_config));
+    let mut endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
+    endpoint.set_default_client_config(client_config);
 
     // Resolve endpoint and connect
-    let mut resolved_endpoint = endpoint_str.clone();
-    if !resolved_endpoint.contains(':') {
-        resolved_endpoint = format!("{}:10443", resolved_endpoint);
-    }
-
-    let addr = tokio::net::lookup_host(&resolved_endpoint).await?
-        .next()
-        .context("Failed to resolve endpoint")?;
-    
-    info!("Connecting to WebTransport endpoint {} (resolved: {})", resolved_endpoint, addr);
-    
-    let connect_url = format!("https://{}/vpn", resolved_endpoint);
-    let connection = endpoint.connect(&connect_url).await
-        .map_err(|e| {
-            error!("WebTransport handshake failed: {}. Ensure your Certificate PIN is correct and the server is reachable.", e);
-            e
-        })
-        .context("WebTransport handshake failed")?;
-
-    info!("WebTransport handshake OK, sending auth token ({} bytes)", token.len());
+    let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve endpoint")?;
+    let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
+    info!("Connecting to {} (resolved: {}, SNI: {})", endpoint_str, addr, server_name);
+    let connecting = endpoint.connect(addr, server_name).context("endpoint.connect() failed")?;
+    let connection = connecting.await.context("QUIC handshake failed (TLS/cert error?)")?;
+    info!("QUIC handshake OK, sending auth token ({} bytes)", token.len());
 
     // Perform application-level handshake
-    let (mut send, mut recv) = connection.open_bi().await?.await?;
+    let (mut send, mut recv) = connection.open_bi().await?;
     let auth_msg = ControlMessage::Auth { token };
     let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
     send.write_u32_le(bytes.len() as u32).await?;
@@ -350,12 +341,12 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let msg = format!("[FAIL] {} → {} {}", display, stdout, stderr);
+            let msg = format!("[FAIL] {} ÔåÆ {} {}", display, stdout, stderr);
             warn!(cmd = %msg);
             false
         }
         Err(e) => {
-            let msg = format!("[ERR] {} → {}", display, e);
+            let msg = format!("[ERR] {} ÔåÆ {}", display, e);
             warn!(cmd = %msg);
             false
         }
@@ -391,17 +382,17 @@ fn set_adapter_network_config(
     // 1. Ensure adapter is administratively up
     run_cmd("netsh", &["interface", "set", "interface", &adapter_name, "admin=enabled"]);
 
-    // 2. Set IPv4 address — positional syntax is the most reliable across Windows versions.
+    // 2. Set IPv4 address ÔÇö positional syntax is the most reliable across Windows versions.
     //    "netsh interface ipv4 set address <name> static <ip> <mask>"
-    //    Do NOT set gateway here — we add split routes manually.
+    //    Do NOT set gateway here ÔÇö we add split routes manually.
     if !run_cmd("netsh", &["interface", "ipv4", "set", "address", &adapter_name, "static", &ip_str, &mask_str]) {
         // Retry with "add" in case "set" fails on fresh adapter
         run_cmd("netsh", &["interface", "ipv4", "add", "address", &adapter_name, &ip_str, &mask_str]);
     }
 
     // Wait for Windows to register the on-link route for the new IP.
-    // 150ms is sufficient; 500ms was unnecessarily long.
-    std::thread::sleep(Duration::from_millis(150));
+    info!("Waiting for IP to register on adapter...");
+    std::thread::sleep(Duration::from_millis(500));
 
     // Verify the IP was actually set
     let verify = std::process::Command::new("netsh")
@@ -435,25 +426,18 @@ fn set_adapter_network_config(
     run_cmd("netsh", &["interface", "ipv4", "set", "subinterface", &adapter_name, &mtu_val, "store=active"]);
     run_cmd("netsh", &["interface", "ipv6", "set", "subinterface", &adapter_name, &mtu_val, "store=active"]);
 
-    // 6. Host exception FIRST — must run before split routes so that
+    // 6. Host exception FIRST ÔÇö must run before split routes so that
     //    Get-NetRoute still sees the real physical default route.
     let endpoint_ip = add_host_route_exception(endpoint);
 
-    // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 — override default route without deleting it.
-    if !run_cmd("route", &["add", "0.0.0.0",   "mask", "128.0.0.0", &gw_str, "metric", "5", "if", &if_str]) {
-        return Err(anyhow::anyhow!("Failed to apply routing rules. Please make sure to run Mavi VPN as Administrator!"));
-    }
+    // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 ÔÇö override default route without deleting it.
+    run_cmd("route", &["add", "0.0.0.0",   "mask", "128.0.0.0", &gw_str, "metric", "5", "if", &if_str]);
     run_cmd("route", &["add", "128.0.0.0", "mask", "128.0.0.0", &gw_str, "metric", "5", "if", &if_str]);
 
     if let Some(gv6) = gateway_v6 {
         let gv6_str = gv6.to_string();
         run_cmd("netsh", &["interface", "ipv6", "add", "route", "::/1",    &adapter_name, &gv6_str]);
         run_cmd("netsh", &["interface", "ipv6", "add", "route", "8000::/1", &adapter_name, &gv6_str]);
-    } else {
-        // Prevent IPv6 leak natively by blackholing IPv6 traffic into the VPN adapter
-        // so it doesn't bypass the tunnel on dual-stack machines.
-        run_cmd("netsh", &["interface", "ipv6", "add", "route", "::/1", &adapter_name]);
-        run_cmd("netsh", &["interface", "ipv6", "add", "route", "8000::/1", &adapter_name]);
     }
 
     // Verify routes were added
@@ -489,7 +473,21 @@ fn cleanup_routes(endpoint_ip: Option<&str>) {
     let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "delete", "route", "8000::/1", "MaviVPN"]).output();
 }
 
-
+fn set_adapter_ipv6(adapter: &Adapter, ip: Ipv6Addr, prefix_len: u8) -> Result<()> {
+    unsafe {
+        use windows_sys::Win32::NetworkManagement::IpHelper::*;
+        use windows_sys::Win32::Networking::WinSock::*;
+        let mut row: MIB_UNICASTIPADDRESS_ROW = std::mem::zeroed();
+        InitializeUnicastIpAddressEntry(&mut row);
+        row.InterfaceLuid = std::mem::transmute(adapter.get_luid());
+        row.Address.si_family = AF_INET6 as u16;
+        row.Address.Ipv6.sin6_addr.u.Byte = ip.octets();
+        row.OnLinkPrefixLength = prefix_len;
+        row.DadState = IpDadStatePreferred;
+        CreateUnicastIpAddressEntry(&row);
+    }
+    Ok(())
+}
 
 /// Routes the VPN server's own IP via the physical gateway rather than the tunnel.
 /// Returns the server IP string so the caller can clean it up later.
@@ -500,39 +498,37 @@ fn add_host_route_exception(endpoint: &str) -> Option<String> {
         .trim_start_matches('[').trim_end_matches(']')
         .to_string();
 
-    // Use `route PRINT 0.0.0.0` instead of PowerShell Get-NetRoute.
-    // PowerShell startup takes ~1s per invocation; route.exe is instant.
-    // We skip routes that go via the MaviVPN adapter (metric 5) to avoid
-    // picking up our own split-tunnel routes on reconnect.
-    let output = std::process::Command::new("route")
-        .args(["PRINT", "0.0.0.0"])
+    // Find the physical default gateway, explicitly excluding the VPN adapter
+    // (important on reconnect where VPN routes might still exist).
+    let ps = "Get-NetRoute -DestinationPrefix 0.0.0.0/0 -AddressFamily IPv4 \
+        | Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).InterfaceDescription -notlike '*WireGuard*' -and \
+          (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).Name -notlike 'MaviVPN*' } \
+        | Sort-Object { $_.RouteMetric + $_.InterfaceMetric } \
+        | Select-Object -First 1 -ExpandProperty NextHop";
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps])
         .output();
 
     if let Ok(out) = output {
-        let text = String::from_utf8_lossy(&out.stdout);
-        // Lines look like:  "         0.0.0.0          0.0.0.0    192.168.1.1    192.168.1.100      5"
-        for line in text.lines() {
-            let cols: Vec<&str> = line.split_whitespace().collect();
-            // Expect: dest mask gateway iface metric
-            if cols.len() >= 3 && cols[0] == "0.0.0.0" && cols[1] == "0.0.0.0" {
-                let gw = cols[2];
-                // Skip our own split-tunnel routes (metric 5 on the VPN adapter)
-                let metric: u32 = cols.get(4).and_then(|m| m.parse().ok()).unwrap_or(999);
-                if gw != "0.0.0.0" && metric != 5 {
-                    let _ = std::process::Command::new("route")
-                        .args(["add", &server_ip, "mask", "255.255.255.255", gw, "metric", "1"])
-                        .output();
-                    info!("Host exception: {} → {} (metric {})", server_ip, gw, metric);
-                    return Some(server_ip);
-                }
-            }
+        let gateway = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !gateway.is_empty() && gateway != "0.0.0.0" {
+            let _ = std::process::Command::new("route")
+                .args(["add", &server_ip, "mask", "255.255.255.255", &gateway, "metric", "1"])
+                .output();
+            info!("Host exception: {} ÔåÆ {}", server_ip, gateway);
+            return Some(server_ip);
         }
     }
     warn!("Could not determine physical gateway for host exception route");
     None
 }
 
-
+fn netmask_to_prefix_len(netmask: Ipv4Addr) -> Result<u8> {
+    let mask = u32::from_be_bytes(netmask.octets());
+    let prefix = mask.count_ones() as u8;
+    Ok(prefix)
+}
 
 const NRPT_COMMENT: &str = "MaviVPN";
 
@@ -565,10 +561,19 @@ fn set_nrpt_dns_rule(dns_v4: Ipv4Addr, dns_v6: Option<Ipv6Addr>) {
     // 3. Set VPN adapter to highest priority
     let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", "Get-NetAdapter -Name 'MaviVPN*' | Set-NetIPInterface -InterfaceMetric 1"]).output();
 
-    // 4. Flush DNS cache to pick up the new NRPT rules.
-    // NOTE: Removed Restart-Service Dnscache (~4s) and ipconfig /registerdns (~1s) —
-    // a simple flush is sufficient and saves several seconds on connect.
+    // 4. Suppress DNS registration on physical adapters to prevent them from being used
+    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
+        "Get-NetAdapter | Where-Object { $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue }"
+    ]).output();
+
+    // 5. Flush DNS cache and re-register to pick up the new NRPT rules
     let _ = std::process::Command::new("ipconfig").args(["/flushdns"]).output();
+    let _ = std::process::Command::new("ipconfig").args(["/registerdns"]).output();
+
+    // 6. Restart DNS Client service to ensure NRPT + SMHNR changes take effect
+    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
+        "Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue"
+    ]).output();
 
     info!("DNS leak prevention configured: NRPT + SMHNR disabled");
 }
@@ -649,199 +654,4 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> { self.supported.supported_schemes() }
-}
-
-async fn run_session_tcp(
-    config: &Config,
-    cert_pin_bytes: &[u8],
-    adapter: &Arc<Adapter>,
-    global_running: &Arc<AtomicBool>,
-) -> Result<SessionEnd> {
-    let endpoint_str = if config.endpoint.contains(':') { config.endpoint.clone() } else { format!("{}:443", config.endpoint) };
-    let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve TCP endpoint")?;
-    
-    let stream = tokio::net::TcpStream::connect(addr).await?;
-    let _ = stream.set_nodelay(true);
-
-    let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
-
-    let client_crypto = if cert_pin_bytes.is_empty() {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let mut cfg = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        cfg.alpn_protocols = vec![b"h2".to_vec()];
-        cfg
-    } else {
-        let mut cfg = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(PinnedServerVerifier::new(cert_pin_bytes.to_vec())))
-            .with_no_client_auth();
-        cfg.alpn_protocols = vec![b"h2".to_vec()];
-        cfg
-    };
-
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_crypto));
-    let domain = rustls::pki_types::ServerName::try_from(server_name.to_string())
-        .map_err(|_| anyhow::anyhow!("Invalid server name"))?;
-    
-    let tls_stream = connector.connect(domain, stream).await?;
-
-    let (mut h2_client, connection) = h2::client::Builder::new()
-        .initial_window_size(4 * 1024 * 1024)
-        .initial_connection_window_size(4 * 1024 * 1024)
-        .handshake(tls_stream)
-        .await?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    let request = http::Request::builder().uri("/vpn").method("POST").body(()).unwrap();
-    let (response_future, mut send_stream) = h2_client.send_request(request, false)?;
-
-    let auth_msg = ControlMessage::Auth { token: config.token.clone() };
-    let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
-    
-    let mut auth_frame = Vec::with_capacity(4 + bytes.len());
-    auth_frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    auth_frame.extend_from_slice(&bytes);
-    
-    send_stream.send_data(Bytes::from(auth_frame), false)?;
-
-    let response = response_future.await?;
-    if response.status() != http::StatusCode::OK {
-        return Err(anyhow::anyhow!("Server rejected TCP connection: HTTP {}", response.status()));
-    }
-    let mut recv_stream = response.into_body();
-
-    let mut buffer = bytes::BytesMut::new();
-
-    while buffer.len() < 4 {
-        if let Some(Ok(chunk)) = recv_stream.data().await {
-            buffer.extend_from_slice(&chunk);
-            let _ = recv_stream.flow_control().release_capacity(chunk.len());
-        } else {
-            return Err(anyhow::anyhow!("Failed to read config length via h2"));
-        }
-    }
-    
-    let msg_len = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
-    let _ = buffer.split_to(4);
-    
-    if msg_len > 8192 * 4 { return Err(anyhow::anyhow!("Config payload too large")); }
-    
-    while buffer.len() < msg_len {
-        if let Some(Ok(chunk)) = recv_stream.data().await {
-            buffer.extend_from_slice(&chunk);
-            let _ = recv_stream.flow_control().release_capacity(chunk.len());
-        } else {
-            return Err(anyhow::anyhow!("Failed to read config payload via h2"));
-        }
-    }
-
-    let server_config: ControlMessage = bincode::serde::decode_from_slice(&buffer[..msg_len], bincode::config::standard()).map(|(v,_)| v)?;
-    let _ = buffer.split_to(msg_len);
-
-    let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
-        match server_config {
-            ControlMessage::Config {
-                assigned_ip, netmask, gateway, dns_server, mtu,
-                assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6, ..
-            } => (assigned_ip, netmask, gateway, dns_server, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_server_v6),
-            ControlMessage::Error { message } => return Err(anyhow::anyhow!("Server rejected connection: {}", message)),
-            _ => return Err(anyhow::anyhow!("Unexpected server response during TCP handshake")),
-        };
-
-    info!("TCP Handshake successful. Internal IPv4: {}", assigned_ip);
-
-    let endpoint_ip_str = match addr.ip() {
-        std::net::IpAddr::V4(v4) => v4.to_string(),
-        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(|v4| v4.to_string()).unwrap_or_else(|| v6.to_string()),
-    };
-
-    set_adapter_network_config(
-        adapter, assigned_ip, netmask, gateway, dns, mtu, &endpoint_ip_str,
-        assigned_ipv6, netmask_v6, gateway_v6, dns_v6,
-    )?;
-
-    let session = Arc::new(adapter.start_session(wintun::MAX_RING_CAPACITY).context("Failed to start WinTUN session")?);
-    let session_alive = Arc::new(AtomicBool::new(true));
-
-    let alive_pump = session_alive.clone();
-    let run_pump = global_running.clone();
-    let session_tun = session.clone();
-    
-    let tun_to_tcp = tokio::spawn(async move {
-        while run_pump.load(Ordering::Relaxed) && alive_pump.load(Ordering::Relaxed) {
-            match session_tun.try_receive() {
-                 Ok(Some(packet)) => {
-                      let data = packet.bytes();
-                      let mut buf = Vec::with_capacity(2 + data.len());
-                      buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
-                      buf.extend_from_slice(data);
-                      
-                      send_stream.reserve_capacity(buf.len());
-                      if send_stream.capacity() >= buf.len() {
-                          if let Err(_) = send_stream.send_data(Bytes::from(buf), false) {
-                              break;
-                          }
-                      }
-                 }
-                 Ok(None) => { tokio::time::sleep(Duration::from_micros(200)).await; }
-                 Err(_) => { alive_pump.store(false, Ordering::SeqCst); break; }
-            }
-        }
-    });
-
-    let alive_tcp_in = session_alive.clone();
-    let run_tcp_in = global_running.clone();
-    let session_tcp_in = session.clone();
-    let mut leftover = buffer; // Take ownership of any unconsumed bytes from the handshake
-    
-    let tcp_to_tun = tokio::spawn(async move {
-        while run_tcp_in.load(Ordering::Relaxed) && alive_tcp_in.load(Ordering::Relaxed) {
-             // Process any existing data first before waiting for new chunks
-             while leftover.len() >= 2 {
-                 let pkt_len = u16::from_be_bytes([leftover[0], leftover[1]]) as usize;
-                 if leftover.len() >= 2 + pkt_len {
-                     let packet = leftover.split_to(2 + pkt_len).split_off(2).freeze();
-                     if packet.is_empty() { continue; }
-                     
-                     match session_tcp_in.allocate_send_packet(packet.len() as u16) {
-                          Ok(mut pt) => {
-                              pt.bytes_mut().copy_from_slice(&packet);
-                              session_tcp_in.send_packet(pt);
-                          }
-                          Err(e) if is_wintun_ring_full(&e) => {
-                              tokio::time::sleep(Duration::from_millis(2)).await;
-                              // We lost a packet due to full ring, but we must continue parsing the stream
-                          }
-                          Err(_) => { alive_tcp_in.store(false, Ordering::SeqCst); break; }
-                     }
-                 } else { break; }
-             }
-             
-             match recv_stream.data().await {
-                 Some(Ok(chunk)) => {
-                     leftover.extend_from_slice(&chunk);
-                     let _ = recv_stream.flow_control().release_capacity(chunk.len());
-                 }
-                 Some(Err(_)) | None => { alive_tcp_in.store(false, Ordering::SeqCst); break; }
-             }
-        }
-    });
-
-    while global_running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    tun_to_tcp.abort();
-    tcp_to_tun.abort();
-
-    if global_running.load(Ordering::Relaxed) { Ok(SessionEnd::ConnectionLost) } else { Ok(SessionEnd::UserStopped) }
 }

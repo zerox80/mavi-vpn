@@ -111,9 +111,13 @@ async fn main() -> Result<()> {
     .with_no_client_auth()
         .with_single_cert(certs, key)?;
     
-    // Obfuscation Layer: Supports both standard h3 (Censorship Resistant) 
-    // and our custom mavivpn ALPN for legacy/non-CR mode clients.
-    server_crypto.alpn_protocols = vec![b"h3".to_vec(), b"mavivpn".to_vec()];
+    // Obfuscation Layer: Only offer "h3" in censorship-resistant mode to avoid fingerprinting.
+    // Standard mode allows fallback to "mavivpn" for legacy clients.
+    server_crypto.alpn_protocols = if config.censorship_resistant {
+        vec![b"h3".to_vec()]
+    } else {
+        vec![b"h3".to_vec(), b"mavivpn".to_vec()]
+    };
     
     if config.censorship_resistant {
         info!("Censorship Resistant Mode ENABLED. ALPN priority: h3");
@@ -207,9 +211,19 @@ async fn main() -> Result<()> {
 
     // Configure IPv6 on TUN via external command (tun-rs doesn't natively handle dual-stack well yet)
     let gateway_ip6 = state.gateway_ip_v6();
-    let _ = std::process::Command::new("ip")
+    match std::process::Command::new("ip")
         .args(&["-6", "addr", "add", &format!("{}/64", gateway_ip6), "dev", &tun_name])
-        .output();
+        .output() {
+            Ok(output) if output.status.success() => {
+                 info!("IPv6 address {} successfully assigned to {}", gateway_ip6, tun_name);
+            }
+            Ok(output) => {
+                 warn!("FAILED to assign IPv6 address to TUN: {}. IPv6 connectivity might be limited.", String::from_utf8_lossy(&output.stderr).trim());
+            }
+            Err(e) => {
+                 warn!("FAILED to execute 'ip' command for IPv6 assignment: {}. Ensure 'iproute2' is installed.", e);
+            }
+        }
 
     // Cleanup legacy system rules to ensure a clean slate
     cleanup_legacy_rules();

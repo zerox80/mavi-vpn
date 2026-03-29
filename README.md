@@ -29,8 +29,8 @@ graph TD
         HUB <-->|Packet I/O| TUN_S
     end
 
-    SVC <-->|MTU Pinned 1360| QUIC
-    QUIC <-->|MTU Pinned 1360| HUB
+    SVC <-->|QUIC Payload 1360| QUIC
+    QUIC <-->|QUIC Payload 1360| HUB
 ```
 
 ## Key Features
@@ -44,7 +44,7 @@ graph TD
     *   **BBR Congestion Control**: Optimized for high-bandwidth, high-latency mobile networks.
 *   **Mobile-First Resilience**:
     *   **Seamless Roaming**: Automatic connection migration (IP-address change) without handshake restarts.
-    *   **MTU Pinning (1280/1360)**: Avoids "Path MTU Black Holes" by enforcing a stable 1280 payload size.
+    *   **MTU Pinning (1280/1360+)**: Avoids "Path MTU Black Holes" by enforcing a stable 1280 payload and 1360 QUIC internal size.
 *   **Windows & Android Support**: Native high-performance clients for both platforms.
 
 ## Project Structure

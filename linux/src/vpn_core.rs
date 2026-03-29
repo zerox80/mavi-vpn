@@ -339,11 +339,11 @@ async fn connect_and_handshake(
         .next()
         .context("Failed to resolve endpoint")?;
 
-    // Rule 2: Outgoing MTU MUST be 1360 (Wire Size).
-    // IPv4 Overhead: 20 (IP) + 8 (UDP) = 28. QUIC Payload = 1360 - 28 = 1332.
-    // IPv6 Overhead: 40 (IP) + 8 (UDP) = 48. QUIC Payload = 1360 - 48 = 1312.
-    let quic_mtu = if addr.is_ipv4() { 1332 } else { 1312 };
-    info!("Address family: {}. Setting QUIC MTU: {} (Target Wire: 1360)", if addr.is_ipv4() { "IPv4" } else { "IPv6" }, quic_mtu);
+    // Rule 2: Outgoing QUIC Payload (Initial MTU) MUST be 1360.
+    // IPv4 Wire: 1360 + 20 (IP) + 8 (UDP) = 1388 bytes.
+    // IPv6 Wire: 1360 + 40 (IP) + 8 (UDP) = 1408 bytes.
+    let quic_mtu = 1360;
+    info!("Address family: {}. Setting QUIC MTU: 1360 (Target Wire: 1388-1408)", if addr.is_ipv4() { "IPv4" } else { "IPv6" });
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(

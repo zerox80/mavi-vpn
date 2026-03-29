@@ -236,7 +236,7 @@ net stop MaviVPNService
 | Transport | QUIC über UDP, BBR Congestion Control |
 | TUN-Treiber | WinTUN (eingebettet, kein extra Download) |
 | Dual-Stack | IPv4 + IPv6 vollständig unterstützt |
-| MTU | 1280 Payload / 1360 Wire (pinned) |
+| MTU | 1280 Tun / 1360 QUIC Payload / ~1400 Wire |
 | Certificate Pinning | SHA-256 Fingerabdruck, verhindert MitM |
 | Censorship Resistance | H3 ALPN (sieht aus wie HTTP/3) |
 | DNS Leak Prevention | NRPT-Regeln + SMHNR deaktiviert |

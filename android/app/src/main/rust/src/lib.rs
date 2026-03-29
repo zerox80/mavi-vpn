@@ -14,7 +14,7 @@ use bytes::{Bytes, BytesMut, BufMut};
 use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use sha2::{Sha256, Digest};
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::io;
 #[cfg(target_os = "android")]
 use futures_util::FutureExt;
 use wtransport::{ClientConfig, Endpoint};
@@ -379,7 +379,6 @@ async fn connect_and_handshake_quic(
     // MTU Pinning: Strictly enforce 1360 to match global rule.
     transport_config.initial_mtu(1360);
     transport_config.min_mtu(1360);
-    transport_config.max_mtu(Some(1360));
     transport_config.mtu_discovery_config(None); // Disable discovery to strictly follow the rule.
     // Datagram queue tuning: Increased for high-speed stability
     transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB
@@ -482,8 +481,6 @@ async fn connect_and_handshake_quic(
                libc::setsockopt(fd, libc::IPPROTO_IPV6, 23, &pmtu_v6 as *const _ as *const _, std::mem::size_of_val(&pmtu_v6) as libc::socklen_t);
             }
         }
-    } else {
-        warn!("Could not find active QUIC socket FD for protection!");
     }
 
     // Resolve endpoint (add default port if missing)

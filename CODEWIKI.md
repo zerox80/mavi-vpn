@@ -38,12 +38,12 @@ This prevent attackers from issuing fake certificates to intercept or impersonat
 ---
 
 ## 🏎 4. MTU and Network Performance Optimizations
-Mavi VPN optimizes performance and reliability, particularly on unstable mobile networks, through a multi-faceted approach to network tuning. A key strategy involves MTU (Maximum Transmission Unit) management, where the system employs an **inner MTU of 1280 bytes** and a **wire MTU of 1360 bytes**. 
+A key strategy involves MTU (Maximum Transmission Unit) management, where the system employs an **internal MTU of 1280 bytes** (Tun) and a **QUIC MTU of 1360 bytes** (resulting in ~1400 bytes on the wire).
 
 ### 📐 4.1 The 1280/1360 Pinning Strategy
 This specific configuration aims to minimize packet fragmentation, which can degrade performance and reliability over diverse network paths. 
 - **Inner TUN MTU**: 1280 (The IPv6 minimum required by all networks).
-- **Wire QUIC MTU**: 1360 (Calculated as $1280 + 80$ bytes for QUIC/UDP/IP overhead).
+- **QUIC Payload MTU**: 1360 (Selected to fit comfortably within 1460-MTU networks like Vodafone without fragmentation).
 By pinning these values, Mavi VPN avoids the "Black Hole" problem of Path MTU Discovery (PMTUD) where ICMP messages are blocked by ISPs.
 
 ### 🏎 4.2 Congestion Control: BBR

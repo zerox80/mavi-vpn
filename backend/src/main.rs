@@ -58,6 +58,9 @@ async fn main() -> Result<()> {
     // Initialise logging with tracing-subscriber (defaulting to info level)
     tracing_subscriber::fmt::init();
     
+    // Install the default crypto provider for rustls & jsonwebtoken to prevent panics
+    rustls::crypto::aws_lc_rs::default_provider().install_default().ok();
+
     // 1. Load Configuration
     // Combines .env files, standard environment variables, and CLI arguments.
     let config = config::load();

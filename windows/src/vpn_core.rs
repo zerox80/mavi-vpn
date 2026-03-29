@@ -285,15 +285,28 @@ async fn connect_and_handshake(
         vec![b"mavivpn".to_vec(), b"h3".to_vec()]
     };
 
+    // Resolve endpoint and connect
+    let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve endpoint")?;
+    let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
+
+    // Rule 2: Outgoing MTU MUST be 1360 (Wire Size).
+    // IPv4 Overhead: 20 (IP) + 8 (UDP) = 28. QUIC Payload = 1360 - 28 = 1332.
+    // IPv6 Overhead: 40 (IP) + 8 (UDP) = 48. QUIC Payload = 1360 - 48 = 1312.
+    let quic_mtu = if addr.is_ipv4() { 1332 } else { 1312 };
+    info!("Address family: {}. Setting QUIC MTU: {} (Target Wire: 1360)", if addr.is_ipv4() { "IPv4" } else { "IPv6" }, quic_mtu);
+
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
     
-    // MTU PINNING: 1360 Wire MTU to support 1280 payload over QUIC/UDP/IP.
-    // GSO (segmentation offload) is enabled for maximum performance as requested.
+    // MTU PINNING
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1360);
-    transport_config.min_mtu(1360);
+    transport_config.initial_mtu(quic_mtu);
+    transport_config.min_mtu(quic_mtu);
+
+    // Rule 1: TUN MTU MUST be 1280. 
+    // Handled in NetworkConfig::apply. Peer datagram size is implicitly limited by path MTU discovery.
+
     transport_config.enable_segmentation_offload(true);
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     
@@ -306,9 +319,6 @@ async fn connect_and_handshake(
     let mut endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
     endpoint.set_default_client_config(client_config);
 
-    // Resolve endpoint and connect
-    let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve endpoint")?;
-    let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
     info!("Connecting to {} (resolved: {}, SNI: {})", endpoint_str, addr, server_name);
     let connecting = endpoint.connect(addr, server_name).context("endpoint.connect() failed")?;
     let connection = connecting.await.context("QUIC handshake failed (TLS/cert error?)")?;
@@ -374,7 +384,7 @@ fn set_adapter_network_config(
     let mask_str = netmask.to_string();
     let gw_str = gateway.to_string();
     let dns_str = dns.to_string();
-    let mtu_str = mtu.to_string();
+    let _mtu_str = mtu.to_string();
 
     info!("Configuring adapter '{}' (if={}) ip={} mask={} gw={} dns={}",
         adapter_name, adapter_index, ip, netmask, gateway, dns);
@@ -420,11 +430,11 @@ fn set_adapter_network_config(
         run_cmd("netsh", &["interface", "ipv6", "add", "dnsservers", &adapter_name, &dv6_str, "index=1"]);
     }
 
-    // 5. Set MTU
-    let _ = adapter.set_mtu(mtu as usize);
-    let mtu_val = format!("mtu={}", mtu_str);
-    run_cmd("netsh", &["interface", "ipv4", "set", "subinterface", &adapter_name, &mtu_val, "store=active"]);
-    run_cmd("netsh", &["interface", "ipv6", "set", "subinterface", &adapter_name, &mtu_val, "store=active"]);
+    // 5. Set MTU (Rule 1: Always 1280)
+    let _ = adapter.set_mtu(1280);
+    let mtu_val = "mtu=1280";
+    run_cmd("netsh", &["interface", "ipv4", "set", "subinterface", &adapter_name, mtu_val, "store=active"]);
+    run_cmd("netsh", &["interface", "ipv6", "set", "subinterface", &adapter_name, mtu_val, "store=active"]);
 
     // 6. Host exception FIRST — must run before split routes so that
     //    Get-NetRoute still sees the real physical default route.

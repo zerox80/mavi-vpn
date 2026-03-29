@@ -77,6 +77,8 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
     let endpoint = match get_string(&mut env, &endpoint) { Some(s) => s, None => { error!("Endpoint is null/invalid"); return 0; } };
     let cert_pin_str = match get_string(&mut env, &cert_pin) { Some(s) => s, None => { error!("CertPin is null/invalid"); return 0; } };
 
+    info!("JNI init - token: [redacted], endpoint: {}, cert_pin: {}", endpoint, cert_pin_str);
+
     if cert_pin_str.is_empty() {
         error!("Certificate PIN is empty. Connection aborted.");
         return 0;
@@ -123,39 +125,30 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
         }
 
         // Allow Fragmentation (OS-level fragmentation)
-        // If the cellular network has MTU 1300, and we send 1360, the OS must fragment it.
-        // By default, many sockets have IP_PMTUDISC_DO (Don't Fragment). We switch to IP_PMTUDISC_DONT.
-        // Explicitly set IP_MTU_DISCOVER via libc because socket2 API varies between versions/targets
-#[cfg(target_os = "android")]
-    unsafe {
-        let fd = socket2_sock.as_raw_fd();
-        // IPv4 Fragmentation
-        let val: libc::c_int = libc::IP_PMTUDISC_DONT;
-        let ret = libc::setsockopt(
-            fd,
-            libc::IPPROTO_IP,
-            libc::IP_MTU_DISCOVER,
-            &val as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&val) as libc::socklen_t,
-        );
-        if ret < 0 {
-            warn!("Failed to disable PMTUD (IPv4): {}", std::io::Error::last_os_error());
-        }
+        // If the cellular network has MTU 1280 or 1300, and we send 1360 (wire), the OS must fragment it.
+        // We switch to IP_PMTUDISC_DONT (MTU_DISCOVER_DONT) to ensure connectivity on restricted networks.
+        #[cfg(target_os = "android")]
+        unsafe {
+            let fd = socket2_sock.as_raw_fd();
+            let val: libc::c_int = 0; // 0 is DONT for both IPv4 and IPv6 on Linux/Android
 
-        // IPv6 Fragmentation (Ensure dual-stack consistency)
-        let val_v6: libc::c_int = 0; // IPV6_PMTUDISC_DONT = 0 on many systems, but let's be explicit if possible
-        // IPV6_MTU_DISCOVER is 23 on Android
-        let ret_v6 = libc::setsockopt(
-            fd,
-            libc::IPPROTO_IPV6,
-            23, // IPV6_MTU_DISCOVER
-            &val_v6 as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&val_v6) as libc::socklen_t,
-        );
-        if ret_v6 < 0 {
-             warn!("Failed to disable PMTUD (IPv6): {}", std::io::Error::last_os_error());
+            // IPv4: IP_PMTUDISC_DONT = 0
+            if let Err(e) = socket2_sock.set_mtu_discover(socket2::MtuDiscover::Dont) {
+                warn!("Failed to disable PMTUD (IPv4): {}", e);
+            }
+
+            // IPv6: IPV6_MTU_DISCOVER = 23, IPV6_PMTUDISC_DONT = 0
+            let ret_v6 = libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                23, // IPV6_MTU_DISCOVER
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            );
+            if ret_v6 < 0 {
+                 warn!("Failed to disable PMTUD (IPv6): {}", std::io::Error::last_os_error());
+            }
         }
-    }
         
         // Note: socket2::MtuDiscover::Dont applies to IP_MTU_DISCOVER (IPv4).
         // For IPv6, we might need separate handling, but often Dual Stack sockets handle it.
@@ -385,16 +378,27 @@ async fn connect_and_handshake(
         info!("Standard Mode enabled. ALPN: mavivpn");
     }
 
+    // Connect & MTU Logic
+    info!("Resolving host: {}", endpoint_str);
+    let addr = tokio::net::lookup_host(&endpoint_str).await?
+        .next()
+        .ok_or(anyhow::anyhow!("Invalid address"))?;
+
+    // Rule 2: Outgoing MTU MUST be 1360 (Wire Size).
+    // IPv4 Overhead: 20 (IP) + 8 (UDP) = 28. QUIC Payload = 1360 - 28 = 1332.
+    // IPv6 Overhead: 40 (IP) + 8 (UDP) = 48. QUIC Payload = 1360 - 48 = 1312.
+    let quic_mtu = if addr.is_ipv4() { 1332 } else { 1312 };
+    info!("Address family: {}. Setting QUIC MTU: {} (Target Wire: 1360)", if addr.is_ipv4() { "IPv4" } else { "IPv6" }, quic_mtu);
+
     // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-    // MTU Pinning: Set min_mtu = initial_mtu = 1332.
-    // This ensures that the total IP packet (including IP/UDP headers) is exactly 1360 bytes.
+    
+    // MTU Pinning
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1332);
-    transport_config.min_mtu(1332);
-
+    transport_config.initial_mtu(quic_mtu);
+    transport_config.min_mtu(quic_mtu);
 
     // Enable Segmentation Offload (GSO) for higher throughput
     transport_config.enable_segmentation_offload(true);
@@ -414,12 +418,6 @@ async fn connect_and_handshake(
     )?;
     endpoint.set_default_client_config(client_config);
 
-    // Connect
-    info!("Resolving host: {}", endpoint_str);
-    let addr = tokio::net::lookup_host(&endpoint_str).await?
-        .next()
-        .ok_or(anyhow::anyhow!("Invalid address"))?;
-    
     info!("Connecting to {}", addr);
     let connection = endpoint.connect(addr, "localhost")?.await?;
     info!("Connection established");

@@ -101,14 +101,24 @@ class MaviVpnService : VpnService() {
     }
 
     private fun startVpn(ip: String, port: String, token: String, certPin: String, splitMode: String, splitPackages: String) {
-        // Stop any existing thread before starting a new one
+        // 1. Stop any existing thread before starting a new one
         if (thread != null) {
             isRunning = false
             try { thread?.join(2000) } catch(_: Exception){}
             thread = null
         }
 
-        // Register Network Callback
+        // 2. Unregister previous Network Callback to avoid leaks
+        try {
+            if (connectivityManager != null && networkCallback != null) {
+                connectivityManager?.unregisterNetworkCallback(networkCallback!!)
+            }
+        } catch (e: Exception) {
+            Log.w("MaviVPN", "Failed to unregister previous callback: ${e.message}")
+        }
+        networkCallback = null
+
+        // 3. Register New Network Callback
         try {
             connectivityManager = getSystemService(ConnectivityManager::class.java)
             networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -164,6 +174,8 @@ class MaviVpnService : VpnService() {
                         Thread.sleep(500)
                         continue
                     }
+                    
+                    // Bug Fix: Update global handle immediately to ensure cleanup in finally block
                     synchronized(vpnLock) {
                         vpnSessionHandle = handle
                     }

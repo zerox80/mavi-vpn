@@ -111,13 +111,14 @@ async fn main() -> Result<()> {
     .with_no_client_auth()
         .with_single_cert(certs, key)?;
     
-    // Obfuscation Layer: If censorship resistance is enabled, use standard HTTP/3 ALPN
-    // to blend in with HTTPS traffic.
+    // Obfuscation Layer: Supports both standard h3 (Censorship Resistant) 
+    // and our custom mavivpn ALPN for legacy/non-CR mode clients.
+    server_crypto.alpn_protocols = vec![b"h3".to_vec(), b"mavivpn".to_vec()];
+    
     if config.censorship_resistant {
-        server_crypto.alpn_protocols = vec![b"h3".to_vec()];
-        info!("Censorship Resistant Mode ENABLED. ALPN: h3");
+        info!("Censorship Resistant Mode ENABLED. ALPN priority: h3");
     } else {
-        server_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
+        info!("Standard Mode ENABLED. ALPN priority: h3 (Compatibility: mavivpn)");
     }
     
     let mut server_config = ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?));
@@ -140,12 +141,13 @@ async fn main() -> Result<()> {
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     
     // --- MTU PINNING STRATEGY ---
-    // We disable automatic MTU discovery to prevent Quinn from shrinking the window to 1280
-    // upon detecting the slightest congestion or path restriction. 
-    // By pinning it to 1360 (wire), we ensure 1280 (inner payload) packets always fit.
+    // Rule: Wire size MUST NOT exceed 1360 bytes.
+    // IPv6 Overhead (40) + UDP (8) = 48. Target (1360) - 48 = 1312 (Safe QUIC Payload).
+    // By pinning it to 1312 (Safe Payload), we ensure we hit exactly 1360 wire for IPv6
+    // and stay slightly below (1340 wire) for IPv4.
     transport_config.mtu_discovery_config(None); 
-    transport_config.initial_mtu(1360); 
-    transport_config.min_mtu(1360);
+    transport_config.initial_mtu(1312); 
+    transport_config.min_mtu(1312);
     
     // Enable Generic Segmentation Offload (GSO) for OS-level performance boost
     transport_config.enable_segmentation_offload(true);

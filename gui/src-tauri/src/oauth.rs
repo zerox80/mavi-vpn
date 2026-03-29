@@ -206,12 +206,10 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
 fn open_browser(url: &str) {
     #[cfg(target_os = "windows")]
     {
-        // Using 'cmd /c start' is the most robust way to open URLs from an elevated process
-        // while ensuring they open in the user's default, non-elevated browser session.
-        let _ = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("start")
-            .arg("") // empty title for start command
+        // The webbrowser crate uses `cmd /c start` internally, which treats `&` as a
+        // command separator and truncates the OAuth2 URL. Using explorer.exe directly
+        // correctly handles full URLs with query parameters.
+        let _ = std::process::Command::new("explorer.exe")
             .arg(url)
             .spawn();
     }

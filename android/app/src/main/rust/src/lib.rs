@@ -10,7 +10,7 @@ use log::{info, error, warn};
 use std::sync::Arc;
 #[cfg(target_os = "android")]
 use tokio::io::unix::AsyncFd;
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{Bytes, BufMut};
 use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use sha2::{Sha256, Digest};
@@ -448,7 +448,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
         _ => (std::net::Ipv4Addr::new(10, 0, 0, 1), None),
     };
     
-    // Duplicate FD to manage its lifecycle independently from Java
+    // Duplicated FD to manage its lifecycle independently from Java
     let dup_fd = unsafe { libc::dup(raw_fd) };
     if dup_fd < 0 {
         error!("Could not duplicate FD: {}", std::io::Error::last_os_error());
@@ -463,179 +463,133 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
         libc::fcntl(dup_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
     
-    let tun_reader = match file.try_clone() {
-        Ok(f) => match AsyncFd::new(f) {
-            Ok(t) => t,
-            Err(e) => { error!("Failed to create AsyncFd for reader: {}", e); return; }
-        },
-        Err(e) => { error!("Failed to clone file descriptor: {}", e); return; }
-    };
-    let tun_writer = match AsyncFd::new(file) {
-        Ok(t) => t,
+    let tun_async_fd = match AsyncFd::new(file) {
+        Ok(t) => Arc::new(t),
         Err(e) => { error!("Failed to create AsyncFd: {}", e); return; }
     };
 
     let connection_arc = Arc::new(connection);
-    
-    // TUN -> QUIC
-    let conn_send = connection_arc.clone();
-    let stop_check = stop_flag.clone();
-    let read_fd = dup_fd; // Use the duplicated FD for reads
-
-    // We need a writer for ICMP loopback
-    // Solution: Create a channel to send packets to the TUN Writer task.
     let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
 
-    let tun_to_quic = tokio::spawn(async move {
-        let mut buf = BytesMut::with_capacity(65536); 
-        loop {
-            if stop_check.load(Ordering::Relaxed) { break; }
-            
-            let mut guard = match tun_reader.readable().await {
-                Ok(g) => g,
-                Err(_) => break,
-            };
+    // Buffer for reading from TUN
+    let mut tun_read_buf = bytes::BytesMut::with_capacity(65536);
 
-            // Read ONE packet from TUN
-            let packet = match guard.try_io(|_inner| {
-                 if buf.capacity() < 2048 {
-                     buf.reserve(2048);
-                 }
-                 let chunk = buf.chunk_mut();
-                 let max_len = 2048.min(chunk.len());
-                 
-                 let n = unsafe { libc::read(read_fd, chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
-                 
-                 if n < 0 {
-                     let err = std::io::Error::last_os_error();
-                     return Err(err);
-                 }
-                 let n = n as usize;
-                 if n == 0 { return Ok(None); } 
-                 
-                 unsafe { buf.advance_mut(n); }
-                 let packet = buf.split_to(n).freeze();
-                 Ok(Some(packet))
-            }) {
-                Ok(Ok(Some(p))) => p,
-                Ok(Ok(None)) => break,
-                Ok(Err(e)) => {
-                    if e.kind() != std::io::ErrorKind::WouldBlock {
-                        error!("TUN Read Error: {}", e);
-                        break;
-                    }
-                    continue;
-                },
-                Err(_) => continue, // WouldBlock
-            };
+    info!("Entering unified VPN Loop");
 
-            let packet_len = packet.len();
-            let packet_bytes = packet.clone(); 
-
-            // Send to QUIC (Non-blocking / Drop on congestion)
-            match conn_send.send_datagram(packet) {
-                Ok(_) => {},
-                Err(e) => {
-                    match e {
-                        quinn::SendDatagramError::ConnectionLost(_) => {
-                            error!("Connection lost during send");
-                            stop_check.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                         quinn::SendDatagramError::TooLarge => {
-                            let current_mtu = conn_send.max_datagram_size().unwrap_or(1200) as u16;
-                            
-                            // Determine correct gateway for the packet version
-                            let version = (packet_bytes[0] >> 4) & 0xF;
-                            let gw = if version == 4 { 
-                                std::net::IpAddr::V4(gateway_v4) 
-                            } else { 
-                                std::net::IpAddr::V6(gateway_v6_opt.unwrap_or("2001:db8::1".parse().unwrap())) 
-                            };
-
-                            warn!("Packet too large ({} bytes). Exceeds QUIC Path MTU ({} bytes). Sending ICMP Signal from {}.", packet_len, current_mtu, gw);
-                            
-                            if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, current_mtu, Some(gw)) {
-                                // Feed back to TUN via channel
-                                let _ = tx_tun.try_send(icmp_packet);
-                            }
-                        },
-                         quinn::SendDatagramError::UnsupportedByPeer => {
-                            error!("Datagrams unsupported by peer. Closing.");
-                            stop_check.store(true, Ordering::SeqCst);
-                            break;
-                         },
-                         quinn::SendDatagramError::Disabled => {
-                             error!("Datagrams disabled. Closing.");
-                             stop_check.store(true, Ordering::SeqCst);
-                             break;
-                         }
-                    }
-                }
-            }
-        }
-    });
-
-    // QUIC -> TUN
     loop {
         if stop_flag.load(Ordering::Relaxed) { break; }
         
         tokio::select! {
-             Some(icmp_pkt) = rx_tun.recv() => {
-                 let mut guard = match tun_writer.writable().await {
+             // 1. TUN -> QUIC (Outgoing Traffic)
+             readable_guard = tun_async_fd.readable() => {
+                 let mut guard = match readable_guard {
                      Ok(g) => g,
                      Err(_) => break,
                  };
-                 let _ = guard.try_io(|_inner| {
-                     unsafe { libc::write(dup_fd, icmp_pkt.as_ptr() as *const libc::c_void, icmp_pkt.len()) };
+                 
+                 let packet_opt = guard.try_io(|inner| {
+                     if tun_read_buf.remaining_mut() < 2048 {
+                         tun_read_buf.reserve(2048);
+                     }
+                     let chunk = tun_read_buf.chunk_mut();
+                     let max_len = 2048.min(chunk.len());
+                     let n = unsafe { libc::read(inner.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
+                     
+                     if n < 0 {
+                         return Err(std::io::Error::last_os_error());
+                     }
+                     let n = n as usize;
+                     if n == 0 { return Ok(None); } 
+                     
+                     unsafe { tun_read_buf.advance_mut(n); }
+                     Ok(Some(tun_read_buf.split_to(n).freeze()))
+                 });
+
+                 if let Ok(Ok(Some(packet))) = packet_opt {
+                     let packet_len = packet.len();
+                     let packet_bytes = packet.clone();
+
+                     if let Err(e) = connection_arc.send_datagram(packet) {
+                         match e {
+                             quinn::SendDatagramError::ConnectionLost(_) => {
+                                 error!("Connection lost during send");
+                                 stop_flag.store(true, Ordering::SeqCst);
+                                 break;
+                             }
+                             quinn::SendDatagramError::TooLarge => {
+                                 // BUG FIX (Bug 4): MTU Clamping to 1280 (TUN MTU limit)
+                                 let raw_mtu = connection_arc.max_datagram_size().unwrap_or(1200);
+                                 let current_mtu = 1280.min(raw_mtu) as u16;
+                                 
+                                 let version = (packet_bytes[0] >> 4) & 0xF;
+                                 let gw = if version == 4 { 
+                                     std::net::IpAddr::V4(gateway_v4) 
+                                 } else { 
+                                     std::net::IpAddr::V6(gateway_v6_opt.unwrap_or("2001:db8::1".parse().unwrap())) 
+                                 };
+
+                                 warn!("Packet too large ({} bytes). Local Limit: 1280. Sending ICMP.", packet_len);
+                                 if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, current_mtu, Some(gw)) {
+                                     let _ = tx_tun.try_send(icmp_packet);
+                                 }
+                             },
+                             _ => warn!("Send datagram failed: {:?}", e),
+                         }
+                     }
+                 }
+             }
+
+             // 2. Feedback Loop (ICMP Signals -> TUN)
+             Some(icmp_pkt) = rx_tun.recv() => {
+                 let mut guard = match tun_async_fd.writable().await {
+                     Ok(g) => g,
+                     Err(_) => break,
+                 };
+                 let _ = guard.try_io(|inner| {
+                     unsafe { libc::write(inner.as_raw_fd(), icmp_pkt.as_ptr() as *const libc::c_void, icmp_pkt.len()) };
                      Ok(())
                  });
              }
+
+             // 3. QUIC -> TUN (Incoming Traffic)
              res = connection_arc.read_datagram() => {
                  match res {
                      Ok(first_packet) => {
-                        let mut batch = Vec::with_capacity(64);
-                        batch.push(first_packet);
+                         let mut batch = Vec::with_capacity(64);
+                         batch.push(first_packet);
 
-                        for _ in 0..63 {
-                             match connection_arc.read_datagram().now_or_never() {
-                                 Some(Ok(pkt)) => batch.push(pkt),
-                                 _ => break,
-                             }
-                        }
+                         for _ in 0..63 {
+                              match connection_arc.read_datagram().now_or_never() {
+                                  Some(Ok(pkt)) => batch.push(pkt),
+                                  _ => break,
+                              }
+                         }
 
-                        let mut batch_idx = 0;
-                        while batch_idx < batch.len() {
-                            let mut guard = match tun_writer.writable().await {
-                                 Ok(g) => g,
-                                 Err(_) => break,
-                            };
-                            
-                            let res = guard.try_io(|_inner| {
-                                while batch_idx < batch.len() {
-                                     let packet = &batch[batch_idx];
-                                     let n = unsafe { libc::write(dup_fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
-                                     if n < 0 {
-                                         let err = std::io::Error::last_os_error();
-                                         if err.kind() == std::io::ErrorKind::WouldBlock {
-                                             return Err(err); 
-                                         }
-                                         return Err(err);
-                                     }
-                                     batch_idx += 1;
-                                }
-                                Ok(())
-                            });
-                            
-                            match res {
-                                Ok(Ok(())) => {}, 
-                                Ok(Err(e)) => {
-                                     error!("TUN Write Error (Critical): {}", e);
-                                     break; 
-                                },
-                                Err(_) => {}, // WouldBlock: wait for writable again
-                            }
-                        }
+                         let mut batch_idx = 0;
+                         while batch_idx < batch.len() {
+                             let mut guard = match tun_async_fd.writable().await {
+                                  Ok(g) => g,
+                                  Err(_) => break,
+                             };
+                             
+                             let res = guard.try_io(|inner| {
+                                 while batch_idx < batch.len() {
+                                      let packet = &batch[batch_idx];
+                                      let n = unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) };
+                                      if n < 0 {
+                                          let err = std::io::Error::last_os_error();
+                                          if err.kind() == std::io::ErrorKind::WouldBlock {
+                                              return Err(err); 
+                                          }
+                                          return Err(err);
+                                      }
+                                      batch_idx += 1;
+                                 }
+                                 Ok(())
+                             });
+                             
+                             if let Ok(Err(_)) = res { break; } 
+                         }
                      }
                      Err(e) => { error!("Connection lost: {}", e); break; }
                  }
@@ -645,7 +599,6 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
     
     // Cleanup
     stop_flag.store(true, Ordering::SeqCst);
-    tun_to_quic.abort();
 
 }
 

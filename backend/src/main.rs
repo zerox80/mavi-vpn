@@ -552,7 +552,12 @@ async fn handle_h2_connection(
         _ => anyhow::bail!("TLS handshake failed or timed out"),
     };
 
-    let mut h2_conn = match tokio::time::timeout(std::time::Duration::from_secs(5), h2::server::handshake(tls_stream)).await {
+    let mut h2_conn = match tokio::time::timeout(std::time::Duration::from_secs(5), 
+        h2::server::Builder::new()
+            .initial_window_size(4 * 1024 * 1024)
+            .initial_connection_window_size(4 * 1024 * 1024)
+            .handshake(tls_stream)
+    ).await {
         Ok(Ok(c)) => c,
         _ => anyhow::bail!("HTTP/2 handshake failed or timed out"),
     };

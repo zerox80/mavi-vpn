@@ -692,7 +692,11 @@ async fn run_session_tcp(
     
     let tls_stream = connector.connect(domain, stream).await?;
 
-    let (mut h2_client, connection) = h2::client::handshake(tls_stream).await?;
+    let (mut h2_client, connection) = h2::client::Builder::new()
+        .initial_window_size(4 * 1024 * 1024)
+        .initial_connection_window_size(4 * 1024 * 1024)
+        .handshake(tls_stream)
+        .await?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -713,34 +717,35 @@ async fn run_session_tcp(
     if response.status() != http::StatusCode::OK {
         return Err(anyhow::anyhow!("Server rejected TCP connection: HTTP {}", response.status()));
     }
-
     let mut recv_stream = response.into_body();
 
-    let mut len_buf = [0u8; 4];
-    let mut len_read = 0;
-    while len_read < 4 {
+    let mut buffer = bytes::BytesMut::new();
+
+    while buffer.len() < 4 {
         if let Some(Ok(chunk)) = recv_stream.data().await {
-            let to_copy = std::cmp::min(4 - len_read, chunk.len());
-            len_buf[len_read..len_read+to_copy].copy_from_slice(&chunk[..to_copy]);
-            len_read += to_copy;
+            buffer.extend_from_slice(&chunk);
             let _ = recv_stream.flow_control().release_capacity(chunk.len());
         } else {
             return Err(anyhow::anyhow!("Failed to read config length via h2"));
         }
     }
-    let msg_len = u32::from_le_bytes(len_buf) as usize;
     
-    let mut config_buf = Vec::new();
-    while config_buf.len() < msg_len {
+    let msg_len = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+    let _ = buffer.split_to(4);
+    
+    if msg_len > 8192 * 4 { return Err(anyhow::anyhow!("Config payload too large")); }
+    
+    while buffer.len() < msg_len {
         if let Some(Ok(chunk)) = recv_stream.data().await {
-            config_buf.extend_from_slice(&chunk);
+            buffer.extend_from_slice(&chunk);
             let _ = recv_stream.flow_control().release_capacity(chunk.len());
         } else {
             return Err(anyhow::anyhow!("Failed to read config payload via h2"));
         }
     }
 
-    let server_config: ControlMessage = bincode::serde::decode_from_slice(&config_buf, bincode::config::standard()).map(|(v,_)| v)?;
+    let server_config: ControlMessage = bincode::serde::decode_from_slice(&buffer[..msg_len], bincode::config::standard()).map(|(v,_)| v)?;
+    let _ = buffer.split_to(msg_len);
 
     let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
         match server_config {
@@ -796,32 +801,35 @@ async fn run_session_tcp(
     let alive_tcp_in = session_alive.clone();
     let run_tcp_in = global_running.clone();
     let session_tcp_in = session.clone();
+    let mut leftover = buffer; // Take ownership of any unconsumed bytes from the handshake
+    
     let tcp_to_tun = tokio::spawn(async move {
-        let mut leftover = bytes::BytesMut::new();
         while run_tcp_in.load(Ordering::Relaxed) && alive_tcp_in.load(Ordering::Relaxed) {
+             // Process any existing data first before waiting for new chunks
+             while leftover.len() >= 2 {
+                 let pkt_len = u16::from_be_bytes([leftover[0], leftover[1]]) as usize;
+                 if leftover.len() >= 2 + pkt_len {
+                     let packet = leftover.split_to(2 + pkt_len).split_off(2).freeze();
+                     if packet.is_empty() { continue; }
+                     
+                     match session_tcp_in.allocate_send_packet(packet.len() as u16) {
+                          Ok(mut pt) => {
+                              pt.bytes_mut().copy_from_slice(&packet);
+                              session_tcp_in.send_packet(pt);
+                          }
+                          Err(e) if is_wintun_ring_full(&e) => {
+                              tokio::time::sleep(Duration::from_millis(2)).await;
+                              // We lost a packet due to full ring, but we must continue parsing the stream
+                          }
+                          Err(_) => { alive_tcp_in.store(false, Ordering::SeqCst); break; }
+                     }
+                 } else { break; }
+             }
+             
              match recv_stream.data().await {
                  Some(Ok(chunk)) => {
                      leftover.extend_from_slice(&chunk);
                      let _ = recv_stream.flow_control().release_capacity(chunk.len());
-                     
-                     while leftover.len() >= 2 {
-                         let pkt_len = u16::from_be_bytes([leftover[0], leftover[1]]) as usize;
-                         if leftover.len() >= 2 + pkt_len {
-                             let packet = leftover.split_to(2 + pkt_len).split_off(2).freeze();
-                             if packet.is_empty() { continue; }
-                             
-                             match session_tcp_in.allocate_send_packet(packet.len() as u16) {
-                                  Ok(mut pt) => {
-                                      pt.bytes_mut().copy_from_slice(&packet);
-                                      session_tcp_in.send_packet(pt);
-                                  }
-                                  Err(e) if is_wintun_ring_full(&e) => {
-                                      tokio::time::sleep(Duration::from_millis(2)).await;
-                                  }
-                                  Err(_) => { alive_tcp_in.store(false, Ordering::SeqCst); break; }
-                             }
-                         } else { break; }
-                     }
                  }
                  Some(Err(_)) | None => { alive_tcp_in.store(false, Ordering::SeqCst); break; }
              }

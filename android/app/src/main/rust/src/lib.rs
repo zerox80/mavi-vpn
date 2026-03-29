@@ -610,22 +610,39 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                          } else { break; }
                     }
 
-                    if let Ok(mut guard) = tun_download.writable().await {
-                         let _ = guard.try_io(|inner| {
-                             for packet in &batch {
-                                  match unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) } {
-                                      n if n < 0 => {
-                                          let err = std::io::Error::last_os_error();
-                                          if err.kind() != std::io::ErrorKind::WouldBlock {
-                                              error!("TUN Write error: {}", err);
-                                          }
-                                          break; // Stop batch on error
-                                      }
-                                      _ => {}
-                                  }
-                             }
-                             Ok(())
-                         });
+                    // --- FIX: Ensure the ENTIRE batch is written to TUN ---
+                    // The previous version would drop packets if libc::write returned WouldBlock.
+                    for packet in batch {
+                        loop {
+                            if stop_download.load(Ordering::Relaxed) { break; }
+                            
+                            let mut guard = match tun_download.writable().await {
+                                Ok(g) => g,
+                                Err(_) => break,
+                            };
+
+                            let res = guard.try_io(|inner| {
+                                let n = unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) };
+                                if n < 0 {
+                                    let err = std::io::Error::last_os_error();
+                                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                                        return Err(err); // Wait for readiness
+                                    }
+                                    return Err(err); // Fatal error
+                                }
+                                Ok(())
+                            });
+
+                            match res {
+                                Ok(Ok(())) => break, // Packet written, move to next
+                                Ok(Err(e)) => {
+                                    error!("Fatal TUN Write error: {}", e);
+                                    stop_download.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                                Err(_would_block) => continue, // Retry on next readiness
+                            }
+                        }
                     }
                 }
                 Err(_) => {
@@ -652,9 +669,15 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
         }
     });
 
-    // Wait for critical tasks to terminate
-    let _ = tokio::join!(upload_task, download_task, icmp_task);
+    // Wait for the FIRST task to terminate, then signal others
+    tokio::select! {
+        _ = upload_task => info!("Upload task completed"),
+        _ = download_task => info!("Download task completed"),
+        _ = icmp_task => info!("ICMP task completed"),
+    }
     
+    // Ensure all tasks stop
+    stop_flag.store(true, Ordering::SeqCst);
     info!("VPN Loop tasks terminated.");
 }
 

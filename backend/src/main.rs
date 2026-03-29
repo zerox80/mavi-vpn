@@ -211,19 +211,22 @@ async fn main() -> Result<()> {
 
     // Configure IPv6 on TUN via external command (tun-rs doesn't natively handle dual-stack well yet)
     let gateway_ip6 = state.gateway_ip_v6();
-    match std::process::Command::new("ip")
+    let ipv6_enabled = match std::process::Command::new("ip")
         .args(&["-6", "addr", "add", &format!("{}/64", gateway_ip6), "dev", &tun_name])
         .output() {
             Ok(output) if output.status.success() => {
                  info!("IPv6 address {} successfully assigned to {}", gateway_ip6, tun_name);
+                 true
             }
             Ok(output) => {
-                 warn!("FAILED to assign IPv6 address to TUN: {}. IPv6 connectivity might be limited.", String::from_utf8_lossy(&output.stderr).trim());
+                 warn!("FAILED to assign IPv6 address to TUN: {}. IPv6 connectivity will be disabled for clients.", String::from_utf8_lossy(&output.stderr).trim());
+                 false
             }
             Err(e) => {
-                 warn!("FAILED to execute 'ip' command for IPv6 assignment: {}. Ensure 'iproute2' is installed.", e);
+                 warn!("FAILED to execute 'ip' command for IPv6 assignment: {}. Ensure 'iproute2' is installed. IPv6 disabled.", e);
+                 false
             }
-        }
+        };
 
     // Cleanup legacy system rules to ensure a clean slate
     cleanup_legacy_rules();
@@ -256,8 +259,10 @@ async fn main() -> Result<()> {
             
             for packet in batch.drain(..) {
                 if let Err(e) = tun_writer.write_all(&packet).await {
-                    error!("CRITICAL: Failed to write to TUN: {}. Exiting.", e);
-                    std::process::exit(1); 
+                    error!("CRITICAL: Failed to write to TUN: {}. Potential bridge/MTU issue.", e);
+                    // Do not exit(1) in a shared task if possible, but if TUN is dead, 
+                    // this task will naturally terminate.
+                    break;
                 }
             }
         }
@@ -298,8 +303,8 @@ async fn main() -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    error!("CRITICAL: Error reading from TUN: {}. Exiting.", e);
-                    std::process::exit(1);
+                    error!("CRITICAL: Error reading from TUN: {}. Potential interface crash.", e);
+                    break;
                 }
             }
         }
@@ -313,7 +318,7 @@ async fn main() -> Result<()> {
         let keycloak = keycloak_validator.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn, state, config, tx_tun, keycloak).await {
+            if let Err(e) = handle_connection(conn, state, config, tx_tun, keycloak, ipv6_enabled).await {
                // fine to fail, client disconnected or bad auth
                warn!("Connection terminated: {}", e);
             }
@@ -330,6 +335,7 @@ async fn handle_connection(
     config: Config,
     tx_tun: tokio::sync::mpsc::Sender<Bytes>,
     keycloak: Option<Arc<crate::keycloak::KeycloakValidator>>,
+    ipv6_enabled: bool,
 ) -> Result<()> {
     // 1. Establish QUIC connection (wait for TLS handshake)
     let connection = conn.await?;
@@ -425,10 +431,10 @@ async fn handle_connection(
         gateway: state.gateway_ip(),
         dns_server: config.dns,
         mtu: config.mtu as u16,
-        assigned_ipv6: Some(assigned_ip6),
-        netmask_v6: Some(64),
-        gateway_v6: Some(state.gateway_ip_v6()),
-        dns_server_v6: Some("2001:4860:4860::8888".parse().unwrap()),
+        assigned_ipv6: if ipv6_enabled { Some(assigned_ip6) } else { None },
+        netmask_v6: if ipv6_enabled { Some(64) } else { None },
+        gateway_v6: if ipv6_enabled { Some(state.gateway_ip_v6()) } else { None },
+        dns_server_v6: if ipv6_enabled { Some("2001:4860:4860::8888".parse().unwrap()) } else { None },
         whitelist_domains: Some(config.whitelist_domains.clone()),
     };
     let bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;

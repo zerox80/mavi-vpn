@@ -391,7 +391,6 @@ async fn connect_and_handshake_quic(
     // If we don't drop it first, Endpoint::client() fails with EADDRINUSE because
     // both sockets would be competing for the same port.
     let bind_addr = socket.local_addr()?;
-    drop(socket);
     let client_config = if cert_pin.is_empty() {
         // with_native_certs() silently loads nothing on Android (CAs aren't at
         // standard Linux paths), causing UnknownIssuer on every connection.
@@ -435,15 +434,22 @@ async fn connect_and_handshake_quic(
     let mut client_config = client_config;
     client_config.quic_config_mut().transport_config(Arc::new(transport_config));
 
+    // Drop the initial protected socket JUST before creating the endpoint.
+    // This minimizes the window where the port is free.
+    drop(socket);
     let endpoint = Endpoint::client(client_config)?;
 
     // --- SOCKET OPTIMIZATION & PROTECTION ---
     // After endpoint creation, find the actual UDP socket FD used by quinn
     #[cfg(target_os = "android")]
-    if let Some(fd) = find_fd_by_port(bind_addr.port()) {
+    let fd = find_fd_by_port(bind_addr.port())
+        .ok_or_else(|| anyhow::anyhow!("Could not find active QUIC socket FD for protection!"))?;
+
+    #[cfg(target_os = "android")]
+    {
         info!("Active QUIC socket found (FD: {}). Optimizing...", fd);
         
-    // 1. Protect from VPN routing loop
+        // 1. Protect from VPN routing loop
         let protected = _env.call_method(
             _service, 
             jni::jni_str!("protect"), 
@@ -451,11 +457,10 @@ async fn connect_and_handshake_quic(
             &[JValue::Int(fd as jint)]
         ).and_then(|val| val.z()).unwrap_or(false);
         
-        if protected {
-            info!("QUIC socket protected successfully.");
-        } else {
-            warn!("Failed to protect QUIC socket! Speed may be limited.");
+        if !protected {
+            return Err(anyhow::anyhow!("Failed to protect QUIC socket! This is fatal to prevent routing loops."));
         }
+        info!("QUIC socket protected successfully.");
 
         // 2. Set massive OS-level buffers (8MB)
         let buf_size: libc::c_int = 8 * 1024 * 1024;
@@ -549,7 +554,7 @@ async fn connect_and_handshake_tcp(
 
     let cert_pin_bytes = if let Some(bytes) = decode_hex(&cert_pin) { bytes } else { return Err(anyhow::anyhow!("Invalid PIN")); };
 
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
         .dangerous()
@@ -959,7 +964,7 @@ impl PinnedServerVerifier {
     fn new(expected_hash: Vec<u8>) -> Self {
         Self { 
             expected_hash, 
-            supported: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            supported: rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
         }
     }
 }

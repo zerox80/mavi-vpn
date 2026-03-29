@@ -126,10 +126,10 @@ async fn main() -> Result<()> {
     transport_config.send_window(4 * 1024 * 1024); // 4MB
     // BBR congestion control
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
-    // MTU pinned to 1400
+    // MTU pinned to 1360
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1400);
-    transport_config.min_mtu(1400);
+    transport_config.initial_mtu(1360);
+    transport_config.min_mtu(1360);
     // Generic Segmentation Offload
     transport_config.enable_segmentation_offload(true);
 

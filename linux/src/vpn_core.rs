@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
-use bytes::{Bytes, BytesMut};
 use wtransport::{ClientConfig, Endpoint};
 use wtransport::tls::Certificate;
 
@@ -481,8 +480,8 @@ async fn connect_and_handshake(
     ));
     transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(1400);
-    transport_config.min_mtu(1400);
+    transport_config.initial_mtu(1360);
+    transport_config.min_mtu(1360);
     transport_config.enable_segmentation_offload(true);
     transport_config.congestion_controller_factory(Arc::new(
         quinn::congestion::BbrConfig::default(),

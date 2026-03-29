@@ -328,6 +328,13 @@ class MaviVpnService : VpnService() {
              if (handle != 0L) {
                   stop(handle) // Signal Rust to stop
              }
+             
+             try {
+                 vpnInterface?.close()
+             } catch (e: Exception) {
+                 e.printStackTrace()
+             }
+             vpnInterface = null
         }
         
         try {
@@ -340,12 +347,6 @@ class MaviVpnService : VpnService() {
         connectivityManager = null
         networkCallback = null
         
-        try {
-            vpnInterface?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        vpnInterface = null
         if (thread != null) {
             try {
                 thread?.join(3000) // Wait for thread to finish before nulling reference

@@ -458,8 +458,9 @@ async fn connect_quic(
     let addr = tokio::net::lookup_host(&endpoint_str).await?
         .next().ok_or(anyhow::anyhow!("Invalid address"))?;
 
-    info!("Connecting to {}", addr);
-    let connection = endpoint.connect(addr, "localhost")?.await?;
+    let host = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
+    info!("Connecting to {} (SNI: {})", addr, host);
+    let connection = endpoint.connect(addr, host)?.await?;
     info!("QUIC connection established");
 
     let (mut send_stream, mut recv_stream) = connection.open_bi().await?;

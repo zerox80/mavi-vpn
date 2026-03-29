@@ -11,6 +11,7 @@ import android.provider.Settings
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -29,6 +30,10 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Home
 import android.content.pm.PackageManager
 import android.graphics.drawable.BitmapDrawable
 import androidx.compose.ui.graphics.asImageBitmap
@@ -63,6 +68,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         
         // Load saved credentials
@@ -85,7 +91,7 @@ class MainActivity : ComponentActivity() {
                 )
             ) {
                 Surface(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().systemBarsPadding(),
                     color = MaterialTheme.colorScheme.background
                 ) {
                     AppNavigation(
@@ -208,6 +214,7 @@ class MainActivity : ComponentActivity() {
 }
 
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppNavigation(
     initialIp: String,
@@ -216,7 +223,7 @@ fun AppNavigation(
     initialPin: String,
     initialSplitMode: String,
     initialSplitPackages: String,
-    initialTransportMode: Int, // 0=QUIC, 1=HTTP/3, 2=HTTP/2
+    initialTransportMode: Int,
     onConnect: (String, String, String, String, String, String) -> Unit,
     onDisconnect: () -> Unit
 ) {
@@ -228,35 +235,175 @@ fun AppNavigation(
     var splitPackages by remember { mutableStateOf<String>(initialSplitPackages) }
     var transportMode by remember { mutableStateOf<Int>(initialTransportMode) }
 
-    if (currentScreen == "home") {
-        VpnScreen(
-            initialIp = initialIp,
-            initialPort = initialPort,
-            initialToken = initialToken,
-            initialPin = initialPin,
-            onConnect = { ip, port, token, pin -> 
-                onConnect(ip, port, token, pin, splitMode, splitPackages)
-            },
-            onDisconnect = onDisconnect,
-            onOpenSettings = { currentScreen = "settings" }
-        )
-    } else {
-        SettingsScreen(
-            initialMode = splitMode,
-            initialSelection = splitPackages,
-            initialTransportMode = transportMode,
-            onBack = { mode, pkgs, tMode ->
-                splitMode = mode
-                splitPackages = pkgs
-                transportMode = tMode
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
 
-                // Save Transport Mode to Prefs
-                val prefs = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
-                prefs.edit().putInt("saved_transport_mode", tMode).apply()
-                
-                currentScreen = "home"
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = true,
+        drawerContent = {
+            ModalDrawerSheet(
+                drawerContainerColor = Color(0xFF1E1E1E),
+                drawerContentColor = Color.White
+            ) {
+                Spacer(Modifier.height(48.dp))
+                Text(
+                    "MAVI VPN", 
+                    modifier = Modifier.padding(16.dp), 
+                    fontSize = 24.sp, 
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF007AFF)
+                )
+                NavigationDrawerItem(
+                    label = { Text("Home") },
+                    selected = currentScreen == "home",
+                    icon = { Icon(Icons.Default.Home, contentDescription = null) },
+                    onClick = {
+                        currentScreen = "home"
+                        scope.launch { drawerState.close() }
+                    },
+                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+                    colors = NavigationDrawerItemDefaults.colors(
+                        selectedContainerColor = Color(0xFF007AFF).copy(alpha = 0.2f),
+                        unselectedContainerColor = Color.Transparent
+                    )
+                )
+                NavigationDrawerItem(
+                    label = { Text("Advanced Settings") },
+                    selected = currentScreen == "settings",
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    onClick = {
+                        currentScreen = "settings"
+                        scope.launch { drawerState.close() }
+                    },
+                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+                    colors = NavigationDrawerItemDefaults.colors(
+                        selectedContainerColor = Color(0xFF007AFF).copy(alpha = 0.2f),
+                        unselectedContainerColor = Color.Transparent
+                    )
+                )
+                NavigationDrawerItem(
+                    label = { Text("About") },
+                    selected = currentScreen == "about",
+                    icon = { Icon(Icons.Default.Info, contentDescription = null) },
+                    onClick = {
+                        currentScreen = "about"
+                        scope.launch { drawerState.close() }
+                    },
+                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+                    colors = NavigationDrawerItemDefaults.colors(
+                        selectedContainerColor = Color(0xFF007AFF).copy(alpha = 0.2f),
+                        unselectedContainerColor = Color.Transparent
+                    )
+                )
             }
+        }
+    ) {
+        Scaffold(
+            topBar = {
+                CenterAlignedTopAppBar(
+                    title = { 
+                        Text(
+                            text = if (currentScreen == "home") "MAVI VPN" else if (currentScreen == "settings") "SETTINGS" else "ABOUT",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        ) 
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                            Icon(Icons.Default.Menu, contentDescription = "Menu")
+                        }
+                    },
+                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                        containerColor = Color(0xFF121212),
+                        titleContentColor = Color.White,
+                        navigationIconContentColor = Color.White
+                    )
+                )
+            },
+            containerColor = Color(0xFF121212)
+        ) { paddingValues ->
+            Box(modifier = Modifier.padding(paddingValues)) {
+                when (currentScreen) {
+                    "home" -> VpnScreen(
+                        initialIp = initialIp,
+                        initialPort = initialPort,
+                        initialToken = initialToken,
+                        initialPin = initialPin,
+                        initialTransportMode = transportMode,
+                        onConnect = { ip, port, token, pin, tMode -> 
+                            transportMode = tMode
+                            val prefs = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+                            prefs.edit().putInt("saved_transport_mode", tMode).apply()
+                            onConnect(ip, port, token, pin, splitMode, splitPackages)
+                        },
+                        onDisconnect = onDisconnect
+                    )
+                    "settings" -> SettingsScreen(
+                        initialMode = splitMode,
+                        initialSelection = splitPackages,
+                        onBack = { mode, pkgs ->
+                            splitMode = mode
+                            splitPackages = pkgs
+                            currentScreen = "home"
+                        }
+                    )
+                    "about" -> AboutScreen()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TransportModeSelector(
+    selectedMode: Int,
+    onModeChange: (Int) -> Unit
+) {
+    val transportLabels = listOf("QUIC (Standard)", "HTTP/3 (Anti-Censorship)", "HTTP/2 (TCP)")
+    
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp)
+            .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
+            .padding(12.dp)
+    ) {
+        Text(
+            "Transport Protocol", 
+            color = Color.LightGray, 
+            fontSize = 12.sp,
+            modifier = Modifier.padding(bottom = 8.dp)
         )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            transportLabels.forEachIndexed { index, label ->
+                val isSelected = selectedMode == index
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onModeChange(index) }
+                        .padding(4.dp)
+                ) {
+                    RadioButton(
+                        selected = isSelected,
+                        onClick = { onModeChange(index) },
+                        colors = RadioButtonDefaults.colors(
+                            selectedColor = Color(0xFF007AFF)
+                        )
+                    )
+                    Text(
+                        text = if (index == 0) "QUIC" else if (index == 1) "H3" else "H2",
+                        color = if (isSelected) Color.White else Color.Gray,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -267,9 +414,9 @@ fun VpnScreen(
     initialPort: String,
     initialToken: String,
     initialPin: String,
-    onConnect: (String, String, String, String) -> Unit, 
-    onDisconnect: () -> Unit,
-    onOpenSettings: () -> Unit
+    initialTransportMode: Int,
+    onConnect: (String, String, String, String, Int) -> Unit, 
+    onDisconnect: () -> Unit
 ) {
     val context = LocalContext.current
     val isConnected by MaviVpnService.isConnected.collectAsState()
@@ -277,6 +424,7 @@ fun VpnScreen(
     var serverPort by remember { mutableStateOf<String>(initialPort) }
     var authToken by remember { mutableStateOf<String>(initialToken) }
     var certPin by remember { mutableStateOf<String>(initialPin) }
+    var transportMode by remember { mutableStateOf<Int>(initialTransportMode) }
     
     // Keycloak & auth mode state
     val prefs = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
@@ -308,28 +456,33 @@ fun VpnScreen(
         ) {
             Spacer(modifier = Modifier.height(48.dp))
 
-            Icon(
-                imageVector = if (isConnected) Icons.Default.Lock else Icons.Default.Settings,
-                contentDescription = null,
+            val isConnected by MaviVpnService.isConnected.collectAsState()
+            
+            Box(
                 modifier = Modifier
-                    .size(80.dp)
-                    .clickable { onOpenSettings() },
-                tint = if (isConnected) Color(0xFF00FF7F) else Color(0xFF007AFF)
-            )
+                    .size(160.dp)
+                    .background(
+                        if (isConnected) Color(0xFF00FF7F).copy(alpha = 0.1f) else Color(0xFF007AFF).copy(alpha = 0.1f),
+                        RoundedCornerShape(80.dp)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isConnected) Icons.Default.Lock else Icons.Default.Home,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = if (isConnected) Color(0xFF00FF7F) else Color(0xFF007AFF)
+                )
+            }
 
             Spacer(modifier = Modifier.height(24.dp))
 
             Text(
-                text = "MAVI VPN",
-                fontSize = 32.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
-
-            Text(
-                text = if (isConnected) "SECURED CONNECTION" else "READY TO CONNECT",
+                text = if (isConnected) "CONNECTED" else "NOT CONNECTED",
                 fontSize = 14.sp,
-                color = if (isConnected) Color(0xFF00FF7F) else Color.Gray
+                fontWeight = FontWeight.Bold,
+                color = if (isConnected) Color(0xFF00FF7F) else Color.Gray,
+                letterSpacing = 2.sp
             )
 
             Spacer(modifier = Modifier.height(32.dp))
@@ -361,10 +514,17 @@ fun VpnScreen(
             OutlinedTextField(
                 value = certPin,
                 onValueChange = { certPin = it },
-                label = { Text("Certificate PIN (SHA256 Hex)", color = Color.Gray) },
+                label = { Text("Certificate PIN (empty for Let's Encrypt)", color = Color.Gray) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 colors = fieldColors
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            TransportModeSelector(
+                selectedMode = transportMode,
+                onModeChange = { transportMode = it }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -494,17 +654,6 @@ fun VpnScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Settings Button
-            OutlinedButton(
-                onClick = onOpenSettings,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = Color.White
-                )
-            ) {
-                Text("Split Tunneling Settings")
-            }
 
         } else {
             // Stats or connection info could go here
@@ -549,7 +698,7 @@ fun VpnScreen(
                         if (authToken.isEmpty()) {
                             errorMessage = "Please enter a Preshared Key."
                         } else {
-                            onConnect(serverIp, serverPort, authToken, certPin)
+                            onConnect(serverIp, serverPort, authToken, certPin, transportMode)
                         }
                     }
                 }
@@ -601,11 +750,38 @@ data class InstalledApp(
 )
 
 @Composable
+fun AboutScreen() {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.Info,
+            contentDescription = null,
+            modifier = Modifier.size(80.dp),
+            tint = Color(0xFF007AFF)
+        )
+        Spacer(Modifier.height(16.dp))
+        Text("MAVI VPN", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        Text("Version 1.1.0 (BETA)", color = Color.Gray)
+        Spacer(Modifier.height(32.dp))
+        Text(
+            "Powered by Antigravity Core\nEncryption: AES-256-GCM / ChaCha20\nProtocols: QUIC, H3, H2",
+            color = Color.LightGray,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            fontSize = 14.sp
+        )
+    }
+}
+
+@Composable
 fun SettingsScreen(
     initialMode: String, // "include" or "exclude"
     initialSelection: String, // comma separated packages
-    initialTransportMode: Int, // 0=QUIC, 1=HTTP/3, 2=HTTP/2
-    onBack: (String, String, Int) -> Unit
+    onBack: (String, String) -> Unit
 ) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf<String>(initialMode) } // "include", "exclude"
@@ -661,66 +837,12 @@ fun SettingsScreen(
             .padding(16.dp)
     ) {
         // Header
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp)
-        ) {
-            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), transportMode) }) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
-            }
             Text(
-                text = "Settings",
+                text = "Split Tunneling",
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White,
-                modifier = Modifier.padding(start = 8.dp)
+                color = Color.White
             )
-        }
-        
-        // --- Censorship Resistant Toggle ---
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Transport Mode",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-                val transportLabels = listOf("QUIC (Standard)", "HTTP/3 (Anti-Censorship)", "HTTP/2 (Anti-Censorship/TCP)")
-                transportLabels.forEachIndexed { index, label ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { transportMode = index }
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = transportMode == index,
-                            onClick = { transportMode = index },
-                            colors = RadioButtonDefaults.colors(
-                                selectedColor = Color(0xFF007AFF),
-                                unselectedColor = Color.Gray
-                            )
-                        )
-                        Text(
-                            text = label,
-                            color = if (transportMode == index) Color.White else Color.Gray,
-                            fontSize = 14.sp,
-                            modifier = Modifier.padding(start = 4.dp)
-                        )
-                    }
-                }
-            }
         }
         
         Spacer(modifier = Modifier.height(16.dp))

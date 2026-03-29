@@ -113,12 +113,28 @@ async fn main() -> Result<()> {
         info!("Censorship Resistant Mode ENABLED. Only WebTransport will be served.");
     }
     
-    let server_config = ServerConfig::builder()
+    // Server-side QUIC transport tuning (matches client-side config)
+    let mut transport_config = quinn::TransportConfig::default();
+    // BBR outperforms NewReno/Cubic (default) on Wi-Fi and high-latency paths.
+    // Without this the server-side congestion window collapses to ~50Mbps on jittery links.
+    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    // Pin MTU to avoid fragmentation issues on mobile/VPN paths
+    transport_config.mtu_discovery_config(None);
+    transport_config.initial_mtu(1360);
+    transport_config.min_mtu(1360);
+    // Large datagram buffers prevent drops during download bursts
+    transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); // 4MB
+    transport_config.datagram_send_buffer_size(4 * 1024 * 1024);          // 4MB
+    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+
+    let mut server_config = ServerConfig::builder()
         .with_bind_address(config.bind_addr)
         .with_identity(identity)
-        .keep_alive_interval(Some(std::time::Duration::from_secs(2)))
+        .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
         .build();
-        
+
+    server_config.quic_config_mut().transport_config(Arc::new(transport_config));
+
     let endpoint = Endpoint::server(server_config)?;
     
     // 5. Setup TUN Interface

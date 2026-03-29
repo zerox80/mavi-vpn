@@ -34,7 +34,7 @@ struct VpnSession {
 #[no_mangle]
 pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
     env_unowned: EnvUnowned<'local>,
-    _class: JClass<'local>,
+    _this: JObject<'local>,
     service: JObject<'local>, // Needed to protect the socket
     token: JString<'local>,
     endpoint: JString<'local>,
@@ -129,30 +129,30 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_init<'local>(
         // We switch to IP_PMTUDISC_DONT (MTU_DISCOVER_DONT) to ensure connectivity on restricted networks.
         #[cfg(target_os = "android")]
         unsafe {
+            use std::os::unix::io::AsRawFd;
             let fd = socket2_sock.as_raw_fd();
-            let val: libc::c_int = 0; // 0 is DONT for both IPv4 and IPv6 on Linux/Android
+            let val: libc::c_int = 0; // 0 is DONT for both IPv4 and IPv6/Linux
 
-            // IPv4: IP_PMTUDISC_DONT = 0
-            if let Err(e) = socket2_sock.set_mtu_discover(socket2::MtuDiscover::Dont) {
-                warn!("Failed to disable PMTUD (IPv4): {}", e);
-            }
+            // IPv4: IP_MTU_DISCOVER = 10, IP_PMTUDISC_DONT = 0
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_MTU_DISCOVER,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            );
 
             // IPv6: IPV6_MTU_DISCOVER = 23, IPV6_PMTUDISC_DONT = 0
-            let ret_v6 = libc::setsockopt(
+            let _ = libc::setsockopt(
                 fd,
                 libc::IPPROTO_IPV6,
                 23, // IPV6_MTU_DISCOVER
                 &val as *const _ as *const libc::c_void,
                 std::mem::size_of_val(&val) as libc::socklen_t,
             );
-            if ret_v6 < 0 {
-                 warn!("Failed to disable PMTUD (IPv6): {}", std::io::Error::last_os_error());
-            }
+            
+            info!("UDP Fragmentation enabled (PMTUDISC_DONT) for Android socket");
         }
-        
-        // Note: socket2::MtuDiscover::Dont applies to IP_MTU_DISCOVER (IPv4).
-        // For IPv6, we might need separate handling, but often Dual Stack sockets handle it.
-        // Let's try setting it. If it fails, we log a warning but continue.
 
         let socket = std::net::UdpSocket::from(socket2_sock);
 

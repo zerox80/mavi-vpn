@@ -25,13 +25,9 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
         // Parse PEM formatted certificates and keys
         let certs = rustls_pemfile::certs(&mut &cert_chain[..])
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let keys: Vec<PrivateKeyDer> = rustls_pemfile::pkcs8_private_keys(&mut &key[..])
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(PrivateKeyDer::Pkcs8)
-            .collect();
-            
-        let key = keys.into_iter().next().ok_or_else(|| anyhow::anyhow!("No PKCS#8 private key found in {:?}", key_path))?;
+        let mut key_reader = &key[..];
+        let key = rustls_pemfile::private_key(&mut key_reader)?
+            .ok_or_else(|| anyhow::anyhow!("No valid private key (PKCS#1, PKCS#8, or SEC1) found in {:?}", key_path))?;
 
         // Calculate and log the SHA-256 fingerprint of the end-entity certificate
         if let Some(cert) = certs.first() {

@@ -317,9 +317,10 @@ async fn main() -> Result<()> {
         let h3_config = config.clone();
         let h3_tx = tx_tun.clone();
         let h3_kc = keycloak_validator.clone();
-        let h3_certs = cert::load_or_generate_certs(config.cert_path.clone(), config.key_path.clone())?;
+        let h3_cert_path = config.cert_path.clone();
+        let h3_key_path = config.key_path.clone();
         Some(tokio::spawn(async move {
-            if let Err(e) = run_h3_listener(h3_state, h3_config, h3_tx, h3_kc, h3_certs).await {
+            if let Err(e) = run_h3_listener(h3_state, h3_config, h3_tx, h3_kc, h3_cert_path, h3_key_path).await {
                 error!("[HTTP/3] Listener failed: {}", e);
             }
         }))
@@ -564,6 +565,28 @@ async fn handle_connection(
     res
 }
 
+/// Authenticates a user with either Keycloak JWT or static token.
+/// Returns assigned IPv4 and IPv6 addresses on success.
+async fn authenticate_user(
+    token: &str,
+    config: &Config,
+    keycloak: &Option<Arc<crate::keycloak::KeycloakValidator>>,
+    state: &Arc<AppState>,
+) -> Result<(Ipv4Addr, Ipv6Addr)> {
+    if let Some(kc) = keycloak {
+        if !kc.validate_token(token).await? {
+            anyhow::bail!("Access Denied: Invalid Keycloak JWT Token");
+        }
+    } else {
+        if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
+            anyhow::bail!("Access Denied: Invalid Token");
+        }
+    }
+    let v4 = state.assign_ip()?;
+    let v6 = state.assign_ipv6()?;
+    Ok((v4, v6))
+}
+
 /// System helper to flush old iptables rules that might interfere with modern Mavi VPN routing.
 fn cleanup_legacy_rules() {
     let _ = std::process::Command::new("iptables").args(&["-t", "mangle", "-F", "MAVI_CLAMP"]).output();
@@ -583,18 +606,16 @@ async fn run_h3_listener(
     config: Config,
     tx_tun: tokio::sync::mpsc::Sender<Bytes>,
     keycloak: Option<Arc<crate::keycloak::KeycloakValidator>>,
-    (certs, key): (Vec<rustls::pki_types::CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>),
+    cert_path: std::path::PathBuf,
+    key_path: std::path::PathBuf,
 ) -> Result<()> {
-    use wtransport::{Endpoint, ServerConfig as WtServerConfig};
+    use wtransport::{Endpoint, ServerConfig as WtServerConfig, Identity};
+
+    let identity = Identity::load_pemfiles(&cert_path, &key_path).await?;
 
     let wt_config = WtServerConfig::builder()
         .with_bind_address(config.bind_addr_h3)
-        .with_certificate(
-            wtransport::tls::Certificate::new(
-                certs.into_iter().map(|c| c.into_owned().to_vec()).collect::<Vec<_>>(),
-                key.secret_der().to_vec(),
-            )
-        )
+        .with_identity(identity)
         .keep_alive_interval(Some(Duration::from_secs(2)))
         .max_idle_timeout(Some(Duration::from_secs(60)))
         .expect("valid idle timeout")
@@ -641,8 +662,8 @@ async fn handle_h3_session(
     let remote_addr = connection.remote_address();
     info!("New connection from {} [HTTP/3]", remote_addr);
 
-    // Auth phase: open bi-stream for auth exchange
-    let (mut send_stream, mut recv_stream) = connection.accept_bi().await?.await?;
+    // Auth phase: accept bi-stream for auth exchange
+    let (mut send_stream, mut recv_stream) = connection.accept_bi().await?;
 
     let len = tokio::time::timeout(Duration::from_secs(5), recv_stream.read_u32_le())
         .await
@@ -699,7 +720,7 @@ async fn handle_h3_session(
                 if let wtransport::error::SendDatagramError::TooLarge = e {
                     let current_mtu = 1200u16; // wtransport doesn't expose max_datagram_size directly
                     let version = packet[0] >> 4;
-                    let gw = if version == 4 { std::net::IpAddr::V4(gateway_v4) } else { std::net::IpAddr::V6(gateway_v6) };
+                    let _gw = if version == 4 { std::net::IpAddr::V4(gateway_v4) } else { std::net::IpAddr::V6(gateway_v6) };
                     let reported_mtu = if version == 6 { std::cmp::max(current_mtu, 1280) } else { current_mtu };
                     if let Some(icmp_packet) = icmp::generate_packet_too_big(&packet, reported_mtu, None) {
                         let _ = tx_tun_icmp.try_send(Bytes::from(icmp_packet));
@@ -713,7 +734,7 @@ async fn handle_h3_session(
     let res = loop {
         match connection.receive_datagram().await {
             Ok(datagram) => {
-                let data = Bytes::copy_from_slice(datagram.payload());
+                let data = Bytes::copy_from_slice(&datagram.payload());
                 if data.is_empty() { continue; }
 
                 let version = data[0] >> 4;
@@ -934,30 +955,4 @@ async fn handle_h2_connection(
             }
         }
     }
-}
-
-// =============================================================================
-// Shared Authentication Helper
-// =============================================================================
-
-/// Authenticates a user with either Keycloak JWT or static token.
-/// Returns assigned IPv4 and IPv6 addresses on success.
-async fn authenticate_user(
-    token: &str,
-    config: &Config,
-    keycloak: &Option<Arc<crate::keycloak::KeycloakValidator>>,
-    state: &Arc<AppState>,
-) -> Result<(Ipv4Addr, Ipv6Addr)> {
-    if let Some(kc) = keycloak {
-        if !kc.validate_token(token).await? {
-            anyhow::bail!("Access Denied: Invalid Keycloak JWT Token");
-        }
-    } else {
-        if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
-            anyhow::bail!("Access Denied: Invalid Token");
-        }
-    }
-    let v4 = state.assign_ip()?;
-    let v6 = state.assign_ipv6()?;
-    Ok((v4, v6))
 }

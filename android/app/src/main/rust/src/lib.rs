@@ -399,11 +399,11 @@ async fn connect_and_handshake(
         .next()
         .ok_or(anyhow::anyhow!("Invalid address"))?;
 
-    // Rule 2: Outgoing MTU MUST be 1360 (Wire Size).
-    // IPv4 Overhead: 20 (IP) + 8 (UDP) = 28. QUIC Payload = 1360 - 28 = 1332.
-    // IPv6 Overhead: 40 (IP) + 8 (UDP) = 48. QUIC Payload = 1360 - 48 = 1312.
-    let quic_mtu = if addr.is_ipv4() { 1332 } else { 1312 };
-    info!("Address family: {}. Setting QUIC MTU: {} (Target Wire: 1360)", if addr.is_ipv4() { "IPv4" } else { "IPv6" }, quic_mtu);
+    // Rule 2: Outgoing MTU MUST NOT exceed 1360 (Wire Size).
+    // IPv6 Overhead (40) + UDP (8) = 48. Target (1360) - 48 = 1312 (Safe QUIC Payload).
+    // Using 1312 for both IPv4 and IPv6 for maximum compatibility and consistency.
+    let quic_mtu = 1312;
+    info!("Address family: {}. Setting safe QUIC MTU: 1312 (Target Wire: 1360)", if addr.is_ipv4() { "IPv4" } else { "IPv6" });
 
     // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();

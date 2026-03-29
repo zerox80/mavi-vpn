@@ -95,16 +95,19 @@ impl AppState {
     ///
     /// This is typically called by the `IpGuard` when a client disconnects.
     pub fn release_ips(&self, ip4: Ipv4Addr, ip6: Ipv6Addr) {
+        // Remove from peer registry FIRST to prevent race conditions
+        self.peers.remove(&ip4);
+        self.peers_v6.remove(&ip6);
+
+        // Then return to pools
         {
             let mut free = self.free_ips.lock().unwrap_or_else(|e| e.into_inner());
-            free.push(ip4);
+            if !free.contains(&ip4) { free.push(ip4); }
         }
         {
             let mut free = self.free_ips_v6.lock().unwrap_or_else(|e| e.into_inner());
-            free.push(ip6);
+            if !free.contains(&ip6) { free.push(ip6); }
         }
-        self.peers.remove(&ip4);
-        self.peers_v6.remove(&ip6);
     }
 
     /// Associates an IPv4/IPv6 pair with an async sender channel for a connected client.

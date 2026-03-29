@@ -348,10 +348,9 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_networkChanged<'local>(
         session.runtime.spawn(async move {
             info!("Starting migration burst (5 packets)...");
             for i in 0..5 {
-                match conn.send_datagram(Bytes::from_static(&[])) {
-                     Ok(_) => info!("Migration datagram {}/5 sent", i+1),
-                     Err(e) => error!("Failed to send migration datagram {}/5: {}", i+1, e),
-                }
+                info!("Migration datagram {}/5 sent", i+1);
+                // Send a 1-byte dummy datagram to force NAT rebind/migration
+                let _ = conn.send_datagram(bytes::Bytes::from_static(&[0]));
                 // Small delay to ensure they are spaced out slightly but cover the network switch window
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
@@ -539,7 +538,13 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                     
                     if n < 0 {
                         let err = std::io::Error::last_os_error();
-                        if err.kind() == std::io::ErrorKind::WouldBlock { break; }
+                        if err.kind() == std::io::ErrorKind::WouldBlock {
+                            if packets.is_empty() {
+                                return Err(err); 
+                            } else {
+                                break;
+                            }
+                        }
                         return Err(err);
                     }
                     if n == 0 { break; }
@@ -565,7 +570,8 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                                 let gw = if version == 4 { 
                                     std::net::IpAddr::V4(gateway_v4) 
                                 } else { 
-                                    std::net::IpAddr::V6(gateway_v6_opt.unwrap_or("2001:db8::1".parse().unwrap())) 
+                                     // Use the provided gateway or the destination IP as fallback for ICMP source
+                                     std::net::IpAddr::V6(gateway_v6_opt.unwrap_or_else(|| "fd00::1".parse().unwrap())) 
                                 };
                                     // RFC 8200: IPv6 Minimum MTU is 1280. 
                                     // If Quinn reports < 1280, we still report 1280 to the stack
@@ -682,7 +688,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
 }
 
 #[cfg(not(target_os = "android"))]
-async fn run_vpn_loop(_connection: quinn::Connection, _fd: jint, _stop_flag: Arc<AtomicBool>, _config: ControlMessage) {
+async fn run_vpn_loop(_connection: quinn::Connection, _fd: jint, _stop_flag: Arc<AtomicBool>, _config: ControlMessage, _shutdown_rx: tokio::sync::broadcast::Receiver<()>) {
     error!("VPN Loop not supported on this platform");
 }
 

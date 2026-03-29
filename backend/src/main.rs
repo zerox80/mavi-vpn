@@ -574,39 +574,34 @@ async fn handle_h2_connection(
     // that don't nicely match our protocol boundaries.
     let mut buffer = bytes::BytesMut::new();
 
-    // Helper closure to read N bytes into buffer
-    let mut read_exact = |n: usize| {
-        let mut rs = recv_stream.clone(); // Flow control handle doesn't drop
-        async move {
-            while buffer.len() < n {
-                match rs.data().await {
-                    Some(Ok(chunk)) => {
-                        buffer.extend_from_slice(&chunk);
-                        let _ = rs.flow_control().release_capacity(chunk.len());
-                    }
-                    _ => return false,
-                }
-            }
-            true
-        }
-    };
-
     // 1. Auth Phase (Length-prefixed bincode)
-    if !read_exact(4).await {
-        anyhow::bail!("Failed to read auth length");
+    while buffer.len() < 4 {
+        match recv_stream.data().await {
+            Some(Ok(chunk)) => {
+                buffer.extend_from_slice(&chunk);
+                let _ = recv_stream.flow_control().release_capacity(chunk.len());
+            }
+            _ => anyhow::bail!("Failed to read auth length"),
+        }
     }
     
     let msg_len = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
-    buffer.advance(4); // Consume length
+    buffer.split_to(4); // Consume length
     
     if msg_len > 8192 { anyhow::bail!("Auth payload too large"); }
 
-    if !read_exact(msg_len).await {
-        anyhow::bail!("Failed to read auth payload");
+    while buffer.len() < msg_len {
+        match recv_stream.data().await {
+            Some(Ok(chunk)) => {
+                buffer.extend_from_slice(&chunk);
+                let _ = recv_stream.flow_control().release_capacity(chunk.len());
+            }
+            _ => anyhow::bail!("Failed to read auth payload"),
+        }
     }
 
     let auth_msg: ControlMessage = bincode::serde::decode_from_slice(&buffer[..msg_len], bincode::config::standard()).map(|(v,_)| v)?;
-    buffer.advance(msg_len);
+    buffer.split_to(msg_len);
     let token = match auth_msg {
         ControlMessage::Auth { token } => token,
         _ => anyhow::bail!("Expected Auth message"),

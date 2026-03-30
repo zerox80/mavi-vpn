@@ -4,7 +4,7 @@ use tun::AbstractDevice;
 use crate::config::Config;
 use crate::state::AppState;
 
-pub fn create_tun_device(config: &Config, state: &AppState) -> Result<tokio::io::DuplexStream> {
+pub fn create_tun_device(config: &Config, state: &AppState) -> Result<tun::AsyncDevice> {
     let mut tun_config = tun::Configuration::default();
     let gateway_ip = state.gateway_ip();
     let netmask = state.network.mask();

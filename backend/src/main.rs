@@ -349,8 +349,8 @@ async fn handle_connection(
             .await
             .map_err(|_| anyhow::anyhow!("Handshake timeout"))?? as usize;
         
-        // Increase maximum auth payload size from 1024 to 8192 to support large Keycloak JWTs
-        if len > 8192 { anyhow::bail!("Auth message too big (max 8192 bytes for JWT)"); }
+        // Increase maximum auth payload size from 8192 to 16384 to support very large Keycloak JWTs
+        if len > 16384 { anyhow::bail!("Auth message too big (max 16384 bytes for JWT)"); }
         let mut buf = vec![0u8; len];
         recv_stream.read_exact(&mut buf).await?;
         
@@ -463,13 +463,12 @@ async fn handle_connection(
                     // If the packet exceeds the current path MTU, we synthesise an ICMP
                     // signal back into the TUN device so the client's stack knows to resize.
                     let current_mtu = conn_send.max_datagram_size().unwrap_or(1200) as u16;
-                    let version = packet[0] >> 4;
-                    let _gw = if version == 4 { std::net::IpAddr::V4(gateway_v4) } else { std::net::IpAddr::V6(gateway_v6) };
+                    let gateway = if version == 4 { std::net::IpAddr::V4(gateway_v4) } else { std::net::IpAddr::V6(gateway_v6) };
                     
                     // Report 1280 even if path is smaller (due to our fragmentation support)
                     let reported_mtu = if version == 6 { std::cmp::max(current_mtu, 1280) } else { current_mtu };
 
-                    if let Some(icmp_packet) = icmp::generate_packet_too_big(&packet, reported_mtu, None) {
+                    if let Some(icmp_packet) = icmp::generate_packet_too_big(&packet, reported_mtu, Some(gateway)) {
                         let _ = tx_tun_icmp.try_send(Bytes::from(icmp_packet));
                     }
                 }

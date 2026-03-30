@@ -68,10 +68,10 @@ pub async fn connect_and_handshake(
     // Congestion Control: Use BBR for higher bandwidth and resistance to loss/jitter
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
-    // Datagram queue tuning for high-speed traffic
-    // Reduced to 256KB to ensure clean TCP backpressure and avoid bufferbloat
-    transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); // 4MB
-    transport_config.datagram_send_buffer_size(256 * 1024); // 256KB
+    // FIX: Quinn's internen Datagram-Puffer von 1MB (Default) auf 128KB reduzieren.
+    // Das zwingt send_datagram_wait() früher zu blockieren und verhindert gewaltige
+    // Ping-Spikes (Bufferbloat) im inneren TCP-Tunnel!
+    transport_config.datagram_send_buffer_size(128 * 1024);
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));
@@ -84,9 +84,8 @@ pub async fn connect_and_handshake(
     // Groß für 250+ Mbit/s Downloads
     let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); 
     
-    // EXTREM WICHTIG: Winzig (128 KB) für Uploads! 
-    // Verhindert, dass BBR blind Pakete in den Android-RAM pumpt und das Modem crasht.
-    let _ = socket2_sock.set_send_buffer_size(128 * 1024); 
+    // Erhöht auf 512 KB: Erlaubt bis zu ~130 Mbit/s Upload, schützt das Modem aber weiterhin vor 1.7MB CWND-Eskalation
+    let _ = socket2_sock.set_send_buffer_size(512 * 1024); 
     
     // Zurückwandeln für Quinn
     let socket = std::net::UdpSocket::from(socket2_sock);

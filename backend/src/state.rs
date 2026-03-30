@@ -102,11 +102,11 @@ impl AppState {
         // Then return to pools
         {
             let mut free = self.free_ips.lock().unwrap_or_else(|e| e.into_inner());
-            if !free.contains(&ip4) { free.push(ip4); }
+            free.push(ip4);
         }
         {
             let mut free = self.free_ips_v6.lock().unwrap_or_else(|e| e.into_inner());
-            if !free.contains(&ip6) { free.push(ip6); }
+            free.push(ip6);
         }
     }
 

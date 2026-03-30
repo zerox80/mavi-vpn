@@ -1,8 +1,5 @@
 package com.mavi.vpn
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
@@ -14,6 +11,9 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.content.Context
 import android.util.Log
+import com.mavi.vpn.data.PrefsManager
+import com.mavi.vpn.native_lib.NativeLib
+import com.mavi.vpn.service.NotificationHelper
 import kotlinx.coroutines.flow.MutableStateFlow
 
 class MaviVpnService : VpnService() {
@@ -26,22 +26,20 @@ class MaviVpnService : VpnService() {
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val vpnLock = Any()
+    
+    private lateinit var prefs: PrefsManager
+    private lateinit var notificationHelper: NotificationHelper
 
     companion object {
-        init {
-            System.loadLibrary("mavivpn")
-        }
         /** Observable connection state for UI */
         val isConnected = MutableStateFlow(false)
     }
 
-    // Native methods implemented in Rust
-    private external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String, censorshipResistant: Boolean): Long
-    private external fun getConfig(handle: Long): String
-    private external fun startLoop(handle: Long, fd: Int)
-    private external fun stop(handle: Long)
-    private external fun free(handle: Long)
-    private external fun networkChanged(handle: Long)
+    override fun onCreate() {
+        super.onCreate()
+        prefs = PrefsManager(this)
+        notificationHelper = NotificationHelper(this)
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
@@ -51,7 +49,6 @@ class MaviVpnService : VpnService() {
             return START_NOT_STICKY
         }
         
-        // If action is CONNECT or intent is null (System Restart), we try to start
         if (action == "CONNECT" || intent == null) {
             val ip: String
             val port: String
@@ -68,25 +65,20 @@ class MaviVpnService : VpnService() {
                 splitMode = intent.getStringExtra("SPLIT_MODE") ?: ""
                 splitPackages = intent.getStringExtra("SPLIT_PACKAGES") ?: ""
                 
-                // Save to prefs for restart
-                val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
-                prefs.edit()
-                    .putString("saved_ip", ip)
-                    .putString("saved_port", port)
-                    .putString("saved_token", token)
-                    .putString("saved_pin", pin)
-                    .putString("saved_split_mode", splitMode)
-                    .putString("saved_split_packages", splitPackages)
-                    .apply()
+                prefs.savedIp = ip
+                prefs.savedPort = port
+                prefs.savedToken = token
+                prefs.savedPin = pin
+                prefs.savedSplitMode = splitMode
+                prefs.savedSplitPackages = splitPackages
             } else {
                 Log.i("MaviVPN", "Service restarted by System. Reloading credentials...")
-                val prefs = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
-                ip = prefs.getString("saved_ip", "") ?: ""
-                port = prefs.getString("saved_port", "4433") ?: "4433"
-                token = prefs.getString("saved_token", "") ?: ""
-                pin = prefs.getString("saved_pin", "") ?: ""
-                splitMode = prefs.getString("saved_split_mode", "") ?: ""
-                splitPackages = prefs.getString("saved_split_packages", "") ?: ""
+                ip = prefs.savedIp
+                port = prefs.savedPort
+                token = prefs.savedToken
+                pin = prefs.savedPin
+                splitMode = prefs.savedSplitMode
+                splitPackages = prefs.savedSplitPackages
             }
 
             if (ip.isNotEmpty() && token.isNotEmpty()) {
@@ -101,14 +93,12 @@ class MaviVpnService : VpnService() {
     }
 
     private fun startVpn(ip: String, port: String, token: String, certPin: String, splitMode: String, splitPackages: String) {
-        // 1. Stop any existing thread before starting a new one
         if (thread != null) {
             isRunning = false
             try { thread?.join(2000) } catch(_: Exception){}
             thread = null
         }
 
-        // 2. Unregister previous Network Callback to avoid leaks
         synchronized(vpnLock) {
             try {
                 if (connectivityManager != null && networkCallback != null) {
@@ -120,7 +110,6 @@ class MaviVpnService : VpnService() {
             networkCallback = null
         }
 
-        // 3. Register New Network Callback
         try {
             connectivityManager = getSystemService(ConnectivityManager::class.java)
             networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -128,7 +117,7 @@ class MaviVpnService : VpnService() {
                     Log.d("MaviVPN", "Network available: $network")
                     synchronized(vpnLock) {
                         if (vpnSessionHandle != 0L) {
-                            networkChanged(vpnSessionHandle)
+                            NativeLib.networkChanged(vpnSessionHandle)
                         }
                     }
                 }
@@ -141,24 +130,11 @@ class MaviVpnService : VpnService() {
             Log.e("MaviVPN", "Failed to register network callback", e)
         }
 
-        // Create Notification
-        val channelId = "vpn_channel"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val chan = NotificationChannel(channelId, "VPN Status", NotificationManager.IMPORTANCE_LOW)
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(chan)
-        }
-
-        val notification = Notification.Builder(this, channelId)
-            .setContentTitle("Mavi VPN")
-            .setContentText("Connecting to $ip...")
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .build()
+        val notification = notificationHelper.createNotification("Mavi VPN", "Connecting to $ip...")
         
-        // Acquire WakeLock to keep VPN running during sleep
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MaviVPN::ServiceWakeLock")
-        wakeLock?.acquire(10 * 60 * 60 * 1000L) // 10 hour timeout as safety net
+        wakeLock?.acquire(10 * 60 * 60 * 1000L)
 
         isRunning = true
         startForeground(1, notification)
@@ -169,73 +145,52 @@ class MaviVpnService : VpnService() {
             while (isRunning) {
                 try {
                     var retryCount = 0
-                    val crMode = getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
-                        .getBoolean("saved_censorship_resistant", false)
+                    val crMode = prefs.savedCensorshipResistant
                         
                     while (isRunning) {
                         Log.d("MaviVPN", "Attempting connection to $ip:$port (Attempt ${++retryCount})")
                         
-                        // Update notification to show we are trying
                         if (retryCount > 1) {
-                            val updatedNotification = Notification.Builder(this, channelId)
-                                .setContentTitle("Mavi VPN")
-                                .setContentText("Retrying connection to $ip (Attempt $retryCount)...")
-                                .setSmallIcon(android.R.drawable.ic_lock_lock)
-                                .build()
-                            val manager = getSystemService(NotificationManager::class.java)
-                            manager.notify(1, updatedNotification)
+                            notificationHelper.updateNotification(1, "Mavi VPN", "Retrying connection to $ip (Attempt $retryCount)...")
                         }
 
-                        val handle = init(this, token, "$ip:$port", certPin, crMode)
+                        val handle = NativeLib.init(this, token, "$ip:$port", certPin, crMode)
                         if (handle == 0L) {
                             Log.e("MaviVPN", "Handshake failed. Retrying in 2 seconds...")
-                            Thread.sleep(2000) // Longer interval to be kind to the network
+                            Thread.sleep(2000)
                             continue
                         }
                         
-                        // Reset retry count on success
                         retryCount = 0
-                        
-                        // Bug Fix: Store handle IMMEDIATELY after creation to prevent leak if thread is interrupted
                         synchronized(vpnLock) {
                             vpnSessionHandle = handle
                         }
-                        break // Exit retry loop
+                        break
                     }
                     
-                    if (!isRunning) continue // Handle case where we stopped during retries
+                    if (!isRunning) continue 
                     val handle = vpnSessionHandle
 
                     try {
-                        // 2. Get Config
-                        val configJson = getConfig(handle)
+                        val configJson = NativeLib.getConfig(handle)
                         Log.d("MaviVPN", "Config Received: $configJson")
                         val root = org.json.JSONObject(configJson)
-                        // Check if wrapped in Config (which it is due to Rust Enum serialization)
                         val config = if (root.has("Config")) root.getJSONObject("Config") else root
                         
-                        // 3. Establish Interface
-                        var localInterface: ParcelFileDescriptor? = null // Declare outside try
+                        var localInterface: ParcelFileDescriptor? = null 
                         
                         try {
                              val builder = Builder()
-                        
-                             // Parse Config
                              val assignedIp = config.getString("assigned_ip")
-                             // Dynamic netmask calculation
                              val netmask = config.optString("netmask", "255.255.255.0")
                              val prefixLength = netmaskToPrefixLength(netmask)
                         
                              builder.addAddress(assignedIp, prefixLength)
-                        
-                             // Routes
                              builder.addRoute("0.0.0.0", 0)
                         
-                             // DNS
                              val dns = config.optString("dns_server", "8.8.8.8")
                              builder.addDnsServer(dns)
                         
-                             // IPv6
                              if (config.has("assigned_ipv6")) {
                                  val v6 = config.getString("assigned_ipv6")
                                  val v6Prefix = config.optInt("netmask_v6", 64)
@@ -250,7 +205,6 @@ class MaviVpnService : VpnService() {
                                  }
                              }
 
-                             // Split Tunneling (App based)
                              if (splitMode == "include" || splitMode == "exclude") {
                                  val packages = splitPackages.split(",").map { it.trim() }.filter { it.isNotEmpty() }
                                  Log.d("MaviVPN", "Applying Split Tunneling: Mode=$splitMode, Packages=$packages")
@@ -268,9 +222,7 @@ class MaviVpnService : VpnService() {
                                  }
                              }
 
-
                              builder.setSession("MaviVPN")
-                             // Set inner MTU to 1280 to comply with IPv6 minimum requirements
                              builder.setMtu(1280)
 
                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -283,31 +235,15 @@ class MaviVpnService : VpnService() {
                              }
 
                              if (localInterface != null) {
-
                                  val fd = localInterface.fd
-
                                  Log.d("MaviVPN", "Interface established. Starting Loop.")
-
                                  isConnected.value = true
-
-                            
-
-                                 // 4. Start Loop (Blocks until error or stop)
-
-                                 startLoop(handle, fd)
-
-                            
-
+                                 NativeLib.startLoop(handle, fd)
                                  Log.d("MaviVPN", "Native VPN loop exited")
-
                                  isConnected.value = false
-
                              } else {
-
                                  Log.e("MaviVPN", "Failed to establish VPN interface")
-
                              }
-
                         } finally {
                              try { localInterface?.close() } catch(e: Exception) {}
                              synchronized(vpnLock) {
@@ -316,23 +252,16 @@ class MaviVpnService : VpnService() {
                                   }
                              }
                         }
-
                     } catch (e: Exception) {
                         Log.e("MaviVPN", "Error during VPN session: ${e.message}")
                         e.printStackTrace()
                     } finally {
-                        Log.d("MaviVPN", "Cleaning up VPN session for retry/stop")
-                        
-                        // Clean native memory safely
-                        // Bug Fix: Only free the handle that THIS thread was using
                         synchronized(vpnLock) {
                              if (vpnSessionHandle == handle) {
-                                  free(handle)
+                                  NativeLib.free(handle)
                                   vpnSessionHandle = 0
                              } else if (handle != 0L) {
-                                  // This shouldn't happen often, but if 'handle' was never assigned 
-                                  // or already superseded, we still need to free it.
-                                  free(handle)
+                                  NativeLib.free(handle)
                              }
                         }
                     }
@@ -341,19 +270,14 @@ class MaviVpnService : VpnService() {
                      try { Thread.sleep(500) } catch(_: Exception){}
                 }
                 
-                // Ensure current thread is still active
                 if (Thread.currentThread() != thread) {
-                    Log.i("MaviVPN", "Thread superseded. Exiting loop.")
                     break
                 }
                 
                 if (isRunning) {
-                    Log.i("MaviVPN", "Connection lost or loop exited. Restarting in 500ms...")
                     try { Thread.sleep(500) } catch(_: Exception){}
                 }
             }
-            
-            Log.i("MaviVPN", "VPN Thread Stopped. Stopping Service.")
             stopSelf()
         }.also { it.start() }
     }
@@ -365,7 +289,7 @@ class MaviVpnService : VpnService() {
         synchronized(vpnLock) {
              val handle = vpnSessionHandle
              if (handle != 0L) {
-                  stop(handle) // Signal Rust to stop
+                  NativeLib.stop(handle)
              }
         }
         
@@ -387,7 +311,7 @@ class MaviVpnService : VpnService() {
         vpnInterface = null
         if (thread != null) {
             try {
-                thread?.join(3000) // Wait for thread to finish before nulling reference
+                thread?.join(3000)
             } catch(_: Exception){}
             thread = null
         }
@@ -402,7 +326,6 @@ class MaviVpnService : VpnService() {
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
-                Log.d("MaviVPN", "WakeLock released")
             }
         } catch (e: Exception) {
             Log.w("MaviVPN", "Error releasing WakeLock: ${e.message}")
@@ -414,7 +337,6 @@ class MaviVpnService : VpnService() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Safety net: release WakeLock if stopVpn() was never called
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
@@ -433,12 +355,11 @@ class MaviVpnService : VpnService() {
                 (acc shl 8) or octet.toLong()
             }
             val prefix = Integer.bitCount(mask.toInt())
-            // Validate contiguous bits: a valid netmask has all 1s followed by all 0s
             val expected = if (prefix == 0) 0L else (0xFFFFFFFFL shl (32 - prefix)) and 0xFFFFFFFFL
             if (mask != expected) return 24
             prefix
         } catch (e: Exception) {
-            24 // Fallback default
+            24 
         }
     }
 }

@@ -2,6 +2,7 @@ use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, V
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
+use base64::Engine;
 
 pub struct KeycloakValidator {
     url: String,

@@ -54,9 +54,33 @@ impl KeycloakValidator {
         // So we disable built-in audience validation and check azp manually below.
         validation.validate_aud = false;
 
+        // Allow 120 seconds of clock skew between VPN server and Keycloak
+        validation.leeway = 120;
+
         // Validate the issuer (the Keycloak realm URL)
         let issuer = format!("{}/realms/{}", self.url.trim_end_matches('/'), self.realm);
         validation.set_issuer(&[&issuer]);
+
+        // Debug: decode without validation first to see the claims
+        {
+            let mut no_validate = Validation::new(Algorithm::RS256);
+            no_validate.insecure_disable_signature_validation();
+            no_validate.validate_aud = false;
+            no_validate.validate_exp = false;
+            if let Ok(debug_data) = decode::<serde_json::Value>(token, &DecodingKey::from_secret(b""), &no_validate) {
+                let claims = &debug_data.claims;
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                let exp = claims.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
+                let iat = claims.get("iat").and_then(|v| v.as_u64()).unwrap_or(0);
+                info!("JWT Debug: now={}, iat={}, exp={}, age={}s, expires_in={}s, iss={}, azp={}",
+                    now, iat, exp,
+                    now.saturating_sub(iat),
+                    if exp > now { exp - now } else { 0 },
+                    claims.get("iss").and_then(|v| v.as_str()).unwrap_or("?"),
+                    claims.get("azp").and_then(|v| v.as_str()).unwrap_or("?"),
+                );
+            }
+        }
 
         match decode::<serde_json::Value>(token, &decoding_key, &validation) {
             Ok(token_data) => {

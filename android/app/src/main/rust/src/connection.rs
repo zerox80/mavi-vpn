@@ -62,16 +62,14 @@ pub async fn connect_and_handshake(
     transport_config.initial_mtu(quic_mtu); 
     transport_config.min_mtu(quic_mtu);
 
-    // Enable Segmentation Offload (GSO) for higher throughput - Disabled for better stability on restricted networks
-    transport_config.enable_segmentation_offload(false);
+    // Enable Segmentation Offload (GSO) for higher throughput
+    transport_config.enable_segmentation_offload(true);
 
     // Congestion Control: Use BBR for higher bandwidth and resistance to loss/jitter
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
-    // FIX: Quinn's internen Datagram-Puffer von 1MB (Default) auf 128KB reduzieren.
-    // Das zwingt send_datagram_wait() früher zu blockieren und verhindert gewaltige
-    // Ping-Spikes (Bufferbloat) im inneren TCP-Tunnel!
-    transport_config.datagram_send_buffer_size(128 * 1024);
+    // Internal QUIC datagram send buffer increased to 2MB.
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));
@@ -84,8 +82,8 @@ pub async fn connect_and_handshake(
     // Groß für 250+ Mbit/s Downloads
     let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); 
     
-    // Erhöht auf 512 KB: Erlaubt bis zu ~130 Mbit/s Upload, schützt das Modem aber weiterhin vor 1.7MB CWND-Eskalation
-    let _ = socket2_sock.set_send_buffer_size(512 * 1024); 
+    // Set OS-level UDP send buffer to 2MB.
+    let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024); 
     
     // Zurückwandeln für Quinn
     let socket = std::net::UdpSocket::from(socket2_sock);

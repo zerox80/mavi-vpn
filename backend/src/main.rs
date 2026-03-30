@@ -12,7 +12,6 @@ mod cert;
 mod config;
 mod state;
 mod keycloak;
-mod handler;
 mod routing;
 mod utils;
 mod network;

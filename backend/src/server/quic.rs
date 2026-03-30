@@ -1,13 +1,13 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use quinn::{Endpoint, ServerConfig, TransportConfig};
 use std::sync::Arc;
-use tracing::info;
 use crate::config::Config;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 pub fn create_quic_endpoint(
     config: &Config,
-    certs: Vec<rustls::Certificate>,
-    key: rustls::PrivateKey,
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
 ) -> Result<Endpoint> {
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(
         rustls::crypto::aws_lc_rs::default_provider().into()

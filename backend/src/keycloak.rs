@@ -1,6 +1,5 @@
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use anyhow::{Context, Result};
-use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -54,7 +53,6 @@ impl KeycloakValidator {
         // 2. Set the expected Issuer (the Keycloak realm URL)
         let issuer = format!("{}/realms/{}", self.url.trim_end_matches('/'), self.realm);
         validation.set_issuer(&[&issuer]);
-        validation.validate_iss = true;
 
         match decode::<serde_json::Value>(token, &decoding_key, &validation) {
             Ok(_) => Ok(true),

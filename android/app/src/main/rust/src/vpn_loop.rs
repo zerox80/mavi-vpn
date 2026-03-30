@@ -56,7 +56,7 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
     let tx_feedback = tx_tun.clone();
     
     let upload_task = tokio::spawn(async move {
-        let mut read_buf = bytes::BytesMut::with_capacity(128 * 1024);
+        let mut read_buf = bytes::BytesMut::with_capacity(256 * 1024);
         loop {
             if stop_upload.load(Ordering::Relaxed) { break; }
             
@@ -69,7 +69,7 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
             };
             
             let res = readable_guard.try_io(|inner| {
-                let mut packets = Vec::with_capacity(32);
+                let mut packets = Vec::with_capacity(128);
                 loop {
                     if read_buf.remaining_mut() < 2048 { read_buf.reserve(2048); }
                     let chunk = read_buf.chunk_mut();
@@ -90,7 +90,7 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                     
                     unsafe { read_buf.advance_mut(n as usize); }
                     packets.push(read_buf.split_to(n as usize).freeze());
-                    if packets.len() >= 32 { break; } 
+                    if packets.len() >= 128 { break; } 
                 }
                 Ok(packets)
             });

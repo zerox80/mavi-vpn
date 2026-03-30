@@ -312,7 +312,7 @@ async fn connect_and_handshake(
     
     // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
+    transport_config.datagram_send_buffer_size(256 * 1024); // 256KB send buffer for clean backpressure
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

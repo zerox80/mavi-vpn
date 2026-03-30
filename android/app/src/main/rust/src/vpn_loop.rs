@@ -45,7 +45,7 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
     };
 
     let connection_arc = Arc::new(connection);
-    let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Vec<u8>>(256); // Increased capacity
+    let (tx_tun, mut rx_tun) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
 
     info!("Entering concurrent VPN Loop Hub");
 
@@ -90,16 +90,17 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                     
                     unsafe { read_buf.advance_mut(n as usize); }
                     packets.push(read_buf.split_to(n as usize).freeze());
-                    if packets.len() >= 128 { break; } 
+                    if packets.len() >= 64 { break; } 
                 }
                 Ok(packets)
             });
 
             if let Ok(Ok(packets)) = res {
                 for packet in packets {
-                    // FIX: Nutze send_datagram_wait().await für echtes TCP-Backpressure,
-                    // anstatt Pakete bei vollem Puffer lautlos zu verwerfen.
-                    if let Err(e) = conn_upload.send_datagram_wait(packet.clone()).await {
+                    // Non-blocking send: Bei vollem Buffer wird das Paket gedroppt.
+                    // TCP im Tunnel regelt sich selbst über Retransmits.
+                    // (Identisch zum Linux-Client und Backend-Server)
+                    if let Err(e) = conn_upload.send_datagram(packet.clone()) {
                         match e {
                             quinn::SendDatagramError::ConnectionLost(_) => {
                                 error!("QUIC Connection lost during send");

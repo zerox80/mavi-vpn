@@ -54,31 +54,29 @@ impl KeycloakValidator {
         // So we disable built-in audience validation and check azp manually below.
         validation.validate_aud = false;
 
-        // Allow 120 seconds of clock skew between VPN server and Keycloak
-        validation.leeway = 120;
+        // Increased leeway to 300 seconds to compensate for any server/auth clock differences.
+        validation.leeway = 300;
 
         // Validate the issuer (the Keycloak realm URL)
         let issuer = format!("{}/realms/{}", self.url.trim_end_matches('/'), self.realm);
         validation.set_issuer(&[&issuer]);
 
-        // Debug: decode without validation first to see the claims
-        {
-            let mut no_validate = Validation::new(Algorithm::RS256);
-            no_validate.insecure_disable_signature_validation();
-            no_validate.validate_aud = false;
-            no_validate.validate_exp = false;
-            if let Ok(debug_data) = decode::<serde_json::Value>(token, &DecodingKey::from_secret(b""), &no_validate) {
-                let claims = &debug_data.claims;
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                let exp = claims.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
-                let iat = claims.get("iat").and_then(|v| v.as_u64()).unwrap_or(0);
-                info!("JWT Debug: now={}, iat={}, exp={}, age={}s, expires_in={}s, iss={}, azp={}",
-                    now, iat, exp,
-                    now.saturating_sub(iat),
-                    if exp > now { exp - now } else { 0 },
-                    claims.get("iss").and_then(|v| v.as_str()).unwrap_or("?"),
-                    claims.get("azp").and_then(|v| v.as_str()).unwrap_or("?"),
-                );
+        // Robust Debug: Manually decode the second part of the JWT (the payload)
+        // This is always valid Base64 JSON and doesn't require a key.
+        let token_parts: Vec<&str> = token.split('.').collect();
+        if token_parts.len() >= 2 {
+            if let Ok(payload_bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token_parts[1]) {
+                if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                    let exp = claims.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let iat = claims.get("iat").and_then(|v| v.as_u64()).unwrap_or(0);
+                    info!("JWT Debug: now={}, iat={}, exp={}, expires_in={}s, diff_iat={}s, azp={}",
+                        now, iat, exp,
+                        if exp > now { (exp - now) as i64 } else { -((now - exp) as i64) },
+                        (now as i64) - (iat as i64),
+                        claims.get("azp").and_then(|v| v.as_str()).unwrap_or("?"),
+                    );
+                }
             }
         }
 

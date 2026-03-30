@@ -56,81 +56,80 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
     let tx_feedback = tx_tun.clone();
     
     let upload_task = tokio::spawn(async move {
-        let mut read_buf = bytes::BytesMut::with_capacity(256 * 1024);
+        let mut buf = bytes::BytesMut::with_capacity(65536);
         loop {
             if stop_upload.load(Ordering::Relaxed) { break; }
             
-            let mut readable_guard = tokio::select! {
-                res = tun_upload.readable() => match res {
-                    Ok(g) => g,
-                    Err(_) => break,
-                },
+            let mut guard = tokio::select! {
+                res = tun_upload.readable() => match res { Ok(g) => g, Err(_) => break },
                 _ = shutdown_rx.recv() => break,
             };
-            
-            let res = readable_guard.try_io(|inner| {
-                let mut packets = Vec::with_capacity(128);
-                loop {
-                    if read_buf.remaining_mut() < 2048 { read_buf.reserve(2048); }
-                    let chunk = read_buf.chunk_mut();
-                    let n = unsafe { libc::read(inner.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
-                    
-                    if n < 0 {
-                        let err = std::io::Error::last_os_error();
-                        if err.kind() == std::io::ErrorKind::WouldBlock {
-                            if packets.is_empty() {
-                                return Err(err); 
-                            } else {
-                                break;
-                            }
-                        }
-                        return Err(err);
+
+            let packet = match guard.try_io(|inner| {
+                 if buf.capacity() < 2048 {
+                     buf.reserve(2048);
+                 }
+                 let chunk = buf.chunk_mut();
+                 let max_len = 2048.min(chunk.len());
+                 
+                 let n = unsafe { libc::read(inner.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
+                 
+                 if n < 0 {
+                     let err = std::io::Error::last_os_error();
+                     return Err(err);
+                 }
+                 let n = n as usize;
+                 if n == 0 { return Ok(None); } 
+                 
+                 unsafe { buf.advance_mut(n); }
+                 let packet = buf.split_to(n).freeze();
+                 Ok(Some(packet))
+            }) {
+                Ok(Ok(Some(p))) => p,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
+                    if e.kind() != std::io::ErrorKind::WouldBlock {
+                        error!("TUN Read Error: {}", e);
+                        break;
                     }
-                    if n == 0 { break; }
-                    
-                    unsafe { read_buf.advance_mut(n as usize); }
-                    packets.push(read_buf.split_to(n as usize).freeze());
-                    if packets.len() >= 64 { break; } 
-                }
-                Ok(packets)
-            });
+                    continue; // Loop instantly to `await` readable if not WouldBlock (Wait, if not WouldBlock, break)
+                },
+                Err(_) => continue, // WouldBlock, let tokio select re-await
+            };
 
-            if let Ok(Ok(packets)) = res {
-                for packet in packets {
-                    // Non-blocking send: Bei vollem Buffer wird das Paket gedroppt.
-                    // TCP im Tunnel regelt sich selbst über Retransmits.
-                    // (Identisch zum Linux-Client und Backend-Server)
-                    if let Err(e) = conn_upload.send_datagram(packet.clone()) {
-                        match e {
-                            quinn::SendDatagramError::ConnectionLost(_) => {
-                                error!("QUIC Connection lost during send");
-                                stop_upload.store(true, Ordering::SeqCst);
-                                break;
-                            }
-                            quinn::SendDatagramError::TooLarge => {
-                                let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
-                                warn!("MTU Limit hit! Packet: {} bytes, Limit: {} bytes", packet.len(), current_limit);
-                                
-                                let version = (packet[0] >> 4) & 0xF;
-                                let gw = if version == 4 { 
-                                    std::net::IpAddr::V4(gateway_v4) 
-                                } else { 
-                                     std::net::IpAddr::V6(gateway_v6_opt.unwrap_or_else(|| "fd00::1".parse().unwrap())) 
-                                };
-                                let reported_mtu = if version == 6 {
-                                    std::cmp::max(current_limit as u16, 1280)
-                                } else {
-                                    current_limit as u16
-                                };
+            let packet_len = packet.len();
+            let packet_bytes = packet.clone(); 
 
-                                if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet, reported_mtu, Some(gw)) {
-                                    let _ = tx_feedback.try_send(icmp_packet);
-                                }
-                            },
-                            _ => {
-                                error!("Unexpected SendDatagramError: {:?}", e);
-                            }
+            // Send to QUIC
+            if let Err(e) = conn_upload.send_datagram(packet) {
+                match e {
+                    quinn::SendDatagramError::ConnectionLost(_) => {
+                        error!("QUIC Connection lost during send");
+                        stop_upload.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    quinn::SendDatagramError::TooLarge => {
+                        let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
+                        warn!("MTU Limit hit! Packet: {} bytes, Limit: {} bytes", packet_len, current_limit);
+                        
+                        let version = (packet_bytes[0] >> 4) & 0xF;
+                        let gw = if version == 4 { 
+                            std::net::IpAddr::V4(gateway_v4) 
+                        } else { 
+                             std::net::IpAddr::V6(gateway_v6_opt.unwrap_or_else(|| "fd00::1".parse().unwrap())) 
+                        };
+                        let reported_mtu = if version == 6 {
+                            std::cmp::max(current_limit as u16, 1280)
+                        } else {
+                            current_limit as u16
+                        };
+
+                        if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, reported_mtu, Some(gw)) {
+                            let _ = tx_feedback.try_send(icmp_packet);
                         }
+                    },
+                    _ => {
+                        error!("Unexpected SendDatagramError: {:?}", e);
                     }
                 }
             }

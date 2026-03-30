@@ -1252,4 +1252,6 @@ pub enum SendDatagramError {
 ///
 /// This limits the amount of CPU resources consumed by datagram generation,
 /// and allows other tasks (like receiving ACKs) to run in between.
-const MAX_TRANSMIT_DATAGRAMS: usize = 20;
+/// Increased from 20 to 200 to allow larger pacing bursts to be sent
+/// without being artificially truncated by this limit.
+const MAX_TRANSMIT_DATAGRAMS: usize = 200;

@@ -45,8 +45,16 @@ impl KeycloakValidator {
         let decoding_key = DecodingKey::from_jwk(jwk).context("Failed to create decoding key from JWK")?;
         
         let mut validation = Validation::new(Algorithm::RS256);
-        // Do not strictly validate 'aud' since Keycloak access tokens often don't include the client_id as audience natively without mappers
-        validation.validate_aud = false; 
+        
+        // --- SECURITY FIX: Validate Audience and Issuer ---
+        // 1. Set the expected Audience (the client_id used for this VPN service)
+        validation.set_audience(&[&self.client_id]);
+        validation.validate_aud = true;
+
+        // 2. Set the expected Issuer (the Keycloak realm URL)
+        let issuer = format!("{}/realms/{}", self.url.trim_end_matches('/'), self.realm);
+        validation.set_issuer(&[&issuer]);
+        validation.validate_iss = true;
 
         match decode::<serde_json::Value>(token, &decoding_key, &validation) {
             Ok(_) => Ok(true),

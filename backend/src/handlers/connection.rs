@@ -110,7 +110,7 @@ pub async fn handle_connection(
 
     info!("Authenticated {} -> IPv4: {}, IPv6: {}", remote_addr, assigned_ip, assigned_ip6);
 
-    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(1024);
+    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(4096);
     state.register_client(assigned_ip, assigned_ip6, tx_client);
 
     let connection = Arc::new(connection);

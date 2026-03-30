@@ -142,26 +142,57 @@ pub async fn handle_connection(
         }
     });
 
-    let res = loop {
-        match connection.read_datagram().await {
-            Ok(data) => {
-                if data.is_empty() { continue; }
-                let ver = data[0] >> 4;
-                let mut valid = false;
-                if ver == 4 {
-                    if let Ok(h) = Ipv4HeaderSlice::from_slice(&data) {
-                        if h.source_addr() == assigned_ip { valid = true; }
-                    }
-                } else if ver == 6 {
-                    if let Ok(h) = Ipv6HeaderSlice::from_slice(&data) {
-                        if h.source_addr() == assigned_ip6 || h.source_addr().is_unspecified() { valid = true; }
-                    }
+    let conn_stats = connection.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let stats = conn_stats.stats();
+            info!(
+                "[SERVER QUIC STATS] Peer: {} | RTT: {}ms | CWND: {} bytes | Lost Packets: {} | Max Datagram: {}",
+                remote_addr,
+                stats.path.rtt.as_millis(),
+                stats.path.cwnd,
+                stats.path.lost_packets,
+                conn_stats.max_datagram_size().unwrap_or(0)
+            );
+            if conn_stats.close_reason().is_some() { break; }
+        }
+    });
+
+    let res = 'outer_loop: loop {
+        let first_packet = match connection.read_datagram().await {
+            Ok(data) => data,
+            Err(e) => break Err(anyhow::anyhow!("Lost: {}", e)),
+        };
+
+        let mut batch = Vec::with_capacity(64);
+        batch.push(first_packet);
+
+        for _ in 0..63 {
+            if let Some(Ok(p)) = connection.read_datagram().now_or_never() {
+                batch.push(p);
+            } else {
+                break;
+            }
+        }
+
+        for data in batch {
+            if data.is_empty() { continue; }
+            let ver = data[0] >> 4;
+            let mut valid = false;
+            if ver == 4 {
+                if let Ok(h) = Ipv4HeaderSlice::from_slice(&data) {
+                    if h.source_addr() == assigned_ip { valid = true; }
                 }
-                if valid {
-                    if tx_tun.send(data).await.is_err() { break Err(anyhow::anyhow!("TUN closed")); }
+            } else if ver == 6 {
+                if let Ok(h) = Ipv6HeaderSlice::from_slice(&data) {
+                    if h.source_addr() == assigned_ip6 || h.source_addr().is_unspecified() { valid = true; }
                 }
             }
-            Err(e) => break Err(anyhow::anyhow!("Lost: {}", e)),
+            if valid {
+                if tx_tun.send(data).await.is_err() { break 'outer_loop Err(anyhow::anyhow!("TUN closed")); }
+            }
         }
     };
 

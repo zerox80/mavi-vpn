@@ -41,7 +41,7 @@ pub fn create_quic_endpoint(
         unsafe {
             let val: libc::c_int = 0; 
             let _ = libc::setsockopt(fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
-            let _ = libc::setsockopt(fd, libc::IPPROTO_IPV6, 23, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
+            let _ = libc::setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
         }
     }
 
@@ -66,7 +66,7 @@ fn setup_transport_config(transport_config: &mut TransportConfig) {
     transport_config.send_window(4 * 1024 * 1024); 
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     transport_config.mtu_discovery_config(None); 
-    transport_config.initial_mtu(1360); 
-    transport_config.min_mtu(1360);
+    transport_config.initial_mtu(1412); 
+    transport_config.min_mtu(1412);
     transport_config.enable_segmentation_offload(true);
 }

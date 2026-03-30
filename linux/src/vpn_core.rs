@@ -85,8 +85,9 @@ fn create_udp_socket() -> Result<std::net::UdpSocket> {
     ))?;
 
     // Large socket buffers for high-throughput stability (try 4MB, fall back gracefully)
+    // ONLY set the receive buffer size. Send buffer should be managed by the kernel.
     for size in [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024] {
-        if socket.set_send_buffer_size(size).is_ok() && socket.set_recv_buffer_size(size).is_ok() {
+        if socket.set_recv_buffer_size(size).is_ok() {
             break;
         }
     }

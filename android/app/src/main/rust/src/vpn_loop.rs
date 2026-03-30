@@ -97,31 +97,38 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
 
             if let Ok(Ok(packets)) = res {
                 for packet in packets {
-                    if let Err(e) = conn_upload.send_datagram(packet.clone()) {
+                    // FIX: Nutze send_datagram_wait().await für echtes TCP-Backpressure,
+                    // anstatt Pakete bei vollem Puffer lautlos zu verwerfen.
+                    if let Err(e) = conn_upload.send_datagram_wait(packet.clone()).await {
                         match e {
                             quinn::SendDatagramError::ConnectionLost(_) => {
+                                error!("QUIC Connection lost during send");
                                 stop_upload.store(true, Ordering::SeqCst);
                                 break;
                             }
                             quinn::SendDatagramError::TooLarge => {
                                 let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
+                                warn!("MTU Limit hit! Packet: {} bytes, Limit: {} bytes", packet.len(), current_limit);
+                                
                                 let version = (packet[0] >> 4) & 0xF;
                                 let gw = if version == 4 { 
                                     std::net::IpAddr::V4(gateway_v4) 
                                 } else { 
                                      std::net::IpAddr::V6(gateway_v6_opt.unwrap_or_else(|| "fd00::1".parse().unwrap())) 
                                 };
-                                    let reported_mtu = if version == 6 {
-                                        std::cmp::max(current_limit as u16, 1280)
-                                    } else {
-                                        current_limit as u16
-                                    };
+                                let reported_mtu = if version == 6 {
+                                    std::cmp::max(current_limit as u16, 1280)
+                                } else {
+                                    current_limit as u16
+                                };
 
-                                    if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet, reported_mtu, Some(gw)) {
-                                        let _ = tx_feedback.try_send(icmp_packet);
-                                    }
+                                if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet, reported_mtu, Some(gw)) {
+                                    let _ = tx_feedback.try_send(icmp_packet);
+                                }
                             },
-                            _ => {}
+                            _ => {
+                                error!("Unexpected SendDatagramError: {:?}", e);
+                            }
                         }
                     }
                 }
@@ -207,11 +214,31 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
         }
     });
 
+    // --- TASK 4: QUIC STATS LOGGING ---
+    let stop_stats = stop_flag.clone();
+    let conn_stats = connection_arc.clone();
+    let stats_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            if stop_stats.load(Ordering::Relaxed) { break; }
+            let stats = conn_stats.stats();
+            info!(
+                "[QUIC STATS] RTT: {}ms | CWND: {} bytes | Lost Packets: {} | Max Datagram Size: {}",
+                stats.path.rtt.as_millis(),
+                stats.path.cwnd,
+                stats.path.lost_packets,
+                conn_stats.max_datagram_size().unwrap_or(0)
+            );
+        }
+    });
+
     // Wait for any task to terminate
     let res = tokio::select! {
         r = upload_task => { error!("Upload task terminated: {:?}", r); "Upload" },
         r = download_task => { error!("Download task terminated: {:?}", r); "Download" },
         r = icmp_task => { error!("ICMP task terminated: {:?}", r); "ICMP" },
+        r = stats_task => { error!("Stats task terminated: {:?}", r); "Stats" },
     };
     
     warn!("VPN Loop Hub shutting down. Trigger: {} task exit", res);

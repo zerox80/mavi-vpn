@@ -62,10 +62,11 @@ pub async fn connect_and_handshake(
     transport_config.initial_mtu(quic_mtu); 
     transport_config.min_mtu(quic_mtu);
 
-    // Enable Segmentation Offload (GSO) for higher throughput
-    transport_config.enable_segmentation_offload(true);
+    // Disable GSO for better compatibility on Android (avoiding bursty loss)
+    transport_config.enable_segmentation_offload(false);
 
     // Congestion Control: Use BBR for higher bandwidth and resistance to loss/jitter
+    // Re-enabled BBR as requested. It is excellent at handling bufferbloat.
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
     // Internal QUIC datagram send buffer increased to 2MB.

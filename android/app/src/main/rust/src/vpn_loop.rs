@@ -183,11 +183,11 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                         match res {
                             Ok(Ok(())) => {}, 
                             Ok(Err(e)) => {
-                                 error!("Fatal TUN Write Error (Critical): {}", e);
+                                 error!("TUN Write Error: {}", e);
                                  stop_download.store(true, Ordering::SeqCst);
                                  break; 
                             },
-                            Err(_) => continue, // WouldBlock: loop around to await writable again
+                            Err(_) => continue, // WouldBlock: wait for writable again
                         }
                     }
                 }

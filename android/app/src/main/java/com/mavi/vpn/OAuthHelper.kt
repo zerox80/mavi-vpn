@@ -45,6 +45,7 @@ object OAuthHelper {
             .appendQueryParameter("scope", "openid profile email")
             .appendQueryParameter("code_challenge", challenge)
             .appendQueryParameter("code_challenge_method", "S256")
+            .appendQueryParameter("prompt", "login") // FORCES Keycloak to ignore cookies and show login!
             .build()
             
         val customTabsIntent = CustomTabsIntent.Builder().build()

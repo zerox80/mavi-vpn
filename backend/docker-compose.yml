@@ -23,6 +23,10 @@ services:
       - VPN_MTU=1280
       - VPN_CENSORSHIP_RESISTANT=${VPN_CENSORSHIP_RESISTANT:-false}
       - VPN_MSS_CLAMPING=${VPN_MSS_CLAMPING:-true}
+      - VPN_KEYCLOAK_ENABLED=${VPN_KEYCLOAK_ENABLED}
+      - VPN_KEYCLOAK_URL=${VPN_KEYCLOAK_URL}
+      - VPN_KEYCLOAK_REALM=${VPN_KEYCLOAK_REALM}
+      - VPN_KEYCLOAK_CLIENT_ID=${VPN_KEYCLOAK_CLIENT_ID}
     healthcheck:
       test: ["CMD-SHELL", "ip addr show tun0 || exit 1"]
       interval: 30s

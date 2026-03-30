@@ -56,7 +56,7 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
     let tx_feedback = tx_tun.clone();
     
     let upload_task = tokio::spawn(async move {
-        let mut read_buf = bytes::BytesMut::with_capacity(65536);
+        let mut read_buf = bytes::BytesMut::with_capacity(128 * 1024);
         loop {
             if stop_upload.load(Ordering::Relaxed) { break; }
             

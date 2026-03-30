@@ -145,10 +145,7 @@ fn optimal_capacity(smoothed_rtt: Duration, window: u64, mtu: u16) -> u64 {
 const BURST_INTERVAL_NANOS: u128 = 2_000_000; // 2ms
 
 /// Allows some usage of GSO, and doesn't slow down the handshake.
-/// Increased from 10 to 150 to handle platforms with poor timer resolution
-/// (e.g. Android where tokio timers have ~15-20ms granularity instead of 1ms).
-/// Without this, pacing limits throughput to ~10 Mbit/s on Android.
-const MIN_BURST_SIZE: u64 = 150;
+const MIN_BURST_SIZE: u64 = 10;
 
 /// Creating 256 packets took 1ms in a benchmark, so larger bursts don't make sense.
 const MAX_BURST_SIZE: u64 = 256;

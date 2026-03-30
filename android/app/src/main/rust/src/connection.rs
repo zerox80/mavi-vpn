@@ -74,20 +74,7 @@ pub async fn connect_and_handshake(
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));
 
-    // --- ANTI-BUFFERBLOAT SCHUTZ ---
-    // Wir wandeln den std::net Socket kurz in einen socket2 Socket um,
-    // um die OS-Puffer-Größen auf Kernel-Ebene hart zu drosseln.
-    let socket2_sock = socket2::Socket::from(socket);
-    
-    // Groß für 250+ Mbit/s Downloads
-    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024); 
-    
-    // Set OS-level UDP send buffer to 2MB.
-    let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024); 
-    
-    // Zurückwandeln für Quinn
-    let socket = std::net::UdpSocket::from(socket2_sock);
-    // --------------------------------
+
 
     let mut endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),

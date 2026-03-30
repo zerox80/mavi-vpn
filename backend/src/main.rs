@@ -68,6 +68,8 @@ async fn main() -> Result<()> {
                     tracing::error!("CRITICAL: Failed to initialize Keycloak JWKS cache: {}. Ensure Keycloak is reachable at {}", e, url);
                 }
             }
+        } else {
+            tracing::warn!("Keycloak is enabled but VPN_KEYCLOAK_URL is not set! Falling back to static token.");
         }
     }
 

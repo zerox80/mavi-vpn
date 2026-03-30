@@ -73,19 +73,19 @@ pub struct Config {
     pub whitelist_domains: Vec<String>,
 
     /// Enable Keycloak JWT authentication instead of static token
-    #[arg(long, env = "KEYCLOAK_ENABLED", default_value = "false")]
+    #[arg(long, env = "VPN_KEYCLOAK_ENABLED", default_value = "false")]
     pub keycloak_enabled: bool,
 
     /// Keycloak Server URL (e.g., https://auth.example.com)
-    #[arg(long, env = "KEYCLOAK_URL")]
+    #[arg(long, env = "VPN_KEYCLOAK_URL")]
     pub keycloak_url: Option<String>,
 
     /// Keycloak Realm
-    #[arg(long, env = "KEYCLOAK_REALM", default_value = "mavi-vpn")]
+    #[arg(long, env = "VPN_KEYCLOAK_REALM", default_value = "mavi-vpn")]
     pub keycloak_realm: String,
 
     /// Keycloak Client ID
-    #[arg(long, env = "KEYCLOAK_CLIENT_ID", default_value = "mavi-client")]
+    #[arg(long, env = "VPN_KEYCLOAK_CLIENT_ID", default_value = "mavi-client")]
     pub keycloak_client_id: String,
 }
 

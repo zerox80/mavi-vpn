@@ -366,8 +366,7 @@ async fn connect_and_handshake(
 
     // Datagram queue tuning (match Windows/Android: 2MB each direction)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
-
+    transport_config.datagram_send_buffer_size(256 * 1024); // 256KB send buffer for clean backpressure
     let mut client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
     ));

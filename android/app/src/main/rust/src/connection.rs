@@ -62,15 +62,14 @@ pub async fn connect_and_handshake(
     transport_config.initial_mtu(quic_mtu); 
     transport_config.min_mtu(quic_mtu);
 
-    // Disable GSO for better compatibility on Android (avoiding bursty loss)
-    transport_config.enable_segmentation_offload(false);
+    // Enable GSO (Segmentation Offload) for higher throughput.
+    // With GSO, Quinn batches multiple QUIC packets into one sendmsg() call,
+    // bypassing Android's poor timer resolution which otherwise limits pacing.
+    transport_config.enable_segmentation_offload(true);
 
-    // Congestion Control: Use BBR for higher bandwidth and resistance to loss/jitter
-    // Re-enabled BBR as requested. It is excellent at handling bufferbloat.
-    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
-
-    // Internal QUIC datagram send buffer increased to 2MB.
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
+    // Datagram buffer tuning (matching v0.4 settings for GSO traffic)
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

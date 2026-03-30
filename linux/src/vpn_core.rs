@@ -85,9 +85,9 @@ fn create_udp_socket() -> Result<std::net::UdpSocket> {
     ))?;
 
     // Large socket buffers for high-throughput stability (try 4MB, fall back gracefully)
-    // ONLY set the receive buffer size. Send buffer should be managed by the kernel.
     for size in [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024] {
         if socket.set_recv_buffer_size(size).is_ok() {
+            let _ = socket.set_send_buffer_size(size); // Also set the send buffer
             break;
         }
     }
@@ -367,7 +367,7 @@ async fn connect_and_handshake(
 
     // Datagram queue tuning (match Windows/Android: 2MB each direction)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
-    transport_config.datagram_send_buffer_size(256 * 1024); // 256KB send buffer for clean backpressure
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // Increased from 256KB
     let mut client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
     ));

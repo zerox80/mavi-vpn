@@ -78,12 +78,20 @@ pub async fn handle_connection(
     let (assigned_ip, assigned_ip6) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
+            let error_msg = format!("Unauthorized: {}", e);
+            let err_payload = ControlMessage::Error { message: error_msg.clone() };
+            if let Ok(encoded) = bincode::serde::encode_to_vec(&err_payload, bincode::config::standard()) {
+                let _ = send_stream.write_u32_le(encoded.len() as u32).await;
+                let _ = send_stream.write_all(&encoded).await;
+                let _ = send_stream.finish();
+            }
+
             if config.censorship_resistant {
-                warn!("Unauthorized probe from {}. Emulating HTTP/3.", remote_addr);
+                warn!("Unauthorized probe from {}. Emulating HTTP/3. Error: {}", remote_addr, e);
                 let _ = emulate_http3(&connection, &mut send_stream).await;
-                return Err(anyhow::anyhow!("HTTP/3 probe response sent"));
+                return Err(anyhow::anyhow!("HTTP/3 probe response sent: {}", e));
             } else {
-                return Err(anyhow::anyhow!("Unauthorized: {}", e));
+                return Err(anyhow::anyhow!("{}", error_msg));
             }
         }
     };

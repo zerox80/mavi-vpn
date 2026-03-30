@@ -425,16 +425,16 @@ async fn connect_and_handshake(
     transport_config.initial_mtu(quic_mtu); 
     transport_config.min_mtu(quic_mtu);
 
-    // Enable Segmentation Offload (GSO) for higher throughput
-    transport_config.enable_segmentation_offload(true);
+    // Enable Segmentation Offload (GSO) for higher throughput - Disabled for better stability on restricted networks
+    transport_config.enable_segmentation_offload(false);
 
     // Congestion Control: Use BBR for higher bandwidth and resistance to loss/jitter
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
-    // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
-    // Increased to 4MB to match Backend and prevent bottlenecks during bursts
+    // Datagram queue tuning for high-speed traffic
+    // Reduced to 256KB to ensure clean TCP backpressure and avoid bufferbloat
     transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); // 4MB
-    transport_config.datagram_send_buffer_size(4 * 1024 * 1024); // 4MB
+    transport_config.datagram_send_buffer_size(256 * 1024); // 256KB
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport_config));

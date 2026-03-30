@@ -52,21 +52,24 @@ async fn main() -> Result<()> {
     let (certs, key) = cert::load_or_generate_certs(cert_path, key_path)?;
 
     // Keycloak Validator Setup
-    let keycloak = if config.keycloak_enabled {
+    let mut keycloak = None;
+    if config.keycloak_enabled {
         if let Some(url) = &config.keycloak_url {
             let kc = crate::keycloak::KeycloakValidator::new(
                 url.clone(),
                 config.keycloak_realm.clone(),
                 config.keycloak_client_id.clone(),
             );
-            // Optionally we could call kc.init_and_fetch() here.
-            Some(Arc::new(kc))
-        } else {
-            None
+            
+            info!("Initializing Keycloak validator...");
+            match kc.init_and_fetch().await {
+                Ok(_) => keycloak = Some(Arc::new(kc)),
+                Err(e) => {
+                    tracing::error!("CRITICAL: Failed to initialize Keycloak JWKS cache: {}. Ensure Keycloak is reachable at {}", e, url);
+                }
+            }
         }
-    } else {
-        None
-    };
+    }
 
     // --- NETWORK SETUP ---
     // Create the global TUN message channel (Capacity 4096 to prevent backpressure)

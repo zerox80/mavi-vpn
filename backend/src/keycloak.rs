@@ -39,25 +39,41 @@ impl KeycloakValidator {
         let jwks_read = self.jwks.read().await;
         let jwks = jwks_read.as_ref().ok_or_else(|| anyhow::anyhow!("JWKS not yet loaded from Keycloak Server"))?;
 
-        let jwk = jwks.find(&kid).ok_or_else(|| anyhow::anyhow!("JWK not found for kid: {}", kid))?;
+        let jwk = jwks.find(&kid).ok_or_else(|| {
+            warn!("Token kid '{}' not found in cached JWKS. Available kids: {:?}",
+                kid, jwks.keys.iter().filter_map(|k| k.common.key_id.as_ref()).collect::<Vec<_>>());
+            anyhow::anyhow!("JWK not found for kid: {}", kid)
+        })?;
 
         let decoding_key = DecodingKey::from_jwk(jwk).context("Failed to create decoding key from JWK")?;
         
         let mut validation = Validation::new(Algorithm::RS256);
         
-        // --- SECURITY FIX: Validate Audience and Issuer ---
-        // 1. Set the expected Audience (the client_id used for this VPN service)
-        validation.set_audience(&[&self.client_id]);
-        validation.validate_aud = true;
+        // Keycloak access tokens have aud:"account" by default, NOT the client_id.
+        // The client_id is in the "azp" (authorized party) claim.
+        // So we disable built-in audience validation and check azp manually below.
+        validation.validate_aud = false;
 
-        // 2. Set the expected Issuer (the Keycloak realm URL)
+        // Validate the issuer (the Keycloak realm URL)
         let issuer = format!("{}/realms/{}", self.url.trim_end_matches('/'), self.realm);
         validation.set_issuer(&[&issuer]);
 
         match decode::<serde_json::Value>(token, &decoding_key, &validation) {
-            Ok(_) => Ok(true),
+            Ok(token_data) => {
+                // Manually validate "azp" (authorized party) = our client_id
+                let claims = &token_data.claims;
+                let azp = claims.get("azp").and_then(|v| v.as_str()).unwrap_or("");
+                if azp != self.client_id {
+                    warn!("JWT azp mismatch: expected '{}', got '{}'", self.client_id, azp);
+                    return Ok(false);
+                }
+
+                info!("Keycloak JWT validated successfully (sub: {}, azp: {})",
+                    claims.get("sub").and_then(|v| v.as_str()).unwrap_or("?"), azp);
+                Ok(true)
+            }
             Err(e) => {
-                warn!("JWT Validation failed: {}", e);
+                warn!("JWT validation failed: {}", e);
                 Ok(false)
             }
         }

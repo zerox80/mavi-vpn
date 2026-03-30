@@ -61,15 +61,42 @@ async fn main() -> Result<()> {
                 config.keycloak_client_id.clone(),
             );
             
-            info!("Initializing Keycloak validator...");
-            match kc.init_and_fetch().await {
-                Ok(_) => keycloak = Some(Arc::new(kc)),
-                Err(e) => {
-                    tracing::error!("CRITICAL: Failed to initialize Keycloak JWKS cache: {}. Ensure Keycloak is reachable at {}", e, url);
+            info!("Initializing Keycloak validator for {}...", url);
+
+            // Retry with exponential backoff — Keycloak may not be ready yet
+            let max_retries = 5u32;
+            let mut success = false;
+            for attempt in 1..=max_retries {
+                match kc.init_and_fetch().await {
+                    Ok(_) => {
+                        info!("Keycloak JWKS loaded successfully (attempt {}/{})", attempt, max_retries);
+                        success = true;
+                        break;
+                    }
+                    Err(e) => {
+                        let delay = std::time::Duration::from_secs(2u64.pow(attempt - 1));
+                        warn!(
+                            "Failed to fetch Keycloak JWKS (attempt {}/{}): {}. Retrying in {}s...",
+                            attempt, max_retries, e, delay.as_secs()
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
                 }
             }
+
+            if success {
+                keycloak = Some(Arc::new(kc));
+            } else {
+                // DO NOT silently fall back to static token — that's a security disaster.
+                panic!(
+                    "FATAL: Could not load Keycloak JWKS after {} attempts. \
+                     Refusing to start with broken auth. \
+                     Ensure Keycloak is reachable at: {}/realms/{}/protocol/openid-connect/certs",
+                    max_retries, url, config.keycloak_realm
+                );
+            }
         } else {
-            tracing::warn!("Keycloak is enabled but VPN_KEYCLOAK_URL is not set! Falling back to static token.");
+            panic!("FATAL: VPN_KEYCLOAK_ENABLED=true but VPN_KEYCLOAK_URL is not set!");
         }
     }
 

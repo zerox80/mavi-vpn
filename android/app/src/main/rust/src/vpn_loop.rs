@@ -149,45 +149,46 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
             
             match conn_download.read_datagram().await {
                 Ok(first_packet) => {
-                    let mut batch = Vec::with_capacity(32);
+                    let mut batch = Vec::with_capacity(64);
                     batch.push(first_packet);
 
-                    for _ in 0..31 {
+                    for _ in 0..63 {
                          if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
                              batch.push(pkt);
                          } else { break; }
                     }
 
-                    for packet in batch {
-                        loop {
-                            if stop_download.load(Ordering::Relaxed) { break; }
-                            
-                            let mut guard = match tun_download.writable().await {
-                                Ok(g) => g,
-                                Err(_) => break,
-                            };
-
-                            let res = guard.try_io(|inner| {
-                                let n = unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) };
-                                if n < 0 {
-                                    let err = std::io::Error::last_os_error();
-                                    if err.kind() == std::io::ErrorKind::WouldBlock {
-                                        return Err(err); 
-                                    }
-                                    return Err(err); 
-                                }
-                                Ok(())
-                            });
-
-                            match res {
-                                Ok(Ok(())) => break, 
-                                Ok(Err(e)) => {
-                                    error!("Fatal TUN Write error: {}", e);
-                                    stop_download.store(true, Ordering::SeqCst);
-                                    break;
-                                }
-                                Err(_would_block) => continue, 
+                    let mut batch_idx = 0;
+                    while batch_idx < batch.len() {
+                        let mut guard = match tun_download.writable().await {
+                             Ok(g) => g,
+                             Err(_) => break,
+                        };
+                        
+                        let res = guard.try_io(|inner| {
+                            while batch_idx < batch.len() {
+                                 let packet = &batch[batch_idx];
+                                 let n = unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) };
+                                 if n < 0 {
+                                     let err = std::io::Error::last_os_error();
+                                     if err.kind() == std::io::ErrorKind::WouldBlock {
+                                         return Err(err); 
+                                     }
+                                     return Err(err);
+                                 }
+                                 batch_idx += 1;
                             }
+                            Ok(())
+                        });
+                        
+                        match res {
+                            Ok(Ok(())) => {}, 
+                            Ok(Err(e)) => {
+                                 error!("Fatal TUN Write Error (Critical): {}", e);
+                                 stop_download.store(true, Ordering::SeqCst);
+                                 break; 
+                            },
+                            Err(_) => continue, // WouldBlock: loop around to await writable again
                         }
                     }
                 }

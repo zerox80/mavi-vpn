@@ -251,10 +251,16 @@ pub extern "system" fn Java_com_mavi_vpn_MaviVpnService_getConfig<'local>(
     let env = guard.borrow_env_mut();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if handle == 0 { return env.new_string("{}").unwrap().into_raw(); }
-        let session = unsafe { &mut *(handle as *mut VpnSession) };
         
-        let json = serde_json::to_string(&session.config).unwrap_or("{}".to_string());
-        env.new_string(json).unwrap().into_raw()
+        // --- SAFETY: Cast and dereference carefully ---
+        let session = unsafe { 
+            let ptr = handle as *mut VpnSession;
+            if ptr.is_null() { return env.new_string("{}").unwrap().into_raw(); }
+            &*ptr 
+        };
+        
+        let json = serde_json::to_string(&session.config).unwrap_or_else(|_| "{}".to_string());
+        env.new_string(json).unwrap_or_else(|_| env.new_string("{}").unwrap()).into_raw()
     }));
     
     match result {
@@ -534,7 +540,7 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
                 loop {
                     if read_buf.remaining_mut() < 2048 { read_buf.reserve(2048); }
                     let chunk = read_buf.chunk_mut();
-                    let n = unsafe { libc::read(inner.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, 2048) };
+                    let n = unsafe { libc::read(inner.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
                     
                     if n < 0 {
                         let err = std::io::Error::last_os_error();
@@ -675,15 +681,18 @@ async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<At
         }
     });
 
-    // Wait for the FIRST task to terminate, then signal others
-    tokio::select! {
-        _ = upload_task => info!("Upload task completed"),
-        _ = download_task => info!("Download task completed"),
-        _ = icmp_task => info!("ICMP task completed"),
-    }
+    // Wait for any task to terminate
+    let res = tokio::select! {
+        r = upload_task => { error!("Upload task terminated: {:?}", r); "Upload" },
+        r = download_task => { error!("Download task terminated: {:?}", r); "Download" },
+        r = icmp_task => { error!("ICMP task terminated: {:?}", r); "ICMP" },
+    };
     
-    // Ensure all tasks stop
+    // Ensure all tasks stop by signaling the atomic flag
+    warn!("VPN Loop Hub shutting down. Trigger: {} task exit", res);
     stop_flag.store(true, Ordering::SeqCst);
+    let _ = connection_arc.close(0u32.into(), b"loop_exit");
+    
     info!("VPN Loop tasks terminated.");
 }
 

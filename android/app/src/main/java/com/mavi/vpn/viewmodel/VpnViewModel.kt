@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mavi.vpn.MaviVpnService
+import com.mavi.vpn.OAuthHelper
 import com.mavi.vpn.data.PrefsManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -35,8 +36,20 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     val isConnected = MaviVpnService.isConnected
 
+    init {
+        if (prefs.savedUseKeycloak && !OAuthHelper.isAccessTokenUsable(prefs.savedToken)) {
+            prefs.savedToken = ""
+            authToken.value = ""
+        }
+    }
+
     fun updateErrorMessage(message: String) {
         _errorMessage.value = message
+    }
+
+    fun clearAuthToken() {
+        authToken.value = ""
+        prefs.savedToken = ""
     }
 
     fun saveServerDetails() {

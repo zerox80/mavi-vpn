@@ -67,6 +67,11 @@ pub struct Config {
     #[arg(long, env = "VPN_MSS_CLAMPING", default_value = "false")]
     pub mss_clamping: bool,
 
+    /// The IPv6 DNS server IP address pushed to clients (only used when IPv6 is active).
+    /// If not set, defaults to 2606:4700:4700::1111 (Cloudflare).
+    #[arg(long, env = "VPN_DNS_V6")]
+    pub dns_v6: Option<std::net::Ipv6Addr>,
+
     /// Split-tunnelling: domain names provided here will be whitelisted on
     /// the client side (resolved via local DNS, bypassing the VPN).
     #[arg(long, env = "VPN_WHITELIST_DOMAINS", value_delimiter = ',', num_args = 0..)]

@@ -5,7 +5,22 @@
       "Bash(find /c/Daten2/mavi-vpn/android -type f \\\\\\(-name *.kt -o -name *.xml -o -name *.compose \\\\\\))",
       "Bash(find /c/Daten2/mavi-vpn/android -type f -name *.kt -o -name *.xml)",
       "Bash(grep -r \"preshared\\\\|kc_auth\\\\|keycloak.*auth\" /c/Daten2/mavi-vpn/gui/src --include=*.js --include=*.html)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(grep -n \"unwrap\\\\|expect\\\\|unsafe\\\\|panic\" /c/Daten2/mavi-vpn/backend/src/*.rs /c/Daten2/mavi-vpn/backend/src/**/*.rs)",
+      "Bash(grep -E \"\\(\"\"[a-zA-Z0-9]{20,}|hardcoded|TODO|FIXME\\)\")",
+      "Bash(grep -r \"wtransport\\\\|http3\" /c/Daten2/mavi-vpn --include=*.toml --include=*.rs)",
+      "Bash(wc:*)",
+      "Bash(cargo check:*)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(cmd /c \"cargo check -p backend 2>&1 && echo DONE\")",
+      "Bash(powershell -Command \"Set-Location 'C:\\\\Daten2\\\\mavi-vpn'; cargo check -p backend 2>&1 | Out-String\")",
+      "Bash(find /c/Daten2/mavi-vpn -name *.rs -not -path */target/*)",
+      "Bash(grep -r \"android:debuggable\\\\|cleartext\\\\|usesCleartextTraffic\" /c/Daten2/mavi-vpn/android --include=*.xml)",
+      "Bash(find . -type f -name *.rs -not -path */target/*)",
+      "Bash(find /c/Daten2/mavi-vpn -type f -name *.gradle* -o -name proguard*)",
+      "Bash(find /c/Daten2/mavi-vpn/android/app/src -type f -name *.xml)",
+      "Bash(find . -path ./target -prune -o -type f \\\\\\(-name *.rs -o -name *.kt \\\\\\) -print)",
+      "Bash(ls -la C:/Daten2/mavi-vpn/android/app/src/main/java/com/mavi/vpn/*.kt)"
     ]
   }
 }

@@ -96,11 +96,13 @@ class MainActivity : ComponentActivity() {
             if (code != null) {
                 intent.setData(null)
                 
+                val returnedState = data.getQueryParameter("state")
                 lifecycleScope.launch {
                     val token = OAuthHelper.exchangeCodeForToken(
-                        code, 
-                        viewModel.kcUrl.value, 
-                        viewModel.kcRealm.value, 
+                        code,
+                        returnedState,
+                        viewModel.kcUrl.value,
+                        viewModel.kcRealm.value,
                         viewModel.kcClientId.value
                     )
                     if (token != null) {

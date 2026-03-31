@@ -108,7 +108,8 @@ pub async fn handle_connection(
         netmask_v6: if ipv6_enabled { Some(64) } else { None },
         gateway_v6: if ipv6_enabled { Some(state.gateway_ip_v6()) } else { None },
         dns_server_v6: if ipv6_enabled {
-            Some(config.dns_v6.unwrap_or("2606:4700:4700::1111".parse().unwrap()))
+            // Use Ipv6Addr::new() instead of parsing a string to avoid a potential panic.
+            Some(config.dns_v6.unwrap_or_else(|| std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)))
         } else { None },
         whitelist_domains: Some(config.whitelist_domains.clone()),
     };

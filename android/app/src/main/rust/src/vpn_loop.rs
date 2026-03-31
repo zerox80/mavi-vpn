@@ -19,9 +19,9 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
     let raw_fd = fd as RawFd;
 
     // Extract Gateway IPs for ICMP signaling
-    let (gateway_v4, gateway_v6_opt) = match &config {
-        ControlMessage::Config { gateway, gateway_v6, .. } => (*gateway, *gateway_v6),
-        _ => (std::net::Ipv4Addr::new(10, 0, 0, 1), None),
+    let (gateway_v4, gateway_v6_opt, tunnel_mtu) = match &config {
+        ControlMessage::Config { gateway, gateway_v6, mtu, .. } => (*gateway, *gateway_v6, *mtu),
+        _ => (std::net::Ipv4Addr::new(10, 0, 0, 1), None, 1280),
     };
     
     // Duplicated FD to manage its lifecycle independently from Java
@@ -111,20 +111,26 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                     quinn::SendDatagramError::TooLarge => {
                         let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
                         warn!("MTU Limit hit! Packet: {} bytes, Limit: {} bytes", packet_len, current_limit);
-                        
+
+                        if packet_bytes.is_empty() {
+                            continue;
+                        }
+
                         let version = (packet_bytes[0] >> 4) & 0xF;
-                        let gw = if version == 4 { 
-                            std::net::IpAddr::V4(gateway_v4) 
-                        } else { 
-                             std::net::IpAddr::V6(gateway_v6_opt.unwrap_or_else(|| "fd00::1".parse().unwrap())) 
+                        let gw = if version == 4 {
+                            Some(std::net::IpAddr::V4(gateway_v4))
+                        } else if version == 6 {
+                            gateway_v6_opt.map(std::net::IpAddr::V6)
+                        } else {
+                            None
                         };
                         let reported_mtu = if version == 6 {
-                            std::cmp::max(current_limit as u16, 1280)
+                            tunnel_mtu.max(1280)
                         } else {
-                            current_limit as u16
+                            tunnel_mtu
                         };
 
-                        if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, reported_mtu, Some(gw)) {
+                        if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, reported_mtu, gw) {
                             let _ = tx_feedback.try_send(icmp_packet);
                         }
                     },

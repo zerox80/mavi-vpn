@@ -27,6 +27,8 @@ const KEEPALIVE_SECS: u64 = 10;
 const IDLE_TIMEOUT_SECS: u64 = 60;
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
+const TUN_MTU: u16 = 1280;
+const QUIC_PAYLOAD_MTU: u16 = 1360;
 
 pub use crate::ipc::Config;
 
@@ -208,6 +210,7 @@ async fn run_session(
     let conn_quic = connection.clone();
     let alive_pump = session_alive.clone();
     let run_pump = global_running.clone();
+    let gateway_v6_for_ptb = gateway_v6;
     let tun_to_quic = std::thread::spawn(move || {
         loop {
             if !run_pump.load(Ordering::Relaxed) || !alive_pump.load(Ordering::Relaxed) { break; }
@@ -216,9 +219,30 @@ async fn run_session(
                     let data = Bytes::copy_from_slice(packet.bytes());
                     if let Err(e) = conn_quic.send_datagram(data) {
                         if matches!(e, quinn::SendDatagramError::TooLarge) {
+                            if packet.bytes().is_empty() {
+                                continue;
+                            }
+
                             // Synthesise ICMP PTB signal back to OS
-                            let current_mtu = conn_quic.max_datagram_size().unwrap_or(1200) as u16;
-                            if let Some(icmp_packet) = icmp::generate_packet_too_big(packet.bytes(), current_mtu, Some(std::net::IpAddr::V4(gateway))) {
+                            let version = packet.bytes()[0] >> 4;
+                            let source_ip = if version == 4 {
+                                Some(std::net::IpAddr::V4(gateway))
+                            } else if version == 6 {
+                                gateway_v6_for_ptb.map(std::net::IpAddr::V6)
+                            } else {
+                                None
+                            };
+                            let reported_mtu = if version == 6 {
+                                TUN_MTU.max(1280)
+                            } else {
+                                TUN_MTU
+                            };
+
+                            if let Some(icmp_packet) = icmp::generate_packet_too_big(
+                                packet.bytes(),
+                                reported_mtu,
+                                source_ip,
+                            ) {
                                 if let Ok(mut reply) = session_tun.allocate_send_packet(icmp_packet.len() as u16) {
                                     reply.bytes_mut().copy_from_slice(&icmp_packet);
                                     session_tun.send_packet(reply);
@@ -303,7 +327,8 @@ async fn connect_and_handshake(
     };
 
     // Resolve endpoint and connect
-    let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve endpoint")?;
+    let addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
+    let addr = *addrs.first().context("Failed to resolve endpoint")?;
     let (server_name, _) = split_endpoint(&endpoint_str);
     if server_name.is_empty() {
         anyhow::bail!("Endpoint host missing");
@@ -312,7 +337,7 @@ async fn connect_and_handshake(
     // Rule 2: Outgoing QUIC Payload (Initial MTU) MUST be 1360.
     // IPv4 Wire: 1360 + 20 (IP) + 8 (UDP) = 1388 bytes.
     // IPv6 Wire: 1360 + 40 (IP) + 8 (UDP) = 1408 bytes.
-    let quic_mtu = 1360;
+    let quic_mtu = QUIC_PAYLOAD_MTU;
     info!("Address family: {}. Setting QUIC MTU: 1360 (Target Wire: 1388-1408)", if addr.is_ipv4() { "IPv4" } else { "IPv6" });
 
     let mut transport_config = quinn::TransportConfig::default();
@@ -339,9 +364,31 @@ async fn connect_and_handshake(
     let mut endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
     endpoint.set_default_client_config(client_config);
 
-    info!("Connecting to {} (resolved: {}, SNI: {})", endpoint_str, addr, server_name);
-    let connecting = endpoint.connect(addr, server_name).context("endpoint.connect() failed")?;
-    let connection = connecting.await.context("QUIC handshake failed (TLS/cert error?)")?;
+    let mut last_error = None;
+    let mut connection = None;
+    for addr in addrs {
+        info!("Connecting to {} (resolved: {}, SNI: {})", endpoint_str, addr, server_name);
+        match endpoint.connect(addr, server_name) {
+            Ok(connecting) => match connecting.await {
+                Ok(conn) => {
+                    connection = Some(conn);
+                    break;
+                }
+                Err(err) => {
+                    warn!("QUIC handshake to {} failed: {}", addr, err);
+                    last_error = Some(anyhow::Error::from(err));
+                }
+            },
+            Err(err) => {
+                warn!("endpoint.connect() failed for {}: {}", addr, err);
+                last_error = Some(anyhow::Error::from(err));
+            }
+        }
+    }
+    let connection = match connection {
+        Some(conn) => conn,
+        None => return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str))),
+    };
     info!("QUIC handshake OK, sending auth token ({} bytes)", token.len());
 
     // Perform application-level handshake
@@ -409,7 +456,7 @@ fn set_adapter_network_config(
     netmask: Ipv4Addr,
     gateway: Ipv4Addr,
     dns: Ipv4Addr,
-    mtu: u16,
+    _mtu: u16,
     endpoint: &str,
     assigned_ipv6: Option<Ipv6Addr>,
     netmask_v6: Option<u8>,
@@ -423,7 +470,6 @@ fn set_adapter_network_config(
     let mask_str = netmask.to_string();
     let gw_str = gateway.to_string();
     let dns_str = dns.to_string();
-    let _mtu_str = mtu.to_string();
 
     info!("Configuring adapter '{}' (if={}) ip={} mask={} gw={} dns={}",
         adapter_name, adapter_index, ip, netmask, gateway, dns);
@@ -470,7 +516,7 @@ fn set_adapter_network_config(
     }
 
     // 5. Set MTU (Rule 1: Always 1280)
-    let _ = adapter.set_mtu(1280);
+    let _ = adapter.set_mtu(TUN_MTU);
     let mtu_val = "mtu=1280";
     run_cmd("netsh", &["interface", "ipv4", "set", "subinterface", &adapter_name, mtu_val, "store=active"]);
     run_cmd("netsh", &["interface", "ipv6", "set", "subinterface", &adapter_name, mtu_val, "store=active"]);
@@ -513,14 +559,50 @@ fn set_adapter_network_config(
 fn cleanup_routes(host_route: Option<&str>) {
     let _ = std::process::Command::new("route").args(["delete", "0.0.0.0",   "mask", "128.0.0.0"]).output();
     let _ = std::process::Command::new("route").args(["delete", "128.0.0.0", "mask", "128.0.0.0"]).output();
+    let mut host_routes = Vec::new();
     if let Some(prefix) = host_route {
+        host_routes.push(prefix.to_string());
+    }
+    if let Some(prefix) = load_persisted_host_route() {
+        if !host_routes.iter().any(|item| item == &prefix) {
+            host_routes.push(prefix);
+        }
+    }
+    for prefix in host_routes {
         let cmd = format!("Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null", prefix);
         let _ = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &cmd])
             .output();
     }
+    clear_persisted_host_route();
     let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "delete", "route", "::/1",    "MaviVPN"]).output();
     let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "delete", "route", "8000::/1", "MaviVPN"]).output();
+}
+
+fn persisted_host_route_path() -> PathBuf {
+    let base = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    base.join("mavi-vpn").join("last_host_route.txt")
+}
+
+fn load_persisted_host_route() -> Option<String> {
+    std::fs::read_to_string(persisted_host_route_path())
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn persist_host_route(prefix: &str) {
+    let path = persisted_host_route_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, prefix);
+}
+
+fn clear_persisted_host_route() {
+    let _ = std::fs::remove_file(persisted_host_route_path());
 }
 
 fn set_adapter_ipv6(adapter: &Adapter, ip: Ipv6Addr, prefix_len: u8) -> Result<()> {
@@ -617,6 +699,7 @@ fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
     if let Ok(out) = output {
         let gateway = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !gateway.is_empty() && gateway != empty_next_hop {
+            persist_host_route(&route_prefix);
             info!("Host exception: {} -> {}", route_prefix, gateway);
             return Some(route_prefix);
         }

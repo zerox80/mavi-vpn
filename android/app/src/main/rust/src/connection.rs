@@ -42,9 +42,8 @@ pub async fn connect_and_handshake(
 
     // Connect & MTU Logic
     info!("Resolving host: {}", endpoint_str);
-    let addr = tokio::net::lookup_host(&endpoint_str).await?
-        .next()
-        .ok_or(anyhow::anyhow!("Invalid address"))?;
+    let addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
+    let addr = *addrs.first().ok_or(anyhow::anyhow!("Invalid address"))?;
     let server_name = endpoint_host(&endpoint_str);
     if server_name.is_empty() {
         return Err(anyhow::anyhow!("Endpoint host missing"));
@@ -88,8 +87,31 @@ pub async fn connect_and_handshake(
     )?;
     endpoint.set_default_client_config(client_config);
 
-    info!("Connecting to {} (SNI: {})", addr, server_name);
-    let connection = endpoint.connect(addr, &server_name)?.await?;
+    let mut last_error = None;
+    let mut connection = None;
+    for addr in addrs {
+        info!("Connecting to {} (SNI: {})", addr, server_name);
+        match endpoint.connect(addr, &server_name) {
+            Ok(connecting) => match connecting.await {
+                Ok(conn) => {
+                    connection = Some(conn);
+                    break;
+                }
+                Err(err) => {
+                    info!("QUIC handshake to {} failed: {}", addr, err);
+                    last_error = Some(anyhow::Error::from(err));
+                }
+            },
+            Err(err) => {
+                info!("endpoint.connect() failed for {}: {}", addr, err);
+                last_error = Some(anyhow::Error::from(err));
+            }
+        }
+    }
+    let connection = match connection {
+        Some(conn) => conn,
+        None => return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str))),
+    };
     info!("Connection established");
 
     // Handshake

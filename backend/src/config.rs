@@ -22,8 +22,8 @@ pub struct Config {
     #[arg(long, env = "VPN_NETWORK", default_value = "10.8.0.0/24")]
     pub network_cidr: String,
 
-    /// Optional explicit path to the TUN device.
-    /// If not provided, the server will attempt to create a new one (usually `tun0`).
+    /// Optional explicit TUN interface name.
+    /// If not provided, the server will create one (usually `tun0`).
     #[arg(long, env = "VPN_TUN_DEVICE")]
     pub tun_device_path: Option<String>,
 
@@ -99,5 +99,7 @@ pub struct Config {
 pub fn load() -> Config {
     // Load .env file if it exists
     dotenv::dotenv().ok();
-    Config::parse()
+    let mut config = Config::parse();
+    config.mtu = 1280;
+    config
 }

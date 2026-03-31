@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use constant_time_eq::constant_time_eq;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct KeycloakValidator {
     url: String,
@@ -100,8 +100,33 @@ impl KeycloakValidator {
 
         match decode::<serde_json::Value>(token, &decoding_key, &validation) {
             Ok(token_data) => {
-                // Manually validate "azp" (authorized party) = our client_id
                 let claims = &token_data.claims;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .context("System clock is before Unix epoch")?
+                    .as_secs() as i64;
+                let leeway = validation.leeway as i64;
+
+                let exp = match claims.get("exp").and_then(json_number_as_i64) {
+                    Some(v) => v,
+                    None => {
+                        warn!("JWT missing 'exp' claim - rejecting token");
+                        return Ok(false);
+                    }
+                };
+
+                if now > exp + leeway {
+                    warn!("JWT expired: exp={}, now={}", exp, now);
+                    return Ok(false);
+                }
+
+                if let Some(nbf) = claims.get("nbf").and_then(json_number_as_i64) {
+                    if now + leeway < nbf {
+                        warn!("JWT not yet valid: nbf={}, now={}", nbf, now);
+                        return Ok(false);
+                    }
+                }
+
                 let azp = match claims.get("azp").and_then(|v| v.as_str()) {
                     Some(v) => v,
                     None => {
@@ -128,4 +153,8 @@ impl KeycloakValidator {
             }
         }
     }
+}
+
+fn json_number_as_i64(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
 }

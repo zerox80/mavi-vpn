@@ -38,6 +38,14 @@ iptables -I FORWARD -i tun+ -j ACCEPT
 iptables -I FORWARD -o tun+ -j ACCEPT
 iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 
+if [ "${VPN_MSS_CLAMPING:-false}" = "true" ]; then
+    echo "Enabling TCP MSS clamping..."
+    iptables -t mangle -C FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || \
+        iptables -t mangle -I FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
+    ip6tables -t mangle -C FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || \
+        ip6tables -t mangle -I FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+fi
+
 # IPv6 Support
 echo "Enabling IPv6 Forwarding..."
 sysctl -w net.ipv6.conf.all.forwarding=1 || echo "Failed to enable ipv6 forwarding (container might be restricted)"

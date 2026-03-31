@@ -14,8 +14,14 @@ pub fn create_tun_device(config: &Config, state: &AppState) -> Result<(tun::Asyn
               .mtu(config.mtu as u16)
               .up();
 
-    if let Some(dev_path) = &config.tun_device_path {
-        tun_config.tun_name(dev_path);
+    if let Some(tun_name_override) = &config.tun_device_path {
+        if tun_name_override.contains('/') || tun_name_override.contains('\\') {
+            anyhow::bail!(
+                "VPN_TUN_DEVICE must be a TUN interface name like 'tun0', not a filesystem path: {}",
+                tun_name_override
+            );
+        }
+        tun_config.tun_name(tun_name_override);
     }
 
     let dev = tun::create_as_async(&tun_config).context("Failed to create TUN device. Ensure NET_ADMIN cap is set.")?;

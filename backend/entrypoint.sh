@@ -33,10 +33,14 @@ VPN_NETWORK=${VPN_NETWORK:-"10.8.0.0/24"}
 # IPv4 NAT
 # Use -I (Insert) to be at the top of the chain to avoid being blocked by trailing DROP rules.
 # Use tun+ wildcard to catch any TUN device name (tun0, tun1, etc.) assigned by the kernel.
-iptables -t nat -I POSTROUTING -s $VPN_NETWORK -o $DEFAULT_IFACE -j MASQUERADE
-iptables -I FORWARD -i tun+ -j ACCEPT
-iptables -I FORWARD -o tun+ -j ACCEPT
-iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -t nat -C POSTROUTING -s $VPN_NETWORK -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -I POSTROUTING -s $VPN_NETWORK -o $DEFAULT_IFACE -j MASQUERADE
+iptables -C FORWARD -i tun+ -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD -i tun+ -j ACCEPT
+iptables -C FORWARD -o tun+ -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD -o tun+ -j ACCEPT
+iptables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 if [ "${VPN_MSS_CLAMPING:-false}" = "true" ]; then
     echo "Enabling TCP MSS clamping..."
@@ -51,10 +55,15 @@ echo "Enabling IPv6 Forwarding..."
 sysctl -w net.ipv6.conf.all.forwarding=1 || echo "Failed to enable ipv6 forwarding (container might be restricted)"
 
 # IPv6 NAT
-ip6tables -t nat -I POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null || echo "ip6tables NAT failed"
-ip6tables -I FORWARD -i tun+ -j ACCEPT 2>/dev/null
-ip6tables -I FORWARD -o tun+ -j ACCEPT 2>/dev/null
-ip6tables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+if ! ip6tables -t nat -C POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null; then
+    ip6tables -t nat -I POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null || echo "ip6tables NAT failed"
+fi
+ip6tables -C FORWARD -i tun+ -j ACCEPT 2>/dev/null || \
+    ip6tables -I FORWARD -i tun+ -j ACCEPT 2>/dev/null || true
+ip6tables -C FORWARD -o tun+ -j ACCEPT 2>/dev/null || \
+    ip6tables -I FORWARD -o tun+ -j ACCEPT 2>/dev/null || true
+ip6tables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    ip6tables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
 echo "NAT configured: $VPN_NETWORK -> $DEFAULT_IFACE (IPv4)"
 echo "NAT configured: IPv6 -> $DEFAULT_IFACE"

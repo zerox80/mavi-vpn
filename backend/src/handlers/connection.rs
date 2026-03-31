@@ -67,9 +67,7 @@ pub async fn handle_connection(
                     }
                 }
 
-                let v4 = state.assign_ip()?;
-                let v6 = state.assign_ipv6()?;
-                Ok((v4, v6))
+                state.assign_ip_pair()
             }
             _ => anyhow::bail!("Protocol error: Expected Auth"),
         }
@@ -79,18 +77,17 @@ pub async fn handle_connection(
         Ok(ips) => ips,
         Err(e) => {
             let error_msg = format!("Unauthorized: {}", e);
-            let err_payload = ControlMessage::Error { message: error_msg.clone() };
-            if let Ok(encoded) = bincode::serde::encode_to_vec(&err_payload, bincode::config::standard()) {
-                let _ = send_stream.write_u32_le(encoded.len() as u32).await;
-                let _ = send_stream.write_all(&encoded).await;
-                let _ = send_stream.finish();
-            }
-
             if config.censorship_resistant {
                 warn!("Unauthorized probe from {}. Emulating HTTP/3. Error: {}", remote_addr, e);
                 let _ = emulate_http3(&connection, &mut send_stream).await;
                 return Err(anyhow::anyhow!("HTTP/3 probe response sent: {}", e));
             } else {
+                let err_payload = ControlMessage::Error { message: error_msg.clone() };
+                if let Ok(encoded) = bincode::serde::encode_to_vec(&err_payload, bincode::config::standard()) {
+                    let _ = send_stream.write_u32_le(encoded.len() as u32).await;
+                    let _ = send_stream.write_all(&encoded).await;
+                    let _ = send_stream.finish();
+                }
                 return Err(anyhow::anyhow!("{}", error_msg));
             }
         }

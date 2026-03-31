@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
     info!("Starting Mavi VPN Server...");
     info!("Network: {}", config.network_cidr);
     info!("Bind Address: {}", config.bind_addr);
+    info!("MSS Clamping: {}", if config.mss_clamping { "enabled" } else { "disabled" });
 
     let state = Arc::new(AppState::new(&config.network_cidr)?);
 

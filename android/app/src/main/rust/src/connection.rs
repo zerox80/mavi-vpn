@@ -45,6 +45,10 @@ pub async fn connect_and_handshake(
     let addr = tokio::net::lookup_host(&endpoint_str).await?
         .next()
         .ok_or(anyhow::anyhow!("Invalid address"))?;
+    let server_name = endpoint_host(&endpoint_str);
+    if server_name.is_empty() {
+        return Err(anyhow::anyhow!("Endpoint host missing"));
+    }
 
     // Rule 2: Outgoing QUIC Payload (Initial MTU) MUST be 1360.
     // IPv4 Wire: 1360 + 20 (IP) + 8 (UDP) = 1388 bytes.
@@ -84,8 +88,8 @@ pub async fn connect_and_handshake(
     )?;
     endpoint.set_default_client_config(client_config);
 
-    info!("Connecting to {}", addr);
-    let connection = endpoint.connect(addr, "localhost")?.await?;
+    info!("Connecting to {} (SNI: {})", addr, server_name);
+    let connection = endpoint.connect(addr, &server_name)?.await?;
     info!("Connection established");
 
     // Handshake
@@ -114,4 +118,20 @@ pub async fn connect_and_handshake(
     }
     
     Ok((connection, config))
+}
+
+fn endpoint_host(endpoint: &str) -> String {
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
+
+    if endpoint.matches(':').count() == 1 {
+        if let Some((host, _)) = endpoint.rsplit_once(':') {
+            return host.to_string();
+        }
+    }
+
+    endpoint.to_string()
 }

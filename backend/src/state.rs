@@ -97,6 +97,19 @@ impl AppState {
         free.pop().ok_or_else(|| anyhow!("VPN IPv6 pool exhausted"))
     }
 
+    pub fn assign_ip_pair(&self) -> Result<(Ipv4Addr, Ipv6Addr)> {
+        let ip4 = self.assign_ip()?;
+
+        match self.assign_ipv6() {
+            Ok(ip6) => Ok((ip4, ip6)),
+            Err(err) => {
+                let mut free = self.free_ips.lock().unwrap_or_else(|e| e.into_inner());
+                free.push(ip4);
+                Err(err)
+            }
+        }
+    }
+
     /// Returns the leasable IPs to the pool and removes the peer registration.
     ///
     /// This is typically called by the `IpGuard` when a client disconnects.

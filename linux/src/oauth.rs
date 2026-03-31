@@ -26,6 +26,10 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     let code_challenge =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
+    let mut state_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut state_bytes);
+    let oauth_state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&state_bytes);
+
     // 2. Start local TCP listener on fixed port
     let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
         .await
@@ -46,7 +50,8 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .append_pair("response_type", "code")
         .append_pair("scope", "openid")
         .append_pair("code_challenge", &code_challenge)
-        .append_pair("code_challenge_method", "S256");
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &oauth_state);
 
     // 4. Open browser
     //    Under `sudo` the desktop-session env vars (WAYLAND_DISPLAY,
@@ -93,6 +98,10 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
 
             let parsed_url = url::Url::parse(&format!("http://localhost{}", path_and_query)).ok();
             if let Some(u) = parsed_url {
+                let returned_state = u.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.into_owned());
+                if returned_state.as_deref() != Some(oauth_state.as_str()) {
+                    continue;
+                }
                 if let Some(code) = u
                     .query_pairs()
                     .find(|(k, _)| k == "code")

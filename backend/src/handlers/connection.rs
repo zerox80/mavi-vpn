@@ -43,13 +43,18 @@ pub async fn handle_connection(
     let (mut send_stream, mut recv_stream) = connection.accept_bi().await?;
     
     let auth_result: Result<(Ipv4Addr, Ipv6Addr)> = async {
-        let len = tokio::time::timeout(Duration::from_secs(5), recv_stream.read_u32_le())
-            .await
-            .map_err(|_| anyhow::anyhow!("Handshake timeout"))?? as usize;
-        
-        if len > 16384 { anyhow::bail!("Auth message too big"); }
-        let mut buf = vec![0u8; len];
-        recv_stream.read_exact(&mut buf).await?;
+        let buf = tokio::time::timeout(Duration::from_secs(5), async {
+            let len = recv_stream.read_u32_le().await? as usize;
+            if len > 16384 {
+                anyhow::bail!("Auth message too big");
+            }
+
+            let mut buf = vec![0u8; len];
+            recv_stream.read_exact(&mut buf).await?;
+            Ok::<Vec<u8>, anyhow::Error>(buf)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("Handshake timeout"))??;
         
         let msg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
             .map(|(v, _)| v)
@@ -126,15 +131,35 @@ pub async fn handle_connection(
     let tx_tun_icmp = tx_tun.clone();
     let gv4 = state.gateway_ip();
     let gv6 = state.gateway_ip_v6();
+    let tunnel_mtu = config.mtu;
     
     let tun_to_quic = tokio::spawn(async move {
         while let Some(packet) = rx_client.recv().await {
             if let Err(e) = conn_send.send_datagram(packet.clone()) {
                 if matches!(e, quinn::SendDatagramError::TooLarge) {
-                    let mtu = conn_send.max_datagram_size().unwrap_or(1200) as u16;
+                    if packet.is_empty() {
+                        continue;
+                    }
+
                     let ver = packet[0] >> 4;
-                    let gw = if ver == 4 { std::net::IpAddr::V4(gv4) } else { std::net::IpAddr::V6(gv6) };
-                    if let Some(icmp_p) = icmp::generate_packet_too_big(&packet, mtu, Some(gw)) {
+                    let gw = if ver == 4 {
+                        Some(std::net::IpAddr::V4(gv4))
+                    } else if ver == 6 {
+                        Some(std::net::IpAddr::V6(gv6))
+                    } else {
+                        None
+                    };
+                    let reported_mtu = if ver == 6 {
+                        tunnel_mtu.max(1280)
+                    } else {
+                        tunnel_mtu
+                    };
+
+                    if let Some(icmp_p) = icmp::generate_packet_too_big(
+                        &packet,
+                        reported_mtu,
+                        gw,
+                    ) {
                         let _ = tx_tun_icmp.try_send(Bytes::from(icmp_p));
                     }
                 }

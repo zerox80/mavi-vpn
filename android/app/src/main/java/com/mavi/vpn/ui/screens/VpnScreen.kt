@@ -255,6 +255,9 @@ fun VpnScreen(
                             viewModel.updateErrorMessage("Please enter Keycloak server details.")
                         } else if (authToken.isEmpty()) {
                             viewModel.updateErrorMessage("Please login with Keycloak first.")
+                        } else if (!OAuthHelper.isAccessTokenUsable(authToken)) {
+                            viewModel.clearAuthToken()
+                            viewModel.updateErrorMessage("Keycloak login expired. Please login again.")
                         } else {
                             viewModel.saveKeycloakDetails()
                             onConnect(serverIp, serverPort, authToken, certPin)

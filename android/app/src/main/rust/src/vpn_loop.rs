@@ -219,7 +219,7 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
     let stop_stats = stop_flag.clone();
     let conn_stats = connection_arc.clone();
     let stats_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
             if stop_stats.load(Ordering::Relaxed) { break; }

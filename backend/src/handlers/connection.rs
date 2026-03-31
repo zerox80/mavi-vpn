@@ -144,7 +144,7 @@ pub async fn handle_connection(
 
     let conn_stats = connection.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             interval.tick().await;
             let stats = conn_stats.stats();

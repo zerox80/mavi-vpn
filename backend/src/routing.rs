@@ -23,7 +23,7 @@ pub fn spawn_tun_writer(mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>, 
             
             for packet in batch.drain(..) {
                 if let Err(e) = tun_writer.write_all(&packet).await {
-                    error!("CRITICAL: Failed to write to TUN: {}. Interface might be down. Terminatiing task.", e);
+                    error!("CRITICAL: Failed to write to TUN: {}. Interface might be down. Terminating task.", e);
                     break 'writer_loop;
                 }
             }

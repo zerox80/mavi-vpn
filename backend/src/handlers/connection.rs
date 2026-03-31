@@ -107,7 +107,9 @@ pub async fn handle_connection(
         assigned_ipv6: if ipv6_enabled { Some(assigned_ip6) } else { None },
         netmask_v6: if ipv6_enabled { Some(64) } else { None },
         gateway_v6: if ipv6_enabled { Some(state.gateway_ip_v6()) } else { None },
-        dns_server_v6: if ipv6_enabled { Some("2001:4860:4860::8888".parse().unwrap()) } else { None },
+        dns_server_v6: if ipv6_enabled {
+            Some(config.dns_v6.unwrap_or("2606:4700:4700::1111".parse().unwrap()))
+        } else { None },
         whitelist_domains: Some(config.whitelist_domains.clone()),
     };
     
@@ -187,7 +189,7 @@ pub async fn handle_connection(
                 }
             } else if ver == 6 {
                 if let Ok(h) = Ipv6HeaderSlice::from_slice(&data) {
-                    if h.source_addr() == assigned_ip6 || h.source_addr().is_unspecified() { valid = true; }
+                    if h.source_addr() == assigned_ip6 { valid = true; }
                 }
             }
             if valid {

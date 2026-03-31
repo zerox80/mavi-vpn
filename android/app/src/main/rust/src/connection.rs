@@ -36,8 +36,8 @@ pub async fn connect_and_handshake(
         client_crypto.alpn_protocols = vec![b"h3".to_vec()];
         info!("Censorship Resistant Mode enabled. ALPN: h3 (Strict)");
     } else {
-        client_crypto.alpn_protocols = vec![b"mavivpn".to_vec()];
-        info!("Standard Mode enabled. ALPN: mavivpn");
+        client_crypto.alpn_protocols = vec![b"mavivpn".to_vec(), b"h3".to_vec()];
+        info!("Standard Mode enabled. ALPN: mavivpn, h3");
     }
 
     // Connect & MTU Logic

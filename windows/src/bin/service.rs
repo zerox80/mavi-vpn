@@ -12,6 +12,8 @@ use std::{ffi::OsString, sync::Arc, sync::atomic::{AtomicBool, Ordering}, time::
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
 use tracing::{error, info};
 use tracing_subscriber;
+use rand::RngCore;
+use base64::Engine;
 
 #[path = "../ipc.rs"]
 mod ipc;
@@ -173,7 +175,6 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
     let mut vpn_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut active_config: Option<ipc::Config> = None;
 
-    // Bind TCP listener for Local IPC
     let listener = match TcpListener::bind(ipc::LOCAL_IPC_ADDR).await {
         Ok(l) => l,
         Err(e) => {
@@ -182,7 +183,19 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
         }
     };
     
-    info!("Service listening for IPC on {}", ipc::LOCAL_IPC_ADDR);
+    // Generate secure token for IPC and save to file
+    let mut token_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut token_bytes);
+    let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
+    
+    let token_path = ipc::ipc_token_path();
+    if let Some(parent) = token_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&token_path, &auth_token) {
+        error!("Failed to write IPC token to {:?}: {}", token_path, e);
+    }
+    info!("Service listening for IPC on {} (Auth token generated)", ipc::LOCAL_IPC_ADDR);
 
     loop {
         if stop_signal.load(Ordering::SeqCst) {
@@ -227,12 +240,16 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
                     continue;
                 }
                 
-                let req: ipc::IpcRequest = match bincode::serde::decode_from_slice(&buf, bincode::config::standard()) {
+                let req_msg: ipc::SecureIpcRequest = match bincode::serde::decode_from_slice(&buf, bincode::config::standard()) {
                     Ok((r, _)) => r,
                     Err(_) => continue,
                 };
                 
-                let resp = match req {
+                let resp = if req_msg.auth_token != auth_token {
+                    error!("Rejecting IPC request due to invalid auth token");
+                    ipc::IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
+                } else {
+                    match req_msg.request {
                     ipc::IpcRequest::Status => {
                         ipc::IpcResponse::Status {
                             running: vpn_running.load(Ordering::SeqCst),
@@ -247,7 +264,9 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
                     }
                     ipc::IpcRequest::Start(config) => {
                         info!("Handling Start request for endpoint: {}", config.endpoint);
-                        if vpn_running.load(Ordering::SeqCst) {
+                        let still_running = vpn_running.load(Ordering::SeqCst)
+                            || vpn_task.as_ref().map_or(false, |t| !t.is_finished());
+                        if still_running {
                             ipc::IpcResponse::Error("VPN is already running".to_string())
                         } else {
                             active_config = Some(config.clone());
@@ -262,6 +281,7 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
                             }));
                             ipc::IpcResponse::Ok
                         }
+                    }
                     }
                 };
                 

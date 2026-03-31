@@ -3,17 +3,21 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use base64::Engine;
+use std::time::{Duration, Instant};
 
 pub struct KeycloakValidator {
     url: String,
     realm: String,
     pub client_id: String,
     jwks: RwLock<Option<JwkSet>>,
+    last_refresh: RwLock<Option<Instant>>,
 }
+
+const JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 
 impl KeycloakValidator {
     pub fn new(url: String, realm: String, client_id: String) -> Self {
-        Self { url, realm, client_id, jwks: RwLock::new(None) }
+        Self { url, realm, client_id, jwks: RwLock::new(None), last_refresh: RwLock::new(None) }
     }
 
     pub async fn init_and_fetch(&self) -> Result<()> {
@@ -51,10 +55,21 @@ impl KeycloakValidator {
         drop(jwks_read);
 
         if !kid_found {
-            warn!("Token kid '{}' not found in cached JWKS — refreshing keys from Keycloak", kid);
-            match self.fetch_jwks_from_server().await {
-                Ok(fresh) => { *self.jwks.write().await = Some(fresh); }
-                Err(e) => warn!("JWKS refresh failed: {}. Proceeding with cached keys.", e),
+            let should_refresh = {
+                let last = self.last_refresh.read().await;
+                last.map_or(true, |t| t.elapsed() >= JWKS_REFRESH_COOLDOWN)
+            };
+            if should_refresh {
+                warn!("Token kid '{}' not found in cached JWKS — refreshing keys from Keycloak", kid);
+                match self.fetch_jwks_from_server().await {
+                    Ok(fresh) => {
+                        *self.jwks.write().await = Some(fresh);
+                        *self.last_refresh.write().await = Some(Instant::now());
+                    }
+                    Err(e) => warn!("JWKS refresh failed: {}. Proceeding with cached keys.", e),
+                }
+            } else {
+                warn!("Token kid '{}' not found but JWKS refresh is on cooldown. Rejecting token.", kid);
             }
         }
 

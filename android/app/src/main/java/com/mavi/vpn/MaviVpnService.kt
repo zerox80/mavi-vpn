@@ -157,7 +157,7 @@ class MaviVpnService : VpnService() {
                         val handle = NativeLib.init(this, token, "$ip:$port", certPin, crMode)
                         if (handle == 0L) {
                             Log.e("MaviVPN", "Handshake failed. Retrying in 2 seconds...")
-                            Thread.sleep(2000)
+                            repeat(4) { if (isRunning) Thread.sleep(500) }
                             continue
                         }
                         
@@ -173,7 +173,7 @@ class MaviVpnService : VpnService() {
 
                     try {
                         val configJson = NativeLib.getConfig(handle)
-                        Log.d("MaviVPN", "Config Received: $configJson")
+                        Log.d("MaviVPN", "Config received from server")
                         val root = org.json.JSONObject(configJson)
                         val config = if (root.has("Config")) root.getJSONObject("Config") else root
                         

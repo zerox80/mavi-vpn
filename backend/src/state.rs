@@ -118,11 +118,11 @@ impl AppState {
 
     /// Returns the server's internal IPv4 address (the VPN Gateway).
     pub fn gateway_ip(&self) -> Ipv4Addr {
-        self.network.nth(1).expect("Network size too small")
+        self.network.nth(1).unwrap_or(Ipv4Addr::new(10, 8, 0, 1))
     }
 
     /// Returns the server's internal IPv6 address (the VPN Gateway).
     pub fn gateway_ip_v6(&self) -> Ipv6Addr {
-        self.network_v6.iter().nth(1).expect("IPv6 network unexpectedly empty")
+        self.network_v6.iter().nth(1).unwrap_or(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1))
     }
 }

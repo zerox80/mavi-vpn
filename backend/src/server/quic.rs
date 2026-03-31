@@ -4,6 +4,8 @@ use std::sync::Arc;
 use crate::config::Config;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+const QUIC_PAYLOAD_MTU: u16 = 1360;
+
 pub fn create_quic_endpoint(
     config: &Config,
     certs: Vec<CertificateDer<'static>>,
@@ -66,7 +68,7 @@ fn setup_transport_config(transport_config: &mut TransportConfig) {
     transport_config.send_window(4 * 1024 * 1024); 
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     transport_config.mtu_discovery_config(None); 
-    transport_config.initial_mtu(1412); 
-    transport_config.min_mtu(1412);
+    transport_config.initial_mtu(QUIC_PAYLOAD_MTU); 
+    transport_config.min_mtu(QUIC_PAYLOAD_MTU);
     transport_config.enable_segmentation_offload(true);
 }

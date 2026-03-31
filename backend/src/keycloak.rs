@@ -1,7 +1,7 @@
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use base64::Engine;
 
 pub struct KeycloakValidator {
@@ -17,31 +17,52 @@ impl KeycloakValidator {
     }
 
     pub async fn init_and_fetch(&self) -> Result<()> {
-        let jwks_url = format!("{}/realms/{}/protocol/openid-connect/certs", self.url.trim_end_matches('/'), self.realm);
-        info!("Fetching Keycloak JWKS from: {}", jwks_url);
-        
-        // Wait up to 5 seconds to fetch the JWKS on boot to prevent hanging forever
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()?;
-            
-        let res = client.get(&jwks_url).send().await.context("Failed to fetch JWKS")?;
-        let jwks: JwkSet = res.json().await.context("Failed to parse JWKS JSON")?;
-        
+        let jwks = self.fetch_jwks_from_server().await?;
         *self.jwks.write().await = Some(jwks);
         info!("Successfully loaded Keycloak JWKS configuration");
         Ok(())
+    }
+
+    /// Fetches a fresh JWKS from Keycloak. Called on startup and when an unknown kid is seen.
+    async fn fetch_jwks_from_server(&self) -> Result<JwkSet> {
+        let jwks_url = format!("{}/realms/{}/protocol/openid-connect/certs", self.url.trim_end_matches('/'), self.realm);
+        info!("Fetching Keycloak JWKS from: {}", jwks_url);
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?;
+
+        let res = client.get(&jwks_url).send().await.context("Failed to fetch JWKS")?;
+        let jwks: JwkSet = res.json().await.context("Failed to parse JWKS JSON")?;
+        Ok(jwks)
     }
 
     pub async fn validate_token(&self, token: &str) -> Result<bool> {
         let header = decode_header(token).context("Invalid JWT header")?;
         let kid = header.kid.ok_or_else(|| anyhow::anyhow!("JWT header without 'kid' block"))?;
 
+        // First attempt: look up kid in cached JWKS.
+        // If not found, Keycloak may have rotated keys — refresh once and retry.
+        let jwks_read = self.jwks.read().await;
+        let kid_found = jwks_read
+            .as_ref()
+            .map(|j| j.find(&kid).is_some())
+            .unwrap_or(false);
+        drop(jwks_read);
+
+        if !kid_found {
+            warn!("Token kid '{}' not found in cached JWKS — refreshing keys from Keycloak", kid);
+            match self.fetch_jwks_from_server().await {
+                Ok(fresh) => { *self.jwks.write().await = Some(fresh); }
+                Err(e) => warn!("JWKS refresh failed: {}. Proceeding with cached keys.", e),
+            }
+        }
+
         let jwks_read = self.jwks.read().await;
         let jwks = jwks_read.as_ref().ok_or_else(|| anyhow::anyhow!("JWKS not yet loaded from Keycloak Server"))?;
 
         let jwk = jwks.find(&kid).ok_or_else(|| {
-            warn!("Token kid '{}' not found in cached JWKS. Available kids: {:?}",
+            warn!("Token kid '{}' not found even after JWKS refresh. Available kids: {:?}",
                 kid, jwks.keys.iter().filter_map(|k| k.common.key_id.as_ref()).collect::<Vec<_>>());
             anyhow::anyhow!("JWK not found for kid: {}", kid)
         })?;
@@ -55,8 +76,8 @@ impl KeycloakValidator {
         // So we disable built-in audience validation and check azp manually below.
         validation.validate_aud = false;
 
-        // Increased leeway to 300 seconds to compensate for any server/auth clock differences.
-        validation.leeway = 300;
+        // Small leeway to compensate for clock drift between server and Keycloak.
+        validation.leeway = 30;
 
         // Validate the issuer (the Keycloak realm URL)
         let issuer = format!("{}/realms/{}", self.url.trim_end_matches('/'), self.realm);
@@ -71,7 +92,7 @@ impl KeycloakValidator {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
                     let exp = claims.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
                     let iat = claims.get("iat").and_then(|v| v.as_u64()).unwrap_or(0);
-                    info!("JWT Debug: now={}, iat={}, exp={}, expires_in={}s, diff_iat={}s, azp={}",
+                    debug!("JWT Debug: now={}, iat={}, exp={}, expires_in={}s, diff_iat={}s, azp={}",
                         now, iat, exp,
                         if exp > now { (exp - now) as i64 } else { -((now - exp) as i64) },
                         (now as i64) - (iat as i64),

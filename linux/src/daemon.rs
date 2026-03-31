@@ -75,7 +75,9 @@ pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
                     }
                     IpcRequest::Start(config) => {
                         info!("Handling Start request for endpoint: {}", config.endpoint);
-                        if vpn_running.load(Ordering::SeqCst) {
+                        let still_running = vpn_running.load(Ordering::SeqCst)
+                            || vpn_task.as_ref().map_or(false, |t| !t.is_finished());
+                        if still_running {
                             IpcResponse::Error("VPN is already running".to_string())
                         } else {
                             active_config = Some(config.clone());
@@ -94,9 +96,13 @@ pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
                 };
 
                 // Send response
-                let resp_buf = bincode::serde::encode_to_vec(&resp, bincode::config::standard()).unwrap();
-                let _ = tx.write_u32_le(resp_buf.len() as u32).await;
-                let _ = tx.write_all(&resp_buf).await;
+                match bincode::serde::encode_to_vec(&resp, bincode::config::standard()) {
+                    Ok(resp_buf) => {
+                        let _ = tx.write_u32_le(resp_buf.len() as u32).await;
+                        let _ = tx.write_all(&resp_buf).await;
+                    }
+                    Err(e) => error!("Failed to serialize IPC response: {}", e),
+                }
             }
         }
     }

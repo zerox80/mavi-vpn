@@ -157,7 +157,7 @@ impl NetworkConfig {
         let _ = run_cmd("ip", &["route", "del", "0.0.0.0/1"]);
         let _ = run_cmd("ip", &["route", "del", "128.0.0.0/1"]);
 
-        if self.has_ipv6 {
+        if self.gateway_v6.is_some() {
             let _ = run_cmd("ip", &["-6", "route", "del", "::/1"]);
             let _ = run_cmd("ip", &["-6", "route", "del", "8000::/1"]);
         }
@@ -190,8 +190,9 @@ fn detect_physical_gateway() -> (Option<String>, Option<String>) {
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // Parse: "default via 192.168.1.1 dev eth0 ..."
-        let parts: Vec<&str> = stdout.split_whitespace().collect();
+        // Parse first default route only: "default via 192.168.1.1 dev eth0 ..."
+        let first_line = stdout.lines().next().unwrap_or("");
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
         let gateway = parts
             .iter()
             .position(|&p| p == "via")

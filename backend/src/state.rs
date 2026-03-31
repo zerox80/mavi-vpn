@@ -42,11 +42,17 @@ impl AppState {
     pub fn new(cidr: &str) -> Result<Self> {
         let network: Ipv4Network = cidr.parse().map_err(|_| anyhow!("Invalid CIDR format: {}", cidr))?;
         // Internal IPv6 network (ULA range)
-        let network_v6: Ipv6Network = "fd00::/64".parse().unwrap();
+        let network_v6: Ipv6Network = "fd00::/64".parse().expect("Invalid hardcoded IPv6 CIDR 'fd00::/64'");
         
         // --- Populate IPv4 pool ---
+        if network.prefix() > 30 {
+            return Err(anyhow!("CIDR '{}' network is too small (/{} prefix leaves fewer than 2 usable addresses): use /30 or larger network (i.e. a smaller prefix number)", cidr, network.prefix()));
+        }
+        if network.prefix() < 8 {
+            return Err(anyhow!("CIDR '{}' network is too large (/{} prefix): use /8 or smaller network (i.e. a larger prefix number) to avoid exhausting system memory on IP pool allocation", cidr, network.prefix()));
+        }
         let mut free_ips = Vec::new();
-        let gateway = network.nth(1).unwrap(); // By convention, server is .1
+        let gateway = network.nth(1).ok_or_else(|| anyhow!("CIDR '{}' too small to assign a gateway address", cidr))?; // By convention, server is .1
         let broadcast = network.broadcast();
         
         for ip in network.iter() {

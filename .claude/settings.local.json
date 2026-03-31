@@ -20,7 +20,12 @@
       "Bash(find /c/Daten2/mavi-vpn -type f -name *.gradle* -o -name proguard*)",
       "Bash(find /c/Daten2/mavi-vpn/android/app/src -type f -name *.xml)",
       "Bash(find . -path ./target -prune -o -type f \\\\\\(-name *.rs -o -name *.kt \\\\\\) -print)",
-      "Bash(ls -la C:/Daten2/mavi-vpn/android/app/src/main/java/com/mavi/vpn/*.kt)"
+      "Bash(ls -la C:/Daten2/mavi-vpn/android/app/src/main/java/com/mavi/vpn/*.kt)",
+      "Bash(cargo build:*)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(echo \"RC=$?\")",
+      "Bash(echo \"DONE $?\")",
+      "Bash(grep -v \"//\")"
     ]
   }
 }

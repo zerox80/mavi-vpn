@@ -11,6 +11,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info};
+use rand::RngCore;
+use base64::Engine;
 
 /// Runs the IPC daemon loop. Accepts commands from CLI/GUI clients.
 pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
@@ -19,10 +21,22 @@ pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
     let mut active_config: Option<Config> = None;
 
     let listener = TcpListener::bind(LOCAL_IPC_ADDR).await?;
-    info!("Daemon listening on {}", LOCAL_IPC_ADDR);
+    
+    let mut token_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut token_bytes);
+    let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
+    
+    let token_path = ipc::ipc_token_path();
+    if let Some(parent) = token_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&token_path, &auth_token) {
+        error!("Failed to write IPC token to {:?}: {}", token_path, e);
+    }
+    info!("Daemon listening on {} (Auth token generated)", LOCAL_IPC_ADDR);
 
     loop {
-        if !stop_signal.load(Ordering::SeqCst) {
+        if stop_signal.load(Ordering::SeqCst) {
             info!("Stop signal received, shutting down daemon...");
             vpn_running.store(false, Ordering::SeqCst);
             if let Some(t) = vpn_task {
@@ -54,13 +68,17 @@ pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
                 let mut buf = vec![0u8; len];
                 if rx.read_exact(&mut buf).await.is_err() { continue; }
 
-                let req: IpcRequest = match bincode::serde::decode_from_slice(&buf, bincode::config::standard()) {
+                let req_msg: ipc::SecureIpcRequest = match bincode::serde::decode_from_slice(&buf, bincode::config::standard()) {
                     Ok((r, _)) => r,
                     Err(_) => continue,
                 };
 
                 // Handle request
-                let resp = match req {
+                let resp = if req_msg.auth_token != auth_token {
+                    error!("Rejecting IPC request due to invalid auth token");
+                    IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
+                } else {
+                    match req_msg.request {
                     IpcRequest::Status => {
                         IpcResponse::Status {
                             running: vpn_running.load(Ordering::SeqCst),
@@ -93,6 +111,7 @@ pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
                             IpcResponse::Ok
                         }
                     }
+                    }
                 };
 
                 // Send response
@@ -112,9 +131,20 @@ pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
 
 /// Sends a single IPC request to the running daemon and returns the response.
 pub async fn send_request(req: IpcRequest) -> Result<IpcResponse> {
+    let token_path = ipc::ipc_token_path();
+    let auth_token = std::fs::read_to_string(&token_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read IPC token from {:?}: {}", token_path, e))?
+        .trim()
+        .to_string();
+
+    let req_msg = ipc::SecureIpcRequest {
+        auth_token,
+        request: req,
+    };
+
     let mut stream = TcpStream::connect(LOCAL_IPC_ADDR).await?;
 
-    let req_buf = bincode::serde::encode_to_vec(&req, bincode::config::standard())?;
+    let req_buf = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())?;
     stream.write_u32_le(req_buf.len() as u32).await?;
     stream.write_all(&req_buf).await?;
 

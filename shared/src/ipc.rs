@@ -13,6 +13,17 @@ use serde::{Deserialize, Serialize};
 /// Address for the local TCP IPC server.
 pub const LOCAL_IPC_ADDR: &str = "127.0.0.1:14433";
 
+/// Path to the authentication token file used to secure the local TCP IPC socket.
+#[cfg(windows)]
+pub fn ipc_token_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(r"C:\ProgramData\mavi-vpn\ipc.token")
+}
+
+#[cfg(unix)]
+pub fn ipc_token_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/var/run/mavi-vpn.token")
+}
+
 /// Configuration required to establish a VPN session.
 /// Passed from the client to the service via IPC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +47,7 @@ pub struct Config {
 }
 
 /// Commands sent from the client UI to the background service.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IpcRequest {
     /// Start the VPN tunnel with the given configuration.
     Start(Config),
@@ -44,6 +55,16 @@ pub enum IpcRequest {
     Stop,
     /// Query the current tunnel status.
     Status,
+}
+
+/// A wrapper around `IpcRequest` that includes the authentication token.
+/// This ensures only authorized local users can command the background service.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SecureIpcRequest {
+    /// The secret token read from `ipc_token_path()`.
+    pub auth_token: String,
+    /// The actual command.
+    pub request: IpcRequest,
 }
 
 /// Responses sent from the background service back to the client UI.

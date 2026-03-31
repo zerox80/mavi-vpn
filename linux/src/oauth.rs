@@ -119,7 +119,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
                 {
                     let html = format!(
                         "<html><body><h1 style=\"color: red;\">Login failed!</h1><p>Error: {}</p></body></html>",
-                        err
+                        html_escape(&err)
                     );
                     let response = format!(
                         "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
@@ -178,6 +178,10 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .ok_or_else(|| anyhow::anyhow!("No access_token in response"))?;
 
     Ok(access_token.to_string())
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 /// Open a URL in the user's default browser.

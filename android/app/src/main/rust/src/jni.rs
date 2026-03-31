@@ -1,7 +1,7 @@
 use jni::objects::{JClass, JString, JObject};
 use jni::{JValue, Env, AttachGuard, EnvUnowned};
 use jni::sys::{jint, jlong};
-use log::{info, error, warn};
+use log::{info, error};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::Once;
@@ -57,34 +57,28 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
         return 0;
     }
 
-    use std::net::ToSocketAddrs;
-    let addr = match endpoint.to_socket_addrs() {
-        Ok(mut addrs) => addrs.next(),
-        Err(e) => {
-            error!("Failed to resolve endpoint {}: {}", endpoint, e);
-            return 0;
-        }
-    };
-    
-    let target_addr = match addr {
-        Some(a) => a,
-        None => {
-            error!("No address found for endpoint {}", endpoint);
-            return 0;
-        }
-    };
-
-    let bind_addr = if target_addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
-    let socket = match std::net::UdpSocket::bind(bind_addr) {
-        Ok(s) => s,
+    let socket2_sock = match socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    ) {
+        Ok(sock) => sock,
         Err(e) => {
             error!("Failed to bind UDP socket: {}", e);
             return 0;
         }
     };
-    
-    let socket2_sock = socket2::Socket::from(socket);
+
+    if let Err(e) = socket2_sock.set_only_v6(false) {
+        error!("Failed to enable dual-stack UDP socket: {}", e);
+        return 0;
+    }
+    if let Err(e) = socket2_sock.bind(&socket2::SockAddr::from(std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0))) {
+        error!("Failed to bind UDP socket: {}", e);
+        return 0;
+    }
     let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
+    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
 
     #[cfg(target_os = "android")]
     unsafe {
@@ -92,11 +86,8 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
         let fd = socket2_sock.as_raw_fd();
         let val: libc::c_int = 0; 
 
-        if target_addr.is_ipv4() {
-            let _ = libc::setsockopt(fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
-        } else {
-            let _ = libc::setsockopt(fd, libc::IPPROTO_IPV6, 23, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
-        }
+        let _ = libc::setsockopt(fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
+        let _ = libc::setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
     }
 
     let socket = std::net::UdpSocket::from(socket2_sock);

@@ -19,11 +19,22 @@ use tokio::net::TcpStream;
 // =============================================================================
 
 async fn send_ipc_request(req: &IpcRequest) -> Result<IpcResponse, String> {
+    let token_path = shared::ipc::ipc_token_path();
+    let auth_token = std::fs::read_to_string(&token_path)
+        .map_err(|e| format!("Failed to read IPC token (is the service running?): {}", e))?
+        .trim()
+        .to_string();
+
+    let req_msg = shared::ipc::SecureIpcRequest {
+        auth_token,
+        request: req.clone(),
+    };
+
     let mut stream = TcpStream::connect(LOCAL_IPC_ADDR)
         .await
         .map_err(|e| format!("Service not running: {}", e))?;
 
-    let encoded = bincode::serde::encode_to_vec(req, bincode::config::standard())
+    let encoded = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())
         .map_err(|e| e.to_string())?;
 
     stream

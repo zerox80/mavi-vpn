@@ -262,24 +262,37 @@ async fn run_session(
     let alive_quic_in = session_alive.clone();
     let run_quic_in = global_running.clone();
     let quic_to_tun = tokio::spawn(async move {
+        let mut pending_datagram: Option<Bytes> = None;
+
         loop {
             if !run_quic_in.load(Ordering::Relaxed) || !alive_quic_in.load(Ordering::Relaxed) { break; }
-            match connection.read_datagram().await {
-                Ok(data) => {
-                    if data.is_empty() { continue; }
-                    match session_quic_in.allocate_send_packet(data.len() as u16) {
-                        Ok(mut packet) => {
-                            packet.bytes_mut().copy_from_slice(&data);
-                            session_quic_in.send_packet(packet);
-                        }
-                        Err(e) if is_wintun_ring_full(&e) => {
-                             tokio::time::sleep(Duration::from_millis(2)).await;
-                             continue;
-                        }
-                        Err(_) => { alive_quic_in.store(false, Ordering::SeqCst); break; }
+
+            let data = match pending_datagram.take() {
+                Some(data) => data,
+                None => match connection.read_datagram().await {
+                    Ok(data) => data,
+                    Err(_) => {
+                        alive_quic_in.store(false, Ordering::SeqCst);
+                        break;
                     }
+                },
+            };
+
+            if data.is_empty() { continue; }
+
+            match session_quic_in.allocate_send_packet(data.len() as u16) {
+                Ok(mut packet) => {
+                    packet.bytes_mut().copy_from_slice(&data);
+                    session_quic_in.send_packet(packet);
                 }
-                Err(_) => { alive_quic_in.store(false, Ordering::SeqCst); break; }
+                Err(e) if is_wintun_ring_full(&e) => {
+                    pending_datagram = Some(data);
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+                Err(_) => {
+                    alive_quic_in.store(false, Ordering::SeqCst);
+                    break;
+                }
             }
         }
     });

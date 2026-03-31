@@ -4,7 +4,7 @@ use tun::AbstractDevice;
 use crate::config::Config;
 use crate::state::AppState;
 
-pub fn create_tun_device(config: &Config, state: &AppState) -> Result<tun::AsyncDevice> {
+pub fn create_tun_device(config: &Config, state: &AppState) -> Result<(tun::AsyncDevice, bool)> {
     let mut tun_config = tun::Configuration::default();
     let gateway_ip = state.gateway_ip();
     let netmask = state.network.mask();
@@ -20,18 +20,12 @@ pub fn create_tun_device(config: &Config, state: &AppState) -> Result<tun::Async
 
     let dev = tun::create_as_async(&tun_config).context("Failed to create TUN device. Ensure NET_ADMIN cap is set.")?;
     let tun_name = std::ops::Deref::deref(&dev).tun_name().unwrap_or_else(|_| "tun0".into());
-    
-    info!("TUN Device created: {}. IP: {}", tun_name, gateway_ip);
-    
-    setup_ipv6(&tun_name, state);
 
-    // This is a bit tricky, tokio::io::split returns Reader/Writer. 
-    // I will return the reader/writer or just the device if I can.
-    // Actually the original main.rs split it immediately.
-    // I'll return the device after some logic.
-    // Wait, create_as_async returns 'AsyncDevice'.
-    
-    Ok(dev)
+    info!("TUN Device created: {}. IP: {}", tun_name, gateway_ip);
+
+    let ipv6_enabled = setup_ipv6(&tun_name, state);
+
+    Ok((dev, ipv6_enabled))
 }
 
 fn setup_ipv6(tun_name: &str, state: &AppState) -> bool {

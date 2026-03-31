@@ -104,9 +104,9 @@ async fn main() -> Result<()> {
     // Create the global TUN message channel (Capacity 4096 to prevent backpressure)
     let (tx_tun, rx_tun) = tokio::sync::mpsc::channel::<Bytes>(4096);
 
-    // Create the TUN device
-    let tun_device = create_tun_device(&config, &state)?;
-    
+    // Create the TUN device; returns whether IPv6 was successfully configured
+    let (tun_device, ipv6_enabled) = create_tun_device(&config, &state)?;
+
     // Split the TUN device for concurrent reading/writing
     let (tun_reader, tun_writer) = tokio::io::split(tun_device);
     
@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
         let keycloak = keycloak.clone();
         
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn, state, config, tx_tun, keycloak, true).await {
+            if let Err(e) = handle_connection(conn, state, config, tx_tun, keycloak, ipv6_enabled).await {
                 warn!("Connection handler exited: {}", e);
             }
         });

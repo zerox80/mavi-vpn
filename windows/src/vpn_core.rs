@@ -516,7 +516,7 @@ fn set_adapter_network_config(
     }
 
     // 5. Set MTU (Rule 1: Always 1280)
-    let _ = adapter.set_mtu(TUN_MTU);
+    let _ = adapter.set_mtu(usize::from(TUN_MTU));
     let mtu_val = "mtu=1280";
     run_cmd("netsh", &["interface", "ipv4", "set", "subinterface", &adapter_name, mtu_val, "store=active"]);
     run_cmd("netsh", &["interface", "ipv6", "set", "subinterface", &adapter_name, mtu_val, "store=active"]);

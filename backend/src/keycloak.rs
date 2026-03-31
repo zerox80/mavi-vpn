@@ -1,28 +1,30 @@
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
-use base64::Engine;
+use tracing::{info, warn};
+use constant_time_eq::constant_time_eq;
 use std::time::{Duration, Instant};
 
 pub struct KeycloakValidator {
     url: String,
     realm: String,
     pub client_id: String,
-    jwks: RwLock<Option<JwkSet>>,
-    last_refresh: RwLock<Option<Instant>>,
+    // Combined lock: JWKS and its fetch timestamp are always updated atomically.
+    // Keeping them in a single RwLock prevents a TOCTOU race where `last_refresh`
+    // could be written by a different task between the two separate writes.
+    jwks_cache: RwLock<Option<(JwkSet, Instant)>>,
 }
 
 const JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 
 impl KeycloakValidator {
     pub fn new(url: String, realm: String, client_id: String) -> Self {
-        Self { url, realm, client_id, jwks: RwLock::new(None), last_refresh: RwLock::new(None) }
+        Self { url, realm, client_id, jwks_cache: RwLock::new(None) }
     }
 
     pub async fn init_and_fetch(&self) -> Result<()> {
         let jwks = self.fetch_jwks_from_server().await?;
-        *self.jwks.write().await = Some(jwks);
+        *self.jwks_cache.write().await = Some((jwks, Instant::now()));
         info!("Successfully loaded Keycloak JWKS configuration");
         Ok(())
     }
@@ -47,24 +49,22 @@ impl KeycloakValidator {
 
         // First attempt: look up kid in cached JWKS.
         // If not found, Keycloak may have rotated keys — refresh once and retry.
-        let jwks_read = self.jwks.read().await;
-        let kid_found = jwks_read
+        let kid_found = self.jwks_cache.read().await
             .as_ref()
-            .map(|j| j.find(&kid).is_some())
+            .map(|(j, _)| j.find(&kid).is_some())
             .unwrap_or(false);
-        drop(jwks_read);
 
         if !kid_found {
-            let should_refresh = {
-                let last = self.last_refresh.read().await;
-                last.map_or(true, |t| t.elapsed() >= JWKS_REFRESH_COOLDOWN)
-            };
+            let should_refresh = self.jwks_cache.read().await
+                .as_ref()
+                .map_or(true, |(_, t)| t.elapsed() >= JWKS_REFRESH_COOLDOWN);
+
             if should_refresh {
                 warn!("Token kid '{}' not found in cached JWKS — refreshing keys from Keycloak", kid);
                 match self.fetch_jwks_from_server().await {
                     Ok(fresh) => {
-                        *self.jwks.write().await = Some(fresh);
-                        *self.last_refresh.write().await = Some(Instant::now());
+                        // Atomic update: JWKS and timestamp written together under a single lock.
+                        *self.jwks_cache.write().await = Some((fresh, Instant::now()));
                     }
                     Err(e) => warn!("JWKS refresh failed: {}. Proceeding with cached keys.", e),
                 }
@@ -73,8 +73,8 @@ impl KeycloakValidator {
             }
         }
 
-        let jwks_read = self.jwks.read().await;
-        let jwks = jwks_read.as_ref().ok_or_else(|| anyhow::anyhow!("JWKS not yet loaded from Keycloak Server"))?;
+        let cache_guard = self.jwks_cache.read().await;
+        let (jwks, _) = cache_guard.as_ref().ok_or_else(|| anyhow::anyhow!("JWKS not yet loaded from Keycloak Server"))?;
 
         let jwk = jwks.find(&kid).ok_or_else(|| {
             warn!("Token kid '{}' not found even after JWKS refresh. Available kids: {:?}",
@@ -83,9 +83,9 @@ impl KeycloakValidator {
         })?;
 
         let decoding_key = DecodingKey::from_jwk(jwk).context("Failed to create decoding key from JWK")?;
-        
+
         let mut validation = Validation::new(Algorithm::RS256);
-        
+
         // Keycloak access tokens have aud:"account" by default, NOT the client_id.
         // The client_id is in the "azp" (authorized party) claim.
         // So we disable built-in audience validation and check azp manually below.
@@ -98,31 +98,19 @@ impl KeycloakValidator {
         let issuer = format!("{}/realms/{}", self.url.trim_end_matches('/'), self.realm);
         validation.set_issuer(&[&issuer]);
 
-        // Robust Debug: Manually decode the second part of the JWT (the payload)
-        // This is always valid Base64 JSON and doesn't require a key.
-        let token_parts: Vec<&str> = token.split('.').collect();
-        if token_parts.len() >= 2 {
-            if let Ok(payload_bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token_parts[1]) {
-                if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
-                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                    let exp = claims.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let iat = claims.get("iat").and_then(|v| v.as_u64()).unwrap_or(0);
-                    debug!("JWT Debug: now={}, iat={}, exp={}, expires_in={}s, diff_iat={}s, azp={}",
-                        now, iat, exp,
-                        if exp > now { (exp - now) as i64 } else { -((now - exp) as i64) },
-                        (now as i64) - (iat as i64),
-                        claims.get("azp").and_then(|v| v.as_str()).unwrap_or("?"),
-                    );
-                }
-            }
-        }
-
         match decode::<serde_json::Value>(token, &decoding_key, &validation) {
             Ok(token_data) => {
                 // Manually validate "azp" (authorized party) = our client_id
                 let claims = &token_data.claims;
-                let azp = claims.get("azp").and_then(|v| v.as_str()).unwrap_or("");
-                if azp != self.client_id {
+                let azp = match claims.get("azp").and_then(|v| v.as_str()) {
+                    Some(v) => v,
+                    None => {
+                        warn!("JWT missing 'azp' claim — rejecting token");
+                        return Ok(false);
+                    }
+                };
+                // Use constant-time comparison to prevent timing-based client_id enumeration.
+                if !constant_time_eq(azp.as_bytes(), self.client_id.as_bytes()) {
                     warn!("JWT azp mismatch: expected '{}', got '{}'", self.client_id, azp);
                     return Ok(false);
                 }
@@ -133,7 +121,10 @@ impl KeycloakValidator {
             }
             Err(e) => {
                 warn!("JWT validation failed: {}", e);
-                Ok(false)
+                // Return Err so callers can distinguish "token is invalid" (Ok(false))
+                // from "an error occurred during validation" (Err). Both reject the
+                // connection, but Err propagates the underlying reason up the call stack.
+                Err(anyhow::anyhow!("JWT decode error: {}", e))
             }
         }
     }

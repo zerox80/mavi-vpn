@@ -49,7 +49,7 @@ class MaviVpnService : VpnService() {
             return START_NOT_STICKY
         }
         
-        if (action == "CONNECT" || intent == null) {
+        if (action == "CONNECT" || action == null) {
             val ip: String
             val port: String
             val token: String
@@ -134,7 +134,7 @@ class MaviVpnService : VpnService() {
         
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MaviVPN::ServiceWakeLock")
-        wakeLock?.acquire(10 * 60 * 60 * 1000L)
+        wakeLock?.acquire(60 * 60 * 1000L)
 
         isRunning = true
         startForeground(1, notification)
@@ -354,7 +354,8 @@ class MaviVpnService : VpnService() {
                 if (octet < 0 || octet > 255) return 24
                 (acc shl 8) or octet.toLong()
             }
-            val prefix = Integer.bitCount(mask.toInt())
+            // Use Long.bitCount to avoid truncating the upper 32 bits with toInt().
+            val prefix = java.lang.Long.bitCount(mask).toInt()
             val expected = if (prefix == 0) 0L else (0xFFFFFFFFL shl (32 - prefix)) and 0xFFFFFFFFL
             if (mask != expected) return 24
             prefix

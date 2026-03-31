@@ -204,7 +204,7 @@ async fn run_session(
     let conn_monitor = connection.clone();
     let alive_monitor = session_alive.clone();
     let running_monitor = global_running.clone();
-    tokio::spawn(async move {
+    let mtu_monitor = tokio::spawn(async move {
         let mut last_mtu = 0;
         loop {
             if !running_monitor.load(Ordering::Relaxed) || !alive_monitor.load(Ordering::Relaxed) {
@@ -247,7 +247,8 @@ async fn run_session(
                             ) {
                                 let _ = tun_reader.write(&icmp_packet).await;
                             }
-                        } else if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) {
+                        } else {
+                            warn!("Datagram send error: {}", e);
                             alive_tun.store(false, Ordering::SeqCst);
                             break;
                         }
@@ -298,6 +299,7 @@ async fn run_session(
 
     tun_to_quic.abort();
     quic_to_tun.abort();
+    mtu_monitor.abort();
 
     // Cleanup networking
     net_config.cleanup();
@@ -381,7 +383,13 @@ async fn connect_and_handshake(
     )?;
     endpoint.set_default_client_config(client_config);
 
-    let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
+    let server_name = if endpoint_str.starts_with('[') {
+        // IPv6 literal: [::1]:443 → ::1
+        endpoint_str.trim_start_matches('[').split(']').next().unwrap_or(&endpoint_str)
+    } else {
+        // hostname:port or IPv4:port
+        endpoint_str.split(':').next().unwrap_or(&endpoint_str)
+    };
     let connection = endpoint
         .connect(addr, server_name)?
         .await

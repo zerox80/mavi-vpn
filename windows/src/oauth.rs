@@ -9,6 +9,10 @@ use base64::Engine;
 /// Fixed callback port — register `http://127.0.0.1:18923/callback` in Keycloak.
 const OAUTH_CALLBACK_PORT: u16 = 18923;
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
     // 1. Generate PKCE verifier and challenge
     let mut verifier_bytes = [0u8; 32];
@@ -68,7 +72,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
                 }
                 
                 if let Some(err) = u.query_pairs().find(|(k, _)| k == "error").map(|(_, v)| v.into_owned()) {
-                    let html = format!("<html><body><h1 style=\"color: red;\">Login fehlgeschlagen!</h1><p>Fehler: {}</p></body></html>", err);
+                    let html = format!("<html><body><h1 style=\"color: red;\">Login fehlgeschlagen!</h1><p>Fehler: {}</p></body></html>", html_escape(&err));
                     let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}", html);
                     let _ = socket.write_all(response.as_bytes()).await;
                     return Err(anyhow::anyhow!("Keycloak Fehler: {}", err));

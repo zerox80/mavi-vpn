@@ -332,6 +332,7 @@ async fn connect_and_handshake(
     send.write_all(&bytes).await?;
 
     let len = recv.read_u32_le().await? as usize;
+    if len > 65536 { anyhow::bail!("Server response too large: {} bytes", len); }
     let mut buf = vec![0u8; len];
     recv.read_exact(&mut buf).await?;
     let config: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;

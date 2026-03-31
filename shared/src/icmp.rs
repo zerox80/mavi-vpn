@@ -20,8 +20,9 @@ use etherparse::{Icmpv4Type, Icmpv6Type, Ipv4HeaderSlice, Ipv6HeaderSlice, Packe
 /// - `None` – If the dropped packet is empty, malformed, or has an unsupported IP version.
 ///
 /// # Standards
-/// - ICMPv4 "Fragmentation Needed" (Type 3 Code 4): RFC 792 / RFC 1191
-/// - ICMPv6 "Packet Too Big"  (Type 2):             RFC 4443 / RFC 8201
+/// - `ICMPv4` "Fragmentation Needed" (Type 3 Code 4): RFC 792 / RFC 1191
+/// - `ICMPv6` "Packet Too Big"  (Type 2):             RFC 4443 / RFC 8201
+#[must_use]
 pub fn generate_packet_too_big(
     dropped_packet: &[u8],
     mtu: u16,
@@ -43,10 +44,10 @@ pub fn generate_packet_too_big(
             // Determine the source address for the ICMP reply.
             // If an override is supplied (e.g. the VPN gateway), use it so the
             // error appears to originate from a known address within the VPN.
-            let icmp_src = if let Some(std::net::IpAddr::V4(v4)) = source_ip_override {
-                v4
-            } else {
-                internet_ip
+            let icmp_src = match source_ip_override {
+                Some(std::net::IpAddr::V4(v4)) => v4,
+                Some(std::net::IpAddr::V6(_)) => return None, // Version mismatch
+                None => internet_ip,
             };
 
             // RFC 792: include the IP header + first 8 bytes of the original payload
@@ -77,10 +78,10 @@ pub fn generate_packet_too_big(
             let client_ip = header_slice.source_addr();
             let internet_ip = header_slice.destination_addr();
 
-            let icmp_src = if let Some(std::net::IpAddr::V6(v6)) = source_ip_override {
-                v6
-            } else {
-                internet_ip
+            let icmp_src = match source_ip_override {
+                Some(std::net::IpAddr::V6(v6)) => v6,
+                Some(std::net::IpAddr::V4(_)) => return None, // Version mismatch
+                None => internet_ip,
             };
 
             // RFC 4443 §2.4: An ICMPv6 error message must not exceed 1280 bytes
@@ -95,7 +96,7 @@ pub fn generate_packet_too_big(
                 client_ip.octets(), // Destination: the VPN client
                 64,                 // Hop Limit (equiv. of TTL)
             )
-            .icmpv6(Icmpv6Type::PacketTooBig { mtu: mtu as u32 });
+            .icmpv6(Icmpv6Type::PacketTooBig { mtu: u32::from(mtu) });
 
             let mut result = Vec::with_capacity(builder.size(payload_slice.len()));
             builder.write(&mut result, payload_slice).ok()?;

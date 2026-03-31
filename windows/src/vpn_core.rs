@@ -11,7 +11,7 @@ use bytes::Bytes;
 use sha2::{Sha256, Digest};
 use tracing::{info, warn};
 use shared::{icmp, ControlMessage};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -93,6 +93,22 @@ enum SessionEnd {
     ConnectionLost,
 }
 
+struct SessionRouteGuard {
+    host_route: Option<String>,
+}
+
+impl SessionRouteGuard {
+    fn new(host_route: Option<String>) -> Self {
+        Self { host_route }
+    }
+}
+
+impl Drop for SessionRouteGuard {
+    fn drop(&mut self) {
+        cleanup_routes(self.host_route.as_deref());
+    }
+}
+
 /// Helper to ensure the "MaviVPN" adapter exists in Windows.
 fn get_or_create_adapter(wintun: &wintun::Wintun) -> Result<Arc<Adapter>> {
     if let Ok(adapter) = Adapter::open(wintun, "MaviVPN") {
@@ -158,10 +174,10 @@ async fn run_session(
         std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(|v4| v4.to_string()).unwrap_or_else(|| v6.to_string()),
     };
 
-    set_adapter_network_config(
+    let route_cleanup = SessionRouteGuard::new(set_adapter_network_config(
         adapter, assigned_ip, netmask, gateway, dns, mtu, &endpoint_ip_str,
         assigned_ipv6, netmask_v6, gateway_v6, dns_v6,
-    )?;
+    )?);
 
     // 4. Start WinTUN Session
     let session = Arc::new(adapter.start_session(wintun::MAX_RING_CAPACITY).context("Failed to start WinTUN session")?);
@@ -251,6 +267,7 @@ async fn run_session(
 
     quic_to_tun.abort();
     let _ = tun_to_quic.join();
+    drop(route_cleanup);
 
     if global_running.load(Ordering::Relaxed) { Ok(SessionEnd::ConnectionLost) } else { Ok(SessionEnd::UserStopped) }
 }
@@ -287,7 +304,10 @@ async fn connect_and_handshake(
 
     // Resolve endpoint and connect
     let addr = tokio::net::lookup_host(&endpoint_str).await?.next().context("Failed to resolve endpoint")?;
-    let server_name = endpoint_str.split(':').next().unwrap_or(&endpoint_str);
+    let (server_name, _) = split_endpoint(&endpoint_str);
+    if server_name.is_empty() {
+        anyhow::bail!("Endpoint host missing");
+    }
 
     // Rule 2: Outgoing QUIC Payload (Initial MTU) MUST be 1360.
     // IPv4 Wire: 1360 + 20 (IP) + 8 (UDP) = 1388 bytes.
@@ -364,6 +384,24 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
     }
 }
 
+fn split_endpoint(endpoint: &str) -> (&str, Option<&str>) {
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            let host = &rest[..end];
+            let port = rest[end + 1..].strip_prefix(':');
+            return (host, port);
+        }
+    }
+
+    if endpoint.matches(':').count() == 1 {
+        if let Some((host, port)) = endpoint.rsplit_once(':') {
+            return (host, Some(port));
+        }
+    }
+
+    (endpoint, None)
+}
+
 /// Comprehensive helper to apply all Windows networking settings for the VPN.
 fn set_adapter_network_config(
     adapter: &Adapter,
@@ -377,7 +415,7 @@ fn set_adapter_network_config(
     netmask_v6: Option<u8>,
     gateway_v6: Option<Ipv6Addr>,
     dns_v6: Option<Ipv6Addr>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let adapter_index = adapter.get_adapter_index()?;
     let if_str = adapter_index.to_string();
@@ -439,7 +477,7 @@ fn set_adapter_network_config(
 
     // 6. Host exception FIRST — must run before split routes so that
     //    Get-NetRoute still sees the real physical default route.
-    let endpoint_ip = add_host_route_exception(endpoint);
+    let endpoint_route = add_host_route_exception_fixed(endpoint);
 
     // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 — override default route without deleting it.
     run_cmd("route", &["add", "0.0.0.0",   "mask", "128.0.0.0", &gw_str, "metric", "5", "if", &if_str]);
@@ -466,20 +504,21 @@ fn set_adapter_network_config(
     set_nrpt_dns_rule(dns, dns_v6);
 
     info!("Network config complete: endpoint_exception={}",
-        endpoint_ip.as_deref().unwrap_or("none"));
-    Ok(())
+        endpoint_route.as_deref().unwrap_or("none"));
+    Ok(endpoint_route)
 }
 
 /// Remove the two split-tunnel routes and the host exception.
 /// Called both before a new session (stale cleanup) and on disconnect.
-fn cleanup_routes(endpoint_ip: Option<&str>) {
+fn cleanup_routes(host_route: Option<&str>) {
     let _ = std::process::Command::new("route").args(["delete", "0.0.0.0",   "mask", "128.0.0.0"]).output();
     let _ = std::process::Command::new("route").args(["delete", "128.0.0.0", "mask", "128.0.0.0"]).output();
-    if let Some(ip) = endpoint_ip {
-        let _ = std::process::Command::new("route").args(["delete", ip]).output();
+    if let Some(prefix) = host_route {
+        let cmd = format!("Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null", prefix);
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &cmd])
+            .output();
     }
-    // Also remove any stored endpoint exception (best-effort, ignore errors)
-    // IPv6 split routes
     let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "delete", "route", "::/1",    "MaviVPN"]).output();
     let _ = std::process::Command::new("netsh").args(["interface", "ipv6", "delete", "route", "8000::/1", "MaviVPN"]).output();
 }
@@ -503,6 +542,7 @@ fn set_adapter_ipv6(adapter: &Adapter, ip: Ipv6Addr, prefix_len: u8) -> Result<(
 /// Routes the VPN server's own IP via the physical gateway rather than the tunnel.
 /// Returns the server IP string so the caller can clean it up later.
 /// Must be called BEFORE the split-tunnel routes are installed.
+#[allow(dead_code)]
 fn add_host_route_exception(endpoint: &str) -> Option<String> {
     let server_ip = endpoint
         .split(':').next().unwrap_or(endpoint)
@@ -531,6 +571,57 @@ fn add_host_route_exception(endpoint: &str) -> Option<String> {
             return Some(server_ip);
         }
     }
+    warn!("Could not determine physical gateway for host exception route");
+    None
+}
+
+fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
+    let server_ip: IpAddr = match endpoint.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            warn!("Could not parse endpoint IP '{}' for host exception route", endpoint);
+            return None;
+        }
+    };
+
+    let route_prefix = match server_ip {
+        IpAddr::V4(v4) => format!("{}/32", v4),
+        IpAddr::V6(v6) => format!("{}/128", v6),
+    };
+
+    let (default_prefix, family, empty_next_hop) = match server_ip {
+        IpAddr::V4(_) => ("0.0.0.0/0", "IPv4", "0.0.0.0"),
+        IpAddr::V6(_) => ("::/0", "IPv6", "::"),
+    };
+
+    let ps = format!(
+        "$best = Get-NetRoute -DestinationPrefix '{}' -AddressFamily {} \
+        | Where-Object {{ (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).InterfaceDescription -notlike '*WireGuard*' -and \
+          (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).Name -notlike 'MaviVPN*' }} \
+        | Sort-Object {{ $_.RouteMetric + $_.InterfaceMetric }} \
+        | Select-Object -First 1; \
+        if ($best -and $best.NextHop -and $best.NextHop -ne '{}') {{ \
+            New-NetRoute -DestinationPrefix '{}' -InterfaceIndex $best.InterfaceIndex -NextHop $best.NextHop -RouteMetric 1 -ErrorAction SilentlyContinue | Out-Null; \
+            Write-Output $best.NextHop \
+        }}",
+        default_prefix,
+        family,
+        empty_next_hop,
+        route_prefix,
+    );
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps])
+        .output();
+
+    if let Ok(out) = output {
+        let gateway = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !gateway.is_empty() && gateway != empty_next_hop {
+            info!("Host exception: {} -> {}", route_prefix, gateway);
+            return Some(route_prefix);
+        }
+    }
+
     warn!("Could not determine physical gateway for host exception route");
     None
 }

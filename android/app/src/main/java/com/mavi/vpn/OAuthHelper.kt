@@ -6,8 +6,6 @@ import android.util.Base64
 import android.util.Log
 import androidx.browser.customtabs.CustomTabsIntent
 import okhttp3.*
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -76,6 +74,27 @@ object OAuthHelper {
         customTabsIntent.launchUrl(context, url)
     }
 
+    fun isAccessTokenUsable(token: String, skewSeconds: Long = 60): Boolean {
+        if (token.isBlank()) {
+            return false
+        }
+
+        return try {
+            val payload = parseJwtPayload(token) ?: return false
+            val exp = payload.optLong("exp", -1L)
+            if (exp <= 0L) {
+                Log.w("OAuthHelper", "JWT missing usable exp claim")
+                return false
+            }
+
+            val now = System.currentTimeMillis() / 1000L
+            now + skewSeconds < exp
+        } catch (e: Exception) {
+            Log.e("OAuthHelper", "Failed to inspect access token expiry: ${e.message}")
+            false
+        }
+    }
+
     suspend fun exchangeCodeForToken(code: String, returnedState: String?, kcUrl: String, realm: String, clientId: String): String? = withContext(Dispatchers.IO) {
         // Read and clear state atomically to prevent a second concurrent call from
         // consuming the same verifier (replay) or seeing a partially-overwritten state.
@@ -128,5 +147,15 @@ object OAuthHelper {
             Log.e("OAuthHelper", "Token exchange exception: ${e.message}")
             null
         }
+    }
+
+    private fun parseJwtPayload(token: String): JSONObject? {
+        val parts = token.split(".")
+        if (parts.size < 2) {
+            return null
+        }
+
+        val decoded = Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        return JSONObject(String(decoded, Charsets.UTF_8))
     }
 }

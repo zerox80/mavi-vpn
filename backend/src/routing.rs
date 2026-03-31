@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::error;
+use tracing::{error, warn};
 use bytes::Bytes;
 use crate::state::AppState;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
@@ -48,14 +48,18 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                          if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&packet) {
                             let dest_ip = ipv4_header.destination_addr();
                             if let Some(tx_client) = state_reader.peers.get(&dest_ip) {
-                                let _ = tx_client.try_send(packet);
+                                if tx_client.try_send(packet).is_err() {
+                                    warn!("Dropped IPv4 packet for {}: client channel full", dest_ip);
+                                }
                             }
                         }
                     } else if version == 6 {
                          if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&packet) {
                             let dest_ip = ipv6_header.destination_addr();
                             if let Some(tx_client) = state_reader.peers_v6.get(&dest_ip) {
-                                let _ = tx_client.try_send(packet);
+                                if tx_client.try_send(packet).is_err() {
+                                    warn!("Dropped IPv6 packet for {}: client channel full", dest_ip);
+                                }
                             }
                         }
                     }

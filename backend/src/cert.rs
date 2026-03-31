@@ -44,7 +44,7 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
         let subject_alt_names = vec!["localhost".to_string(), "vpn-server".to_string(), "mavivpn".to_string()];
         
         // Generate a new self-signed certificate (valid for 365 days by default in rcgen)
-        let cert = generate_simple_self_signed(subject_alt_names).unwrap();
+        let cert = generate_simple_self_signed(subject_alt_names).context("Failed to generate self-signed certificate")?;
         
         let cert_pem = cert.cert.pem();
         let key_pem = cert.signing_key.serialize_pem();
@@ -60,7 +60,7 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
             .into_iter()
             .map(PrivateKeyDer::Pkcs8)
             .collect();
-        let key = keys.into_iter().next().unwrap();
+        let key = keys.into_iter().next().ok_or_else(|| anyhow::anyhow!("No PKCS#8 private key found in generated certificate"))?;
 
         if let Some(cert) = certs.first() {
             write_cert_pin(&cert_path, cert)?;

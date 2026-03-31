@@ -99,9 +99,20 @@ async fn interactive_mode() -> Result<()> {
 }
 
 async fn send_request_internal(req: IpcRequest) -> Result<IpcResponse> {
+    let token_path = ipc::ipc_token_path();
+    let auth_token = std::fs::read_to_string(&token_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read IPC token from {:?}. Is the service running? {}", token_path, e))?
+        .trim()
+        .to_string();
+
+    let req_msg = ipc::SecureIpcRequest {
+        auth_token,
+        request: req,
+    };
+
     let mut client = TcpStream::connect(ipc::LOCAL_IPC_ADDR).await?;
     
-    let req_buf = bincode::serde::encode_to_vec(&req, bincode::config::standard())?;
+    let req_buf = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())?;
     client.write_u32_le(req_buf.len() as u32).await?;
     client.write_all(&req_buf).await?;
     

@@ -122,14 +122,25 @@ async fn main() -> Result<()> {
 
     info!("Server Ready. Waiting for connections...");
 
+    let connection_semaphore = Arc::new(tokio::sync::Semaphore::new(1000));
+
     // Accept incoming connections
     while let Some(conn) = endpoint.accept().await {
+        let permit = match connection_semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!("Connection limit reached (1000), rejecting new connection");
+                continue;
+            }
+        };
+
         let state = state.clone();
         let config = config.clone();
         let tx_tun = tx_tun.clone();
         let keycloak = keycloak.clone();
-        
+
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = handle_connection(conn, state, config, tx_tun, keycloak, ipv6_enabled).await {
                 warn!("Connection handler exited: {}", e);
             }

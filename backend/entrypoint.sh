@@ -27,6 +27,7 @@ echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "Info: Skipping ip_fo
 
 # Setup NAT (Masquerade)
 VPN_NETWORK=${VPN_NETWORK:-"10.8.0.0/24"}
+VPN_NETWORK_V6=${VPN_NETWORK_V6:-"fd00::/64"}
 # Clear and set rules (DO NOT FLUSH ENTIRE NAT TABLE IN HOST MODE)
 # We only want to append our specific masquerade rule.
 
@@ -55,8 +56,8 @@ echo "Enabling IPv6 Forwarding..."
 sysctl -w net.ipv6.conf.all.forwarding=1 || echo "Failed to enable ipv6 forwarding (container might be restricted)"
 
 # IPv6 NAT
-if ! ip6tables -t nat -C POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null; then
-    ip6tables -t nat -I POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null || echo "ip6tables NAT failed"
+if ! ip6tables -t nat -C POSTROUTING -s $VPN_NETWORK_V6 -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null; then
+    ip6tables -t nat -I POSTROUTING -s $VPN_NETWORK_V6 -o $DEFAULT_IFACE -j MASQUERADE 2>/dev/null || echo "ip6tables NAT failed"
 fi
 ip6tables -C FORWARD -i tun+ -j ACCEPT 2>/dev/null || \
     ip6tables -I FORWARD -i tun+ -j ACCEPT 2>/dev/null || true
@@ -66,7 +67,7 @@ ip6tables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null 
     ip6tables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
 echo "NAT configured: $VPN_NETWORK -> $DEFAULT_IFACE (IPv4)"
-echo "NAT configured: IPv6 -> $DEFAULT_IFACE"
+echo "NAT configured: $VPN_NETWORK_V6 -> $DEFAULT_IFACE (IPv6)"
 
 # Verify tables
 iptables -t nat -L -v -n

@@ -19,6 +19,7 @@ services:
       - VPN_AUTH_TOKEN=${VPN_AUTH_TOKEN:-change_me}
       - VPN_BIND_ADDR=${VPN_BIND_ADDR:-0.0.0.0:${VPN_PORT:-10443}}
       - VPN_NETWORK=10.8.0.0/24
+      - VPN_NETWORK_V6=fd00::/64
       - VPN_DNS=1.1.1.1
       - VPN_MTU=1280
       - VPN_CENSORSHIP_RESISTANT=${VPN_CENSORSHIP_RESISTANT:-false}
@@ -28,7 +29,7 @@ services:
       - VPN_KEYCLOAK_REALM=${VPN_KEYCLOAK_REALM}
       - VPN_KEYCLOAK_CLIENT_ID=${VPN_KEYCLOAK_CLIENT_ID}
     healthcheck:
-      test: ["CMD-SHELL", "ip addr show tun0 || exit 1"]
+      test: ["CMD-SHELL", "ip -details link show type tun | grep -q 'tun' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

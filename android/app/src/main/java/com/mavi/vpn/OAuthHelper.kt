@@ -95,6 +95,39 @@ object OAuthHelper {
         }
     }
 
+    suspend fun isAccessTokenAcceptedByKeycloak(
+        token: String,
+        kcUrl: String,
+        realm: String
+    ): Boolean? = withContext(Dispatchers.IO) {
+        if (token.isBlank() || kcUrl.isBlank() || realm.isBlank()) {
+            return@withContext null
+        }
+
+        val userInfoUrl = "${kcUrl.trimEnd('/')}/realms/$realm/protocol/openid-connect/userinfo"
+        val request = Request.Builder()
+            .url(userInfoUrl)
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+
+        try {
+            httpClient.newCall(request).execute().use { response ->
+                when {
+                    response.isSuccessful -> true
+                    response.code == 401 || response.code == 403 -> false
+                    else -> {
+                        Log.w("OAuthHelper", "UserInfo token validation returned HTTP ${response.code}")
+                        null
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("OAuthHelper", "UserInfo token validation failed: ${e.message}")
+            null
+        }
+    }
+
     suspend fun exchangeCodeForToken(code: String, returnedState: String?, kcUrl: String, realm: String, clientId: String): String? = withContext(Dispatchers.IO) {
         // Read and clear state atomically to prevent a second concurrent call from
         // consuming the same verifier (replay) or seeing a partially-overwritten state.

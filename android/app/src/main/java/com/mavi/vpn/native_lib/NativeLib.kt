@@ -8,6 +8,7 @@ object NativeLib {
     }
 
     external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String, censorshipResistant: Boolean): Long
+    external fun getLastInitError(): String
     external fun getConfig(handle: Long): String
     external fun startLoop(handle: Long, fd: Int)
     external fun stop(handle: Long)

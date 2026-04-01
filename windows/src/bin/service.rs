@@ -8,9 +8,9 @@ use windows_service::{
     service_dispatcher,
 };
 
-use std::{ffi::OsString, sync::Arc, sync::atomic::{AtomicBool, Ordering}, time::Duration};
+use std::{ffi::OsString, path::Path, sync::Arc, sync::atomic::{AtomicBool, Ordering}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber;
 use rand::RngCore;
 use base64::Engine;
@@ -45,13 +45,14 @@ pub fn main() -> Result<(), windows_service::Error> {
     // Support installation via CLI
     if args.iter().any(|arg| arg == "install") {
         let exe_path = std::env::current_exe().unwrap();
+        let quoted_exe_path = format!("\"{}\"", exe_path.display());
         info!("Installing MaviVPNService...");
         let status = std::process::Command::new("sc")
             .args([
                 "create",
                 SERVICE_NAME,
                 "binPath=",
-                &exe_path.display().to_string(),
+                &quoted_exe_path,
                 "start=",
                 "auto",
             ])
@@ -194,6 +195,8 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
     }
     if let Err(e) = std::fs::write(&token_path, &auth_token) {
         error!("Failed to write IPC token to {:?}: {}", token_path, e);
+    } else {
+        harden_ipc_token_permissions(&token_path);
     }
     info!("Service listening for IPC on {} (Auth token generated)", ipc::LOCAL_IPC_ADDR);
 
@@ -293,4 +296,49 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn harden_ipc_token_permissions(token_path: &Path) {
+    let mut args = vec![
+        token_path.to_string_lossy().to_string(),
+        "/inheritance:r".to_string(),
+        "/grant:r".to_string(),
+        "*S-1-5-18:(F)".to_string(),
+        "*S-1-5-32-544:(F)".to_string(),
+    ];
+
+    if let Some(user_sid) = active_console_user_sid() {
+        args.push(format!("*{}:(R)", user_sid));
+    } else {
+        warn!("No interactive user detected while hardening the IPC token ACL; local clients may need to run elevated until the service is restarted after login");
+    }
+
+    match std::process::Command::new("icacls").args(&args).output() {
+        Ok(out) if out.status.success() => {
+            info!("Locked down IPC token permissions at {:?}", token_path);
+        }
+        Ok(out) => {
+            warn!(
+                "Failed to harden IPC token permissions: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            warn!("Failed to execute icacls for IPC token hardening: {}", e);
+        }
+    }
+}
+
+fn active_console_user_sid() -> Option<String> {
+    let ps = "$user = (Get-CimInstance Win32_ComputerSystem).UserName; if ($user) { try { (New-Object System.Security.Principal.NTAccount($user)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { '' } }";
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let sid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sid.is_empty() { None } else { Some(sid) }
 }

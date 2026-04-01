@@ -2,14 +2,52 @@ use jni::objects::{JClass, JString, JObject};
 use jni::{JValue, Env, AttachGuard, EnvUnowned};
 use jni::sys::{jint, jlong};
 use log::{info, error};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::sync::atomic::Ordering;
-use std::sync::Once;
 use android_logger::Config;
 
 use crate::session::VpnSession;
 use crate::connection::connect_and_handshake;
 use crate::vpn_loop::run_vpn_loop;
+
+const INIT_RETRYABLE_FAILURE: jlong = 0;
+const INIT_FATAL_AUTH: jlong = -1;
+const INIT_FATAL_CERT: jlong = -2;
+const INIT_FATAL_CONFIG: jlong = -3;
+
+fn last_init_error() -> &'static Mutex<String> {
+    static LAST_INIT_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+    LAST_INIT_ERROR.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn set_last_init_error(message: &str) {
+    let mut last = last_init_error().lock().unwrap_or_else(|e| e.into_inner());
+    last.clear();
+    last.push_str(message);
+}
+
+fn clear_last_init_error() {
+    let mut last = last_init_error().lock().unwrap_or_else(|e| e.into_inner());
+    last.clear();
+}
+
+fn classify_init_error(message: &str) -> jlong {
+    let msg = message.to_ascii_lowercase();
+    if msg.contains("invalid certificate pin") || msg.contains("pin mismatch") || msg.contains("certificate pin mismatch") {
+        return INIT_FATAL_CERT;
+    }
+    if msg.contains("server error: unauthorized")
+        || msg.contains("access denied")
+        || msg.contains("invalid keycloak token")
+        || msg.contains("invalid token")
+    {
+        return INIT_FATAL_AUTH;
+    }
+    if msg.contains("endpoint host missing") || msg.contains("invalid address") {
+        return INIT_FATAL_CONFIG;
+    }
+    INIT_RETRYABLE_FAILURE
+}
 
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
@@ -24,6 +62,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
 ) -> jlong {
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let mut env = guard.borrow_env_mut();
+    clear_last_init_error();
     
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         static LOGGER_INIT: Once = Once::new();
@@ -48,13 +87,33 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
          }
     };
 
-    let token = match get_string(&mut env, &token) { Some(s) => s, None => { return 0; } };
-    let endpoint = match get_string(&mut env, &endpoint) { Some(s) => s, None => { return 0; } };
-    let cert_pin_str = match get_string(&mut env, &cert_pin) { Some(s) => s, None => { return 0; } };
+    let token = match get_string(&mut env, &token) {
+        Some(s) => s,
+        None => {
+            set_last_init_error("Failed to read VPN token from JNI");
+            return INIT_FATAL_CONFIG;
+        }
+    };
+    let endpoint = match get_string(&mut env, &endpoint) {
+        Some(s) => s,
+        None => {
+            set_last_init_error("Failed to read VPN endpoint from JNI");
+            return INIT_FATAL_CONFIG;
+        }
+    };
+    let cert_pin_str = match get_string(&mut env, &cert_pin) {
+        Some(s) => s,
+        None => {
+            set_last_init_error("Failed to read certificate pin from JNI");
+            return INIT_FATAL_CONFIG;
+        }
+    };
 
     if cert_pin_str.is_empty() {
-        error!("Certificate PIN is empty. Connection aborted.");
-        return 0;
+        let message = "Certificate PIN is empty. Connection aborted.";
+        error!("{}", message);
+        set_last_init_error(message);
+        return INIT_FATAL_CERT;
     }
 
     let socket2_sock = match socket2::Socket::new(
@@ -64,18 +123,24 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     ) {
         Ok(sock) => sock,
         Err(e) => {
-            error!("Failed to bind UDP socket: {}", e);
-            return 0;
+            let message = format!("Failed to create UDP socket: {}", e);
+            error!("{}", message);
+            set_last_init_error(&message);
+            return INIT_RETRYABLE_FAILURE;
         }
     };
 
     if let Err(e) = socket2_sock.set_only_v6(false) {
-        error!("Failed to enable dual-stack UDP socket: {}", e);
-        return 0;
+        let message = format!("Failed to enable dual-stack UDP socket: {}", e);
+        error!("{}", message);
+        set_last_init_error(&message);
+        return INIT_RETRYABLE_FAILURE;
     }
     if let Err(e) = socket2_sock.bind(&socket2::SockAddr::from(std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0))) {
-        error!("Failed to bind UDP socket: {}", e);
-        return 0;
+        let message = format!("Failed to bind UDP socket: {}", e);
+        error!("{}", message);
+        set_last_init_error(&message);
+        return INIT_RETRYABLE_FAILURE;
     }
     let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
     let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
@@ -105,8 +170,10 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     ).and_then(|val| val.z()).unwrap_or(false);
     
     if !protected {
-        error!("Failed to protect VPN socket!");
-        return 0;
+        let message = "Failed to protect VPN socket!";
+        error!("{}", message);
+        set_last_init_error(message);
+        return INIT_RETRYABLE_FAILURE;
     }
     
     let _ = socket.set_nonblocking(true);
@@ -114,8 +181,10 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
-            error!("Failed to create runtime: {}", e);
-            return 0;
+            let message = format!("Failed to create runtime: {}", e);
+            error!("{}", message);
+            set_last_init_error(&message);
+            return INIT_RETRYABLE_FAILURE;
         }
     };
 
@@ -125,20 +194,38 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
 
     match result {
         Ok((connection, config)) => {
+            clear_last_init_error();
             let session = VpnSession::new(rt, connection, config);
             Box::into_raw(Box::new(session)) as jlong
         },
         Err(e) => {
-            error!("Handshake failed: {}", e);
-            0
+            let message = e.to_string();
+            error!("Handshake failed: {}", message);
+            set_last_init_error(&message);
+            classify_init_error(&message)
         }
     }
     }));
 
     match result {
         Ok(handle) => handle,
-        Err(_) => 0
+        Err(_) => {
+            set_last_init_error("Unexpected panic in native init");
+            INIT_RETRYABLE_FAILURE
+        }
     }
+}
+
+#[allow(improper_ctypes_definitions)]
+#[no_mangle]
+pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getLastInitError<'local>(
+    env_unowned: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jni::sys::jstring {
+    let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
+    let env = guard.borrow_env_mut();
+    let message = last_init_error().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    env.new_string(message).unwrap_or_else(|_| env.new_string("").unwrap()).into_raw()
 }
 
 #[allow(improper_ctypes_definitions)]
@@ -151,7 +238,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getConfig<'local>
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let env = guard.borrow_env_mut();
     
-    if handle == 0 { return env.new_string("{}").unwrap().into_raw(); }
+    if handle <= 0 { return env.new_string("{}").unwrap().into_raw(); }
     
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
@@ -173,7 +260,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_startLoop<'local>
     handle: jlong,
     tun_fd: jint,
 ) {
-    if handle == 0 { return; }
+    if handle <= 0 { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &mut *(handle as *mut VpnSession) };
         let stop_flag = session.stop_flag.clone();
@@ -193,7 +280,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_stop<'local>(
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    if handle == 0 { return; }
+    if handle <= 0 { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
         session.stop_flag.store(true, Ordering::SeqCst);
@@ -209,7 +296,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_free<'local>(
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    if handle == 0 { return; }
+    if handle <= 0 { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         unsafe { let _ = Box::from_raw(handle as *mut VpnSession); }
     }));
@@ -222,7 +309,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_networkChanged<'l
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    if handle == 0 { return; }
+    if handle <= 0 { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
         let conn = session.connection.clone();

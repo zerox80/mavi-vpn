@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
     spawn_tun_writer(tun_writer, rx_tun);
 
     // Cleanup legacy firewall rules (if any)
-    let _ = cleanup_legacy_rules();
+    cleanup_legacy_rules();
 
     // Create the QUIC endpoint
     let endpoint = create_quic_endpoint(&config, certs, key)?;

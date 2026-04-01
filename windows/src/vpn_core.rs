@@ -622,22 +622,6 @@ fn clear_persisted_host_route() {
     let _ = std::fs::remove_file(persisted_host_route_path());
 }
 
-fn set_adapter_ipv6(adapter: &Adapter, ip: Ipv6Addr, prefix_len: u8) -> Result<()> {
-    unsafe {
-        use windows_sys::Win32::NetworkManagement::IpHelper::*;
-        use windows_sys::Win32::Networking::WinSock::*;
-        let mut row: MIB_UNICASTIPADDRESS_ROW = std::mem::zeroed();
-        InitializeUnicastIpAddressEntry(&mut row);
-        row.InterfaceLuid = std::mem::transmute(adapter.get_luid());
-        row.Address.si_family = AF_INET6 as u16;
-        row.Address.Ipv6.sin6_addr.u.Byte = ip.octets();
-        row.OnLinkPrefixLength = prefix_len;
-        row.DadState = IpDadStatePreferred;
-        CreateUnicastIpAddressEntry(&row);
-    }
-    Ok(())
-}
-
 /// Routes the VPN server's own IP via the physical gateway rather than the tunnel.
 /// Returns the server IP string so the caller can clean it up later.
 /// Must be called BEFORE the split-tunnel routes are installed.
@@ -726,12 +710,6 @@ fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
     None
 }
 
-fn netmask_to_prefix_len(netmask: Ipv4Addr) -> Result<u8> {
-    let mask = u32::from_be_bytes(netmask.octets());
-    let prefix = mask.count_ones() as u8;
-    Ok(prefix)
-}
-
 const NRPT_COMMENT: &str = "MaviVPN";
 
 /// Configures NRPT (Name Resolution Policy Table) to force all DNS through the VPN.
@@ -813,7 +791,7 @@ fn remove_nrpt_dns_rule() {
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 { return None; }
+    if !s.len().is_multiple_of(2) { return None; }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
 }
 

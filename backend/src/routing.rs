@@ -41,7 +41,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                 Ok(0) => break, 
                 Ok(n) => {
                     let packet = buf.split_to(n).freeze();
-                    if packet.len() == 0 { continue; }
+                    if packet.is_empty() { continue; }
                     
                     let version = packet[0] >> 4;
                     if version == 4 {

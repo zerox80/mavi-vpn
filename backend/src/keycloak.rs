@@ -127,12 +127,18 @@ impl KeycloakValidator {
                     }
                 }
 
-                let azp = claims.get("azp").and_then(|v| v.as_str()).unwrap_or("?");
+                let azp = match claims.get("azp").and_then(|v| v.as_str()) {
+                    Some(v) => v,
+                    None => {
+                        warn!("JWT missing 'azp' claim — rejecting token");
+                        return Ok(false);
+                    }
+                };
                 
-                // Allow the connection even if the Client ID (azp) mismatch occurs. Many users use a separate
-                // Keycloak client for the Android frontend (e.g. mavi-vpn-app) than the backend (e.g. mavi-vpn-server).
-                if azp != "?" && !constant_time_eq(azp.as_bytes(), self.client_id.as_bytes()) {
-                    warn!("JWT azp mismatch: expected '{}', got '{}'. Accepting token anyway.", self.client_id, azp);
+                // Strict check: Only accept tokens that were explicitly issued to THIS client ID.
+                if !constant_time_eq(azp.as_bytes(), self.client_id.as_bytes()) {
+                    warn!("JWT azp mismatch: expected '{}', got '{}'. Rejecting token for security.", self.client_id, azp);
+                    return Ok(false);
                 }
 
                 info!("Keycloak JWT validated successfully (sub: {}, azp: {})",

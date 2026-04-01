@@ -174,7 +174,9 @@ class MaviVpnService : VpnService() {
                         }
 
                         val handle = NativeLib.init(this, token, buildEndpoint(ip, port), certPin, crMode)
-                        if (handle <= 0L) {
+                        // Valid 64-bit pointers on Android MTE/TBI can be negative when cast to a signed Long.
+                        // NativeLib error codes are strictly in the range [-3, 0].
+                        if (handle in -3L..0L) {
                             val initError = NativeLib.getLastInitError()
                             if (handle < 0L) {
                                 Log.e("MaviVPN", "Fatal handshake failure: $initError")

@@ -11,23 +11,30 @@
 //!   mavi-vpn stop                            # Send stop to running daemon
 //!   mavi-vpn status                          # Check VPN status
 
-mod daemon;
-mod network;
-mod oauth;
-mod tun;
-mod vpn_core;
+#[cfg(target_os = "linux")]
+mod linux_app {
+    #[path = "daemon.rs"]
+    pub mod daemon;
+    #[path = "network.rs"]
+    pub mod network;
+    #[path = "oauth.rs"]
+    pub mod oauth;
+    #[path = "tun.rs"]
+    pub mod tun;
+    #[path = "vpn_core.rs"]
+    pub mod vpn_core;
 
-use anyhow::Result;
-use shared::ipc::Config;
-use std::io::{self, Write};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tracing::info;
+    use anyhow::Result;
+    use shared::ipc::Config;
+    use std::io::{self, Write};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tracing::info;
 
 const CONFIG_FILE: &str = "mavi-vpn.json";
 
-fn main() {
+    pub fn run() {
     // Print banner
     println!();
     println!("\x1b[1;36m");
@@ -466,4 +473,15 @@ fn read_line() -> Result<String> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_string())
+}
+} // close linux_app
+
+#[cfg(target_os = "linux")]
+fn main() {
+    linux_app::run();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    println!("The Mavi Linux VPN client can only be compiled for Linux.");
 }

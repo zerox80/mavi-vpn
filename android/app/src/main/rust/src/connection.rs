@@ -130,7 +130,13 @@ pub async fn connect_and_handshake(
         return Err(anyhow::anyhow!("Server response too large: {} bytes", len));
     }
     let mut buf = vec![0u8; len];
-    recv_stream.read_exact(&mut buf).await?;
+    if let Err(e) = recv_stream.read_exact(&mut buf).await {
+        if len == 6401 && censorship_resistant {
+            return Err(anyhow::anyhow!("Access Denied: Server rejected the token. Check Keycloak logs or token validity."));
+        }
+        return Err(anyhow::anyhow!("Handshake read error: {}", e));
+    }
+    
     let config: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
         .map(|(v, _)| v)
         .map_err(|e| anyhow::anyhow!("{}", e))?;

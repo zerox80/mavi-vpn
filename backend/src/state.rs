@@ -32,6 +32,9 @@ pub struct AppState {
     
     /// Stack of available (unassigned) IPv6 addresses.
     free_ips_v6: Mutex<Vec<Ipv6Addr>>,
+
+    /// Next IPv6 host suffix to lease when no recycled address is available.
+    next_ipv6_host: Mutex<u64>,
 }
 
 impl AppState {
@@ -64,21 +67,14 @@ impl AppState {
         // Reverse so we allocate from .2 upwards (pop from end is O(1))
         free_ips.reverse();
 
-        // --- Populate IPv6 pool ---
-        // For performance, we pre-allocate only the first 5000 suffix addresses
-        let mut free_ips_v6: Vec<Ipv6Addr> = network_v6.iter()
-            .skip(2) // Skip ::0 and ::1 (gateway)
-            .take(5000)
-            .collect();
-        free_ips_v6.reverse();
-
         Ok(Self {
             peers: DashMap::new(),
             peers_v6: DashMap::new(),
             network,
             network_v6,
             free_ips: Mutex::new(free_ips),
-            free_ips_v6: Mutex::new(free_ips_v6),
+            free_ips_v6: Mutex::new(Vec::new()),
+            next_ipv6_host: Mutex::new(2),
         })
     }
 
@@ -94,7 +90,23 @@ impl AppState {
     /// Leases a free IPv6 address from the pool.
     pub fn assign_ipv6(&self) -> Result<Ipv6Addr> {
         let mut free = self.free_ips_v6.lock().unwrap_or_else(|e| e.into_inner());
-        free.pop().ok_or_else(|| anyhow!("VPN IPv6 pool exhausted"))
+        if let Some(ip) = free.pop() {
+            return Ok(ip);
+        }
+        drop(free);
+
+        let mut next = self.next_ipv6_host.lock().unwrap_or_else(|e| e.into_inner());
+        let candidate = u128::from(self.network_v6.network())
+            .checked_add(u128::from(*next))
+            .ok_or_else(|| anyhow!("VPN IPv6 pool exhausted"))?;
+        let ip = Ipv6Addr::from(candidate);
+        if !self.network_v6.contains(ip) {
+            return Err(anyhow!("VPN IPv6 pool exhausted"));
+        }
+        *next = next
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("VPN IPv6 pool exhausted"))?;
+        Ok(ip)
     }
 
     pub fn assign_ip_pair(&self) -> Result<(Ipv4Addr, Ipv6Addr)> {

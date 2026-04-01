@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.sp
 import com.mavi.vpn.ui.components.MaviTextField
 import com.mavi.vpn.viewmodel.VpnViewModel
 import com.mavi.vpn.OAuthHelper
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,6 +46,42 @@ fun VpnScreen(
     val kcClientId by viewModel.kcClientId.collectAsState()
     
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val hasKeycloakToken = useKeycloak && authToken.isNotEmpty()
+    val keycloakTokenUsableLocally = hasKeycloakToken && OAuthHelper.isAccessTokenUsable(authToken, skewSeconds = 0)
+    var keycloakTokenAcceptedByServer by remember(useKeycloak, authToken, kcUrl, kcRealm) { mutableStateOf<Boolean?>(null) }
+
+    LaunchedEffect(useKeycloak, authToken, kcUrl, kcRealm, isConnected) {
+        keycloakTokenAcceptedByServer = null
+
+        if (!useKeycloak || authToken.isEmpty()) {
+            return@LaunchedEffect
+        }
+
+        while (true) {
+            if (!OAuthHelper.isAccessTokenUsable(authToken, skewSeconds = 0)) {
+                if (isConnected) {
+                    onDisconnect()
+                }
+                viewModel.clearAuthToken()
+                viewModel.updateErrorMessage("Keycloak access token expired. Please login again.")
+                break
+            }
+
+            val accepted = OAuthHelper.isAccessTokenAcceptedByKeycloak(authToken, kcUrl, kcRealm)
+            keycloakTokenAcceptedByServer = accepted
+
+            if (accepted == false) {
+                if (isConnected) {
+                    onDisconnect()
+                }
+                viewModel.clearAuthToken()
+                viewModel.updateErrorMessage("Keycloak session is no longer valid. Please login again.")
+                break
+            }
+
+            delay(15_000)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -191,10 +228,21 @@ fun VpnScreen(
                         Text("Login with Keycloak")
                     }
 
-                    if (authToken.isNotEmpty()) {
+                    if (hasKeycloakToken) {
+                        val statusText = when {
+                            keycloakTokenAcceptedByServer == true -> "Authenticated"
+                            keycloakTokenUsableLocally -> "Checking token..."
+                            else -> "Token expired"
+                        }
+                        val statusColor = when {
+                            keycloakTokenAcceptedByServer == true -> Color(0xFF00FF7F)
+                            keycloakTokenUsableLocally -> Color.Gray
+                            else -> Color(0xFFFF3B30)
+                        }
+
                         Text(
-                            text = "Authenticated",
-                            color = Color(0xFF00FF7F),
+                            text = statusText,
+                            color = statusColor,
                             fontSize = 12.sp,
                             modifier = Modifier.padding(top = 4.dp)
                         )

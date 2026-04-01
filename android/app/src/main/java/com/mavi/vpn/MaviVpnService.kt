@@ -146,9 +146,7 @@ class MaviVpnService : VpnService() {
 
         val notification = notificationHelper.createNotification("Mavi VPN", "Connecting to $ip...")
         
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MaviVPN::ServiceWakeLock")
-        wakeLock?.acquire(60 * 60 * 1000L)
+        acquireWakeLock()
 
         isRunning = true
         startForeground(1, notification)
@@ -176,8 +174,24 @@ class MaviVpnService : VpnService() {
                         }
 
                         val handle = NativeLib.init(this, token, buildEndpoint(ip, port), certPin, crMode)
-                        if (handle == 0L) {
-                            Log.e("MaviVPN", "Handshake failed. Retrying in 2 seconds...")
+                        if (handle <= 0L) {
+                            val initError = NativeLib.getLastInitError()
+                            if (handle < 0L) {
+                                Log.e("MaviVPN", "Fatal handshake failure: $initError")
+                                if (prefs.savedUseKeycloak && isAuthFailure(initError)) {
+                                    prefs.savedToken = ""
+                                }
+                                isConnected.value = false
+                                isRunning = false
+                                notificationHelper.updateNotification(
+                                    1,
+                                    "Mavi VPN",
+                                    if (initError.isNotBlank()) initError else "Connection aborted. Check your configuration."
+                                )
+                                break
+                            }
+
+                            Log.e("MaviVPN", "Handshake failed. ${if (initError.isNotBlank()) initError else "Retrying in 2 seconds..."}")
                             repeat(4) { if (isRunning) Thread.sleep(500) }
                             continue
                         }
@@ -346,6 +360,41 @@ class MaviVpnService : VpnService() {
             stopForeground(true)
         }
         
+        releaseWakeLock()
+        
+        stopSelf()
+    }
+
+    private fun buildEndpoint(host: String, port: String): String {
+        val trimmedHost = host.trim()
+        if (trimmedHost.startsWith("[") && trimmedHost.contains("]")) {
+            val suffix = trimmedHost.substringAfter("]", "")
+            return if (suffix.startsWith(":")) trimmedHost else "$trimmedHost:$port"
+        }
+
+        val colonCount = trimmedHost.count { it == ':' }
+        return when {
+            colonCount == 0 -> "$trimmedHost:$port"
+            colonCount == 1 -> trimmedHost
+            else -> "[$trimmedHost]:$port"
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        releaseWakeLock()
+    }
+
+    private fun acquireWakeLock() {
+        releaseWakeLock()
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MaviVPN::ServiceWakeLock").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseWakeLock() {
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
@@ -354,27 +403,14 @@ class MaviVpnService : VpnService() {
             Log.w("MaviVPN", "Error releasing WakeLock: ${e.message}")
         }
         wakeLock = null
-        
-        stopSelf()
     }
 
-    private fun buildEndpoint(host: String, port: String): String {
-        val trimmedHost = host.trim()
-        return if (trimmedHost.contains(":") && !trimmedHost.startsWith("[") && !trimmedHost.endsWith("]")) {
-            "[$trimmedHost]:$port"
-        } else {
-            "$trimmedHost:$port"
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
-        } catch (_: Exception) {}
-        wakeLock = null
+    private fun isAuthFailure(message: String): Boolean {
+        val normalized = message.lowercase()
+        return normalized.contains("unauthorized")
+            || normalized.contains("access denied")
+            || normalized.contains("invalid token")
+            || normalized.contains("invalid keycloak token")
     }
 
     private fun netmaskToPrefixLength(netmask: String): Int {

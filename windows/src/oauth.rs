@@ -19,6 +19,10 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     rand::thread_rng().fill_bytes(&mut verifier_bytes);
     let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&verifier_bytes);
 
+    let mut state_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut state_bytes);
+    let oauth_state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&state_bytes);
+
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
@@ -37,7 +41,8 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .append_pair("response_type", "code")
         .append_pair("scope", "openid")
         .append_pair("code_challenge", &code_challenge)
-        .append_pair("code_challenge_method", "S256");
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &oauth_state);
 
     // 4. Open browser
     println!("\nÖffne Webbrowser für den Login...");
@@ -64,6 +69,14 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
             
             let parsed_url = url::Url::parse(&format!("http://localhost{}", path_and_query)).ok();
             if let Some(u) = parsed_url {
+                let returned_state = u.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.into_owned());
+                if returned_state.as_deref() != Some(oauth_state.as_str()) {
+                    let html = "<html><body><h1 style=\"color: red;\">Login fehlgeschlagen!</h1><p>OAuth state ungültig.</p></body></html>";
+                    let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}", html);
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    return Err(anyhow::anyhow!("OAuth state mismatch"));
+                }
+
                 if let Some(code) = u.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.into_owned()) {
                     let html = "<html><head><title>Login Erfolgreich</title></head><body style=\"font-family: sans-serif; text-align: center; padding-top: 50px;\"><h1 style=\"color: green;\">Login erfolgreich!</h1><p>Du kannst dieses Fenster jetzt schliessen und in dein Terminal zurueckkehren.</p><script>setTimeout(function(){window.close();}, 3000);</script></body></html>";
                     let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}", html);

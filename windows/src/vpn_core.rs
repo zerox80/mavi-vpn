@@ -251,7 +251,13 @@ async fn run_session(
                         } else if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) { break; }
                     }
                 }
-                Ok(None) => std::thread::sleep(Duration::from_micros(100)),
+                Ok(None) => {
+                    if let Ok(event) = session_tun.get_read_wait_event() {
+                        unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(event as _, 50); }
+                    } else {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
                 Err(_) => { alive_pump.store(false, Ordering::SeqCst); break; }
             }
         }
@@ -683,13 +689,19 @@ fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
           (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).Name -notlike 'MaviVPN*' }} \
         | Sort-Object {{ $_.RouteMetric + $_.InterfaceMetric }} \
         | Select-Object -First 1; \
-        if ($best -and $best.NextHop -and $best.NextHop -ne '{}') {{ \
-            New-NetRoute -DestinationPrefix '{}' -InterfaceIndex $best.InterfaceIndex -NextHop $best.NextHop -RouteMetric 1 -ErrorAction SilentlyContinue | Out-Null; \
-            Write-Output $best.NextHop \
+        if ($best) {{ \
+            if ($best.NextHop -and $best.NextHop -ne '{}') {{ \
+                New-NetRoute -DestinationPrefix '{}' -InterfaceIndex $best.InterfaceIndex -NextHop $best.NextHop -RouteMetric 1 -ErrorAction SilentlyContinue | Out-Null; \
+                Write-Output $best.NextHop \
+            }} else {{ \
+                New-NetRoute -DestinationPrefix '{}' -InterfaceIndex $best.InterfaceIndex -RouteMetric 1 -ErrorAction SilentlyContinue | Out-Null; \
+                Write-Output 'On-Link' \
+            }} \
         }}",
         default_prefix,
         family,
         empty_next_hop,
+        route_prefix,
         route_prefix,
     );
 
@@ -776,7 +788,7 @@ fn remove_nrpt_dns_rule() {
 
     // 3. Restore DNS registration on physical adapters
     let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
-        "Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue }"
+        "Get-NetAdapter | Where-Object { $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue }"
     ]).output();
 
     // 4. Flush DNS cache

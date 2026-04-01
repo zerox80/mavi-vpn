@@ -505,14 +505,18 @@ fn set_adapter_network_config(
     // Verify the IP was actually set
     let verify = std::process::Command::new("netsh")
         .args(["interface", "ipv4", "show", "addresses", &adapter_name])
-        .output();
-    if let Ok(out) = verify {
-        let text = String::from_utf8_lossy(&out.stdout);
-        if text.contains(&ip_str) {
-            info!("IP {} confirmed on adapter", ip);
-        } else {
-            warn!("IP {} NOT visible on adapter! Output: {}", ip, text.trim());
-        }
+        .output()
+        .context("Failed to verify IPv4 address on WinTUN adapter")?;
+    let text = String::from_utf8_lossy(&verify.stdout);
+    if text.contains(&ip_str) {
+        info!("IP {} confirmed on adapter", ip);
+    } else {
+        anyhow::bail!(
+            "IPv4 address {} was not applied to adapter '{}'. Aborting session setup. netsh output: {}",
+            ip,
+            adapter_name,
+            text.trim()
+        );
     }
 
     // 3. Set IPv6 address if available

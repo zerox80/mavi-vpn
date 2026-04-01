@@ -66,10 +66,8 @@ pub async fn handle_connection(
                     if !kc.validate_token(&token).await? {
                          anyhow::bail!("Access Denied: Invalid Keycloak Token");
                     }
-                } else {
-                    if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
-                        anyhow::bail!("Access Denied: Invalid Token");
-                    }
+                } else if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
+                    anyhow::bail!("Access Denied: Invalid Token");
                 }
 
                 state.assign_ip_pair()
@@ -215,8 +213,8 @@ pub async fn handle_connection(
                     if h.source_addr() == assigned_ip6 { valid = true; }
                 }
             }
-            if valid {
-                if tx_tun.send(data).await.is_err() { break 'outer_loop Err(anyhow::anyhow!("TUN closed")); }
+            if valid && tx_tun.send(data).await.is_err() {
+                break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
             }
         }
     };

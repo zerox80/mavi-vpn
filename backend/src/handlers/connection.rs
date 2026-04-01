@@ -213,7 +213,12 @@ pub async fn handle_connection(
                     if h.source_addr() == assigned_ip6 { valid = true; }
                 }
             }
-            if valid && tx_tun.send(data).await.is_err() {
+            
+            if valid {
+                if tx_tun.send(data).await.is_err() {
+                    break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
+                }
+            } else if tx_tun.is_closed() {
                 break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
             }
         }

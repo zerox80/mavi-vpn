@@ -14,8 +14,7 @@ pub fn create_quic_endpoint(
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(
         rustls::crypto::aws_lc_rs::default_provider().into()
     )
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
+    .with_protocol_versions(&[&rustls::version::TLS13])?
     .with_no_client_auth()
     .with_single_cert(certs, key)?;
     
@@ -59,7 +58,9 @@ pub fn create_quic_endpoint(
 }
 
 fn setup_transport_config(transport_config: &mut TransportConfig) {
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+    if let Ok(timeout) = std::time::Duration::from_secs(60).try_into() {
+        transport_config.max_idle_timeout(Some(timeout));
+    }
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
     transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); 
     transport_config.datagram_send_buffer_size(4 * 1024 * 1024); 

@@ -238,7 +238,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getConfig<'local>
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let env = guard.borrow_env_mut();
     
-    if handle <= 0 { return env.new_string("{}").unwrap().into_raw(); }
+    if handle >= -3 && handle <= 0 { return env.new_string("{}").unwrap().into_raw(); }
     
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
@@ -260,7 +260,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_startLoop<'local>
     handle: jlong,
     tun_fd: jint,
 ) {
-    if handle <= 0 { return; }
+    if handle >= -3 && handle <= 0 { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &mut *(handle as *mut VpnSession) };
         let stop_flag = session.stop_flag.clone();
@@ -280,7 +280,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_stop<'local>(
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    if handle <= 0 { return; }
+    if handle >= -3 && handle <= 0 { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
         session.stop_flag.store(true, Ordering::SeqCst);
@@ -296,7 +296,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_free<'local>(
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    if handle <= 0 { return; }
+    if handle >= -3 && handle <= 0 { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         unsafe { let _ = Box::from_raw(handle as *mut VpnSession); }
     }));
@@ -309,7 +309,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_networkChanged<'l
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    if handle <= 0 { return; }
+    if handle >= -3 && handle <= 0 { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
         let conn = session.connection.clone();

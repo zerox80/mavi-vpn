@@ -48,7 +48,9 @@ async fn main() -> Result<()> {
     let cert_path = config.cert_path.clone();
     let key_path = config.key_path.clone();
     if let Some(parent) = cert_path.parent() {
-        std::fs::create_dir_all(parent).context("Failed to create certificate directory")?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).context("Failed to create certificate directory")?;
+        }
     }
     let (certs, key) = cert::load_or_generate_certs(cert_path, key_path)?;
 
@@ -80,6 +82,9 @@ async fn main() -> Result<()> {
                             "Failed to fetch Keycloak JWKS (attempt {}/{}): {}. Retrying in {}s...",
                             attempt, max_retries, e, delay.as_secs()
                         );
+                        if attempt == max_retries {
+                            break;
+                        }
                         tokio::time::sleep(delay).await;
                     }
                 }

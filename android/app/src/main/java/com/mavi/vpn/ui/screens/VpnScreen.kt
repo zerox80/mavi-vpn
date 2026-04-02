@@ -58,7 +58,16 @@ fun VpnScreen(
         }
 
         while (true) {
-            if (!OAuthHelper.isAccessTokenUsable(authToken, skewSeconds = 0)) {
+            // First, re-sync the latest token from prefs in case the background service refreshed it!
+            val prefs = com.mavi.vpn.data.PrefsManager(viewModel.getApplication())
+            val freshToken = prefs.savedToken
+            if (freshToken.isNotEmpty() && freshToken != authToken) {
+                viewModel.authToken.value = freshToken
+            }
+            
+            // Check the most up-to-date token
+            if (freshToken.isNotEmpty() && !OAuthHelper.isAccessTokenUsable(freshToken, skewSeconds = 0)) {
+                // Background service failed to refresh it in time or we are totally expired.
                 if (isConnected) {
                     onDisconnect()
                 }
@@ -67,7 +76,8 @@ fun VpnScreen(
                 break
             }
 
-            val accepted = OAuthHelper.isAccessTokenAcceptedByKeycloak(authToken, kcUrl, kcRealm)
+            val accepted = OAuthHelper.isAccessTokenAcceptedByKeycloak(freshToken, kcUrl, kcRealm)
+            // Timeout or network error returns null, which we ignore safely
             keycloakTokenAcceptedByServer = accepted
 
             if (accepted == false) {

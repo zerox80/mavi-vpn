@@ -48,17 +48,14 @@ fun VpnScreen(
     val errorMessage by viewModel.errorMessage.collectAsState()
     val hasKeycloakToken = useKeycloak && authToken.isNotEmpty()
     val keycloakTokenUsableLocally = hasKeycloakToken && OAuthHelper.isAccessTokenUsable(authToken, skewSeconds = 0)
-    var keycloakTokenAcceptedByServer by remember(useKeycloak, authToken, kcUrl, kcRealm) { mutableStateOf<Boolean?>(null) }
 
-    LaunchedEffect(useKeycloak, authToken, kcUrl, kcRealm, isConnected) {
-        keycloakTokenAcceptedByServer = null
-
+    LaunchedEffect(useKeycloak, authToken, isConnected) {
         if (!useKeycloak || authToken.isEmpty()) {
             return@LaunchedEffect
         }
 
         while (true) {
-            // First, re-sync the latest token from prefs in case the background service refreshed it!
+            // Re-sync the latest token from prefs in case the background service refreshed it
             val prefs = com.mavi.vpn.data.PrefsManager(viewModel.getApplication())
             val freshToken = prefs.savedToken
             if (freshToken.isNotEmpty() && freshToken != authToken) {
@@ -76,20 +73,8 @@ fun VpnScreen(
                 break
             }
 
-            val accepted = OAuthHelper.isAccessTokenAcceptedByKeycloak(freshToken, kcUrl, kcRealm)
-            // Timeout or network error returns null, which we ignore safely
-            keycloakTokenAcceptedByServer = accepted
-
-            if (accepted == false) {
-                if (isConnected) {
-                    onDisconnect()
-                }
-                viewModel.clearAuthToken()
-                viewModel.updateErrorMessage("Keycloak session is no longer valid. Please login again.")
-                break
-            }
-
-            delay(15_000)
+            // Local token check only; the active HTTP check was removed to prevent UI-driven disconnects
+            delay(5_000)
         }
     }
 
@@ -240,13 +225,11 @@ fun VpnScreen(
 
                     if (hasKeycloakToken) {
                         val statusText = when {
-                            keycloakTokenAcceptedByServer == true -> "Authenticated"
-                            keycloakTokenUsableLocally -> "Checking token..."
-                            else -> "Token expired"
+                            keycloakTokenUsableLocally -> "Authenticated locally"
+                            else -> "Token expired locally"
                         }
                         val statusColor = when {
-                            keycloakTokenAcceptedByServer == true -> Color(0xFF00FF7F)
-                            keycloakTokenUsableLocally -> Color.Gray
+                            keycloakTokenUsableLocally -> Color(0xFF00FF7F)
                             else -> Color(0xFFFF3B30)
                         }
 

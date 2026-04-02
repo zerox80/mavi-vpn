@@ -58,10 +58,9 @@ pub fn create_quic_endpoint(
 }
 
 fn setup_transport_config(transport_config: &mut TransportConfig) {
-    if let Ok(timeout) = std::time::Duration::from_secs(60).try_into() {
-        transport_config.max_idle_timeout(Some(timeout));
-    }
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
+    // We disable the max_idle_timeout so mobile clients in Doze mode don't get forcefully disconnected
+    transport_config.max_idle_timeout(None);
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
     transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); 
     transport_config.datagram_send_buffer_size(4 * 1024 * 1024); 
     transport_config.receive_window(quinn::VarInt::from(4u32 * 1024 * 1024)); 

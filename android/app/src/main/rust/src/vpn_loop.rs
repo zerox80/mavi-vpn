@@ -88,11 +88,16 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                 Ok(Ok(Some(p))) => p,
                 Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
+                    if let Some(raw) = e.raw_os_error() {
+                        if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK || raw == libc::EINTR {
+                            continue;
+                        }
+                    }
                     if e.kind() != std::io::ErrorKind::WouldBlock {
                         error!("TUN Read Error: {}", e);
                         break;
                     }
-                    continue; // Loop instantly to `await` readable if not WouldBlock (Wait, if not WouldBlock, break)
+                    continue;
                 },
                 Err(_) => continue, // WouldBlock, let tokio select re-await
             };
@@ -176,6 +181,16 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                                  let n = unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) };
                                  if n < 0 {
                                      let err = std::io::Error::last_os_error();
+                                     if let Some(raw) = err.raw_os_error() {
+                                         if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK {
+                                             return Err(err); 
+                                         }
+                                         if raw == libc::ENOBUFS || raw == libc::EINTR {
+                                             // Network internal buffer full or interrupted, just drop the packet immediately
+                                             batch_idx += 1;
+                                             continue;
+                                         }
+                                     }
                                      if err.kind() == std::io::ErrorKind::WouldBlock {
                                          return Err(err); 
                                      }
@@ -189,9 +204,17 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                         match res {
                             Ok(Ok(())) => {}, 
                             Ok(Err(e)) => {
+                                 if e.kind() == std::io::ErrorKind::WouldBlock {
+                                     continue; // Handled by outer while loop re-awaiting
+                                 }
                                  error!("TUN Write Error: {}", e);
-                                 stop_download.store(true, Ordering::SeqCst);
-                                 break; 
+                                 if let Some(raw) = e.raw_os_error() {
+                                     if raw == libc::EBADF {
+                                         // Fatal descriptor error
+                                         stop_download.store(true, Ordering::SeqCst);
+                                     }
+                                 }
+                                 break; // this drops the rest of the batch, preserving the loop
                             },
                             Err(_) => continue, // WouldBlock: wait for writable again
                         }

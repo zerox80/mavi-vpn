@@ -57,8 +57,8 @@ pub async fn connect_and_handshake(
 
     // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.max_idle_timeout(None); // Disable idle timeout for Doze Mode!
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15))); // Less aggressive keep-alives
     
     // MTU Pinning
     transport_config.mtu_discovery_config(None);

@@ -13,6 +13,8 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+data class OAuthTokens(val accessToken: String, val refreshToken: String)
+
 object OAuthHelper {
     // @Volatile ensures cross-thread visibility; synchronized(OAuthHelper) ensures atomicity
     // of combined read+clear operations to prevent CSRF state corruption under parallel flows.
@@ -128,7 +130,7 @@ object OAuthHelper {
         }
     }
 
-    suspend fun exchangeCodeForToken(code: String, returnedState: String?, kcUrl: String, realm: String, clientId: String): String? = withContext(Dispatchers.IO) {
+    suspend fun exchangeCodeForToken(code: String, returnedState: String?, kcUrl: String, realm: String, clientId: String): OAuthTokens? = withContext(Dispatchers.IO) {
         // Read and clear state atomically to prevent a second concurrent call from
         // consuming the same verifier (replay) or seeing a partially-overwritten state.
         val expectedState: String?
@@ -168,16 +170,51 @@ object OAuthHelper {
             val body = response.body?.string() ?: return@withContext null
             if (response.isSuccessful) {
                 val json = JSONObject(body)
-                if (!json.has("access_token")) {
-                    Log.e("OAuthHelper", "Token response missing 'access_token' field")
+                if (!json.has("access_token") || !json.has("refresh_token")) {
+                    Log.e("OAuthHelper", "Token response missing 'access_token' or 'refresh_token' field")
                     return@withContext null
                 }
-                return@withContext json.getString("access_token")
+                return@withContext OAuthTokens(json.getString("access_token"), json.getString("refresh_token"))
             }
             Log.e("OAuthHelper", "Token exchange failed with HTTP ${response.code}: $body")
             null
         } catch (e: Exception) {
             Log.e("OAuthHelper", "Token exchange exception: ${e.message}")
+            null
+        }
+    }
+
+    suspend fun refreshToken(refreshToken: String, kcUrl: String, realm: String, clientId: String): OAuthTokens? = withContext(Dispatchers.IO) {
+        if (refreshToken.isBlank()) return@withContext null
+
+        val tokenUrl = "$kcUrl/realms/$realm/protocol/openid-connect/token"
+
+        val formBody = FormBody.Builder()
+            .add("grant_type", "refresh_token")
+            .add("client_id", clientId)
+            .add("refresh_token", refreshToken)
+            .build()
+
+        val request = Request.Builder()
+            .url(tokenUrl)
+            .post(formBody)
+            .build()
+
+        try {
+            val response = httpClient.newCall(request).execute()
+            val body = response.body?.string() ?: return@withContext null
+            if (response.isSuccessful) {
+                val json = JSONObject(body)
+                if (!json.has("access_token") || !json.has("refresh_token")) {
+                    Log.e("OAuthHelper", "Refresh response missing tokens")
+                    return@withContext null
+                }
+                return@withContext OAuthTokens(json.getString("access_token"), json.getString("refresh_token"))
+            }
+            Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}: $body")
+            null
+        } catch (e: Exception) {
+            Log.e("OAuthHelper", "Refresh token exception: ${e.message}")
             null
         }
     }

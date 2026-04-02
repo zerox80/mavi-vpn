@@ -99,15 +99,17 @@ class MainActivity : ComponentActivity() {
                 
                 val returnedState = data.getQueryParameter("state")
                 lifecycleScope.launch {
-                    val token = OAuthHelper.exchangeCodeForToken(
+                    val tokens = OAuthHelper.exchangeCodeForToken(
                         code,
                         returnedState,
                         viewModel.kcUrl.value,
                         viewModel.kcRealm.value,
                         viewModel.kcClientId.value
                     )
-                    if (token != null) {
-                        viewModel.authToken.value = token
+                    if (tokens != null) {
+                        viewModel.authToken.value = tokens.accessToken
+                        val prefs = com.mavi.vpn.data.PrefsManager(this@MainActivity)
+                        prefs.savedRefreshToken = tokens.refreshToken
                         viewModel.saveServerDetails()
                         recreate()
                     }

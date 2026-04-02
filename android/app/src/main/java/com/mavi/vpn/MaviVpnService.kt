@@ -15,6 +15,7 @@ import com.mavi.vpn.data.PrefsManager
 import com.mavi.vpn.native_lib.NativeLib
 import com.mavi.vpn.service.NotificationHelper
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
 
 class MaviVpnService : VpnService() {
 
@@ -82,13 +83,28 @@ class MaviVpnService : VpnService() {
             }
 
             if (prefs.savedUseKeycloak && !OAuthHelper.isAccessTokenUsable(token)) {
-                Log.i("MaviVPN", "Stored Keycloak token expired. Clearing session before connect.")
-                prefs.savedToken = ""
-                return START_NOT_STICKY
+                // Try one refresh unconditionally before giving up completely on startup
+                val refreshed = runBlocking { 
+                    OAuthHelper.refreshToken(prefs.savedRefreshToken, prefs.savedKcUrl, prefs.savedKcRealm, prefs.savedKcClientId) 
+                }
+                
+                if (refreshed != null) {
+                    prefs.savedToken = refreshed.accessToken
+                    prefs.savedRefreshToken = refreshed.refreshToken
+                } else {
+                    Log.i("MaviVPN", "Stored Keycloak token expired and refresh failed. Clearing session before connect.")
+                    prefs.savedToken = ""
+                    prefs.savedRefreshToken = ""
+                    return START_NOT_STICKY
+                }
             }
 
-            if (ip.isNotEmpty() && token.isNotEmpty()) {
-                startVpn(ip, port, token, pin, splitMode, splitPackages)
+            // Always re-read the token from prefs in case we just refreshed it,
+            // or if it was valid to begin with.
+            val currentToken = prefs.savedToken
+
+            if (ip.isNotEmpty() && currentToken.isNotEmpty()) {
+                startVpn(ip, port, currentToken, pin, splitMode, splitPackages)
                 return START_STICKY
             } else {
                 Log.e("MaviVPN", "Cannot restart: Credentials missing.")
@@ -153,6 +169,7 @@ class MaviVpnService : VpnService() {
 
         thread = Thread {
             Log.d("MaviVPN", "Starting VPN Thread")
+            var currentToken = token
             
             while (isRunning) {
                 try {
@@ -160,11 +177,24 @@ class MaviVpnService : VpnService() {
                     val crMode = prefs.savedCensorshipResistant
                         
                     while (isRunning) {
-                        if (prefs.savedUseKeycloak && !OAuthHelper.isAccessTokenUsable(token)) {
-                            Log.i("MaviVPN", "Keycloak token expired. Clearing saved session and stopping reconnect loop.")
-                            prefs.savedToken = ""
-                            isRunning = false
-                            break
+                        if (prefs.savedUseKeycloak && !OAuthHelper.isAccessTokenUsable(currentToken, skewSeconds = 300)) {
+                            Log.i("MaviVPN", "Keycloak token expires soon. Attempting refresh in background.")
+                            val refreshed = runBlocking {
+                                OAuthHelper.refreshToken(prefs.savedRefreshToken, prefs.savedKcUrl, prefs.savedKcRealm, prefs.savedKcClientId)
+                            }
+
+                            if (refreshed != null) {
+                                currentToken = refreshed.accessToken
+                                prefs.savedToken = refreshed.accessToken
+                                prefs.savedRefreshToken = refreshed.refreshToken
+                                Log.i("MaviVPN", "Successfully refreshed Keycloak token.")
+                            } else {
+                                Log.e("MaviVPN", "Refresh failed. Keycloak session expired. Stopping reconnect loop.")
+                                prefs.savedToken = ""
+                                prefs.savedRefreshToken = ""
+                                isRunning = false
+                                break
+                            }
                         }
 
                         Log.d("MaviVPN", "Attempting connection to $ip:$port (Attempt ${++retryCount})")
@@ -173,7 +203,7 @@ class MaviVpnService : VpnService() {
                             notificationHelper.updateNotification(1, "Mavi VPN", "Retrying connection to $ip (Attempt $retryCount)...")
                         }
 
-                        val handle = NativeLib.init(this, token, buildEndpoint(ip, port), certPin, crMode)
+                        val handle = NativeLib.init(this, currentToken, buildEndpoint(ip, port), certPin, crMode)
                         // Valid 64-bit pointers on Android MTE/TBI can be negative when cast to a signed Long.
                         // NativeLib error codes are strictly in the range [-3, 0].
                         if (handle in -3L..0L) {
@@ -182,6 +212,7 @@ class MaviVpnService : VpnService() {
                                 Log.e("MaviVPN", "Fatal handshake failure: $initError")
                                 if (prefs.savedUseKeycloak && isAuthFailure(initError)) {
                                     prefs.savedToken = ""
+                                    prefs.savedRefreshToken = ""
                                 }
                                 isConnected.value = false
                                 isRunning = false

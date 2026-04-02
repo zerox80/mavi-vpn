@@ -18,6 +18,10 @@ class PrefsManager(context: Context) {
         get() = prefs.getString("saved_token", "") ?: ""
         set(value) = prefs.edit().putString("saved_token", value).apply()
 
+    var savedRefreshToken: String
+        get() = prefs.getString("saved_refresh_token", "") ?: ""
+        set(value) = prefs.edit().putString("saved_refresh_token", value).apply()
+
     var savedPin: String
         get() = prefs.getString("saved_pin", "") ?: ""
         set(value) = prefs.edit().putString("saved_pin", value).apply()

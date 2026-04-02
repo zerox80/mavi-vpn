@@ -88,14 +88,21 @@ class MaviVpnService : VpnService() {
                     OAuthHelper.refreshToken(prefs.savedRefreshToken, prefs.savedKcUrl, prefs.savedKcRealm, prefs.savedKcClientId) 
                 }
                 
-                if (refreshed != null) {
-                    prefs.savedToken = refreshed.accessToken
-                    prefs.savedRefreshToken = refreshed.refreshToken
-                } else {
-                    Log.i("MaviVPN", "Stored Keycloak token expired and refresh failed. Clearing session before connect.")
-                    prefs.savedToken = ""
-                    prefs.savedRefreshToken = ""
-                    return START_NOT_STICKY
+                when (refreshed) {
+                    is RefreshResult.Success -> {
+                        prefs.savedToken = refreshed.tokens.accessToken
+                        prefs.savedRefreshToken = refreshed.tokens.refreshToken
+                    }
+                    is RefreshResult.NetworkError -> {
+                        Log.w("MaviVPN", "Stored Keycloak token expired, but network is offline. Will let VPN reconnect loop try later.")
+                        // We do NOT clear the tokens, we let the VPN start and handle it when network is up!
+                    }
+                    is RefreshResult.Error -> {
+                        Log.i("MaviVPN", "Keycloak refresh rejected (Session explicitly expired/revoked). Clearing session.")
+                        prefs.savedToken = ""
+                        prefs.savedRefreshToken = ""
+                        return START_NOT_STICKY
+                    }
                 }
             }
 
@@ -183,17 +190,25 @@ class MaviVpnService : VpnService() {
                                 OAuthHelper.refreshToken(prefs.savedRefreshToken, prefs.savedKcUrl, prefs.savedKcRealm, prefs.savedKcClientId)
                             }
 
-                            if (refreshed != null) {
-                                currentToken = refreshed.accessToken
-                                prefs.savedToken = refreshed.accessToken
-                                prefs.savedRefreshToken = refreshed.refreshToken
-                                Log.i("MaviVPN", "Successfully refreshed Keycloak token.")
-                            } else {
-                                Log.e("MaviVPN", "Refresh failed. Keycloak session expired. Stopping reconnect loop.")
-                                prefs.savedToken = ""
-                                prefs.savedRefreshToken = ""
-                                isRunning = false
-                                break
+                            when (refreshed) {
+                                is RefreshResult.Success -> {
+                                    currentToken = refreshed.tokens.accessToken
+                                    prefs.savedToken = refreshed.tokens.accessToken
+                                    prefs.savedRefreshToken = refreshed.tokens.refreshToken
+                                    Log.i("MaviVPN", "Successfully refreshed Keycloak token.")
+                                }
+                                is RefreshResult.NetworkError -> {
+                                    Log.w("MaviVPN", "Refresh skipped due to network (${refreshed.error}). Waiting before retry.")
+                                    Thread.sleep(3000)
+                                    continue // Try again! We don't drop the connection
+                                }
+                                is RefreshResult.Error -> {
+                                    Log.e("MaviVPN", "Refresh failed: ${refreshed.message}. Keycloak session expired. Stopping reconnect loop.")
+                                    prefs.savedToken = ""
+                                    prefs.savedRefreshToken = ""
+                                    isRunning = false
+                                    break
+                                }
                             }
                         }
 

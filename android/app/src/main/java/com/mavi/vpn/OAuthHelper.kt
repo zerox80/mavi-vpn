@@ -15,6 +15,12 @@ import kotlinx.coroutines.withContext
 
 data class OAuthTokens(val accessToken: String, val refreshToken: String)
 
+sealed class RefreshResult {
+    data class Success(val tokens: OAuthTokens) : RefreshResult()
+    data class Error(val message: String) : RefreshResult()
+    data class NetworkError(val error: String) : RefreshResult()
+}
+
 object OAuthHelper {
     // @Volatile ensures cross-thread visibility; synchronized(OAuthHelper) ensures atomicity
     // of combined read+clear operations to prevent CSRF state corruption under parallel flows.
@@ -184,8 +190,8 @@ object OAuthHelper {
         }
     }
 
-    suspend fun refreshToken(refreshToken: String, kcUrl: String, realm: String, clientId: String): OAuthTokens? = withContext(Dispatchers.IO) {
-        if (refreshToken.isBlank()) return@withContext null
+    suspend fun refreshToken(refreshToken: String, kcUrl: String, realm: String, clientId: String): RefreshResult = withContext(Dispatchers.IO) {
+        if (refreshToken.isBlank()) return@withContext RefreshResult.Error("No refresh token available")
 
         val tokenUrl = "$kcUrl/realms/$realm/protocol/openid-connect/token"
 
@@ -202,20 +208,26 @@ object OAuthHelper {
 
         try {
             val response = httpClient.newCall(request).execute()
-            val body = response.body?.string() ?: return@withContext null
+            val body = response.body?.string() ?: return@withContext RefreshResult.NetworkError("Empty response body")
             if (response.isSuccessful) {
                 val json = JSONObject(body)
                 if (!json.has("access_token") || !json.has("refresh_token")) {
                     Log.e("OAuthHelper", "Refresh response missing tokens")
-                    return@withContext null
+                    return@withContext RefreshResult.Error("Invalid JSON from Keycloak")
                 }
-                return@withContext OAuthTokens(json.getString("access_token"), json.getString("refresh_token"))
+                return@withContext RefreshResult.Success(OAuthTokens(json.getString("access_token"), json.getString("refresh_token")))
+            }
+            if (response.code >= 500) {
+                 return@withContext RefreshResult.NetworkError("Server Error (HTTP ${response.code})")
             }
             Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}: $body")
-            null
+            return@withContext RefreshResult.Error("Refresh rejected by server (HTTP ${response.code})")
+        } catch (e: java.io.IOException) {
+            Log.w("OAuthHelper", "Refresh token IO exception (Offline?): ${e.message}")
+            return@withContext RefreshResult.NetworkError(e.message ?: "Offline or network timeout")
         } catch (e: Exception) {
-            Log.e("OAuthHelper", "Refresh token exception: ${e.message}")
-            null
+            Log.e("OAuthHelper", "Refresh token unknown exception: ${e.message}")
+            return@withContext RefreshResult.Error(e.message ?: "Unknown exception during refresh")
         }
     }
 

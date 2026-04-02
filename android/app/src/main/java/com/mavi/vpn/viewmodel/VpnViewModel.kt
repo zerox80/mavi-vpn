@@ -37,10 +37,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     val isConnected = MaviVpnService.isConnected
 
     init {
-        if (prefs.savedUseKeycloak && !OAuthHelper.isAccessTokenUsable(prefs.savedToken)) {
-            prefs.savedToken = ""
-            authToken.value = ""
-        }
+        // We only clear out token entirely if the token is completely
+        // unusable and refresh fails, but for the viewModel startup,
+        // we can just leave it. If it fails to refresh during connection,
+        // MaviVpnService handles the clearing.
     }
 
     fun updateErrorMessage(message: String) {
@@ -50,6 +50,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun clearAuthToken() {
         authToken.value = ""
         prefs.savedToken = ""
+        prefs.savedRefreshToken = ""
     }
 
     fun saveServerDetails() {

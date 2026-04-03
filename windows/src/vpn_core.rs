@@ -120,10 +120,22 @@ impl Drop for SessionRouteGuard {
 /// Helper to ensure the "MaviVPN" adapter exists in Windows.
 fn get_or_create_adapter(wintun: &wintun::Wintun) -> Result<Arc<Adapter>> {
     if let Ok(adapter) = Adapter::open(wintun, "MaviVPN") {
+        if let Ok(index) = adapter.get_adapter_index() {
+            let name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
+            info!("Opened existing WinTUN adapter '{}' (if={})", name, index);
+        }
         return Ok(adapter);
     }
-    Adapter::create(wintun, "MaviVPN", "Mavi VPN Tunnel", None)
-        .context("Failed to create WinTUN adapter. Admin privileges required.")
+
+    let adapter = Adapter::create(wintun, "MaviVPN", "Mavi VPN Tunnel", None)
+        .context("Failed to create WinTUN adapter. Admin privileges required.")?;
+
+    if let Ok(index) = adapter.get_adapter_index() {
+        let name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
+        info!("Created WinTUN adapter '{}' (if={})", name, index);
+    }
+
+    Ok(adapter)
 }
 
 /// Creates a UDP socket configured for both IPv4 and IPv6 (dual-stack).
@@ -462,6 +474,110 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
     }
 }
 
+fn run_powershell_cmd(display: &str, script: &str) -> bool {
+    match std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let msg = format!("[OK]  {}", display);
+            info!(cmd = %msg);
+            true
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let msg = format!("[FAIL] {} → {} {}", display, stdout, stderr);
+            warn!(cmd = %msg);
+            false
+        }
+        Err(e) => {
+            let msg = format!("[ERR] {} → {}", display, e);
+            warn!(cmd = %msg);
+            false
+        }
+    }
+}
+
+fn adapter_alias_by_index(adapter_index: u32) -> Option<String> {
+    let script = format!(
+        "$adapter = Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object InterfaceIndex -eq {adapter_index} | Select-Object -First 1; if ($adapter) {{ $adapter.Name }}"
+    );
+
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+
+    let alias = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if alias.is_empty() {
+        None
+    } else {
+        Some(alias)
+    }
+}
+
+fn wait_for_adapter_alias(adapter_index: u32, requested_name: &str) -> Result<String> {
+    for attempt in 1..=30 {
+        if let Some(alias) = adapter_alias_by_index(adapter_index) {
+            if alias == requested_name {
+                info!("WinTUN adapter '{}' is now visible in Windows (if={})", alias, adapter_index);
+            } else {
+                info!(
+                    "WinTUN adapter requested as '{}' is visible in Windows as '{}' (if={})",
+                    requested_name,
+                    alias,
+                    adapter_index
+                );
+            }
+            return Ok(alias);
+        }
+
+        info!(
+            "Waiting for adapter interface index {} to become available (attempt {}/30)...",
+            adapter_index,
+            attempt
+        );
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+
+    anyhow::bail!(
+        "Adapter '{}' (if={}) did not appear in Windows networking within 30 seconds.",
+        requested_name,
+        adapter_index
+    )
+}
+
+fn wait_for_ipv4_address(adapter_index: u32, ip: Ipv4Addr) -> bool {
+    let ip_str = ip.to_string();
+    let script = format!(
+        "$addr = Get-NetIPAddress -InterfaceIndex {adapter_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object IPAddress -eq '{ip_str}' | Select-Object -First 1; if ($addr) {{ 'ok' }}"
+    );
+
+    for _ in 0..10 {
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output();
+
+        if let Ok(out) = out {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if text.contains("ok") {
+                    return true;
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    false
+}
+
 fn split_endpoint(endpoint: &str) -> (&str, Option<&str>) {
     if let Some(rest) = endpoint.strip_prefix('[') {
         if let Some(end) = rest.find(']') {
@@ -494,30 +610,26 @@ fn set_adapter_network_config(
     gateway_v6: Option<Ipv6Addr>,
     dns_v6: Option<Ipv6Addr>,
 ) -> Result<Option<String>> {
-    let adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
+    let requested_adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let adapter_index = adapter.get_adapter_index()?;
     let if_str = adapter_index.to_string();
     let ip_str = ip.to_string();
     let mask_str = netmask.to_string();
     let gw_str = gateway.to_string();
     let dns_str = dns.to_string();
+    let adapter_name = wait_for_adapter_alias(adapter_index, &requested_adapter_name)?;
 
     info!("Configuring adapter '{}' (if={}) ip={} mask={} gw={} dns={}",
         adapter_name, adapter_index, ip, netmask, gateway, dns);
 
-    // 1. Ensure adapter is administratively up, waiting for it to register in the OS
-    let mut adapter_ready = false;
-    for i in 1..=15 {
-        if run_cmd("netsh", &["interface", "set", "interface", &adapter_name, "admin=enabled"]) {
-            adapter_ready = true;
-            break;
-        }
-        info!("Waiting for adapter '{}' to become available (attempt {}/15)...", adapter_name, i);
-        std::thread::sleep(Duration::from_millis(1000));
-    }
-    if !adapter_ready {
-        anyhow::bail!("Adapter '{}' failed to become available after 15 seconds.", adapter_name);
-    }
+    // 1. Ensure adapter is administratively up once it is visible in the OS.
+    let enable_script = format!(
+        "$adapter = Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object InterfaceIndex -eq {adapter_index} | Select-Object -First 1; if (-not $adapter) {{ throw 'Adapter not found' }}; if ($adapter.Status -eq 'Disabled') {{ $adapter | Enable-NetAdapter -Confirm:$false -ErrorAction Stop | Out-Null }}"
+    );
+    let _ = run_powershell_cmd(
+        &format!("Enable-NetAdapter ifIndex={}", adapter_index),
+        &enable_script,
+    );
 
     // 2. Set IPv4 address — positional syntax is the most reliable across Windows versions.
     //    "netsh interface ipv4 set address <name> static <ip> <mask>"
@@ -532,19 +644,14 @@ fn set_adapter_network_config(
     std::thread::sleep(Duration::from_millis(500));
 
     // Verify the IP was actually set
-    let verify = std::process::Command::new("netsh")
-        .args(["interface", "ipv4", "show", "addresses", &adapter_name])
-        .output()
-        .context("Failed to verify IPv4 address on WinTUN adapter")?;
-    let text = String::from_utf8_lossy(&verify.stdout);
-    if text.contains(&ip_str) {
+    if wait_for_ipv4_address(adapter_index, ip) {
         info!("IP {} confirmed on adapter", ip);
     } else {
         anyhow::bail!(
-            "IPv4 address {} was not applied to adapter '{}'. Aborting session setup. netsh output: {}",
+            "IPv4 address {} was not applied to adapter '{}' (if={}). Aborting session setup.",
             ip,
             adapter_name,
-            text.trim()
+            adapter_index
         );
     }
 

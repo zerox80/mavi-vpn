@@ -176,15 +176,7 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
     let mut vpn_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut active_config: Option<ipc::Config> = None;
 
-    let listener = match TcpListener::bind(ipc::LOCAL_IPC_ADDR).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!("Failed to bind TCP IPC listener on {}: {}", ipc::LOCAL_IPC_ADDR, e);
-            return Err(e.into());
-        }
-    };
-    
-    // Generate secure token for IPC and save to file
+    // Generate secure token for IPC and save to file BEFORE binding listener
     let mut token_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut token_bytes);
     let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
@@ -198,7 +190,16 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
     } else {
         harden_ipc_token_permissions(&token_path);
     }
-    info!("Service listening for IPC on {} (Auth token generated)", ipc::LOCAL_IPC_ADDR);
+    info!("Auth token generated and saved");
+
+    let listener = match TcpListener::bind(ipc::LOCAL_IPC_ADDR).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("Failed to bind TCP IPC listener on {}: {}", ipc::LOCAL_IPC_ADDR, e);
+            return Err(e.into());
+        }
+    };
+    info!("Service listening for IPC on {}", ipc::LOCAL_IPC_ADDR);
 
     loop {
         if stop_signal.load(Ordering::SeqCst) {

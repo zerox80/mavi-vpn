@@ -74,6 +74,12 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
                 Duration::from_secs(RECONNECT_INITIAL_SECS),
             ),
             Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("AUTH_FAILED") || err_str.contains("Server rejected connection") {
+                    warn!("Authentication permanently denied: {}. Stopping VPN loop.", err_str);
+                    running.store(false, Ordering::Relaxed);
+                    break;
+                }
                 warn!("Session failed: {:#}. Reconnecting...", e);
                 (backoff, (backoff * 2).min(Duration::from_secs(RECONNECT_MAX_SECS)))
             }
@@ -416,9 +422,15 @@ async fn connect_and_handshake(
     let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
     send.write_u32_le(bytes.len() as u32).await?;
     send.write_all(&bytes).await?;
+    let _ = send.finish(); // properly close the send side of the auth stream
 
     let len = recv.read_u32_le().await? as usize;
     if len > 65536 { anyhow::bail!("Server response too large: {} bytes", len); }
+    if len == 0x1901 {
+        // This magic length happens when the server sends the HTTP/3 spoof payload
+        // [0x01, 0x19, 0x00, 0x00] in censorship_resistant mode due to Auth Failure.
+        anyhow::bail!("AUTH_FAILED: Server rejected authentication token");
+    }
     let mut buf = vec![0u8; len];
     recv.read_exact(&mut buf).await?;
     let config: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
@@ -493,8 +505,19 @@ fn set_adapter_network_config(
     info!("Configuring adapter '{}' (if={}) ip={} mask={} gw={} dns={}",
         adapter_name, adapter_index, ip, netmask, gateway, dns);
 
-    // 1. Ensure adapter is administratively up
-    run_cmd("netsh", &["interface", "set", "interface", &adapter_name, "admin=enabled"]);
+    // 1. Ensure adapter is administratively up, waiting for it to register in the OS
+    let mut adapter_ready = false;
+    for i in 1..=15 {
+        if run_cmd("netsh", &["interface", "set", "interface", &adapter_name, "admin=enabled"]) {
+            adapter_ready = true;
+            break;
+        }
+        info!("Waiting for adapter '{}' to become available (attempt {}/15)...", adapter_name, i);
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+    if !adapter_ready {
+        anyhow::bail!("Adapter '{}' failed to become available after 15 seconds.", adapter_name);
+    }
 
     // 2. Set IPv4 address — positional syntax is the most reliable across Windows versions.
     //    "netsh interface ipv4 set address <name> static <ip> <mask>"

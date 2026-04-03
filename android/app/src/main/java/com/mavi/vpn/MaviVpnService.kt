@@ -177,6 +177,7 @@ class MaviVpnService : VpnService() {
         thread = Thread {
             Log.d("MaviVPN", "Starting VPN Thread")
             var currentToken = token
+            var forcedRefreshCount = 0
             
             while (isRunning) {
                 try {
@@ -226,8 +227,15 @@ class MaviVpnService : VpnService() {
                             if (handle < 0L) {
                                 Log.e("MaviVPN", "Fatal handshake failure: $initError")
                                 if (prefs.savedUseKeycloak && isAuthFailure(initError)) {
-                                    prefs.savedToken = ""
-                                    prefs.savedRefreshToken = ""
+                                    if (prefs.savedRefreshToken.isNotBlank() && forcedRefreshCount < 1) {
+                                        Log.w("MaviVPN", "Server rejected token. Forcing refresh due to possible clock skew or expiration mismatch.")
+                                        currentToken = ""
+                                        forcedRefreshCount++
+                                        continue
+                                    } else {
+                                        prefs.savedToken = ""
+                                        prefs.savedRefreshToken = ""
+                                    }
                                 }
                                 isConnected.value = false
                                 isRunning = false
@@ -245,6 +253,7 @@ class MaviVpnService : VpnService() {
                         }
                         
                         retryCount = 0
+                        forcedRefreshCount = 0
                         synchronized(vpnLock) {
                             vpnSessionHandle = handle
                         }

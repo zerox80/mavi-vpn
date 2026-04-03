@@ -1,8 +1,11 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
 use serde::{Deserialize, Serialize};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub mod icmp;
 pub mod ipc;
+
+#[cfg(test)]
+mod tests;
 
 /// Control-plane messages exchanged over the QUIC bidirectional stream during
 /// connection setup (the "handshake phase").

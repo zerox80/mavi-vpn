@@ -22,7 +22,9 @@ fn config_message_preserves_whitelist_order() {
     let decoded: ControlMessage = roundtrip(&config);
 
     match decoded {
-        ControlMessage::Config { whitelist_domains, .. } => assert_eq!(
+        ControlMessage::Config {
+            whitelist_domains, ..
+        } => assert_eq!(
             whitelist_domains,
             Some(vec![
                 "first.example".to_string(),

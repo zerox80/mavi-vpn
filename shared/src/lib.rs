@@ -1,5 +1,5 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
 use serde::{Deserialize, Serialize};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub mod icmp;
 pub mod ipc;

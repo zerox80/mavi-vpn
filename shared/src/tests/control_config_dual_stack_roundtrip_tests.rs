@@ -12,9 +12,15 @@ fn dual_stack_config_roundtrips_through_bincode() {
             dns_server_v6,
             ..
         } => {
-            assert_eq!(assigned_ipv6, Some(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)));
+            assert_eq!(
+                assigned_ipv6,
+                Some(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2))
+            );
             assert_eq!(netmask_v6, Some(64));
-            assert_eq!(gateway_v6, Some(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)));
+            assert_eq!(
+                gateway_v6,
+                Some(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
+            );
             assert_eq!(dns_server_v6, Some(std::net::Ipv6Addr::LOCALHOST));
         }
         other => panic!("expected config message, got {other:?}"),

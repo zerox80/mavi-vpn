@@ -1,4 +1,3 @@
-
 use crate::{icmp::generate_packet_too_big, ipc, ControlMessage};
 use etherparse::PacketBuilder;
 use serde::{de::DeserializeOwned, Serialize};
@@ -41,7 +40,10 @@ pub(super) fn sample_control_dual_stack_config() -> ControlMessage {
         netmask_v6: Some(64),
         gateway_v6: Some(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
         dns_server_v6: Some(Ipv6Addr::LOCALHOST),
-        whitelist_domains: Some(vec!["example.com".to_string(), "internal.example".to_string()]),
+        whitelist_domains: Some(vec![
+            "example.com".to_string(),
+            "internal.example".to_string(),
+        ]),
     }
 }
 
@@ -89,8 +91,8 @@ pub(super) fn ipv6_server() -> Ipv6Addr {
 
 pub(super) fn build_ipv4_udp_packet(payload_len: usize) -> Vec<u8> {
     let payload = vec![0xAB; payload_len];
-    let builder = PacketBuilder::ipv4(ipv4_client().octets(), ipv4_server().octets(), 32)
-        .udp(40000, 4433);
+    let builder =
+        PacketBuilder::ipv4(ipv4_client().octets(), ipv4_server().octets(), 32).udp(40000, 4433);
     let mut packet = Vec::with_capacity(builder.size(payload.len()));
     builder
         .write(&mut packet, &payload)
@@ -100,53 +102,53 @@ pub(super) fn build_ipv4_udp_packet(payload_len: usize) -> Vec<u8> {
 
 pub(super) fn build_ipv6_udp_packet(payload_len: usize) -> Vec<u8> {
     let payload = vec![0xCD; payload_len];
-    let builder = PacketBuilder::ipv6(ipv6_client().octets(), ipv6_server().octets(), 32)
-        .udp(40000, 4433);
+    let builder =
+        PacketBuilder::ipv6(ipv6_client().octets(), ipv6_server().octets(), 32).udp(40000, 4433);
     let mut packet = Vec::with_capacity(builder.size(payload.len()));
     builder
         .write(&mut packet, &payload)
         .expect("write ipv6 test packet");
     packet
 }
-mod control_auth_roundtrip_tests;
-mod control_error_roundtrip_tests;
-mod control_config_ipv4_roundtrip_tests;
-mod control_config_dual_stack_roundtrip_tests;
 mod control_auth_clone_tests;
-mod control_error_clone_tests;
-mod control_config_clone_tests;
 mod control_auth_empty_token_tests;
+mod control_auth_roundtrip_tests;
+mod control_config_clone_tests;
+mod control_config_dual_stack_roundtrip_tests;
+mod control_config_ipv4_roundtrip_tests;
+mod control_error_clone_tests;
+mod control_error_roundtrip_tests;
 mod control_whitelist_none_tests;
 mod control_whitelist_order_tests;
-mod ipc_local_addr_tests;
-mod ipc_token_path_tests;
-mod ipc_config_full_roundtrip_tests;
-mod ipc_config_minimal_roundtrip_tests;
-mod ipc_request_start_roundtrip_tests;
-mod ipc_request_stop_roundtrip_tests;
-mod ipc_request_status_roundtrip_tests;
-mod ipc_secure_request_roundtrip_tests;
-mod ipc_response_ok_roundtrip_tests;
-mod ipc_response_error_roundtrip_tests;
-mod ipc_response_status_roundtrip_tests;
 mod icmp_empty_packet_tests;
-mod icmp_unknown_version_tests;
-mod icmp_short_ipv4_tests;
-mod icmp_short_ipv6_tests;
+mod icmp_ipv4_default_source_tests;
+mod icmp_ipv4_embeds_header_plus_eight_tests;
 mod icmp_ipv4_generates_reply_tests;
-mod icmp_ipv4_uses_override_source_tests;
 mod icmp_ipv4_rejects_v6_override_tests;
 mod icmp_ipv4_reply_targets_client_tests;
-mod icmp_ipv4_type_code_tests;
 mod icmp_ipv4_reported_mtu_tests;
-mod icmp_ipv4_embeds_header_plus_eight_tests;
+mod icmp_ipv4_type_code_tests;
+mod icmp_ipv4_uses_override_source_tests;
+mod icmp_ipv6_default_source_tests;
+mod icmp_ipv6_embeds_truncated_original_packet_tests;
 mod icmp_ipv6_generates_reply_tests;
-mod icmp_ipv6_uses_override_source_tests;
 mod icmp_ipv6_rejects_v4_override_tests;
 mod icmp_ipv6_reply_targets_client_tests;
-mod icmp_ipv6_type_code_tests;
 mod icmp_ipv6_reported_mtu_tests;
 mod icmp_ipv6_truncation_limit_tests;
-mod icmp_ipv6_embeds_truncated_original_packet_tests;
-mod icmp_ipv4_default_source_tests;
-mod icmp_ipv6_default_source_tests;
+mod icmp_ipv6_type_code_tests;
+mod icmp_ipv6_uses_override_source_tests;
+mod icmp_short_ipv4_tests;
+mod icmp_short_ipv6_tests;
+mod icmp_unknown_version_tests;
+mod ipc_config_full_roundtrip_tests;
+mod ipc_config_minimal_roundtrip_tests;
+mod ipc_local_addr_tests;
+mod ipc_request_start_roundtrip_tests;
+mod ipc_request_status_roundtrip_tests;
+mod ipc_request_stop_roundtrip_tests;
+mod ipc_response_error_roundtrip_tests;
+mod ipc_response_ok_roundtrip_tests;
+mod ipc_response_status_roundtrip_tests;
+mod ipc_secure_request_roundtrip_tests;
+mod ipc_token_path_tests;

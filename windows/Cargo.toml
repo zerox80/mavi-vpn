@@ -32,13 +32,13 @@ wintun = "0.5"
 parking_lot = "0.12"
 ctrlc = "3.4"
 sha2 = "0.11.0"
-rand = "0.8"
+rand = "0.10"
 base64 = "0.22"
 url = "2.5"
 webbrowser = "1.0"
 
 [target.'cfg(windows)'.dependencies]
-windows-service = "0.7"
+windows-service = "0.8"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",

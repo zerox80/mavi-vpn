@@ -50,7 +50,7 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
                 Duration::from_secs(RECONNECT_INITIAL_SECS),
             ),
             Err(e) => {
-                warn!("Session failed: {}. Reconnecting...", e);
+                warn!("Session failed: {:#}. Reconnecting...", e);
                 (
                     backoff,
                     (backoff * 2).min(Duration::from_secs(RECONNECT_MAX_SECS)),

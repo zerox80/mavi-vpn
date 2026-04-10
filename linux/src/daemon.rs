@@ -15,7 +15,7 @@ use rand::RngCore;
 use base64::Engine;
 
 /// Runs the IPC daemon loop. Accepts commands from CLI/GUI clients.
-pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
+pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
     let vpn_running = Arc::new(AtomicBool::new(false));
     let mut vpn_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut active_config: Option<Config> = None;
@@ -36,7 +36,7 @@ pub async fn run_daemon(stop_signal: Arc<AtomicBool>) -> Result<()> {
     info!("Daemon listening on {} (Auth token generated)", LOCAL_IPC_ADDR);
 
     loop {
-        if stop_signal.load(Ordering::SeqCst) {
+        if !running_flag.load(Ordering::SeqCst) {
             info!("Stop signal received, shutting down daemon...");
             vpn_running.store(false, Ordering::SeqCst);
             if let Some(t) = vpn_task {

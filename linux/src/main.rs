@@ -12,17 +12,23 @@
 //!   mavi-vpn status                          # Check VPN status
 
 #[cfg(target_os = "linux")]
+pub mod daemon;
+#[cfg(target_os = "linux")]
+pub mod network;
+#[cfg(target_os = "linux")]
+pub mod oauth;
+#[cfg(target_os = "linux")]
+pub mod tun;
+#[cfg(target_os = "linux")]
+pub mod vpn_core;
+
+#[cfg(target_os = "linux")]
 mod linux_app {
-    #[path = "daemon.rs"]
-    pub mod daemon;
-    #[path = "network.rs"]
-    pub mod network;
-    #[path = "oauth.rs"]
-    pub mod oauth;
-    #[path = "tun.rs"]
-    pub mod tun;
-    #[path = "vpn_core.rs"]
-    pub mod vpn_core;
+    pub use super::daemon;
+    pub use super::network;
+    pub use super::oauth;
+    pub use super::tun;
+    pub use super::vpn_core;
 
     use anyhow::Result;
     use shared::ipc::Config;

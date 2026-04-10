@@ -80,6 +80,16 @@ def main():
 
     require_cmd("cargo")
 
+    # ── Permissions fix ──────────────────────────────────────────────────────
+    target_dir = ROOT / "target"
+    if target_dir.exists() and not os.access(target_dir, os.W_OK):
+        info("Fixing target directory permissions (likely owned by root)...")
+        user = os.environ.get("SUDO_USER") or os.environ.get("USER")
+        chown_paths = [str(target_dir)]
+        if (ROOT / "Cargo.lock").exists():
+            chown_paths.append(str(ROOT / "Cargo.lock"))
+        sudo("chown", "-R", f"{user}:{user}", *chown_paths)
+
     # ── Build ────────────────────────────────────────────────────────────────
     step("Building CLI")
     run(["cargo", "build", "--release", "-p", "linux-vpn"])

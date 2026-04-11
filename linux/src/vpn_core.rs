@@ -10,7 +10,12 @@ use anyhow::{Context, Result};
 use bytes::{Buf, Bytes};
 use h3_quinn::Connection as H3QuinnConnection;
 use sha2::{Digest, Sha256};
-use shared::{icmp, ipc::Config, ControlMessage};
+use shared::{
+    icmp,
+    ipc::Config,
+    masque::{self, CAPSULE_MAVI_CONFIG},
+    ControlMessage,
+};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -259,10 +264,12 @@ async fn run_session(
             }
             match tun_reader.read(&mut buf).await {
                 Ok(n) if n > 0 => {
-                    // In H3 mode, prepend Quarter Stream ID (0x00)
+                    // In H3 mode, prepend [Quarter Stream ID] [Context ID]
+                    // (connect-ip datagram framing, RFC 9484 §5 — 2 bytes).
                     let payload = if is_h3_framing {
-                        let mut h3_payload = Vec::with_capacity(n + 1);
-                        h3_payload.push(0x00);
+                        let mut h3_payload =
+                            Vec::with_capacity(n + masque::DATAGRAM_PREFIX.len());
+                        h3_payload.extend_from_slice(&masque::DATAGRAM_PREFIX);
                         h3_payload.extend_from_slice(&buf[..n]);
                         Bytes::from(h3_payload)
                     } else {
@@ -308,10 +315,15 @@ async fn run_session(
             }
             match connection.read_datagram().await {
                 Ok(mut data) => {
-                    // In H3 mode, strip Quarter Stream ID prefix (1 byte)
+                    // Strip [Quarter Stream ID] [Context ID] for connect-ip.
                     if is_h3_framing_dl {
-                        if data.len() <= 1 { continue; }
-                        data.advance(1);
+                        let inner_len = match masque::unwrap_datagram(&data) {
+                            Some(slice) => slice.len(),
+                            None => continue,
+                        };
+                        if inner_len == 0 { continue; }
+                        let prefix = data.len() - inner_len;
+                        data.advance(prefix);
                     }
                     if data.is_empty() {
                         continue;
@@ -458,7 +470,11 @@ async fn connect_and_handshake(
     Ok((connection, config, h3_guard))
 }
 
-/// HTTP/3 Layer 7 handshake: Uses the h3 crate to send a proper HTTP/3 request.
+/// MASQUE connect-ip (RFC 9484) handshake.
+///
+/// Sends `CONNECT` with `:protocol=connect-ip` over HTTP/3, then parses the
+/// capsule stream on the request body to extract the vendor `MAVI_CONFIG`
+/// capsule which carries the full `ControlMessage::Config`.
 ///
 /// Returns the server config **and** an `H3SessionGuard` that MUST be held for the
 /// entire VPN session. Dropping `send_request` here would tear the quinn connection
@@ -470,6 +486,7 @@ async fn connect_and_handshake_h3(
     let h3_conn = H3QuinnConnection::new(connection.clone());
     let mut builder = h3::client::builder();
     builder.enable_datagram(true);
+    builder.enable_extended_connect(true);
     let (mut driver, mut send_request) = builder.build::<_, _, bytes::Bytes>(h3_conn).await
         .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
 
@@ -479,17 +496,20 @@ async fn connect_and_handshake_h3(
         tracing::debug!("H3 driver finished: {}", e);
     });
 
+    // Extended CONNECT with :protocol=connect-ip (RFC 9484 §3).
     let req = http::Request::builder()
-        .method("GET")
-        .uri("https://localhost/vpn")
+        .method(http::Method::CONNECT)
+        .uri("https://mavi-vpn/.well-known/masque/ip/*/*/")
+        .extension(h3::ext::Protocol::CONNECT_IP)
         .header("authorization", format!("Bearer {}", token))
+        .header("capsule-protocol", "?1")
         .body(())
-        .context("Failed to build H3 request")?;
+        .context("Failed to build H3 CONNECT request")?;
 
     let mut stream = send_request.send_request(req).await
         .map_err(|e| anyhow::anyhow!("H3 send_request failed: {}", e))?;
-    stream.finish().await
-        .map_err(|e| anyhow::anyhow!("H3 finish failed: {}", e))?;
+    // NB: do NOT finish the stream — connect-ip keeps the request stream open
+    // for bidirectional capsule traffic throughout the session.
 
     let resp = stream.recv_response().await
         .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {}", e))?;
@@ -498,16 +518,54 @@ async fn connect_and_handshake_h3(
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
     }
 
-    // Read the response body (bincode-encoded ControlMessage)
-    let mut body_buf = Vec::new();
-    while let Some(chunk) = stream.recv_data().await
-        .map_err(|e| anyhow::anyhow!("H3 recv_data failed: {}", e))? {
-        body_buf.extend_from_slice(chunk.chunk());
+    // Accumulate capsules until we see MAVI_CONFIG. Every wait on `recv_data`
+    // is bounded by the remaining handshake budget so a silent or slow-drip
+    // server cannot leave us blocked forever; the buffer is also capped by
+    // `masque::MAX_CAPSULE_BUF` to bound memory use.
+    let mut capsule_buf: Vec<u8> = Vec::new();
+    let mut config: Option<ControlMessage> = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    'read: while config.is_none() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule");
+        }
+
+        loop {
+            let (ctype, payload, consumed) = match masque::read_capsule(&capsule_buf) {
+                Some(parts) => (parts.0, parts.1.to_vec(), parts.2),
+                None => break,
+            };
+            capsule_buf.drain(..consumed);
+            if ctype == CAPSULE_MAVI_CONFIG {
+                config = Some(
+                    bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+                        .map(|(v, _)| v)
+                        .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {}", e))?,
+                );
+                break 'read;
+            }
+        }
+
+        let chunk = match tokio::time::timeout(remaining, stream.recv_data()).await {
+            Ok(Ok(Some(data))) => data,
+            Ok(Ok(None)) => {
+                anyhow::bail!("Server closed connect-ip stream before MAVI_CONFIG")
+            }
+            Ok(Err(e)) => anyhow::bail!("H3 recv_data failed: {}", e),
+            Err(_) => anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule"),
+        };
+        capsule_buf.extend_from_slice(chunk.chunk());
+        if capsule_buf.len() > masque::MAX_CAPSULE_BUF {
+            anyhow::bail!(
+                "connect-ip capsule buffer exceeded {} bytes",
+                masque::MAX_CAPSULE_BUF
+            );
+        }
     }
 
-    let config: ControlMessage = bincode::serde::decode_from_slice(&body_buf, bincode::config::standard())
-        .map(|(v, _)| v)
-        .map_err(|e| anyhow::anyhow!("Failed to decode H3 config: {}", e))?;
+    let config =
+        config.ok_or_else(|| anyhow::anyhow!("connect-ip response lacked MAVI_CONFIG capsule"))?;
 
     Ok((
         config,

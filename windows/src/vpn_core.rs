@@ -102,6 +102,24 @@ enum SessionEnd {
     ConnectionLost,
 }
 
+/// Holds the h3 `SendRequest` + driver task for the lifetime of the VPN session.
+///
+/// Dropping `h3::client::SendRequest` decrements its internal `sender_count`; when the
+/// last one goes, its `Drop` impl calls `handle_connection_error_on_stream(H3_NO_ERROR,
+/// "Connection closed by client")` which tears down the underlying quinn connection.
+/// We therefore keep the SendRequest alive for the whole session so the VPN datagram
+/// plane can keep using the same quinn::Connection.
+struct H3SessionGuard {
+    _send_request: h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
+    drive_handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for H3SessionGuard {
+    fn drop(&mut self) {
+        self.drive_handle.abort();
+    }
+}
+
 struct SessionRouteGuard {
     host_route: Option<String>,
 }
@@ -167,7 +185,10 @@ async fn run_session(
     let socket = create_udp_socket()?;
 
     // 1. QUIC Handshake & Auth
-    let (connection, server_config) = connect_and_handshake(
+    //    `_h3_guard` keeps the h3 SendRequest + driver task alive for the entire
+    //    session; dropping it earlier would send CONNECTION_CLOSE(H3_NO_ERROR) and
+    //    kill the VPN datagram plane. It lives to the end of `run_session` scope.
+    let (connection, server_config, _h3_guard) = connect_and_handshake(
         socket,
         config.token.clone(),
         config.endpoint.clone(),
@@ -369,7 +390,7 @@ async fn connect_and_handshake(
     cert_pin: Vec<u8>,
     censorship_resistant: bool,
     http3_framing: bool,
-) -> Result<(quinn::Connection, ControlMessage)> {
+) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
     let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
@@ -451,8 +472,9 @@ async fn connect_and_handshake(
     };
     info!("QUIC handshake OK, sending auth token ({} bytes)", token.len());
 
-    let config = if http3_framing {
-        connect_and_handshake_h3(connection.clone(), token).await?
+    let (config, h3_guard) = if http3_framing {
+        let (cfg, guard) = connect_and_handshake_h3(connection.clone(), token).await?;
+        (cfg, Some(guard))
     } else {
         // Perform application-level handshake
         let (mut send, mut recv) = connection.open_bi().await?;
@@ -471,27 +493,35 @@ async fn connect_and_handshake(
         }
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
-        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?
+        let cfg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
+        (cfg, None)
     };
 
-    Ok((connection, config))
+    Ok((connection, config, h3_guard))
 }
 
 /// HTTP/3 Layer 7 handshake: Uses the h3 crate to send a proper HTTP/3 request.
+///
+/// Returns the decoded `ControlMessage` plus a `H3SessionGuard` that owns the
+/// `SendRequest` handle and the background driver task. The caller MUST hold
+/// the guard for the entire VPN session — dropping it sends
+/// CONNECTION_CLOSE(H3_NO_ERROR) and terminates the underlying quinn connection.
 async fn connect_and_handshake_h3(
     connection: quinn::Connection,
     token: String,
-) -> Result<ControlMessage> {
+) -> Result<(ControlMessage, H3SessionGuard)> {
     let h3_conn = H3QuinnConnection::new(connection.clone());
     let mut builder = h3::client::builder();
     builder.enable_datagram(true);
     let (mut driver, mut send_request) = builder.build::<_, _, bytes::Bytes>(h3_conn).await
         .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
 
-    // Drive the H3 connection in the background
+    // Drive the H3 connection in the background. This task lives for the whole
+    // VPN session (via H3SessionGuard) so h3's control/QPACK streams keep being
+    // serviced. A clean close at session end is reported at debug level.
     let drive_handle = tokio::spawn(async move {
         let e = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
-        tracing::warn!("H3 driver error: {}", e);
+        tracing::debug!("H3 driver finished: {}", e);
     });
 
     let req = http::Request::builder()
@@ -524,8 +554,10 @@ async fn connect_and_handshake_h3(
         .map(|(v, _)| v)
         .map_err(|e| anyhow::anyhow!("Failed to decode H3 config: {}", e))?;
 
-    drive_handle.abort();
-    Ok(config)
+    // Intentionally do NOT abort drive_handle or drop send_request here.
+    // Both are moved into the guard and kept alive for the whole session.
+    let guard = H3SessionGuard { _send_request: send_request, drive_handle };
+    Ok((config, guard))
 }
 
 /// Helper: run a command and log its outcome.

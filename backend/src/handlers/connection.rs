@@ -10,13 +10,34 @@ use constant_time_eq::constant_time_eq;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
 use futures_util::FutureExt;
 use http::Response;
-use shared::{icmp, ControlMessage};
+use shared::{
+    icmp,
+    masque::{
+        self, AssignedAddress, IpAddressRange, CAPSULE_ADDRESS_ASSIGN, CAPSULE_MAVI_CONFIG,
+        CAPSULE_ROUTE_ADVERTISEMENT,
+    },
+    ControlMessage,
+};
+use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 
 use crate::{config::Config, keycloak::KeycloakValidator, state::AppState};
 
 const H3_DETECTION_GRACE: Duration = Duration::from_millis(50);
+
+/// Convert an IPv4 dotted-decimal netmask to a CIDR prefix length in bits.
+/// Non-contiguous masks (not realistic on a VPN subnet) fall back to `/32`.
+fn prefix_len_from_mask(mask: std::net::Ipv4Addr) -> u8 {
+    let bits = u32::from(mask);
+    let ones = bits.count_ones() as u8;
+    // Require the mask to be contiguous: all ones followed by all zeros.
+    if bits.leading_ones() + bits.trailing_zeros() == 32 {
+        ones
+    } else {
+        32
+    }
+}
 
 pub struct IpGuard {
     pub state: Arc<AppState>,
@@ -345,6 +366,7 @@ pub async fn handle_h3_connection(
         crate::network::h3_quinn::Connection::with_pre_streams(connection.clone(), pre_bi, Some(pre_uni));
     let mut h3_conn = h3::server::builder()
         .enable_datagram(true)
+        .enable_extended_connect(true)
         .build(h3_conn_wrapper)
         .await
         .map_err(|e| anyhow::anyhow!("H3 build failed: {}", e))?;
@@ -355,7 +377,45 @@ pub async fn handle_h3_connection(
         .ok_or_else(|| anyhow::anyhow!("Expected H3 request"))?;
     let (req, mut req_stream) = resolver.resolve_request().await
         .map_err(|e| anyhow::anyhow!("H3 resolve error: {}", e))?;
-    info!("H3 Request: {} {}", req.method(), req.uri());
+    let connect_ip_requested = req
+        .extensions()
+        .get::<h3::ext::Protocol>()
+        .copied()
+        == Some(h3::ext::Protocol::CONNECT_IP);
+    info!(
+        "H3 Request: {} {} (connect-ip={})",
+        req.method(),
+        req.uri(),
+        connect_ip_requested
+    );
+
+    // Reject anything that is not an extended CONNECT with `:protocol=connect-ip`.
+    // Responding with capsules to a plain GET would be an immediate DPI tell, and
+    // it would also be a protocol violation (the MAVI_CONFIG/ADDRESS_ASSIGN flow
+    // below is only meaningful for a real connect-ip session). We emit a generic
+    // 404 + tiny HTML body so the stream looks like an ordinary web server
+    // answering for an unknown path, then finish the stream cleanly.
+    if !connect_ip_requested {
+        warn!(
+            "Rejecting non-connect-ip H3 request from {}: {} {}",
+            remote_addr,
+            req.method(),
+            req.uri()
+        );
+        let response = Response::builder()
+            .status(http::StatusCode::NOT_FOUND)
+            .header("content-type", "text/html; charset=utf-8")
+            .body(())
+            .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+        let _ = req_stream.send_response(response).await;
+        let _ = req_stream
+            .send_data(Bytes::from_static(
+                b"<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>",
+            ))
+            .await;
+        let _ = req_stream.finish().await;
+        return Ok(());
+    }
 
     let token = req.headers().get("authorization")
         .and_then(|h| h.to_str().ok())
@@ -407,24 +467,70 @@ pub async fn handle_h3_connection(
         whitelist_domains: Some(config.whitelist_domains.clone()),
     };
     
-    let config_bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
-    
+    // Build the MASQUE capsule stream. We always emit IETF-standard
+    // `ADDRESS_ASSIGN` (0x01) and `ROUTE_ADVERTISEMENT` (0x03) capsules so
+    // the wire format matches RFC 9484 byte-for-byte, then append a vendor
+    // `MAVI_CONFIG` capsule (0x4D56) carrying the full bincode-encoded
+    // `ControlMessage::Config`. Unknown capsules MUST be ignored per RFC 9297,
+    // so standard MASQUE clients see only valid connect-ip framing.
+    let mut capsule_stream: Vec<u8> = Vec::with_capacity(256);
+
+    let mut address_assigns = vec![AssignedAddress {
+        request_id: 0,
+        ip: IpAddr::V4(assigned_ip),
+        prefix_len: prefix_len_from_mask(state.network.mask()),
+    }];
+    if ipv6_enabled {
+        address_assigns.push(AssignedAddress {
+            request_id: 0,
+            ip: IpAddr::V6(assigned_ip6),
+            prefix_len: 64,
+        });
+    }
+    masque::encode_capsule(
+        CAPSULE_ADDRESS_ASSIGN,
+        &masque::encode_address_assign(&address_assigns),
+        &mut capsule_stream,
+    );
+
+    let mut routes = vec![IpAddressRange {
+        start: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        end: IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
+        ip_protocol: 0,
+    }];
+    if ipv6_enabled {
+        routes.push(IpAddressRange {
+            start: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            end: IpAddr::V6(std::net::Ipv6Addr::from([0xff; 16])),
+            ip_protocol: 0,
+        });
+    }
+    masque::encode_capsule(
+        CAPSULE_ROUTE_ADVERTISEMENT,
+        &masque::encode_route_advertisement(&routes),
+        &mut capsule_stream,
+    );
+
+    let mavi_config_bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
+    masque::encode_capsule(CAPSULE_MAVI_CONFIG, &mavi_config_bytes, &mut capsule_stream);
+
     let response = Response::builder()
         .status(http::StatusCode::OK)
         .body(())
         .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
     req_stream.send_response(response).await
         .map_err(|e| anyhow::anyhow!("H3 send_response error: {}", e))?;
-    req_stream.send_data(Bytes::from(config_bytes)).await
+    req_stream.send_data(Bytes::from(capsule_stream)).await
         .map_err(|e| anyhow::anyhow!("H3 send_data error: {}", e))?;
-    req_stream.finish().await
-        .map_err(|e| anyhow::anyhow!("H3 finish error: {}", e))?;
+    // IMPORTANT: the request stream must stay open for the whole connect-ip
+    // session so we can push additional capsules later and so the client side
+    // does not interpret a FIN as session teardown. Do NOT call req_stream.finish().
 
     info!("H3 Authenticated {} -> IPv4: {}, IPv6: {}", remote_addr, assigned_ip, assigned_ip6);
 
-    // VPN data plane: Use raw QUIC datagrams with HTTP/3 Quarter Stream ID prefix.
-    // The h3 SETTINGS exchange already advertised H3_DATAGRAM=1.
-    // VPN packets are sent as: [Quarter Stream ID (1 byte: 0x00)] [IP Packet]
+    // VPN data plane: connect-ip datagrams on the request stream (RFC 9484 §5).
+    // Each datagram is framed as: [Quarter Stream ID varint] [Context ID varint] [IP Packet].
+    // For stream ID 0 + Context ID 0 this is a 2-byte 0x00 0x00 prefix.
     let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(4096);
     state.register_client(assigned_ip, assigned_ip6, tx_client);
 
@@ -433,13 +539,13 @@ pub async fn handle_h3_connection(
     let gv4 = state.gateway_ip();
     let gv6 = state.gateway_ip_v6();
     let tunnel_mtu = config.mtu;
-    
-    // TUN -> QUIC (with H3 datagram framing)
+
+    // TUN -> QUIC (with connect-ip datagram framing)
     let tun_to_quic = tokio::spawn(async move {
         while let Some(packet) = rx_client.recv().await {
-            // Prepend Quarter Stream ID (0x00) for HTTP/3 Datagram framing
-            let mut h3_payload = Vec::with_capacity(packet.len() + 1);
-            h3_payload.push(0x00); // Quarter Stream ID
+            // Prepend [Quarter Stream ID = 0] [Context ID = 0] per RFC 9484 §5
+            let mut h3_payload = Vec::with_capacity(packet.len() + masque::DATAGRAM_PREFIX.len());
+            h3_payload.extend_from_slice(&masque::DATAGRAM_PREFIX);
             h3_payload.extend_from_slice(&packet);
 
             if let Err(e) = conn_send.send_datagram(Bytes::from(h3_payload)) {
@@ -462,7 +568,7 @@ pub async fn handle_h3_connection(
         }
     });
 
-    // QUIC -> TUN (strip H3 datagram framing)
+    // QUIC -> TUN (strip connect-ip datagram framing)
     let res = 'outer_loop: loop {
         let first_dg = match connection.read_datagram().await {
             Ok(data) => data,
@@ -480,9 +586,14 @@ pub async fn handle_h3_connection(
         }
 
         for datagram in batch {
-            // Skip Quarter Stream ID prefix (1 byte)
-            if datagram.len() <= 1 { continue; }
-            let packet = datagram.slice(1..);
+            // Strip [Quarter Stream ID] [Context ID] per RFC 9484 §5.
+            let inner_len = match masque::unwrap_datagram(&datagram) {
+                Some(slice) => slice.len(),
+                None => continue,
+            };
+            if inner_len == 0 { continue; }
+            let prefix_len = datagram.len() - inner_len;
+            let packet = datagram.slice(prefix_len..);
             if packet.is_empty() { continue; }
             
             let ver = packet[0] >> 4;

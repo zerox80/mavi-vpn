@@ -194,9 +194,9 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     });
 
     match result {
-        Ok((connection, config)) => {
+        Ok((connection, config, h3_guard)) => {
             clear_last_init_error();
-            let session = VpnSession::new(rt, connection, config, http3_framing.into());
+            let session = VpnSession::new(rt, connection, config, http3_framing.into(), h3_guard);
             Box::into_raw(Box::new(session)) as jlong
         },
         Err(e) => {

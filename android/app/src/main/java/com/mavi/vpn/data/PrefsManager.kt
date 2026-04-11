@@ -38,6 +38,10 @@ class PrefsManager(context: Context) {
         get() = prefs.getBoolean("saved_censorship_resistant", false)
         set(value) = prefs.edit().putBoolean("saved_censorship_resistant", value).apply()
 
+    var savedHttp3Framing: Boolean
+        get() = prefs.getBoolean("saved_http3_framing", false)
+        set(value) = prefs.edit().putBoolean("saved_http3_framing", value).apply()
+
     var savedUseKeycloak: Boolean
         get() = prefs.getBoolean("saved_use_keycloak", false)
         set(value) = prefs.edit().putBoolean("saved_use_keycloak", value).apply()

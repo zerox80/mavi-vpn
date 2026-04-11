@@ -7,6 +7,7 @@ pub struct VpnSession {
     pub runtime: tokio::runtime::Runtime,
     pub connection: quinn::Connection,
     pub config: ControlMessage,
+    pub http3_framing: bool,
     pub stop_flag: Arc<AtomicBool>,
     pub shutdown_tx: broadcast::Sender<()>,
 }
@@ -16,12 +17,14 @@ impl VpnSession {
         runtime: tokio::runtime::Runtime,
         connection: quinn::Connection,
         config: ControlMessage,
+        http3_framing: bool,
     ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
         Self {
             runtime,
             connection,
             config,
+            http3_framing,
             stop_flag: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
         }

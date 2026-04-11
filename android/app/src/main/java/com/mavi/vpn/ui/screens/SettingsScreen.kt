@@ -29,16 +29,18 @@ import kotlinx.coroutines.withContext
 @Composable
 fun SettingsScreen(
     viewModel: VpnViewModel,
-    onBack: (String, String, Boolean) -> Unit
+    onBack: (String, String, Boolean, Boolean) -> Unit
 ) {
     val context = LocalContext.current
     
     val initialMode by viewModel.splitMode.collectAsState()
     val initialSelection by viewModel.splitPackages.collectAsState()
     val initialCensorshipResistant by viewModel.censorshipResistant.collectAsState()
+    val initialHttp3Framing by viewModel.http3Framing.collectAsState()
     
     var mode by remember { mutableStateOf(initialMode) }
     var censorshipResistant by remember { mutableStateOf(initialCensorshipResistant) }
+    var http3Framing by remember { mutableStateOf(initialHttp3Framing) }
     
     val selectedPackages = remember { 
         mutableStateListOf<String>().apply { 
@@ -87,7 +89,7 @@ fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
         ) {
-            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant) }) {
+            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing) }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
             Text(
@@ -114,6 +116,32 @@ fun SettingsScreen(
             Switch(
                 checked = censorshipResistant,
                 onCheckedChange = { censorshipResistant = it },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Color(0xFF007AFF),
+                    uncheckedThumbColor = Color.Gray,
+                    uncheckedTrackColor = Color.DarkGray
+                )
+            )
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = "HTTP/3 Framing", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(text = "Tunnel packets inside HTTP/3 datagrams (RFC 9297).", color = Color.Gray, fontSize = 12.sp)
+            }
+            Switch(
+                checked = http3Framing,
+                onCheckedChange = { http3Framing = it },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
                     checkedTrackColor = Color(0xFF007AFF),
@@ -219,7 +247,7 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(16.dp))
         
         Button(
-            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant) },
+            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing) },
             modifier = Modifier.fillMaxWidth().height(50.dp),
             shape = RoundedCornerShape(12.dp)
         ) {

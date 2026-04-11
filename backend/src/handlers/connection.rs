@@ -1,19 +1,22 @@
+use std::{
+    net::{Ipv4Addr, Ipv6Addr},
+    sync::Arc,
+    time::Duration,
+};
+
 use anyhow::Result;
 use bytes::Bytes;
-use std::sync::Arc;
+use constant_time_eq::constant_time_eq;
+use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
+use futures_util::FutureExt;
+use http::Response;
+use shared::{icmp, ControlMessage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
-use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::Duration;
-use shared::ControlMessage;
-use shared::icmp;
-use futures_util::FutureExt;
-use constant_time_eq::constant_time_eq;
 
-use crate::config::Config;
-use crate::state::AppState;
-use crate::keycloak::KeycloakValidator;
+use crate::{config::Config, keycloak::KeycloakValidator, state::AppState};
+
+const H3_DETECTION_GRACE: Duration = Duration::from_millis(50);
 
 pub struct IpGuard {
     pub state: Arc<AppState>,
@@ -25,6 +28,65 @@ impl Drop for IpGuard {
     fn drop(&mut self) {
         self.state.release_ips(self.ip4, self.ip6);
         info!("Released IPs for dropped connection: {} / {}", self.ip4, self.ip6);
+    }
+}
+
+enum InitialStreams {
+    Raw {
+        send_stream: quinn::SendStream,
+        recv_stream: quinn::RecvStream,
+    },
+    H3 {
+        pre_bi: Option<(quinn::SendStream, quinn::RecvStream)>,
+        pre_uni: quinn::RecvStream,
+    },
+}
+
+fn negotiated_alpn(connection: &quinn::Connection) -> Option<Vec<u8>> {
+    let handshake_data = connection.handshake_data()?;
+    let handshake_data = handshake_data
+        .downcast::<quinn::crypto::rustls::HandshakeData>()
+        .ok()?;
+    handshake_data.protocol.clone()
+}
+
+async fn detect_initial_streams(connection: &quinn::Connection) -> Result<InitialStreams> {
+    match negotiated_alpn(connection).as_deref() {
+        Some(protocol) if protocol == b"mavivpn" => {
+            let (send_stream, recv_stream) = connection.accept_bi().await?;
+            Ok(InitialStreams::Raw {
+                send_stream,
+                recv_stream,
+            })
+        }
+        _ => {
+            tokio::select! {
+                biased;
+                uni_res = connection.accept_uni() => {
+                    Ok(InitialStreams::H3 {
+                        pre_bi: None,
+                        pre_uni: uni_res?,
+                    })
+                }
+                bi_res = connection.accept_bi() => {
+                    let pre_bi = bi_res?;
+                    match tokio::time::timeout(H3_DETECTION_GRACE, connection.accept_uni()).await {
+                        Ok(Ok(pre_uni)) => Ok(InitialStreams::H3 {
+                            pre_bi: Some(pre_bi),
+                            pre_uni,
+                        }),
+                        Ok(Err(err)) => Err(err.into()),
+                        Err(_) => {
+                            let (send_stream, recv_stream) = pre_bi;
+                            Ok(InitialStreams::Raw {
+                                send_stream,
+                                recv_stream,
+                            })
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -40,7 +102,29 @@ pub async fn handle_connection(
     let remote_addr = connection.remote_address();
     info!("New connection from {}", remote_addr);
 
-    let (mut send_stream, mut recv_stream) = connection.accept_bi().await?;
+    let (pre_bi, pre_uni) = match detect_initial_streams(&connection).await? {
+        InitialStreams::Raw {
+            send_stream,
+            recv_stream,
+        } => (Some((send_stream, recv_stream)), None),
+        InitialStreams::H3 { pre_bi, pre_uni } => (pre_bi, Some(pre_uni)),
+    };
+
+    if let Some(pre_uni) = pre_uni {
+        return handle_h3_connection(
+            connection,
+            pre_bi,
+            pre_uni,
+            state,
+            config,
+            tx_tun,
+            keycloak,
+            ipv6_enabled,
+        )
+        .await;
+    }
+
+    let (mut send_stream, mut recv_stream) = pre_bi.expect("raw detection always includes a bidi stream");
     
     let auth_result: Result<(Ipv4Addr, Ipv6Addr)> = async {
         let buf = tokio::time::timeout(Duration::from_secs(5), async {
@@ -242,4 +326,187 @@ async fn emulate_http3(conn: &quinn::Connection, stream: &mut quinn::SendStream)
     let _ = stream.finish();
     tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())
+}
+
+pub async fn handle_h3_connection(
+    connection: quinn::Connection,
+    pre_bi: Option<(quinn::SendStream, quinn::RecvStream)>,
+    pre_uni: quinn::RecvStream,
+    state: Arc<AppState>,
+    config: Config,
+    tx_tun: tokio::sync::mpsc::Sender<Bytes>,
+    keycloak: Option<Arc<KeycloakValidator>>,
+    ipv6_enabled: bool,
+) -> Result<()> {
+    let remote_addr = connection.remote_address();
+    info!("Detected HTTP/3 L7 client from {}", remote_addr);
+
+    let h3_conn_wrapper =
+        crate::network::h3_quinn::Connection::with_pre_streams(connection.clone(), pre_bi, Some(pre_uni));
+    let mut h3_conn = h3::server::builder()
+        .enable_datagram(true)
+        .build(h3_conn_wrapper)
+        .await
+        .map_err(|e| anyhow::anyhow!("H3 build failed: {}", e))?;
+
+    // accept() returns a RequestResolver; call resolve_request() to get (Request, RequestStream)
+    let resolver = h3_conn.accept().await
+        .map_err(|e| anyhow::anyhow!("H3 accept error: {}", e))?
+        .ok_or_else(|| anyhow::anyhow!("Expected H3 request"))?;
+    let (req, mut req_stream) = resolver.resolve_request().await
+        .map_err(|e| anyhow::anyhow!("H3 resolve error: {}", e))?;
+    info!("H3 Request: {} {}", req.method(), req.uri());
+
+    let token = req.headers().get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+
+    let auth_result: Result<(Ipv4Addr, Ipv6Addr)> = async {
+        if let Some(kc) = &keycloak {
+            if !kc.validate_token(&token).await? {
+                anyhow::bail!("Access Denied: Invalid Keycloak Token");
+            }
+        } else if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
+            anyhow::bail!("Access Denied: Invalid Token");
+        }
+        state.assign_ip_pair()
+    }.await;
+
+    let (assigned_ip, assigned_ip6) = match auth_result {
+        Ok(ips) => ips,
+        Err(e) => {
+            let error_msg = format!("Unauthorized: {}", e);
+            warn!("H3 Unauthorized from {}: {}", remote_addr, e);
+            let response = Response::builder()
+                .status(http::StatusCode::UNAUTHORIZED)
+                .body(())
+                .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+            let _ = req_stream.send_response(response).await;
+            let _ = req_stream.send_data(Bytes::from("Unauthorized")).await;
+            let _ = req_stream.finish().await;
+            return Err(anyhow::anyhow!("H3 Error: {}", error_msg));
+        }
+    };
+
+    let _ip_guard = IpGuard { state: state.clone(), ip4: assigned_ip, ip6: assigned_ip6 };
+
+    let success_msg = ControlMessage::Config {
+        assigned_ip,
+        netmask: state.network.mask(),
+        gateway: state.gateway_ip(),
+        dns_server: config.dns,
+        mtu: config.mtu as u16,
+        assigned_ipv6: if ipv6_enabled { Some(assigned_ip6) } else { None },
+        netmask_v6: if ipv6_enabled { Some(64) } else { None },
+        gateway_v6: if ipv6_enabled { Some(state.gateway_ip_v6()) } else { None },
+        dns_server_v6: if ipv6_enabled {
+            Some(config.dns_v6.unwrap_or_else(|| std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)))
+        } else { None },
+        whitelist_domains: Some(config.whitelist_domains.clone()),
+    };
+    
+    let config_bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
+    
+    let response = Response::builder()
+        .status(http::StatusCode::OK)
+        .body(())
+        .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+    req_stream.send_response(response).await
+        .map_err(|e| anyhow::anyhow!("H3 send_response error: {}", e))?;
+    req_stream.send_data(Bytes::from(config_bytes)).await
+        .map_err(|e| anyhow::anyhow!("H3 send_data error: {}", e))?;
+    req_stream.finish().await
+        .map_err(|e| anyhow::anyhow!("H3 finish error: {}", e))?;
+
+    info!("H3 Authenticated {} -> IPv4: {}, IPv6: {}", remote_addr, assigned_ip, assigned_ip6);
+
+    // VPN data plane: Use raw QUIC datagrams with HTTP/3 Quarter Stream ID prefix.
+    // The h3 SETTINGS exchange already advertised H3_DATAGRAM=1.
+    // VPN packets are sent as: [Quarter Stream ID (1 byte: 0x00)] [IP Packet]
+    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(4096);
+    state.register_client(assigned_ip, assigned_ip6, tx_client);
+
+    let conn_send = connection.clone();
+    let tx_tun_icmp = tx_tun.clone();
+    let gv4 = state.gateway_ip();
+    let gv6 = state.gateway_ip_v6();
+    let tunnel_mtu = config.mtu;
+    
+    // TUN -> QUIC (with H3 datagram framing)
+    let tun_to_quic = tokio::spawn(async move {
+        while let Some(packet) = rx_client.recv().await {
+            // Prepend Quarter Stream ID (0x00) for HTTP/3 Datagram framing
+            let mut h3_payload = Vec::with_capacity(packet.len() + 1);
+            h3_payload.push(0x00); // Quarter Stream ID
+            h3_payload.extend_from_slice(&packet);
+
+            if let Err(e) = conn_send.send_datagram(Bytes::from(h3_payload)) {
+                if matches!(e, quinn::SendDatagramError::TooLarge) {
+                    if packet.is_empty() { continue; }
+                    let ver = packet[0] >> 4;
+                    let gw = if ver == 4 {
+                        Some(std::net::IpAddr::V4(gv4))
+                    } else if ver == 6 {
+                        Some(std::net::IpAddr::V6(gv6))
+                    } else {
+                        None
+                    };
+                    let reported_mtu = if ver == 6 { tunnel_mtu.max(1280) } else { tunnel_mtu };
+                    if let Some(icmp_p) = icmp::generate_packet_too_big(&packet, reported_mtu, gw) {
+                        let _ = tx_tun_icmp.try_send(Bytes::from(icmp_p));
+                    }
+                }
+            }
+        }
+    });
+
+    // QUIC -> TUN (strip H3 datagram framing)
+    let res = 'outer_loop: loop {
+        let first_dg = match connection.read_datagram().await {
+            Ok(data) => data,
+            Err(e) => break Err(anyhow::anyhow!("H3 connection lost: {}", e)),
+        };
+
+        let mut batch = Vec::with_capacity(64);
+        batch.push(first_dg);
+        for _ in 0..63 {
+            if let Some(Ok(p)) = connection.read_datagram().now_or_never() {
+                batch.push(p);
+            } else {
+                break;
+            }
+        }
+
+        for datagram in batch {
+            // Skip Quarter Stream ID prefix (1 byte)
+            if datagram.len() <= 1 { continue; }
+            let packet = datagram.slice(1..);
+            if packet.is_empty() { continue; }
+            
+            let ver = packet[0] >> 4;
+            let mut valid = false;
+            if ver == 4 {
+                if let Ok(h) = Ipv4HeaderSlice::from_slice(&packet) {
+                    if h.source_addr() == assigned_ip { valid = true; }
+                }
+            } else if ver == 6 {
+                if let Ok(h) = Ipv6HeaderSlice::from_slice(&packet) {
+                    if h.source_addr() == assigned_ip6 { valid = true; }
+                }
+            }
+            
+            if valid {
+                if tx_tun.send(packet).await.is_err() {
+                    break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
+                }
+            } else if tx_tun.is_closed() {
+                break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
+            }
+        }
+    };
+
+    tun_to_quic.abort();
+    res
 }

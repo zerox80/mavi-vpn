@@ -1,8 +1,12 @@
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
-use shared::ControlMessage;
+use shared::{
+    masque::{self, CAPSULE_MAVI_CONFIG},
+    ControlMessage,
+};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::crypto::{decode_hex, PinnedServerVerifier};
@@ -187,7 +191,8 @@ async fn connect_and_handshake_h3(
     let h3_conn = H3QuinnConnection::new(connection.clone());
     let mut builder = h3::client::builder();
     builder.enable_datagram(true);
-    let (mut driver, mut send_request) = builder.build::<_, _, bytes::Bytes>(h3_conn).await
+    builder.enable_extended_connect(true);
+    let (mut driver, mut send_request) = builder.build::<_, _, Bytes>(h3_conn).await
         .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
 
     // Drive the H3 connection in the background for the lifetime of the session.
@@ -196,17 +201,22 @@ async fn connect_and_handshake_h3(
         log::debug!("H3 driver finished: {}", e);
     });
 
+    // RFC 9484 connect-ip: Extended CONNECT with :protocol=connect-ip.
+    // The target template /.well-known/masque/ip/*/* tunnels all addresses+protocols.
     let req = http::Request::builder()
-        .method("GET")
-        .uri("https://localhost/vpn")
+        .method(http::Method::CONNECT)
+        .uri("https://mavi-vpn/.well-known/masque/ip/*/*/")
+        .extension(h3::ext::Protocol::CONNECT_IP)
         .header("authorization", format!("Bearer {}", token))
+        .header("capsule-protocol", "?1")
         .body(())
-        .map_err(|e| anyhow::anyhow!("Failed to build H3 request: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to build H3 CONNECT request: {}", e))?;
 
     let mut stream = send_request.send_request(req).await
         .map_err(|e| anyhow::anyhow!("H3 send_request failed: {}", e))?;
-    stream.finish().await
-        .map_err(|e| anyhow::anyhow!("H3 finish failed: {}", e))?;
+
+    // NOTE: do NOT call stream.finish(). connect-ip keeps the request stream
+    // open bidirectionally for the whole session (for capsules + control).
 
     let resp = stream.recv_response().await
         .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {}", e))?;
@@ -215,15 +225,59 @@ async fn connect_and_handshake_h3(
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
     }
 
-    let mut body_buf = Vec::new();
-    while let Some(chunk) = stream.recv_data().await
-        .map_err(|e| anyhow::anyhow!("H3 recv_data failed: {}", e))? {
-        body_buf.extend_from_slice(chunk.chunk());
+    // Parse capsule stream. The server sends ADDRESS_ASSIGN + ROUTE_ADVERTISEMENT
+    // (standard connect-ip) followed by the vendor MAVI_CONFIG capsule carrying
+    // our bincode ControlMessage::Config. Unknown capsule types are ignored per
+    // RFC 9297 §3.2.
+    //
+    // Every wait on `recv_data` is bounded by the remaining handshake budget so
+    // a silent or slow-drip server cannot block us indefinitely, and the buffer
+    // itself is capped by `masque::MAX_CAPSULE_BUF`.
+    let mut capsule_buf: Vec<u8> = Vec::new();
+    let mut config: Option<ControlMessage> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    'read: while config.is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule");
+        }
+
+        loop {
+            let (ctype, payload, consumed) = match masque::read_capsule(&capsule_buf) {
+                Some((t, p, n)) => (t, p.to_vec(), n),
+                None => break,
+            };
+            capsule_buf.drain(..consumed);
+
+            if ctype == CAPSULE_MAVI_CONFIG {
+                let (cfg, _): (ControlMessage, _) =
+                    bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+                        .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {}", e))?;
+                config = Some(cfg);
+                break 'read;
+            }
+            // Ignore ADDRESS_ASSIGN, ROUTE_ADVERTISEMENT, and any unknown type.
+        }
+
+        let chunk = match tokio::time::timeout(remaining, stream.recv_data()).await {
+            Ok(Ok(Some(data))) => data,
+            Ok(Ok(None)) => {
+                anyhow::bail!("Server closed connect-ip stream before MAVI_CONFIG")
+            }
+            Ok(Err(e)) => anyhow::bail!("H3 recv_data failed: {}", e),
+            Err(_) => anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule"),
+        };
+        capsule_buf.extend_from_slice(chunk.chunk());
+        if capsule_buf.len() > masque::MAX_CAPSULE_BUF {
+            anyhow::bail!(
+                "connect-ip capsule buffer exceeded {} bytes",
+                masque::MAX_CAPSULE_BUF
+            );
+        }
     }
 
-    let config: ControlMessage = bincode::serde::decode_from_slice(&body_buf, bincode::config::standard())
-        .map(|(v, _)| v)
-        .map_err(|e| anyhow::anyhow!("Failed to decode H3 config: {}", e))?;
+    let config = config.expect("loop invariant: broken out only when config set");
 
     if let ControlMessage::Error { message } = &config {
         return Err(anyhow::anyhow!("Server Error: {}", message));

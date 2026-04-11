@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod icmp;
 pub mod ipc;
+pub mod masque;
 
 /// Control-plane messages exchanged over the QUIC bidirectional stream during
 /// connection setup (the "handshake phase").

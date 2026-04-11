@@ -11,6 +11,9 @@ RUN sed -i '/members = \[/,/\]/c\members = ["backend", "shared"]' Cargo.toml
 COPY shared/Cargo.toml ./shared/Cargo.toml
 COPY backend/Cargo.toml ./backend/Cargo.toml
 COPY external ./external
+# Clone the patched h3 dependency (nested git repo, not tracked by parent)
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 https://github.com/hyperium/h3.git scratch/h3-repo
 
 # 2. Create Dummy Source to Cache Dependencies
 RUN mkdir -p shared/src backend/src

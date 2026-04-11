@@ -64,8 +64,8 @@ class MainActivity : ComponentActivity() {
                     } else {
                         SettingsScreen(
                             viewModel = viewModel,
-                            onBack = { mode, pkgs, crMode -> 
-                                viewModel.saveSettings(mode, pkgs, crMode)
+                            onBack = { mode, pkgs, crMode, h3Mode -> 
+                                viewModel.saveSettings(mode, pkgs, crMode, h3Mode)
                                 currentScreen = "home"
                             }
                         )

@@ -16,6 +16,9 @@ bytes = { workspace = true }
 bincode = { workspace = true }
 anyhow = { workspace = true }
 socket2 = { workspace = true }
+http = "1"
+h3 = { workspace = true }
+h3-quinn = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 etherparse = { workspace = true }
 reqwest = { version = "0.13", features = ["json", "rustls", "form"], default-features = false }

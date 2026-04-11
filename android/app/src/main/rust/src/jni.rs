@@ -59,6 +59,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     endpoint: JString<'local>,
     cert_pin: JString<'local>,
     censorship_resistant: jni::sys::jboolean,
+    http3_framing: jni::sys::jboolean,
 ) -> jlong {
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let mut env = guard.borrow_env_mut();
@@ -189,13 +190,13 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     };
 
     let result = rt.block_on(async {
-        connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant).await
+        connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant.into(), http3_framing.into()).await
     });
 
     match result {
         Ok((connection, config)) => {
             clear_last_init_error();
-            let session = VpnSession::new(rt, connection, config);
+            let session = VpnSession::new(rt, connection, config, http3_framing.into());
             Box::into_raw(Box::new(session)) as jlong
         },
         Err(e) => {
@@ -266,9 +267,10 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_startLoop<'local>
         let stop_flag = session.stop_flag.clone();
         let conn = session.connection.clone();
         let config = session.config.clone();
+        let http3_framing = session.http3_framing;
         let shutdown_rx = session.shutdown_tx.subscribe();
         session.runtime.block_on(async {
-            run_vpn_loop(conn, tun_fd, stop_flag, config, shutdown_rx).await;
+            run_vpn_loop(conn, tun_fd, stop_flag, config, shutdown_rx, http3_framing).await;
         });
     }));
 }

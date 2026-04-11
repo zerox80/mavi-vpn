@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use log::{info, error, warn};
-use shared::ControlMessage;
+use shared::{ControlMessage, masque};
 use jni::sys::jint;
 use bytes::BufMut;
 use futures_util::FutureExt;
@@ -105,10 +105,11 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
             let packet_len = packet.len();
             let packet_bytes = packet.clone(); 
 
-            // In H3 mode, prepend Quarter Stream ID (0x00)
+            // In H3/MASQUE mode, prepend connect-ip datagram header:
+            // [Quarter Stream ID varint = 0x00] [Context ID varint = 0x00] [IP packet]
             let payload = if http3_framing {
-                let mut h3_payload = bytes::BytesMut::with_capacity(packet.len() + 1);
-                h3_payload.put_u8(0x00);
+                let mut h3_payload = bytes::BytesMut::with_capacity(packet.len() + masque::DATAGRAM_PREFIX.len());
+                h3_payload.put_slice(&masque::DATAGRAM_PREFIX);
                 h3_payload.put(packet);
                 h3_payload.freeze()
             } else {
@@ -168,21 +169,23 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
             if stop_download.load(Ordering::Relaxed) { break; }
             
             match conn_download.read_datagram().await {
-                Ok(mut first_packet) => {
+                Ok(first_packet) => {
                     let mut batch = Vec::with_capacity(64);
                     if http3_framing {
-                        if first_packet.len() > 1 {
-                            batch.push(first_packet.slice(1..));
+                        if let Some(inner) = masque::unwrap_datagram(&first_packet) {
+                            let prefix = first_packet.len() - inner.len();
+                            batch.push(first_packet.slice(prefix..));
                         }
                     } else {
                         batch.push(first_packet);
                     }
 
                     for _ in 0..63 {
-                         if let Some(Ok(mut pkt)) = conn_download.read_datagram().now_or_never() {
+                         if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
                              if http3_framing {
-                                 if pkt.len() > 1 {
-                                     batch.push(pkt.slice(1..));
+                                 if let Some(inner) = masque::unwrap_datagram(&pkt) {
+                                     let prefix = pkt.len() - inner.len();
+                                     batch.push(pkt.slice(prefix..));
                                  }
                              } else {
                                  batch.push(pkt);

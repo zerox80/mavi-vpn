@@ -7,7 +7,8 @@
 //! - Dual-stack (IPv4/IPv6) support.
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
+use h3_quinn::Connection as H3QuinnConnection;
 use sha2::{Digest, Sha256};
 use shared::{icmp, ipc::Config, ControlMessage};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -128,6 +129,7 @@ async fn run_session(
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
         config.censorship_resistant,
+        config.http3_framing,
     )
     .await?;
 
@@ -227,6 +229,7 @@ async fn run_session(
     let conn_sender = connection.clone();
     let alive_tun = session_alive.clone();
     let run_tun = global_running.clone();
+    let is_h3_framing = config.http3_framing;
     let tun_to_quic = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
@@ -235,8 +238,16 @@ async fn run_session(
             }
             match tun_reader.read(&mut buf).await {
                 Ok(n) if n > 0 => {
-                    let data = Bytes::copy_from_slice(&buf[..n]);
-                    if let Err(e) = conn_sender.send_datagram(data) {
+                    // In H3 mode, prepend Quarter Stream ID (0x00)
+                    let payload = if is_h3_framing {
+                        let mut h3_payload = Vec::with_capacity(n + 1);
+                        h3_payload.push(0x00);
+                        h3_payload.extend_from_slice(&buf[..n]);
+                        Bytes::from(h3_payload)
+                    } else {
+                        Bytes::copy_from_slice(&buf[..n])
+                    };
+                    if let Err(e) = conn_sender.send_datagram(payload) {
                         if matches!(e, quinn::SendDatagramError::TooLarge) {
                             let current_mtu =
                                 conn_sender.max_datagram_size().unwrap_or(1200) as u16;
@@ -268,13 +279,19 @@ async fn run_session(
     let tun_writer = async_tun.clone();
     let alive_quic = session_alive.clone();
     let run_quic = global_running.clone();
+    let is_h3_framing_dl = config.http3_framing;
     let quic_to_tun = tokio::spawn(async move {
         loop {
             if !run_quic.load(Ordering::Relaxed) || !alive_quic.load(Ordering::Relaxed) {
                 break;
             }
             match connection.read_datagram().await {
-                Ok(data) => {
+                Ok(mut data) => {
+                    // In H3 mode, strip Quarter Stream ID prefix (1 byte)
+                    if is_h3_framing_dl {
+                        if data.len() <= 1 { continue; }
+                        data.advance(1);
+                    }
                     if data.is_empty() {
                         continue;
                     }
@@ -318,6 +335,7 @@ async fn connect_and_handshake(
     endpoint_str: String,
     cert_pin: Vec<u8>,
     censorship_resistant: bool,
+    http3_framing: bool,
 ) -> Result<(quinn::Connection, ControlMessage)> {
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
@@ -330,7 +348,8 @@ async fn connect_and_handshake(
     .with_custom_certificate_verifier(verifier)
     .with_no_client_auth();
 
-    client_crypto.alpn_protocols = if censorship_resistant {
+    // HTTP/3 transport requires h3. Raw mode keeps mavivpn as the preferred ALPN.
+    client_crypto.alpn_protocols = if http3_framing || censorship_resistant {
         vec![b"h3".to_vec()]
     } else {
         vec![b"mavivpn".to_vec(), b"h3".to_vec()]
@@ -395,21 +414,76 @@ async fn connect_and_handshake(
         .await
         .context("QUIC handshake failed")?;
 
-    // Application-level handshake (Auth -> Config)
-    let (mut send, mut recv) = connection.open_bi().await?;
-    let auth_msg = ControlMessage::Auth { token };
-    let encoded = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
-    send.write_u32_le(encoded.len() as u32).await?;
-    send.write_all(&encoded).await?;
+    // Application-level handshake
+    let config = if http3_framing {
+        connect_and_handshake_h3(connection.clone(), token).await?
+    } else {
+        let (mut send, mut recv) = connection.open_bi().await?;
+        let auth_msg = ControlMessage::Auth { token };
+        let encoded = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
+        send.write_u32_le(encoded.len() as u32).await?;
+        send.write_all(&encoded).await?;
+        let _ = send.finish();
 
-    let len = recv.read_u32_le().await? as usize;
-    if len > 65536 { anyhow::bail!("Server response too large: {} bytes", len); }
-    let mut buf = vec![0u8; len];
-    recv.read_exact(&mut buf).await?;
-    let config: ControlMessage =
-        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
+        let len = recv.read_u32_le().await? as usize;
+        if len > 65536 { anyhow::bail!("Server response too large: {} bytes", len); }
+        let mut buf = vec![0u8; len];
+        recv.read_exact(&mut buf).await?;
+        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?
+    };
 
     Ok((connection, config))
+}
+
+/// HTTP/3 Layer 7 handshake: Uses the h3 crate to send a proper HTTP/3 request.
+async fn connect_and_handshake_h3(
+    connection: quinn::Connection,
+    token: String,
+) -> Result<ControlMessage> {
+    let h3_conn = H3QuinnConnection::new(connection.clone());
+    let mut builder = h3::client::builder();
+    builder.enable_datagram(true);
+    let (mut driver, mut send_request) = builder.build::<_, _, bytes::Bytes>(h3_conn).await
+        .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
+
+    // Drive the H3 connection in the background
+    let drive_handle = tokio::spawn(async move {
+        let e = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+        tracing::warn!("H3 driver error: {}", e);
+    });
+
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/vpn")
+        .header("authorization", format!("Bearer {}", token))
+        .body(())
+        .context("Failed to build H3 request")?;
+
+    let mut stream = send_request.send_request(req).await
+        .map_err(|e| anyhow::anyhow!("H3 send_request failed: {}", e))?;
+    stream.finish().await
+        .map_err(|e| anyhow::anyhow!("H3 finish failed: {}", e))?;
+
+    let resp = stream.recv_response().await
+        .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {}", e))?;
+
+    if resp.status() != http::StatusCode::OK {
+        anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
+    }
+
+    // Read the response body (bincode-encoded ControlMessage)
+    let mut body_buf = Vec::new();
+    while let Some(chunk) = stream.recv_data().await
+        .map_err(|e| anyhow::anyhow!("H3 recv_data failed: {}", e))? {
+        body_buf.extend_from_slice(chunk.chunk());
+    }
+
+    let config: ControlMessage = bincode::serde::decode_from_slice(&body_buf, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow::anyhow!("Failed to decode H3 config: {}", e))?;
+
+    drive_handle.abort();
+    Ok(config)
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {

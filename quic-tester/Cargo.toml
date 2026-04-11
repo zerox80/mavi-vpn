@@ -7,3 +7,5 @@ edition = "2024"
 quinn.workspace = true
 rustls.workspace = true
 tokio.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true

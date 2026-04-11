@@ -45,3 +45,4 @@ gui/src-tauri/gen/schemas/linux-schema.json
 android/app/release/
 android/gradle/gradle-daemon-jvm.properties
 android/app/release/app-release.apk
+android/.kotlin/sessions/kotlin-compiler-9575080087113769916.salive

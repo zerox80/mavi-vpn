@@ -17,6 +17,9 @@ tokio = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 bytes = { workspace = true }
+http = "1"
+h3 = { workspace = true }
+h3-quinn = { workspace = true }
 bincode = { workspace = true }
 anyhow = { workspace = true }
 socket2 = { workspace = true }

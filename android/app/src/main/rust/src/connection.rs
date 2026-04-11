@@ -1,16 +1,39 @@
-use std::sync::Arc;
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use bytes::Buf;
+use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::ControlMessage;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use crate::crypto::{decode_hex, PinnedServerVerifier};
 
+/// Holds the h3 `SendRequest` + driver task for the lifetime of the VPN session.
+///
+/// `h3::client::SendRequest::drop` decrements an internal sender count; when the last
+/// handle goes away it calls `handle_connection_error_on_stream(H3_NO_ERROR,
+/// "Connection closed by client")` and tears down the underlying quinn connection.
+/// Keeping this guard alongside the quinn::Connection prevents that early shutdown
+/// so the VPN datagram plane can keep using the same connection after the H3 auth
+/// request completes.
+pub struct H3SessionGuard {
+    _send_request: h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
+    drive_handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for H3SessionGuard {
+    fn drop(&mut self) {
+        self.drive_handle.abort();
+    }
+}
+
 pub async fn connect_and_handshake(
-    socket: std::net::UdpSocket, 
-    token: String, 
-    endpoint_str: String, 
+    socket: std::net::UdpSocket,
+    token: String,
+    endpoint_str: String,
     cert_pin: String,
     censorship_resistant: bool,
-) -> anyhow::Result<(quinn::Connection, ControlMessage)> {
+    http3_framing: bool,
+) -> anyhow::Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
     
     info!("Connect and Handshake started. Pin: {}", cert_pin);
 
@@ -29,12 +52,10 @@ pub async fn connect_and_handshake(
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
     
-    // STRICT MODE: If censorship_resistant is enabled, we ONLY send "h3".
-    // We do NOT send "mavivpn" as a fallback, because the string "mavivpn" in the ClientHello 
-    // is a cleartext fingerprint that censors can use to block us.
-    if censorship_resistant {
+    // HTTP/3 transport requires h3. Raw mode keeps mavivpn as the preferred ALPN.
+    if http3_framing || censorship_resistant {
         client_crypto.alpn_protocols = vec![b"h3".to_vec()];
-        info!("Censorship Resistant Mode enabled. ALPN: h3 (Strict)");
+        info!("HTTP/3 transport enabled. ALPN: h3");
     } else {
         client_crypto.alpn_protocols = vec![b"mavivpn".to_vec(), b"h3".to_vec()];
         info!("Standard Mode enabled. ALPN: mavivpn, h3");
@@ -115,37 +136,106 @@ pub async fn connect_and_handshake(
     info!("Connection established");
 
     // Handshake
-    let (mut send_stream, mut recv_stream) = connection.open_bi().await?;
-    info!("Stream opened");
-    
-    let auth_msg = ControlMessage::Auth { token };
-    let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard()).map_err(|e| anyhow::anyhow!("{}", e))?;
-    send_stream.write_u32_le(bytes.len() as u32).await?;
-    send_stream.write_all(&bytes).await?;
-    info!("Auth sent");
-    
-    // Read Config
-    let len = recv_stream.read_u32_le().await? as usize;
-    if len > 65536 {
-        return Err(anyhow::anyhow!("Server response too large: {} bytes", len));
-    }
-    let mut buf = vec![0u8; len];
-    if let Err(e) = recv_stream.read_exact(&mut buf).await {
-        if len == 6401 && censorship_resistant {
-            return Err(anyhow::anyhow!("Access Denied: Server rejected the token. Check Keycloak logs or token validity."));
+    //
+    // `h3_guard` (when present) keeps the h3 SendRequest + driver task alive
+    // for the whole VPN session. The caller must hold it until the session ends;
+    // dropping it earlier would send CONNECTION_CLOSE(H3_NO_ERROR) and kill the
+    // VPN datagram plane.
+    let (config, h3_guard) = if http3_framing {
+        let (cfg, guard) = connect_and_handshake_h3(connection.clone(), token).await?;
+        (cfg, Some(guard))
+    } else {
+        let (mut send_stream, mut recv_stream) = connection.open_bi().await?;
+        info!("Stream opened");
+
+        let auth_msg = ControlMessage::Auth { token };
+        let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard()).map_err(|e| anyhow::anyhow!("{}", e))?;
+        send_stream.write_u32_le(bytes.len() as u32).await?;
+        send_stream.write_all(&bytes).await?;
+        info!("Auth sent");
+
+        // Read Config
+        let len = recv_stream.read_u32_le().await? as usize;
+        if len > 65536 {
+            return Err(anyhow::anyhow!("Server response too large: {} bytes", len));
         }
-        return Err(anyhow::anyhow!("Handshake read error: {}", e));
+        let mut buf = vec![0u8; len];
+        if let Err(e) = recv_stream.read_exact(&mut buf).await {
+            if len == 6401 && censorship_resistant {
+                return Err(anyhow::anyhow!("Access Denied: Server rejected the token. Check Keycloak logs or token validity."));
+            }
+            return Err(anyhow::anyhow!("Handshake read error: {}", e));
+        }
+
+        let cfg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+            .map(|(v, _)| v)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if let ControlMessage::Error { message } = &cfg {
+            return Err(anyhow::anyhow!("Server Error: {}", message));
+        }
+        (cfg, None)
+    };
+
+    Ok((connection, config, h3_guard))
+}
+
+async fn connect_and_handshake_h3(
+    connection: quinn::Connection,
+    token: String,
+) -> anyhow::Result<(ControlMessage, H3SessionGuard)> {
+    let h3_conn = H3QuinnConnection::new(connection.clone());
+    let mut builder = h3::client::builder();
+    builder.enable_datagram(true);
+    let (mut driver, mut send_request) = builder.build::<_, _, bytes::Bytes>(h3_conn).await
+        .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
+
+    // Drive the H3 connection in the background for the lifetime of the session.
+    let drive_handle = tokio::spawn(async move {
+        let e = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+        log::debug!("H3 driver finished: {}", e);
+    });
+
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/vpn")
+        .header("authorization", format!("Bearer {}", token))
+        .body(())
+        .map_err(|e| anyhow::anyhow!("Failed to build H3 request: {}", e))?;
+
+    let mut stream = send_request.send_request(req).await
+        .map_err(|e| anyhow::anyhow!("H3 send_request failed: {}", e))?;
+    stream.finish().await
+        .map_err(|e| anyhow::anyhow!("H3 finish failed: {}", e))?;
+
+    let resp = stream.recv_response().await
+        .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {}", e))?;
+
+    if resp.status() != http::StatusCode::OK {
+        anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
     }
-    
-    let config: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+
+    let mut body_buf = Vec::new();
+    while let Some(chunk) = stream.recv_data().await
+        .map_err(|e| anyhow::anyhow!("H3 recv_data failed: {}", e))? {
+        body_buf.extend_from_slice(chunk.chunk());
+    }
+
+    let config: ControlMessage = bincode::serde::decode_from_slice(&body_buf, bincode::config::standard())
         .map(|(v, _)| v)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    
+        .map_err(|e| anyhow::anyhow!("Failed to decode H3 config: {}", e))?;
+
     if let ControlMessage::Error { message } = &config {
         return Err(anyhow::anyhow!("Server Error: {}", message));
     }
-    
-    Ok((connection, config))
+
+    Ok((
+        config,
+        H3SessionGuard {
+            _send_request: send_request,
+            drive_handle,
+        },
+    ))
 }
 
 fn endpoint_host(endpoint: &str) -> String {

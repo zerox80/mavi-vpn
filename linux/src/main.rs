@@ -374,6 +374,10 @@ async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Config>
             "  CR Mode: {}",
             if saved.censorship_resistant { "Yes" } else { "No" }
         );
+        println!(
+            "  HTTP/3 Framing: {}",
+            if saved.http3_framing { "Yes" } else { "No" }
+        );
         println!();
 
         print!("Use this configuration? [Y/n]: ");
@@ -461,6 +465,11 @@ async fn prompt_new_config() -> Result<Config> {
     let cr_input = read_line()?.to_lowercase();
     let censorship_resistant = cr_input == "y" || cr_input == "yes";
 
+    print!("HTTP/3 Framing (RFC 9297)? [y/N]: ");
+    stdout.flush()?;
+    let h3_input = read_line()?.to_lowercase();
+    let http3_framing = h3_input == "y" || h3_input == "yes";
+
     println!();
 
     Ok(Config {
@@ -468,6 +477,7 @@ async fn prompt_new_config() -> Result<Config> {
         token,
         cert_pin,
         censorship_resistant,
+        http3_framing,
         kc_auth,
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,

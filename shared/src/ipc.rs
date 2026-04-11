@@ -36,6 +36,9 @@ pub struct Config {
     pub cert_pin: String,
     /// Enable Layer 7 obfuscation (pretend to be HTTP/3).
     pub censorship_resistant: bool,
+    /// Enable strict HTTP/3 Payload framing.
+    #[serde(default)]
+    pub http3_framing: bool,
     /// Was Keycloak authentication used?
     pub kc_auth: Option<bool>,
     /// Keycloak Server URL.

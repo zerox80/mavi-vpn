@@ -202,6 +202,7 @@ async fn load_or_prompt_config() -> Result<Config> {
             println!("  Token: {}...", &saved.token.chars().take(8).collect::<String>());
         }
         println!("  CR Mode: {}", if saved.censorship_resistant { "Ja" } else { "Nein" });
+        println!("  HTTP/3 Framing: {}", if saved.http3_framing { "Ja" } else { "Nein" });
         println!();
         
         print!("Diese Konfiguration verwenden? [J/n]: ");
@@ -292,6 +293,11 @@ async fn prompt_new_config() -> Result<Config> {
     let cr_input = read_line()?.to_lowercase();
     let censorship_resistant = cr_input == "j" || cr_input == "ja" || cr_input == "y" || cr_input == "yes";
 
+    print!("HTTP/3 Datagram Framing? (Nur nützlich mit CR Mode) [j/N]: ");
+    stdout.flush()?;
+    let h3_input = read_line()?.to_lowercase();
+    let http3_framing = h3_input == "j" || h3_input == "ja" || h3_input == "y" || h3_input == "yes";
+
     println!();
 
     Ok(Config {
@@ -299,6 +305,7 @@ async fn prompt_new_config() -> Result<Config> {
         token,
         cert_pin,
         censorship_resistant,
+        http3_framing,
         kc_auth,
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,

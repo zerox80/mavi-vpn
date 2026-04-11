@@ -13,6 +13,9 @@ tokio-util = "0.7"
 quinn = { workspace = true, default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
 bytes = { workspace = true }
 shared = { workspace = true }
+http = "1"
+h3 = { workspace = true }
+h3-quinn = { workspace = true }
 android_logger = "0.15"
 log = "0.4"
 anyhow = { workspace = true }

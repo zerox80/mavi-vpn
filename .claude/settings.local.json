@@ -25,7 +25,10 @@
       "Bash(echo \"EXIT: $?\")",
       "Bash(echo \"RC=$?\")",
       "Bash(echo \"DONE $?\")",
-      "Bash(grep -v \"//\")"
+      "Bash(grep -v \"//\")",
+      "PowerShell(Get-ChildItem:*)",
+      "PowerShell(cargo check:*)",
+      "PowerShell(rustup target:*)"
     ]
   }
 }

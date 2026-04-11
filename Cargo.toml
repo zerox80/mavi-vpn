@@ -34,6 +34,11 @@ h3-quinn = { version = "0.0.10", features = ["datagram"] }
 quinn = { path = "external/quinn/quinn" }
 quinn-proto = { path = "external/quinn/quinn-proto" }
 quinn-udp = { path = "external/quinn/quinn-udp" }
+# Local h3 / h3-quinn copies carry the unreleased RFC 9484 (connect-ip)
+# Protocol::CONNECT_IP constant on top of 0.0.8 / 0.0.10.
+h3 = { path = "scratch/h3-repo/h3" }
+h3-quinn = { path = "scratch/h3-repo/h3-quinn" }
+h3-datagram = { path = "scratch/h3-repo/h3-datagram" }
 time = { git = "https://github.com/time-rs/time", tag = "v0.3.36" }
 
 [profile.release]

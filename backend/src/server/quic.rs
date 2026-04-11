@@ -1,8 +1,12 @@
 use anyhow::Result;
 use quinn::{Endpoint, ServerConfig, TransportConfig};
-use std::sync::Arc;
-use crate::config::Config;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use std::sync::Arc;
+
+use crate::config::Config;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::io::AsRawFd;
 
 const QUIC_PAYLOAD_MTU: u16 = 1360;
 
@@ -21,7 +25,7 @@ pub fn create_quic_endpoint(
     server_crypto.alpn_protocols = if config.censorship_resistant {
         vec![b"h3".to_vec()]
     } else {
-        vec![b"h3".to_vec(), b"mavivpn".to_vec()]
+        vec![b"mavivpn".to_vec(), b"h3".to_vec()]
     };
     
     let mut server_config = ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?));
@@ -37,7 +41,6 @@ pub fn create_quic_endpoint(
     
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::io::AsRawFd;
         let fd = socket2_sock.as_raw_fd();
         unsafe {
             let val: libc::c_int = 0; 

@@ -15,7 +15,7 @@ use tokio::io::unix::AsyncFd;
 pub type RawFd = std::os::raw::c_int;
 
 #[cfg(target_os = "android")]
-pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage, mut shutdown_rx: tokio::sync::broadcast::Receiver<()>) {
+pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage, mut shutdown_rx: tokio::sync::broadcast::Receiver<()>, http3_framing: bool) {
     let raw_fd = fd as RawFd;
 
     // Extract Gateway IPs for ICMP signaling
@@ -105,8 +105,18 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
             let packet_len = packet.len();
             let packet_bytes = packet.clone(); 
 
+            // In H3 mode, prepend Quarter Stream ID (0x00)
+            let payload = if http3_framing {
+                let mut h3_payload = bytes::BytesMut::with_capacity(packet.len() + 1);
+                h3_payload.put_u8(0x00);
+                h3_payload.put(packet);
+                h3_payload.freeze()
+            } else {
+                packet
+            };
+
             // Send to QUIC
-            if let Err(e) = conn_upload.send_datagram(packet) {
+            if let Err(e) = conn_upload.send_datagram(payload) {
                 match e {
                     quinn::SendDatagramError::ConnectionLost(_) => {
                         error!("QUIC Connection lost during send");
@@ -158,13 +168,25 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
             if stop_download.load(Ordering::Relaxed) { break; }
             
             match conn_download.read_datagram().await {
-                Ok(first_packet) => {
+                Ok(mut first_packet) => {
                     let mut batch = Vec::with_capacity(64);
-                    batch.push(first_packet);
+                    if http3_framing {
+                        if first_packet.len() > 1 {
+                            batch.push(first_packet.slice(1..));
+                        }
+                    } else {
+                        batch.push(first_packet);
+                    }
 
                     for _ in 0..63 {
-                         if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
-                             batch.push(pkt);
+                         if let Some(Ok(mut pkt)) = conn_download.read_datagram().now_or_never() {
+                             if http3_framing {
+                                 if pkt.len() > 1 {
+                                     batch.push(pkt.slice(1..));
+                                 }
+                             } else {
+                                 batch.push(pkt);
+                             }
                          } else { break; }
                     }
 
@@ -279,6 +301,6 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
 }
 
 #[cfg(not(target_os = "android"))]
-pub async fn run_vpn_loop(_connection: quinn::Connection, _fd: jint, _stop_flag: Arc<AtomicBool>, _config: ControlMessage, _shutdown_rx: tokio::sync::broadcast::Receiver<()>) {
+pub async fn run_vpn_loop(_connection: quinn::Connection, _fd: jint, _stop_flag: Arc<AtomicBool>, _config: ControlMessage, _shutdown_rx: tokio::sync::broadcast::Receiver<()>, _http3_framing: bool) {
     error!("VPN Loop not supported on this platform");
 }

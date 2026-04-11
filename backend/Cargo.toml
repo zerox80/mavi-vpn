@@ -12,8 +12,12 @@ rcgen = { workspace = true }
 tun = { version = "0.8", features = ["async"] }
 anyhow = { workspace = true }
 dotenv = "0.15"
+http = "1"
+h3 = { workspace = true }
+h3-quinn = { workspace = true }
 bytes = { workspace = true }
 futures-util = "0.3"
+tokio-util = "0.7"
 base64 = "0.22"
 tracing = { workspace = true }
 tracing-subscriber = "0.3"

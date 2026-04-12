@@ -8,5 +8,8 @@ serde = { version = "1.0", features = ["derive"] }
 etherparse = { workspace = true }
 # We don't need many deps here, just types.
 
+[dev-dependencies]
+bincode = { workspace = true }
+
 [features]
 default = []

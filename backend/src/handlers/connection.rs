@@ -595,7 +595,7 @@ pub async fn handle_h3_connection(
             let prefix_len = datagram.len() - inner_len;
             let packet = datagram.slice(prefix_len..);
             if packet.is_empty() { continue; }
-            
+
             let ver = packet[0] >> 4;
             let mut valid = false;
             if ver == 4 {
@@ -607,7 +607,7 @@ pub async fn handle_h3_connection(
                     if h.source_addr() == assigned_ip6 { valid = true; }
                 }
             }
-            
+
             if valid {
                 if tx_tun.send(packet).await.is_err() {
                     break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
@@ -620,4 +620,45 @@ pub async fn handle_h3_connection(
 
     tun_to_quic.abort();
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_len_slash_24() {
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 255, 0)), 24);
+    }
+
+    #[test]
+    fn prefix_len_slash_16() {
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 0, 0)), 16);
+    }
+
+    #[test]
+    fn prefix_len_slash_8() {
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 0, 0, 0)), 8);
+    }
+
+    #[test]
+    fn prefix_len_slash_32() {
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 255, 255)), 32);
+    }
+
+    #[test]
+    fn prefix_len_slash_0() {
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(0, 0, 0, 0)), 0);
+    }
+
+    #[test]
+    fn prefix_len_slash_25() {
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 255, 128)), 25);
+    }
+
+    #[test]
+    fn prefix_len_non_contiguous_fallback() {
+        // Non-contiguous mask like 255.0.255.0 should fall back to /32
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 0, 255, 0)), 32);
+    }
 }

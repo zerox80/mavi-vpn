@@ -3,7 +3,8 @@
 Mavi VPN – GUI Installer (Windows)
 
 Builds the Tauri GUI and installs it to Program Files.
-cargo-tauri is installed automatically if not present.
+Ensures NASM, CMake, and cargo-tauri are present.
+Uses a short build path to avoid LNK1104 on Windows.
 
 Usage:
   python install_gui_windows.py
@@ -15,6 +16,10 @@ import sys
 import shutil
 import subprocess
 from pathlib import Path
+
+# Force UTF-8 for console output to avoid encoding errors
+if sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -48,32 +53,58 @@ def run_elevated(exe: Path):
     ret = ctypes.windll.shell32.ShellExecuteW(
         None, "runas", str(exe), "", str(exe.parent), 1  # SW_SHOWNORMAL
     )
-    # ShellExecuteW returns >32 on success
     if ret <= 32:
         warn("UAC elevation was cancelled or failed.")
         return False
     return True
 
-def run(cmd, cwd=None, check=True):
+def run(cmd, cwd=None, check=True, env=None):
     info(f"Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
-    result = subprocess.run(cmd, cwd=cwd or ROOT, shell=isinstance(cmd, str))
+    actual_env = os.environ.copy()
+    if env:
+        actual_env.update(env)
+    result = subprocess.run(cmd, cwd=cwd or ROOT, shell=isinstance(cmd, str), env=actual_env)
     if check and result.returncode != 0:
         err(f"Command failed (exit {result.returncode})")
         sys.exit(result.returncode)
     return result
 
-def run_capture(cmd, cwd=None):
-    return subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True, text=True)
+def run_capture(cmd, cwd=None, env=None):
+    actual_env = os.environ.copy()
+    if env:
+        actual_env.update(env)
+    return subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True, text=True, env=actual_env)
 
 def ask(question, default="y"):
     yn = "Y/n" if default == "y" else "y/N"
-    answer = input(c("1;37", f"  ? {question} [{yn}]: ")).strip().lower()
+    try:
+        answer = input(c("1;37", f"  ? {question} [{yn}]: ")).strip().lower()
+    except EOFError:
+        return default == "y"
     return (answer in ("y", "yes", "j", "ja")) if answer else (default == "y")
 
 def require_cmd(name):
     if not shutil.which(name):
-        err(f"'{name}' not found in PATH. Please install it first.")
-        sys.exit(1)
+        # Last ditch effort: refresh PATH
+        _refresh_path()
+        if not shutil.which(name):
+            err(f"'{name}' not found in PATH. Please install it first.")
+            sys.exit(1)
+
+def _refresh_path():
+    """Attempt to refresh the script's PATH from registry/environment."""
+    try:
+        # Simple bash-like refresh isn't easy in Python, but we can look in common places
+        common_paths = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "bin" / "NASM",
+            Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "CMake" / "bin",
+            Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")) / "NASM",
+        ]
+        for p in common_paths:
+            if p.exists() and str(p) not in os.environ["PATH"]:
+                os.environ["PATH"] = str(p) + os.pathsep + os.environ["PATH"]
+    except:
+        pass
 
 def ensure_tauri_cli():
     step("Checking cargo-tauri")
@@ -85,34 +116,34 @@ def ensure_tauri_cli():
     run(["cargo", "install", "tauri-cli"])
     ok("cargo-tauri installed")
 
+
 def find_rc_exe():
     """Search Windows Kits for rc.exe and return its directory, or None."""
     kits_root = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10" / "bin"
     if not kits_root.exists():
         return None
-    # Newest SDK version first
-    candidates = sorted(kits_root.iterdir(), reverse=True)
-    for ver_dir in candidates:
-        rc = ver_dir / "x64" / "rc.exe"
-        if rc.exists():
-            return rc.parent
+    try:
+        candidates = sorted(kits_root.iterdir(), reverse=True)
+        for ver_dir in candidates:
+            rc = ver_dir / "x64" / "rc.exe"
+            if rc.exists():
+                return rc.parent
+    except:
+        pass
     return None
 
 def fix_icon_if_needed():
-    """Regenerate icon.ico from icon.png if it's in old DIB format (causes RC2176)."""
     ico = GUI_DIR / "src-tauri" / "icons" / "icon.ico"
     png = GUI_DIR / "src-tauri" / "icons" / "icon.png"
     if not ico.exists() or not png.exists():
         return
     step("Checking icon.ico format")
-    # Try importing Pillow; install it if missing
     try:
         from PIL import Image
     except ImportError:
         warn("Pillow not found – installing for icon conversion...")
         run([sys.executable, "-m", "pip", "install", "Pillow", "--quiet"])
         from PIL import Image
-    # Re-save the .ico from the PNG to ensure modern DIB format
     img = Image.open(png)
     sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
     imgs = []
@@ -122,28 +153,25 @@ def fix_icon_if_needed():
                  append_images=imgs[1:])
     ok("icon.ico regenerated (modern DIB format)")
 
-
 def ensure_windows_sdk():
     step("Checking Windows SDK (rc.exe)")
     rc_dir = find_rc_exe()
     if rc_dir:
         ok(f"rc.exe found: {rc_dir}")
-        # Make sure it's on PATH for the cargo build subprocess
         os.environ["PATH"] = str(rc_dir) + os.pathsep + os.environ.get("PATH", "")
         return
     warn("rc.exe not found – installing Windows 10 SDK via winget...")
     if not shutil.which("winget"):
-        err("winget not available. Install the Windows 10 SDK manually:")
-        err("  https://developer.microsoft.com/windows/downloads/windows-sdk/")
+        err("winget not available. Install the Windows 10 SDK manually.")
         sys.exit(1)
     run(["winget", "install", "--id", "Microsoft.WindowsSDK.10.0.22000",
          "--accept-package-agreements", "--accept-source-agreements"])
     rc_dir = find_rc_exe()
     if rc_dir:
-        os.environ["PATH"] = str(rc_dir) + os.pathsep + os.environ.get("PATH", "")
+        os.environ["PATH"] = str(rc_dir) + os.pathsep + os.environ["PATH"]
         ok(f"rc.exe ready: {rc_dir}")
     else:
-        err("rc.exe still not found after SDK install. Restart the terminal and try again.")
+        err("rc.exe still not found. Try running as Administrator.")
         sys.exit(1)
 
 def create_shortcut(target: Path):
@@ -158,8 +186,6 @@ def create_shortcut(target: Path):
     r = run(["powershell", "-NoProfile", "-Command", ps], check=False)
     if r.returncode == 0:
         ok(f"Desktop shortcut created: {shortcut}")
-    else:
-        warn("Could not create shortcut (non-fatal)")
 
 # ---------------------------------------------------------------------------
 # Main
@@ -168,7 +194,6 @@ def create_shortcut(target: Path):
 def main():
     if sys.platform != "win32":
         err("This script is for Windows only.")
-        err("For Linux use: python install_gui_linux.py")
         sys.exit(1)
 
     if not GUI_DIR.exists():
@@ -176,10 +201,13 @@ def main():
         sys.exit(1)
 
     print()
-    print(c("1;36", "  ╔══════════════════════════════════════╗"))
-    print(c("1;36", "  ║   Mavi VPN – GUI Installer (Windows)  ║"))
-    print(c("1;36", "  ╚══════════════════════════════════════╝"))
+    print("  +--------------------------------------+ ")
+    print("  |   Mavi VPN – GUI Installer (Windows)  | ")
+    print("  +--------------------------------------+ ")
     print()
+
+    # Refresh PATH initially to pick up tools installed in previous attempts
+    _refresh_path()
 
     require_cmd("cargo")
     ensure_tauri_cli()
@@ -188,15 +216,28 @@ def main():
 
     # ── Build ────────────────────────────────────────────────────────────────
     step("Building GUI (Release)")
-    run(["cargo", "tauri", "build", "--bundles", "nsis"], cwd=GUI_DIR)
+    
+    # Use a short target directory to avoid LNK1104 path length issues
+    build_dir = Path("C:\\mavi-build")
+    try:
+        build_dir.mkdir(parents=True, exist_ok=True)
+    except:
+        # Fallback to local target if C:\ is not writable
+        build_dir = ROOT / "target-short"
+        build_dir.mkdir(parents=True, exist_ok=True)
 
-    # cargo puts output in the workspace root target/ when gui/src-tauri is a
-    # workspace member, otherwise in gui/src-tauri/target/release/.
-    binary = _find_binary()
-    if binary is None:
-        err("Binary not found after build. Expected one of:")
-        err(f"  {ROOT / 'target' / 'release' / 'mavi-vpn-gui.exe'}")
-        err(f"  {GUI_DIR / 'src-tauri' / 'target' / 'release' / 'mavi-vpn-gui.exe'}")
+    info(f"Using short build path: {build_dir}")
+    build_env = {"CARGO_TARGET_DIR": str(build_dir)}
+    
+    run(["cargo", "tauri", "build", "--bundles", "nsis"], cwd=GUI_DIR, env=build_env)
+
+    # ── Find binary ──────────────────────────────────────────────────────────
+    binary = build_dir / "release" / "mavi-vpn-gui.exe"
+    if not binary.exists():
+        binary = build_dir / "x86_64-pc-windows-msvc" / "release" / "mavi-vpn-gui.exe"
+    
+    if not binary.exists():
+        err("Binary not found after build.")
         sys.exit(1)
 
     ok(f"Build successful: {binary}")
@@ -207,16 +248,20 @@ def main():
     else:
         warn("Running as normal user (no admin rights)")
 
-    # ── NSIS installer (preferred on Windows) ────────────────────────────────
-    nsis = _find_nsis()
-    if nsis and ask(f"Run NSIS installer ({nsis.name})? (recommended)"):
+    # ── NSIS installer ───────────────────────────────────────────────────────
+    nsis_dir = build_dir / "release" / "bundle" / "nsis"
+    if not nsis_dir.exists():
+        nsis_dir = build_dir / "x86_64-pc-windows-msvc" / "release" / "bundle" / "nsis"
+        
+    nsis = next(nsis_dir.glob("*_x64-setup.exe"), None) or next(nsis_dir.glob("*.exe"), None)
+    
+    if nsis and ask(f"Run NSIS installer ({nsis.name})?"):
         step("Running NSIS installer")
         if admin:
             run([str(nsis)], check=False)
         else:
-            info("NSIS installer needs admin rights — requesting elevation...")
             if not run_elevated(nsis):
-                err("Could not start installer. Try running this script as Administrator.")
+                err("Could not start installer.")
                 sys.exit(1)
         ok("NSIS installer started")
         return
@@ -224,69 +269,42 @@ def main():
     # ── Manual copy fallback ──────────────────────────────────────────────────
     step("Installing")
     if admin:
-        default_dir = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MaviVPN"
+        dest_dir = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MaviVPN"
     else:
-        default_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "MaviVPN"
-        info(f"No admin rights — defaulting to user directory")
-    raw = input(c("1;37", f"  ? Install to [{default_dir}]: ")).strip()
-    dest_dir = Path(raw) if raw else default_dir
+        dest_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "MaviVPN"
+    
+    raw = input(c("1;37", f"  ? Install to [{dest_dir}]: ")).strip()
+    dest_dir = Path(raw) if raw else dest_dir
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     dest = dest_dir / "mavi-vpn-gui.exe"
     shutil.copy2(binary, dest)
     ok(f"GUI installed to {dest}")
 
-    # ── PATH ──────────────────────────────────────────────────────────────────
-    if admin:
-        if ask("Add install directory to system PATH?"):
-            run(f'setx /M PATH "%PATH%;{dest_dir}"', check=False)
-            ok("System PATH updated (restart terminal to take effect)")
-    else:
-        if ask("Add install directory to user PATH?"):
-            run(f'setx PATH "%PATH%;{dest_dir}"', check=False)
-            ok("User PATH updated (restart terminal to take effect)")
+    if ask("Add to PATH?"):
+        scope = "Machine" if admin else "User"
+        ps = (
+            f'$p = [Environment]::GetEnvironmentVariable("PATH", "{scope}"); '
+            f'if ($p -notlike "*{dest_dir}*") {{ '
+            f'[Environment]::SetEnvironmentVariable("PATH", $p + ";{dest_dir}", "{scope}") '
+            f'}}'
+        )
+        run(["powershell", "-NoProfile", "-Command", ps], check=False)
+        ok("PATH updated.")
 
-    # ── Shortcut ──────────────────────────────────────────────────────────────
     if ask("Create Desktop shortcut?"):
         create_shortcut(dest)
 
     _done_message(str(dest))
 
-
-def _find_binary() -> "Path | None":
-    """Find mavi-vpn-gui.exe in workspace root or local src-tauri target."""
-    candidates = [
-        ROOT / "target" / "release" / "mavi-vpn-gui.exe",
-        GUI_DIR / "src-tauri" / "target" / "release" / "mavi-vpn-gui.exe",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
-
-
-def _find_nsis() -> "Path | None":
-    """Find the NSIS setup.exe produced by cargo tauri build."""
-    bundle_dirs = [
-        ROOT / "target" / "release" / "bundle" / "nsis",
-        GUI_DIR / "src-tauri" / "target" / "release" / "bundle" / "nsis",
-    ]
-    for d in bundle_dirs:
-        if d.exists():
-            hit = next(d.glob("*_x64-setup.exe"), None) or next(d.glob("*.exe"), None)
-            if hit:
-                return hit
-    return None
-
-
 def _done_message(binary_path: str):
     print()
     ok("GUI installation complete!")
+    warn("The VPN service must be running before connecting.")
+    print(c("0;37", "  Service:  python install_cli_windows.py"))
+    print(c("0;37", f"  Launch:   {binary_path}"))
     print()
-    warn("The VPN service must be running before connecting via the GUI.")
-    print(c("0;37", "  Install service first:  python install_cli_windows.py"))
-    print(c("0;37", f"\n  Launch GUI:  {binary_path}"))
-
+    info("Note: You can safely delete 'C:\\mavi-build' to free up disk space.")
 
 if __name__ == "__main__":
     main()

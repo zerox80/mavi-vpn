@@ -175,7 +175,8 @@ mod tests {
     fn new_valid_cidr_16() {
         let state = AppState::new("172.16.0.0/16").unwrap();
         assert_eq!(state.network.prefix(), 16);
-        // /16 = 65536 addresses, minus network, gateway, broadcast = 65533
+        // /16 = 65536 addresses, minus network (.0.0), gateway (.0.1), broadcast (.255.255) = 65533
+        // Note: this test intentionally allocates a large pool to verify the size formula.
         let free = state.free_ips.lock().unwrap();
         assert_eq!(free.len(), 65533);
     }
@@ -311,5 +312,30 @@ mod tests {
         assert!(!free.contains(&gateway));
         assert!(!free.contains(&broadcast));
         assert!(!free.contains(&network));
+    }
+
+    #[test]
+    fn ipv6_recycled_after_release() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let ip4 = state.assign_ip().unwrap();
+        let ip6 = state.assign_ipv6().unwrap();
+        assert_eq!(ip6, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
+
+        // Advance the counter so the next fresh allocation would be ::4
+        let _ = state.assign_ipv6().unwrap(); // ::3
+        let _ = state.assign_ipv6().unwrap(); // ::4 consumed
+
+        // Release the first pair – the IPv6 address goes back onto the recycle stack
+        state.release_ips(ip4, ip6);
+
+        // The recycled ::2 must be handed out before any fresh address
+        let recycled = state.assign_ipv6().unwrap();
+        assert_eq!(recycled, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
+    }
+
+    #[test]
+    fn new_rejects_prefix_zero() {
+        // /0 is too large (> 2^32 usable addresses, rejected by the prefix < 8 guard)
+        assert!(AppState::new("0.0.0.0/0").is_err());
     }
 }

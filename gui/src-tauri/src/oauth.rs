@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use base64::Engine;
-use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,8 +16,7 @@ const OAUTH_CALLBACK_PORT: u16 = 18923;
 /// Returns the access token string on success.
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
     // 1. Generate PKCE verifier and challenge
-    let mut verifier_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut verifier_bytes);
+    let verifier_bytes: [u8; 32] = rand::random();
     let code_verifier =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&verifier_bytes);
 

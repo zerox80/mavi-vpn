@@ -157,3 +157,159 @@ impl AppState {
         self.network_v6.iter().nth(1).unwrap_or(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_valid_cidr_24() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        assert_eq!(state.network.prefix(), 24);
+        // /24 = 256 addresses, minus network (.0), gateway (.1), broadcast (.255) = 253
+        let free = state.free_ips.lock().unwrap();
+        assert_eq!(free.len(), 253);
+    }
+
+    #[test]
+    fn new_valid_cidr_16() {
+        let state = AppState::new("172.16.0.0/16").unwrap();
+        assert_eq!(state.network.prefix(), 16);
+        // /16 = 65536 addresses, minus network, gateway, broadcast = 65533
+        let free = state.free_ips.lock().unwrap();
+        assert_eq!(free.len(), 65533);
+    }
+
+    #[test]
+    fn new_valid_cidr_30() {
+        let state = AppState::new("10.0.0.0/30").unwrap();
+        // /30 = 4 addresses: .0 (network), .1 (gateway), .2, .3 (broadcast) → 1 usable
+        let free = state.free_ips.lock().unwrap();
+        assert_eq!(free.len(), 1);
+        assert_eq!(free[0], Ipv4Addr::new(10, 0, 0, 2));
+    }
+
+    #[test]
+    fn new_rejects_too_small_prefix() {
+        assert!(AppState::new("10.0.0.0/31").is_err());
+        assert!(AppState::new("10.0.0.0/32").is_err());
+    }
+
+    #[test]
+    fn new_rejects_too_large_prefix() {
+        assert!(AppState::new("10.0.0.0/7").is_err());
+    }
+
+    #[test]
+    fn new_rejects_invalid_cidr() {
+        assert!(AppState::new("not_a_cidr").is_err());
+        assert!(AppState::new("").is_err());
+        assert!(AppState::new("999.999.999.999/24").is_err());
+    }
+
+    #[test]
+    fn gateway_ip_is_dot_one() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        assert_eq!(state.gateway_ip(), Ipv4Addr::new(10, 8, 0, 1));
+
+        let state2 = AppState::new("192.168.1.0/24").unwrap();
+        assert_eq!(state2.gateway_ip(), Ipv4Addr::new(192, 168, 1, 1));
+    }
+
+    #[test]
+    fn gateway_ip_v6_is_second_addr() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        assert_eq!(state.gateway_ip_v6(), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+    }
+
+    #[test]
+    fn assign_ip_returns_sequential() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let first = state.assign_ip().unwrap();
+        let second = state.assign_ip().unwrap();
+        let third = state.assign_ip().unwrap();
+        assert_eq!(first, Ipv4Addr::new(10, 8, 0, 2));
+        assert_eq!(second, Ipv4Addr::new(10, 8, 0, 3));
+        assert_eq!(third, Ipv4Addr::new(10, 8, 0, 4));
+    }
+
+    #[test]
+    fn assign_ipv6_returns_sequential() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let first = state.assign_ipv6().unwrap();
+        let second = state.assign_ipv6().unwrap();
+        assert_eq!(first, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
+        assert_eq!(second, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3));
+    }
+
+    #[test]
+    fn assign_ip_pair_returns_both() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let (v4, v6) = state.assign_ip_pair().unwrap();
+        assert_eq!(v4, Ipv4Addr::new(10, 8, 0, 2));
+        assert_eq!(v6, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
+    }
+
+    #[test]
+    fn release_and_reassign() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let ip4 = state.assign_ip().unwrap();
+        let ip6 = state.assign_ipv6().unwrap();
+        assert_eq!(ip4, Ipv4Addr::new(10, 8, 0, 2));
+
+        let second_v4 = state.assign_ip().unwrap();
+        assert_eq!(second_v4, Ipv4Addr::new(10, 8, 0, 3));
+
+        // Release first IP
+        state.release_ips(ip4, ip6);
+
+        // Next assignment should return the released IP (pushed onto stack)
+        let reassigned = state.assign_ip().unwrap();
+        assert_eq!(reassigned, Ipv4Addr::new(10, 8, 0, 2));
+    }
+
+    #[test]
+    fn pool_exhaustion_ipv4() {
+        let state = AppState::new("10.0.0.0/30").unwrap();
+        // Only 1 usable IP (.2)
+        assert!(state.assign_ip().is_ok());
+        assert!(state.assign_ip().is_err());
+    }
+
+    #[test]
+    fn register_and_lookup_client() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let (v4, v6) = state.assign_ip_pair().unwrap();
+        let (tx, _rx) = mpsc::channel::<bytes::Bytes>(16);
+        state.register_client(v4, v6, tx);
+
+        assert!(state.peers.contains_key(&v4));
+        assert!(state.peers_v6.contains_key(&v6));
+    }
+
+    #[test]
+    fn release_removes_from_peers() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let (v4, v6) = state.assign_ip_pair().unwrap();
+        let (tx, _rx) = mpsc::channel::<bytes::Bytes>(16);
+        state.register_client(v4, v6, tx);
+
+        assert!(state.peers.contains_key(&v4));
+        state.release_ips(v4, v6);
+
+        assert!(!state.peers.contains_key(&v4));
+        assert!(!state.peers_v6.contains_key(&v6));
+    }
+
+    #[test]
+    fn pool_does_not_contain_gateway_or_broadcast() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let free = state.free_ips.lock().unwrap();
+        let gateway = Ipv4Addr::new(10, 8, 0, 1);
+        let broadcast = Ipv4Addr::new(10, 8, 0, 255);
+        let network = Ipv4Addr::new(10, 8, 0, 0);
+        assert!(!free.contains(&gateway));
+        assert!(!free.contains(&broadcast));
+        assert!(!free.contains(&network));
+    }
+}

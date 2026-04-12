@@ -57,3 +57,118 @@ pub enum ControlMessage {
     /// The client should log `message` and may retry after a backoff.
     Error { message: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip(msg: &ControlMessage) -> ControlMessage {
+        let encoded = bincode::serde::encode_to_vec(msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ControlMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        decoded
+    }
+
+    #[test]
+    fn auth_message_roundtrip() {
+        let msg = ControlMessage::Auth {
+            token: "my-secret-token-123".to_string(),
+        };
+        let decoded = roundtrip(&msg);
+        match decoded {
+            ControlMessage::Auth { token } => assert_eq!(token, "my-secret-token-123"),
+            other => panic!("Expected Auth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn config_message_roundtrip_full() {
+        let msg = ControlMessage::Config {
+            assigned_ip: Ipv4Addr::new(10, 8, 0, 2),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Ipv4Addr::new(10, 8, 0, 1),
+            dns_server: Ipv4Addr::new(1, 1, 1, 1),
+            mtu: 1280,
+            assigned_ipv6: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)),
+            netmask_v6: Some(64),
+            gateway_v6: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)),
+            dns_server_v6: Some(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)),
+            whitelist_domains: Some(vec!["example.com".to_string(), "test.org".to_string()]),
+        };
+        let decoded = roundtrip(&msg);
+        match decoded {
+            ControlMessage::Config {
+                assigned_ip,
+                netmask,
+                gateway,
+                dns_server,
+                mtu,
+                assigned_ipv6,
+                netmask_v6,
+                gateway_v6,
+                dns_server_v6,
+                whitelist_domains,
+            } => {
+                assert_eq!(assigned_ip, Ipv4Addr::new(10, 8, 0, 2));
+                assert_eq!(netmask, Ipv4Addr::new(255, 255, 255, 0));
+                assert_eq!(gateway, Ipv4Addr::new(10, 8, 0, 1));
+                assert_eq!(dns_server, Ipv4Addr::new(1, 1, 1, 1));
+                assert_eq!(mtu, 1280);
+                assert_eq!(assigned_ipv6, Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)));
+                assert_eq!(netmask_v6, Some(64));
+                assert_eq!(gateway_v6, Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)));
+                assert_eq!(dns_server_v6, Some(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)));
+                assert_eq!(whitelist_domains, Some(vec!["example.com".to_string(), "test.org".to_string()]));
+            }
+            other => panic!("Expected Config, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn config_message_roundtrip_ipv6_none() {
+        let msg = ControlMessage::Config {
+            assigned_ip: Ipv4Addr::new(10, 8, 0, 2),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Ipv4Addr::new(10, 8, 0, 1),
+            dns_server: Ipv4Addr::new(1, 1, 1, 1),
+            mtu: 1280,
+            assigned_ipv6: None,
+            netmask_v6: None,
+            gateway_v6: None,
+            dns_server_v6: None,
+            whitelist_domains: None,
+        };
+        let decoded = roundtrip(&msg);
+        match decoded {
+            ControlMessage::Config {
+                assigned_ipv6,
+                netmask_v6,
+                gateway_v6,
+                dns_server_v6,
+                whitelist_domains,
+                ..
+            } => {
+                assert!(assigned_ipv6.is_none());
+                assert!(netmask_v6.is_none());
+                assert!(gateway_v6.is_none());
+                assert!(dns_server_v6.is_none());
+                assert!(whitelist_domains.is_none());
+            }
+            other => panic!("Expected Config, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn error_message_roundtrip() {
+        let msg = ControlMessage::Error {
+            message: "Access Denied: Invalid Token".to_string(),
+        };
+        let decoded = roundtrip(&msg);
+        match decoded {
+            ControlMessage::Error { message } => {
+                assert_eq!(message, "Access Denied: Invalid Token");
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+}

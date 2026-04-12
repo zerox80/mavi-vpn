@@ -46,3 +46,10 @@ android/app/release/
 android/gradle/gradle-daemon-jvm.properties
 android/app/release/app-release.apk
 android/.kotlin/sessions/kotlin-compiler-9575080087113769916.salive
+pr_commit.patch
+query
+schema.json
+docs/server-performance-tuning.md
+gui/src-tauri/build_error.txt
+gui/src-tauri/wix_binaries/mavi-vpn-client.exe
+gui/src-tauri/wix_binaries/mavi-vpn-service.exe

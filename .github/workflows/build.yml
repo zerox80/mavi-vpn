@@ -201,6 +201,28 @@ jobs:
           key: windows-gui-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: windows-gui-cargo-
 
+      - name: Build Windows CLI & Service
+        run: cargo build --release -p windows-vpn
+
+      - name: Stage binaries for WiX
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "gui\src-tauri\wix_binaries" | Out-Null
+          Copy-Item "target\release\mavi-vpn-client.exe"  "gui\src-tauri\wix_binaries\mavi-vpn-client.exe"
+          Copy-Item "target\release\mavi-vpn-service.exe" "gui\src-tauri\wix_binaries\mavi-vpn-service.exe"
+          Write-Host "Binaries staged."
+
+      - name: Patch service.wxs with absolute paths
+        shell: pwsh
+        run: |
+          $clientPath  = (Resolve-Path "gui\src-tauri\wix_binaries\mavi-vpn-client.exe").Path
+          $servicePath = (Resolve-Path "gui\src-tauri\wix_binaries\mavi-vpn-service.exe").Path
+          $wxs = Get-Content "gui\src-tauri\wix\service.wxs" -Raw
+          $wxs = $wxs -replace '__CLIENT_EXE_PATH__',  $clientPath
+          $wxs = $wxs -replace '__SERVICE_EXE_PATH__', $servicePath
+          Set-Content "gui\src-tauri\wix\service.wxs" $wxs
+          Write-Host "service.wxs patched."
+
       - name: Install npm dependencies
         working-directory: gui
         run: npm install
@@ -209,9 +231,20 @@ jobs:
         working-directory: gui
         run: npm run tauri -- build --bundles nsis,msi
 
+      - name: Restore service.wxs template
+        if: always()
+        shell: pwsh
+        run: |
+          $wxs = Get-Content "gui\src-tauri\wix\service.wxs" -Raw
+          $wxs = $wxs -replace 'Source="[^"]*mavi-vpn-client\.exe"',  'Source="__CLIENT_EXE_PATH__"'
+          $wxs = $wxs -replace 'Source="[^"]*mavi-vpn-service\.exe"', 'Source="__SERVICE_EXE_PATH__"'
+          Set-Content "gui\src-tauri\wix\service.wxs" $wxs
+          Write-Host "service.wxs restored."
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-gui
           path: |
             target/release/bundle/nsis/*.exe
             target/release/bundle/msi/*.msi
+

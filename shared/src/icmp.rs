@@ -107,3 +107,213 @@ pub fn generate_packet_too_big(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    /// Build a minimal valid IPv4 UDP packet (src → dst).
+    fn make_ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
+        let builder = PacketBuilder::ipv4(src.octets(), dst.octets(), 64)
+            .udp(12345, 80);
+        let payload = b"hello!!!"; // 8 bytes payload
+        let mut buf = Vec::with_capacity(builder.size(payload.len()));
+        builder.write(&mut buf, payload).unwrap();
+        buf
+    }
+
+    /// Build a minimal valid IPv6 UDP packet (src → dst).
+    fn make_ipv6_packet(src: Ipv6Addr, dst: Ipv6Addr) -> Vec<u8> {
+        let builder = PacketBuilder::ipv6(src.octets(), dst.octets(), 64)
+            .udp(12345, 80);
+        let payload = b"hello!!!";
+        let mut buf = Vec::with_capacity(builder.size(payload.len()));
+        builder.write(&mut buf, payload).unwrap();
+        buf
+    }
+
+    #[test]
+    fn empty_packet_returns_none() {
+        assert!(generate_packet_too_big(&[], 1280, None).is_none());
+    }
+
+    #[test]
+    fn invalid_version_returns_none() {
+        // Version 3 (0x30 in first nibble)
+        assert!(generate_packet_too_big(&[0x30, 0, 0, 0], 1280, None).is_none());
+        // Version 7
+        assert!(generate_packet_too_big(&[0x70, 0, 0, 0], 1280, None).is_none());
+    }
+
+    #[test]
+    fn truncated_ipv4_header_returns_none() {
+        // Valid version nibble (4) but too short to be a real header
+        assert!(generate_packet_too_big(&[0x45, 0x00], 1280, None).is_none());
+    }
+
+    #[test]
+    fn ipv4_generates_icmpv4_fragmentation_needed() {
+        let client = Ipv4Addr::new(10, 8, 0, 2);
+        let internet = Ipv4Addr::new(93, 184, 216, 34);
+        let packet = make_ipv4_packet(client, internet);
+
+        let result = generate_packet_too_big(&packet, 1280, None).unwrap();
+
+        // Parse the generated ICMP packet
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+
+        // Source should be the internet IP (no override), dest should be the client
+        if let Some(etherparse::NetSlice::Ipv4(ip4)) = parsed.net {
+            let header = ip4.header();
+            assert_eq!(header.source_addr(), internet);
+            assert_eq!(header.destination_addr(), client);
+        } else {
+            panic!("Expected IPv4 header in ICMP response");
+        }
+    }
+
+    #[test]
+    fn ipv4_with_source_override() {
+        let client = Ipv4Addr::new(10, 8, 0, 2);
+        let internet = Ipv4Addr::new(93, 184, 216, 34);
+        let gateway = Ipv4Addr::new(10, 8, 0, 1);
+        let packet = make_ipv4_packet(client, internet);
+
+        let result = generate_packet_too_big(
+            &packet,
+            1280,
+            Some(IpAddr::V4(gateway)),
+        )
+        .unwrap();
+
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        if let Some(etherparse::NetSlice::Ipv4(ip4)) = parsed.net {
+            assert_eq!(ip4.header().source_addr(), gateway);
+            assert_eq!(ip4.header().destination_addr(), client);
+        } else {
+            panic!("Expected IPv4 header");
+        }
+    }
+
+    #[test]
+    fn ipv4_rejects_v6_override() {
+        let packet = make_ipv4_packet(
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(93, 184, 216, 34),
+        );
+        let result = generate_packet_too_big(
+            &packet,
+            1280,
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn ipv6_generates_icmpv6_packet_too_big() {
+        let client = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let internet = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let packet = make_ipv6_packet(client, internet);
+
+        let result = generate_packet_too_big(&packet, 1280, None).unwrap();
+
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        if let Some(etherparse::NetSlice::Ipv6(ip6)) = parsed.net {
+            let header = ip6.header();
+            assert_eq!(header.source_addr(), internet);
+            assert_eq!(header.destination_addr(), client);
+        } else {
+            panic!("Expected IPv6 header in ICMP response");
+        }
+    }
+
+    #[test]
+    fn ipv6_with_source_override() {
+        let client = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let internet = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let gateway = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+        let packet = make_ipv6_packet(client, internet);
+
+        let result = generate_packet_too_big(
+            &packet,
+            1280,
+            Some(IpAddr::V6(gateway)),
+        )
+        .unwrap();
+
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        if let Some(etherparse::NetSlice::Ipv6(ip6)) = parsed.net {
+            assert_eq!(ip6.header().source_addr(), gateway);
+            assert_eq!(ip6.header().destination_addr(), client);
+        } else {
+            panic!("Expected IPv6 header");
+        }
+    }
+
+    #[test]
+    fn ipv6_rejects_v4_override() {
+        let packet = make_ipv6_packet(
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+            Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+        );
+        let result = generate_packet_too_big(
+            &packet,
+            1280,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn truncated_ipv6_header_returns_none() {
+        // Valid version nibble (6) but too short to be a real IPv6 header (need 40 bytes)
+        assert!(generate_packet_too_big(&[0x60, 0x00, 0x00], 1280, None).is_none());
+    }
+
+    #[test]
+    fn ipv4_icmp_type_is_fragmentation_needed() {
+        let client = Ipv4Addr::new(10, 8, 0, 2);
+        let internet = Ipv4Addr::new(93, 184, 216, 34);
+        let packet = make_ipv4_packet(client, internet);
+
+        let result = generate_packet_too_big(&packet, 1400, None).unwrap();
+
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        match parsed.transport {
+            Some(etherparse::TransportSlice::Icmpv4(icmp)) => {
+                match icmp.icmp_type() {
+                    etherparse::Icmpv4Type::DestinationUnreachable(
+                        etherparse::icmpv4::DestUnreachableHeader::FragmentationNeeded {
+                            next_hop_mtu,
+                        },
+                    ) => assert_eq!(next_hop_mtu, 1400),
+                    other => panic!("Expected FragmentationNeeded, got {:?}", other),
+                }
+            }
+            other => panic!("Expected ICMPv4 transport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipv6_icmp_mtu_is_reported_correctly() {
+        let client = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let internet = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let packet = make_ipv6_packet(client, internet);
+
+        let result = generate_packet_too_big(&packet, 1400, None).unwrap();
+
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        match parsed.transport {
+            Some(etherparse::TransportSlice::Icmpv6(icmp)) => {
+                match icmp.icmp_type() {
+                    etherparse::Icmpv6Type::PacketTooBig { mtu } => {
+                        assert_eq!(mtu, 1400);
+                    }
+                    other => panic!("Expected PacketTooBig, got {:?}", other),
+                }
+            }
+            other => panic!("Expected ICMPv6 transport, got {:?}", other),
+        }
+    }
+}

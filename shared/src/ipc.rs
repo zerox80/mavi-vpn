@@ -187,4 +187,48 @@ mod tests {
     fn ipc_token_path_is_absolute() {
         assert!(ipc_token_path().is_absolute());
     }
+
+    #[test]
+    fn ipc_request_start_roundtrip_minimal() {
+        // All optional Keycloak fields are None – the minimal valid Config.
+        let config = Config {
+            endpoint: "vpn.example.com:4433".to_string(),
+            token: "tok".to_string(),
+            cert_pin: "deadbeef".to_string(),
+            censorship_resistant: false,
+            http3_framing: false,
+            kc_auth: None,
+            kc_url: None,
+            kc_realm: None,
+            kc_client_id: None,
+        };
+        let req = IpcRequest::Start(config);
+        let decoded = roundtrip_request(&req);
+        match decoded {
+            IpcRequest::Start(c) => {
+                assert_eq!(c.endpoint, "vpn.example.com:4433");
+                assert!(c.kc_auth.is_none());
+                assert!(c.kc_url.is_none());
+                assert!(c.kc_realm.is_none());
+                assert!(c.kc_client_id.is_none());
+            }
+            other => panic!("Expected Start, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipc_response_status_not_running() {
+        let resp = IpcResponse::Status {
+            running: false,
+            endpoint: None,
+        };
+        let decoded = roundtrip_response(&resp);
+        match decoded {
+            IpcResponse::Status { running, endpoint } => {
+                assert!(!running);
+                assert!(endpoint.is_none());
+            }
+            other => panic!("Expected Status, got {:?}", other),
+        }
+    }
 }

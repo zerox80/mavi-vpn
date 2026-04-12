@@ -1,8 +1,8 @@
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
-        ServiceType,
+        ServiceControl, ServiceControlAccept, ServiceExitCode, SessionChangeReason, ServiceState,
+        ServiceStatus, ServiceType,
     },
     service_control_handler::{self, ServiceControlHandlerResult},
     service_dispatcher,
@@ -102,9 +102,10 @@ pub fn main() -> Result<(), windows_service::Error> {
 fn run_standalone() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let stop_signal = Arc::new(AtomicBool::new(false));
+    let reharden_signal = Arc::new(AtomicBool::new(false));
 
     rt.block_on(async {
-        match run_service_loop(stop_signal.clone()).await {
+        match run_service_loop(stop_signal.clone(), reharden_signal.clone()).await {
             Ok(_) => info!("Service loop exited gracefully"),
             Err(e) => error!("Service loop error: {:?}", e),
         }
@@ -120,6 +121,8 @@ fn my_service_main(arguments: Vec<OsString>) {
 fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
     let stop_signal = Arc::new(AtomicBool::new(false));
     let stop_signal_handler = stop_signal.clone();
+    let reharden_signal = Arc::new(AtomicBool::new(false));
+    let reharden_signal_handler = reharden_signal.clone();
 
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
@@ -129,6 +132,27 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            ServiceControl::SessionChange(param) => {
+                // When a user logs on (console or RDP) or unlocks, re-apply the
+                // IPC token ACL so the now-active interactive user can read it.
+                // Without this, a service that started at boot locks the token
+                // to SYSTEM+Admins only and GUI clients in the user session fail
+                // with "Failed to read IPC token".
+                if matches!(
+                    param.reason,
+                    SessionChangeReason::SessionLogon
+                        | SessionChangeReason::ConsoleConnect
+                        | SessionChangeReason::RemoteConnect
+                        | SessionChangeReason::SessionUnlock
+                ) {
+                    info!(
+                        "Session change ({:?}) for session {} — queuing IPC token ACL re-harden",
+                        param.reason, param.notification.session_id
+                    );
+                    reharden_signal_handler.store(true, Ordering::SeqCst);
+                }
+                ServiceControlHandlerResult::NoError
+            }
             _ => ServiceControlHandlerResult::NotImplemented,
         }
     };
@@ -138,7 +162,7 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
     status_handle.set_service_status(ServiceStatus {
         service_type: SERVICE_TYPE,
         current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
+        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SESSION_CHANGE,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
         wait_hint: Duration::default(),
@@ -152,7 +176,7 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
 
     info!("Service is now running");
 
-    let res = rt.block_on(run_service_loop(stop_signal.clone()));
+    let res = rt.block_on(run_service_loop(stop_signal.clone(), reharden_signal.clone()));
     if let Err(e) = res {
         error!("Service loop failed: {}", e);
     }
@@ -170,7 +194,10 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
+async fn run_service_loop(
+    stop_signal: Arc<AtomicBool>,
+    reharden_signal: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     // Current active VPN tracking
     let vpn_running = Arc::new(AtomicBool::new(false));
     let mut vpn_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -209,6 +236,11 @@ async fn run_service_loop(stop_signal: Arc<AtomicBool>) -> anyhow::Result<()> {
                 let _ = t.await;
             }
             break;
+        }
+
+        if reharden_signal.swap(false, Ordering::SeqCst) {
+            info!("Re-hardening IPC token ACL after session change");
+            harden_ipc_token_permissions(&token_path);
         }
 
         tokio::select! {

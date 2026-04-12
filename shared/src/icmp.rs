@@ -264,4 +264,56 @@ mod tests {
         );
         assert!(result.is_none());
     }
+
+    #[test]
+    fn truncated_ipv6_header_returns_none() {
+        // Valid version nibble (6) but too short to be a real IPv6 header (need 40 bytes)
+        assert!(generate_packet_too_big(&[0x60, 0x00, 0x00], 1280, None).is_none());
+    }
+
+    #[test]
+    fn ipv4_icmp_type_is_fragmentation_needed() {
+        let client = Ipv4Addr::new(10, 8, 0, 2);
+        let internet = Ipv4Addr::new(93, 184, 216, 34);
+        let packet = make_ipv4_packet(client, internet);
+
+        let result = generate_packet_too_big(&packet, 1400, None).unwrap();
+
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        match parsed.transport {
+            Some(etherparse::TransportSlice::Icmpv4(icmp)) => {
+                match icmp.icmp_type() {
+                    etherparse::Icmpv4Type::DestinationUnreachable(
+                        etherparse::icmpv4::DestUnreachableHeader::FragmentationNeeded {
+                            next_hop_mtu,
+                        },
+                    ) => assert_eq!(next_hop_mtu, 1400),
+                    other => panic!("Expected FragmentationNeeded, got {:?}", other),
+                }
+            }
+            other => panic!("Expected ICMPv4 transport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipv6_icmp_mtu_is_reported_correctly() {
+        let client = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let internet = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let packet = make_ipv6_packet(client, internet);
+
+        let result = generate_packet_too_big(&packet, 1400, None).unwrap();
+
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        match parsed.transport {
+            Some(etherparse::TransportSlice::Icmpv6(icmp)) => {
+                match icmp.icmp_type() {
+                    etherparse::Icmpv6Type::PacketTooBig { mtu } => {
+                        assert_eq!(mtu, 1400);
+                    }
+                    other => panic!("Expected PacketTooBig, got {:?}", other),
+                }
+            }
+            other => panic!("Expected ICMPv6 transport, got {:?}", other),
+        }
+    }
 }

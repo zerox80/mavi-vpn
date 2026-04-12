@@ -11,7 +11,6 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info};
-use rand::RngCore;
 use base64::Engine;
 
 /// Runs the IPC daemon loop. Accepts commands from CLI/GUI clients.
@@ -22,8 +21,7 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
 
     let listener = TcpListener::bind(LOCAL_IPC_ADDR).await?;
     
-    let mut token_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut token_bytes);
+    let token_bytes: [u8; 32] = rand::random();
     let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
     
     let token_path = ipc::ipc_token_path();

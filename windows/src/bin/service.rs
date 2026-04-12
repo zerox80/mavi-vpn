@@ -12,7 +12,6 @@ use std::{ffi::OsString, path::Path, sync::Arc, sync::atomic::{AtomicBool, Order
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
 use tracing::{error, info, warn};
 use tracing_subscriber;
-use rand::RngCore;
 use base64::Engine;
 
 #[path = "../ipc.rs"]
@@ -204,8 +203,7 @@ async fn run_service_loop(
     let mut active_config: Option<ipc::Config> = None;
 
     // Generate secure token for IPC and save to file BEFORE binding listener
-    let mut token_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut token_bytes);
+    let token_bytes: [u8; 32] = rand::random();
     let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
     
     let token_path = ipc::ipc_token_path();

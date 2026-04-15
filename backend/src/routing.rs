@@ -7,25 +7,10 @@ use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
 
 pub fn spawn_tun_writer(mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>, mut rx_tun: tokio::sync::mpsc::Receiver<Bytes>) {
     tokio::spawn(async move {
-        let mut batch: Vec<Bytes> = Vec::with_capacity(64);
-        'writer_loop: loop {
-            match rx_tun.recv().await {
-                Some(packet) => batch.push(packet),
-                None => break,
-            }
-            
-            while batch.len() < 64 {
-                match rx_tun.try_recv() {
-                    Ok(packet) => batch.push(packet),
-                    Err(_) => break,
-                }
-            }
-            
-            for packet in batch.drain(..) {
-                if let Err(e) = tun_writer.write_all(&packet).await {
-                    error!("CRITICAL: Failed to write to TUN: {}. Interface might be down. Terminating task.", e);
-                    break 'writer_loop;
-                }
+        while let Some(packet) = rx_tun.recv().await {
+            if let Err(e) = tun_writer.write_all(&packet).await {
+                error!("CRITICAL: Failed to write to TUN: {}. Interface might be down. Terminating task.", e);
+                break;
             }
         }
     });
@@ -33,33 +18,66 @@ pub fn spawn_tun_writer(mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>, 
 
 pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, state_reader: Arc<AppState>) {
     tokio::spawn(async move {
-        let mut buf = bytes::BytesMut::with_capacity(2048);
+        let mut buf = vec![0u8; 65536];
+        let mut local_peers_v4 = std::collections::HashMap::new();
+        let mut local_peers_v6 = std::collections::HashMap::new();
+
         loop {
-            if buf.capacity() < 2048 { buf.reserve(2048); }
-            
-            match tun_reader.read_buf(&mut buf).await {
+            match tun_reader.read(&mut buf).await {
                 Ok(0) => break, 
                 Ok(n) => {
-                    let packet = buf.split_to(n).freeze();
-                    if packet.is_empty() { continue; }
+                    if n == 0 { continue; }
+                    let packet = Bytes::copy_from_slice(&buf[..n]);
                     
                     let version = packet[0] >> 4;
                     if version == 4 {
                          if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&packet) {
                             let dest_ip = ipv4_header.destination_addr();
-                            if let Some(tx_client) = state_reader.peers.get(&dest_ip) {
-                                if tx_client.try_send(packet).is_err() {
-                                    warn!("Dropped IPv4 packet for {}: client channel full", dest_ip);
+                            
+                            let mut remove = false;
+                            if let std::collections::hash_map::Entry::Vacant(e) = local_peers_v4.entry(dest_ip) {
+                                if let Some(tx_ref) = state_reader.peers.get(&dest_ip) {
+                                    e.insert(tx_ref.value().clone());
                                 }
+                            }
+                            
+                            if let Some(tx_client) = local_peers_v4.get(&dest_ip) {
+                                if let Err(e) = tx_client.try_send(packet) {
+                                    if let tokio::sync::mpsc::error::TrySendError::Closed(_) = e {
+                                        remove = true;
+                                    } else {
+                                        warn!("Dropped IPv4 packet for {}: client channel full", dest_ip);
+                                    }
+                                }
+                            }
+                            
+                            if remove {
+                                local_peers_v4.remove(&dest_ip);
                             }
                         }
                     } else if version == 6 {
                          if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&packet) {
                             let dest_ip = ipv6_header.destination_addr();
-                            if let Some(tx_client) = state_reader.peers_v6.get(&dest_ip) {
-                                if tx_client.try_send(packet).is_err() {
-                                    warn!("Dropped IPv6 packet for {}: client channel full", dest_ip);
+                            
+                            let mut remove = false;
+                            if let std::collections::hash_map::Entry::Vacant(e) = local_peers_v6.entry(dest_ip) {
+                                if let Some(tx_ref) = state_reader.peers_v6.get(&dest_ip) {
+                                    e.insert(tx_ref.value().clone());
                                 }
+                            }
+                            
+                            if let Some(tx_client) = local_peers_v6.get(&dest_ip) {
+                                if let Err(e) = tx_client.try_send(packet) {
+                                    if let tokio::sync::mpsc::error::TrySendError::Closed(_) = e {
+                                        remove = true;
+                                    } else {
+                                        warn!("Dropped IPv6 packet for {}: client channel full", dest_ip);
+                                    }
+                                }
+                            }
+                            
+                            if remove {
+                                local_peers_v6.remove(&dest_ip);
                             }
                         }
                     }

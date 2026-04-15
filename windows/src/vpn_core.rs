@@ -192,6 +192,13 @@ async fn run_session(
     //    `_h3_guard` keeps the h3 SendRequest + driver task alive for the entire
     //    session; dropping it earlier would send CONNECTION_CLOSE(H3_NO_ERROR) and
     //    kill the VPN datagram plane. It lives to the end of `run_session` scope.
+    // Optional ECH GREASE + SNI-spoofing config, derived from the admin's
+    // out-of-band ECHConfigList (hex in config.json). None → legacy path.
+    let ech_bytes = config
+        .ech_config
+        .as_deref()
+        .and_then(crate::ech_client::decode_hex);
+
     let (connection, server_config, _h3_guard) = connect_and_handshake(
         socket,
         config.token.clone(),
@@ -199,6 +206,7 @@ async fn run_session(
         cert_pin_bytes.to_vec(),
         config.censorship_resistant,
         config.http3_framing,
+        ech_bytes,
     ).await?;
 
     // 2. Extract Network Configuration
@@ -401,12 +409,39 @@ async fn connect_and_handshake(
     cert_pin: Vec<u8>,
     censorship_resistant: bool,
     http3_framing: bool,
+    ech_config_list: Option<Vec<u8>>,
 ) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
+    // Decide up-front whether we will offer ECH GREASE and which SNI to send on
+    // the wire. The outer SNI spoof is safe because the server authenticates via
+    // SHA-256 cert pinning and does not inspect the SNI.
+    let ech_state = match ech_config_list.as_deref() {
+        Some(bytes) => {
+            let parsed = crate::ech_client::parse(bytes)
+                .context("Failed to parse ECH config list")?
+                .ok_or_else(|| anyhow::anyhow!("ECH config list contained no HPKE suites supported by aws-lc-rs"))?;
+            info!("ECH GREASE enabled, outer SNI: {}", parsed.outer_sni);
+            Some(parsed)
+        }
+        None => None,
+    };
+
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let builder = rustls::ClientConfig::builder_with_provider(provider.into());
+    let versioned = if let Some(ech) = ech_state.as_ref() {
+        // `with_ech` implicitly pins TLS 1.3 (required by ECH) and registers the
+        // GREASE extension, mimicking the server's advertised HPKE suite.
+        builder
+            .with_ech(rustls::client::EchMode::Grease(ech.grease.clone()))
+            .context("failed to enable ECH GREASE on client config")?
+    } else {
+        builder
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+    };
+
+    let mut client_crypto = versioned
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
@@ -421,7 +456,15 @@ async fn connect_and_handshake(
     // Resolve endpoint and connect
     let addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
     let addr = *addrs.first().context("Failed to resolve endpoint")?;
-    let (server_name, _) = split_endpoint(&endpoint_str);
+    // When ECH is active we send the config's `public_name` as the outer SNI
+    // instead of the real server hostname. Cert-pin auth is unaffected.
+    let server_name: String = match ech_state.as_ref() {
+        Some(ech) => ech.outer_sni.clone(),
+        None => {
+            let (host, _) = split_endpoint(&endpoint_str);
+            host.to_string()
+        }
+    };
     if server_name.is_empty() {
         anyhow::bail!("Endpoint host missing");
     }
@@ -460,7 +503,7 @@ async fn connect_and_handshake(
     let mut connection = None;
     for addr in addrs {
         info!("Connecting to {} (resolved: {}, SNI: {})", endpoint_str, addr, server_name);
-        match endpoint.connect(addr, server_name) {
+        match endpoint.connect(addr, &server_name) {
             Ok(connecting) => match connecting.await {
                 Ok(conn) => {
                     connection = Some(conn);

@@ -47,6 +47,11 @@ pub struct Config {
     pub kc_realm: Option<String>,
     /// Keycloak Client ID.
     pub kc_client_id: Option<String>,
+    /// Hex-encoded `ECHConfigList` bytes. When present and the client's crypto
+    /// provider supports HPKE (aws-lc-rs), the client offers ECH GREASE and
+    /// spoofs the SNI to the config's `public_name`.
+    #[serde(default)]
+    pub ech_config: Option<String>,
 }
 
 /// Commands sent from the client UI to the background service.
@@ -116,6 +121,7 @@ mod tests {
             kc_url: Some("https://auth.example.com".to_string()),
             kc_realm: Some("mavi-vpn".to_string()),
             kc_client_id: Some("mavi-client".to_string()),
+            ech_config: None,
         };
         let req = IpcRequest::Start(config);
         let decoded = roundtrip_request(&req);
@@ -189,6 +195,31 @@ mod tests {
     }
 
     #[test]
+    fn ipc_request_start_roundtrip_with_ech_config() {
+        // Ensure that a non-None ech_config survives a bincode round-trip.
+        let config = Config {
+            endpoint: "vpn.example.com:4433".to_string(),
+            token: "tok".to_string(),
+            cert_pin: "deadbeef".to_string(),
+            censorship_resistant: true,
+            http3_framing: false,
+            kc_auth: None,
+            kc_url: None,
+            kc_realm: None,
+            kc_client_id: None,
+            ech_config: Some("deadbeef01020304".to_string()),
+        };
+        let req = IpcRequest::Start(config);
+        let decoded = roundtrip_request(&req);
+        match decoded {
+            IpcRequest::Start(c) => {
+                assert_eq!(c.ech_config.as_deref(), Some("deadbeef01020304"));
+            }
+            other => panic!("Expected Start, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn ipc_request_start_roundtrip_minimal() {
         // All optional Keycloak fields are None – the minimal valid Config.
         let config = Config {
@@ -201,6 +232,7 @@ mod tests {
             kc_url: None,
             kc_realm: None,
             kc_client_id: None,
+            ech_config: None,
         };
         let req = IpcRequest::Start(config);
         let decoded = roundtrip_request(&req);

@@ -219,7 +219,7 @@ class MaviVpnService : VpnService() {
                             notificationHelper.updateNotification(1, "Mavi VPN", "Retrying connection to $ip (Attempt $retryCount)...")
                         }
 
-                        val handle = NativeLib.init(this, currentToken, buildEndpoint(ip, port), certPin, crMode, prefs.savedHttp3Framing)
+                        val handle = NativeLib.init(this, currentToken, buildEndpoint(ip, port), certPin, crMode, prefs.savedHttp3Framing, prefs.savedEchConfig)
                         // Valid 64-bit pointers on Android MTE/TBI can be negative when cast to a signed Long.
                         // NativeLib error codes are strictly in the range [-3, 0].
                         if (handle in -3L..0L) {

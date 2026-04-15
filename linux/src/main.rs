@@ -14,6 +14,8 @@
 #[cfg(target_os = "linux")]
 pub mod daemon;
 #[cfg(target_os = "linux")]
+pub mod ech_client;
+#[cfg(target_os = "linux")]
 pub mod network;
 #[cfg(target_os = "linux")]
 pub mod oauth;
@@ -25,6 +27,7 @@ pub mod vpn_core;
 #[cfg(target_os = "linux")]
 mod linux_app {
     pub use super::daemon;
+    pub use super::ech_client;
     pub use super::network;
     pub use super::oauth;
     pub use super::tun;
@@ -470,6 +473,26 @@ async fn prompt_new_config() -> Result<Config> {
     let h3_input = read_line()?.to_lowercase();
     let http3_framing = h3_input == "y" || h3_input == "yes";
 
+    // Optional hex-encoded ECHConfigList. Prefer $VPN_ECH_CONFIG, fall back to
+    // an interactive prompt when CR mode is on.
+    let ech_config = match std::env::var("VPN_ECH_CONFIG") {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ if censorship_resistant => {
+            print!("ECHConfigList (hex, optional – press Enter to skip): ");
+            stdout.flush()?;
+            let input = read_line()?;
+            if input.is_empty() {
+                None
+            } else if shared::hex::decode_hex(&input).is_none() {
+                eprintln!("Warning: ECHConfigList hex is invalid (odd length or non-hex chars) — ECH will be disabled");
+                None
+            } else {
+                Some(input)
+            }
+        }
+        _ => None,
+    };
+
     println!();
 
     Ok(Config {
@@ -482,6 +505,7 @@ async fn prompt_new_config() -> Result<Config> {
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,
         kc_client_id: saved_kc_client_id,
+        ech_config,
     })
 }
 

@@ -19,27 +19,18 @@ pub fn spawn_tun_writer(mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>, 
 
 pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, state_reader: Arc<AppState>) {
     tokio::spawn(async move {
-        const PREFIX_LEN: usize = DATAGRAM_PREFIX.len();
-        
-        // 1MB Chunk Allocation to amortize heap allocations for zero-copy read
-        const CHUNK_SIZE: usize = 1024 * 1024;
-        let mut buf = bytes::BytesMut::with_capacity(CHUNK_SIZE);
+        let mut buf = vec![0u8; 65536 + DATAGRAM_PREFIX.len()];
+        buf[..DATAGRAM_PREFIX.len()].copy_from_slice(&DATAGRAM_PREFIX);
         
         let mut local_peers_v4: std::collections::HashMap<std::net::Ipv4Addr, tokio::sync::mpsc::Sender<bytes::Bytes>> = std::collections::HashMap::new();
         let mut local_peers_v6: std::collections::HashMap<std::net::Ipv6Addr, tokio::sync::mpsc::Sender<bytes::Bytes>> = std::collections::HashMap::new();
 
         loop {
-            if buf.capacity() < 65536 + PREFIX_LEN {
-                buf.reserve(CHUNK_SIZE);
-            }
-
-            buf.extend_from_slice(&DATAGRAM_PREFIX);
-
-            match tun_reader.read_buf(&mut buf).await {
+            match tun_reader.read(&mut buf[DATAGRAM_PREFIX.len()..]).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    let framed = buf.split_to(PREFIX_LEN + n).freeze();
-                    let packet = framed.slice(PREFIX_LEN..);
+                    let framed = bytes::Bytes::copy_from_slice(&buf[..DATAGRAM_PREFIX.len() + n]);
+                    let packet = framed.slice(DATAGRAM_PREFIX.len()..);
                     
                     if packet.is_empty() { continue; }
 
@@ -60,13 +51,10 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                     }
                                 }
                             } else {
-                                // Slow-path: fetch from DashMap, immediately dropping the read lock
                                 let tx_client_opt = state_reader.peers.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
                                 if let Some(tx_client) = tx_client_opt {
                                     if let Err(e) = tx_client.try_send(framed) {
-                                        if matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
-                                            state_reader.peers.remove(&dest_ip);
-                                        } else {
+                                        if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
                                             warn!("Dropped IPv4 packet for {}: client channel full", dest_ip);
                                             local_peers_v4.insert(dest_ip, tx_client);
                                         }
@@ -78,7 +66,6 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                             
                             if remove {
                                 local_peers_v4.remove(&dest_ip);
-                                state_reader.peers.remove(&dest_ip);
                             }
                         }
                     } else if version == 6 {
@@ -96,13 +83,10 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                     }
                                 }
                             } else {
-                                // Slow-path: fetch from DashMap, immediately dropping the read lock
                                 let tx_client_opt = state_reader.peers_v6.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
                                 if let Some(tx_client) = tx_client_opt {
                                     if let Err(e) = tx_client.try_send(framed) {
-                                        if matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
-                                            state_reader.peers_v6.remove(&dest_ip);
-                                        } else {
+                                        if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
                                             warn!("Dropped IPv6 packet for {}: client channel full", dest_ip);
                                             local_peers_v6.insert(dest_ip, tx_client);
                                         }
@@ -114,7 +98,6 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                             
                             if remove {
                                 local_peers_v6.remove(&dest_ip);
-                                state_reader.peers_v6.remove(&dest_ip);
                             }
                         }
                     }

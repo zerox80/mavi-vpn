@@ -149,6 +149,14 @@ async fn run_session(
     //    `_h3_guard` keeps the h3 SendRequest + driver task alive for the entire
     //    session; dropping it earlier would send CONNECTION_CLOSE(H3_NO_ERROR) and
     //    kill the VPN datagram plane. It lives to the end of `run_session` scope.
+    // Optional ECH GREASE + SNI-spoofing config, derived from the admin's
+    // out-of-band ECHConfigList (hex in config.json / $VPN_ECH_CONFIG). None →
+    // legacy path.
+    let ech_bytes = config
+        .ech_config
+        .as_deref()
+        .and_then(crate::ech_client::decode_hex);
+
     let (connection, server_config, _h3_guard) = connect_and_handshake(
         socket,
         config.token.clone(),
@@ -156,6 +164,7 @@ async fn run_session(
         cert_pin_bytes.to_vec(),
         config.censorship_resistant,
         config.http3_framing,
+        ech_bytes,
     )
     .await?;
 
@@ -369,17 +378,49 @@ async fn connect_and_handshake(
     cert_pin: Vec<u8>,
     censorship_resistant: bool,
     http3_framing: bool,
+    ech_config_list: Option<Vec<u8>>,
 ) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(
-        rustls::crypto::aws_lc_rs::default_provider().into(),
-    )
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
-    .dangerous()
-    .with_custom_certificate_verifier(verifier)
-    .with_no_client_auth();
+    // Decide up-front whether we will offer ECH GREASE and which SNI to send on
+    // the wire. The outer SNI spoof is safe because the server authenticates via
+    // SHA-256 cert pinning and does not inspect the SNI.
+    let ech_state = match ech_config_list.as_deref() {
+        Some(bytes) => match crate::ech_client::parse(bytes) {
+            Ok(Some(parsed)) => {
+                info!("ECH GREASE enabled, outer SNI: {}", parsed.outer_sni);
+                Some(parsed)
+            }
+            Ok(None) => {
+                warn!("ECH config list contained no HPKE suites supported by aws-lc-rs — skipping ECH");
+                None
+            }
+            Err(e) => {
+                warn!("Failed to parse ECH config list: {:#} — skipping ECH", e);
+                None
+            }
+        },
+        None => None,
+    };
+
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let builder = rustls::ClientConfig::builder_with_provider(provider.into());
+    let versioned = if let Some(ech) = ech_state.as_ref() {
+        // `with_ech` implicitly pins TLS 1.3 (required by ECH) and registers the
+        // GREASE extension, mimicking the server's advertised HPKE suite.
+        builder
+            .with_ech(rustls::client::EchMode::Grease(ech.grease.clone()))
+            .context("failed to enable ECH GREASE on client config")?
+    } else {
+        builder
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+    };
+
+    let mut client_crypto = versioned
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
 
     // HTTP/3 transport requires h3. Raw mode keeps mavivpn as the preferred ALPN.
     client_crypto.alpn_protocols = if http3_framing || censorship_resistant {
@@ -435,15 +476,24 @@ async fn connect_and_handshake(
     )?;
     endpoint.set_default_client_config(client_config);
 
-    let server_name = if endpoint_str.starts_with('[') {
-        // IPv6 literal: [::1]:443 → ::1
-        endpoint_str.trim_start_matches('[').split(']').next().unwrap_or(&endpoint_str)
-    } else {
-        // hostname:port or IPv4:port
-        endpoint_str.split(':').next().unwrap_or(&endpoint_str)
+    // When ECH is active we send the config's `public_name` as the outer SNI
+    // instead of the real server hostname. Cert-pin auth is unaffected.
+    let server_name: String = match ech_state.as_ref() {
+        Some(ech) => ech.outer_sni.clone(),
+        None => {
+            let raw = if endpoint_str.starts_with('[') {
+                // IPv6 literal: [::1]:443 → ::1
+                endpoint_str.trim_start_matches('[').split(']').next().unwrap_or(&endpoint_str)
+            } else {
+                // hostname:port or IPv4:port
+                endpoint_str.split(':').next().unwrap_or(&endpoint_str)
+            };
+            raw.to_string()
+        }
     };
+    info!("Connecting to {} (SNI: {})", addr, server_name);
     let connection = endpoint
-        .connect(addr, server_name)?
+        .connect(addr, &server_name)?
         .await
         .context("QUIC handshake failed")?;
 

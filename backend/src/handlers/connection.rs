@@ -71,6 +71,17 @@ fn negotiated_alpn(connection: &quinn::Connection) -> Option<Vec<u8>> {
     handshake_data.protocol.clone()
 }
 
+/// Extract the SNI (Server Name Indication) that the client presented during
+/// the TLS handshake.  Returns `None` when the client omitted the SNI
+/// extension (uncommon but valid) or when the handshake data is unavailable.
+fn negotiated_sni(connection: &quinn::Connection) -> Option<String> {
+    let handshake_data = connection.handshake_data()?;
+    let handshake_data = handshake_data
+        .downcast::<quinn::crypto::rustls::HandshakeData>()
+        .ok()?;
+    handshake_data.server_name.clone()
+}
+
 async fn detect_initial_streams(connection: &quinn::Connection) -> Result<InitialStreams> {
     match negotiated_alpn(connection).as_deref() {
         Some(protocol) if protocol == b"mavivpn" => {
@@ -121,7 +132,36 @@ pub async fn handle_connection(
 ) -> Result<()> {
     let connection = conn.await?;
     let remote_addr = connection.remote_address();
-    info!("New connection from {}", remote_addr);
+
+    let sni = negotiated_sni(&connection);
+    let alpn = negotiated_alpn(&connection)
+        .map(|p| String::from_utf8_lossy(&p).into_owned())
+        .unwrap_or_else(|| "<none>".to_string());
+
+    if config.censorship_resistant {
+        let expected = &config.ech_public_name;
+        match &sni {
+            Some(s) if s == expected => info!(
+                "New connection from {} | SNI: {:?} | ALPN: {} | ECH: cover SNI matches (ok)",
+                remote_addr, s, alpn
+            ),
+            Some(s) => warn!(
+                "New connection from {} | SNI: {:?} | ALPN: {} | ECH: expected cover SNI {:?}",
+                remote_addr, s, alpn, expected
+            ),
+            None => info!(
+                "New connection from {} | SNI: <none> | ALPN: {} | ECH: cover SNI expected {:?}",
+                remote_addr, alpn, expected
+            ),
+        }
+    } else {
+        info!(
+            "New connection from {} | SNI: {} | ALPN: {}",
+            remote_addr,
+            sni.as_deref().unwrap_or("<none>"),
+            alpn
+        );
+    }
 
     let (pre_bi, pre_uni) = match detect_initial_streams(&connection).await? {
         InitialStreams::Raw {
@@ -141,6 +181,7 @@ pub async fn handle_connection(
             tx_tun,
             keycloak,
             ipv6_enabled,
+            sni,
         )
         .await;
     }
@@ -224,7 +265,13 @@ pub async fn handle_connection(
     send_stream.write_all(&bytes).await?;
     let _ = send_stream.finish();
 
-    info!("Authenticated {} -> IPv4: {}, IPv6: {}", remote_addr, assigned_ip, assigned_ip6);
+    info!(
+        "Authenticated {} | SNI: {} -> IPv4: {}, IPv6: {}",
+        remote_addr,
+        sni.as_deref().unwrap_or("<none>"),
+        assigned_ip,
+        assigned_ip6
+    );
 
     let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(4096);
     state.register_client(assigned_ip, assigned_ip6, tx_client);
@@ -358,9 +405,14 @@ pub async fn handle_h3_connection(
     tx_tun: tokio::sync::mpsc::Sender<Bytes>,
     keycloak: Option<Arc<KeycloakValidator>>,
     ipv6_enabled: bool,
+    sni: Option<String>,
 ) -> Result<()> {
     let remote_addr = connection.remote_address();
-    info!("Detected HTTP/3 L7 client from {}", remote_addr);
+    info!(
+        "Detected HTTP/3 L7 client from {} | SNI: {}",
+        remote_addr,
+        sni.as_deref().unwrap_or("<none>")
+    );
 
     let h3_conn_wrapper =
         crate::network::h3_quinn::Connection::with_pre_streams(connection.clone(), pre_bi, Some(pre_uni));
@@ -526,7 +578,13 @@ pub async fn handle_h3_connection(
     // session so we can push additional capsules later and so the client side
     // does not interpret a FIN as session teardown. Do NOT call req_stream.finish().
 
-    info!("H3 Authenticated {} -> IPv4: {}, IPv6: {}", remote_addr, assigned_ip, assigned_ip6);
+    info!(
+        "H3 Authenticated {} | SNI: {} -> IPv4: {}, IPv6: {}",
+        remote_addr,
+        sni.as_deref().unwrap_or("<none>"),
+        assigned_ip,
+        assigned_ip6
+    );
 
     // VPN data plane: connect-ip datagrams on the request stream (RFC 9484 §5).
     // Each datagram is framed as: [Quarter Stream ID varint] [Context ID varint] [IP Packet].

@@ -19,6 +19,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     var serverPort = MutableStateFlow(prefs.savedPort)
     var authToken = MutableStateFlow(prefs.savedToken)
     var certPin = MutableStateFlow(prefs.savedPin)
+    var echConfig = MutableStateFlow(prefs.savedEchConfig)
 
     // Keycloak state
     var useKeycloak = MutableStateFlow(prefs.savedUseKeycloak)
@@ -59,6 +60,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         prefs.savedPort = serverPort.value
         prefs.savedToken = authToken.value
         prefs.savedPin = certPin.value
+        prefs.savedEchConfig = echConfig.value
     }
 
     fun saveKeycloakDetails() {

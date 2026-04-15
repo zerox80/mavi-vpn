@@ -53,3 +53,6 @@ docs/server-performance-tuning.md
 gui/src-tauri/build_error.txt
 gui/src-tauri/wix_binaries/mavi-vpn-client.exe
 gui/src-tauri/wix_binaries/mavi-vpn-service.exe
+
+# --- Backend ---
+/backend/data/

@@ -338,13 +338,14 @@ pub async fn handle_connection(
         }
     });
 
+    let mut batch = Vec::with_capacity(64);
     let res = 'outer_loop: loop {
+        batch.clear();
         let first_packet = match connection.read_datagram().await {
             Ok(data) => data,
             Err(e) => break Err(anyhow::anyhow!("Lost: {}", e)),
         };
 
-        let mut batch = Vec::with_capacity(64);
         batch.push(first_packet);
 
         for _ in 0..63 {
@@ -355,7 +356,7 @@ pub async fn handle_connection(
             }
         }
 
-        for data in batch {
+        for data in batch.drain(..) {
             if data.is_empty() { continue; }
             let ver = data[0] >> 4;
             let mut valid = false;
@@ -629,13 +630,14 @@ pub async fn handle_h3_connection(
     });
 
     // QUIC -> TUN (strip connect-ip datagram framing)
+    let mut batch = Vec::with_capacity(64);
     let res = 'outer_loop: loop {
+        batch.clear();
         let first_dg = match connection.read_datagram().await {
             Ok(data) => data,
             Err(e) => break Err(anyhow::anyhow!("H3 connection lost: {}", e)),
         };
 
-        let mut batch = Vec::with_capacity(64);
         batch.push(first_dg);
         for _ in 0..63 {
             if let Some(Ok(p)) = connection.read_datagram().now_or_never() {
@@ -645,7 +647,7 @@ pub async fn handle_h3_connection(
             }
         }
 
-        for datagram in batch {
+        for datagram in batch.drain(..) {
             // Strip [Quarter Stream ID] [Context ID] per RFC 9484 §5.
             let inner_len = match masque::unwrap_datagram(&datagram) {
                 Some(slice) => slice.len(),

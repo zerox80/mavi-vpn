@@ -60,6 +60,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     cert_pin: JString<'local>,
     censorship_resistant: jni::sys::jboolean,
     http3_framing: jni::sys::jboolean,
+    ech_config: JString<'local>,
 ) -> jlong {
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let mut env = guard.borrow_env_mut();
@@ -109,6 +110,10 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
             return INIT_FATAL_CONFIG;
         }
     };
+
+    // Optional: hex-encoded ECHConfigList. Empty string → no ECH override.
+    let ech_config_hex: Option<String> = get_string(&mut env, &ech_config)
+        .filter(|s| !s.is_empty());
 
     if cert_pin_str.is_empty() {
         let message = "Certificate PIN is empty. Connection aborted.";
@@ -190,7 +195,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     };
 
     let result = rt.block_on(async {
-        connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant.into(), http3_framing.into()).await
+        connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant.into(), http3_framing.into(), ech_config_hex).await
     });
 
     match result {

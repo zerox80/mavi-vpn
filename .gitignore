@@ -56,3 +56,4 @@ gui/src-tauri/wix_binaries/mavi-vpn-service.exe
 
 # --- Backend ---
 /backend/data/
+.claude/settings.local.json

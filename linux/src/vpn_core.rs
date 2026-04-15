@@ -386,20 +386,13 @@ async fn connect_and_handshake(
     // the wire. The outer SNI spoof is safe because the server authenticates via
     // SHA-256 cert pinning and does not inspect the SNI.
     let ech_state = match ech_config_list.as_deref() {
-        Some(bytes) => match crate::ech_client::parse(bytes) {
-            Ok(Some(parsed)) => {
-                info!("ECH GREASE enabled, outer SNI: {}", parsed.outer_sni);
-                Some(parsed)
-            }
-            Ok(None) => {
-                warn!("ECH config list contained no HPKE suites supported by aws-lc-rs — skipping ECH");
-                None
-            }
-            Err(e) => {
-                warn!("Failed to parse ECH config list: {:#} — skipping ECH", e);
-                None
-            }
-        },
+        Some(bytes) => {
+            let parsed = crate::ech_client::parse(bytes)
+                .context("Failed to parse ECH config list")?
+                .ok_or_else(|| anyhow::anyhow!("ECH config list contained no HPKE suites supported by aws-lc-rs"))?;
+            info!("ECH GREASE enabled, outer SNI: {}", parsed.outer_sni);
+            Some(parsed)
+        }
         None => None,
     };
 

@@ -42,6 +42,10 @@ class PrefsManager(context: Context) {
         get() = prefs.getBoolean("saved_http3_framing", false)
         set(value) = prefs.edit().putBoolean("saved_http3_framing", value).apply()
 
+    var savedEchConfig: String
+        get() = prefs.getString("saved_ech_config", "") ?: ""
+        set(value) = prefs.edit().putString("saved_ech_config", value).apply()
+
     var savedUseKeycloak: Boolean
         get() = prefs.getBoolean("saved_use_keycloak", false)
         set(value) = prefs.edit().putBoolean("saved_use_keycloak", value).apply()

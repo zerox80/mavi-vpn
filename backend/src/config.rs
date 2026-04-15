@@ -92,6 +92,20 @@ pub struct Config {
     /// Keycloak Client ID
     #[arg(long, env = "VPN_KEYCLOAK_CLIENT_ID", default_value = "mavi-client")]
     pub keycloak_client_id: String,
+
+    /// ECH "public_name" — the cover/outer SNI that clients will send on the
+    /// wire. Must be a plausible-looking domain (e.g. a CDN). Only used when
+    /// `censorship_resistant` is enabled.
+    #[arg(long, env = "VPN_ECH_PUBLIC_NAME", default_value = "cloudflare-ech.com")]
+    pub ech_public_name: String,
+
+    /// Path to the persisted ECHConfigList bytes (clients consume this).
+    #[arg(long, env = "VPN_ECH_CONFIG", default_value = "data/ech_config.bin")]
+    pub ech_config_path: std::path::PathBuf,
+
+    /// Path to the persisted ECH HPKE private key bytes.
+    #[arg(long, env = "VPN_ECH_KEY", default_value = "data/ech_key.bin")]
+    pub ech_key_path: std::path::PathBuf,
 }
 
 /// Loads the server configuration from environment variables and CLI arguments.

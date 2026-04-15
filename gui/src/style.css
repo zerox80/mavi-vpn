@@ -50,9 +50,8 @@ header {
 }
 
 .header-logo {
-  height: 50px;
-  width: auto;
-  max-width: 250px;
+  height: 80px;
+  width: 80px;
   object-fit: contain;
   filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.4));
 }

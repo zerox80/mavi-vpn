@@ -4,6 +4,12 @@
 **/*.rs.bk
 Cargo.lock
 
+# --- Node ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+
 # --- Android ---
 .gradle/
 .idea/
@@ -11,9 +17,14 @@ build/
 app/build/
 android/build/
 android/app/build/
+android/app/release/
 local.properties
 *.iml
-.DS_Store
+*.hprof
+*.salive
+*.apk
+*.aab
+*.jks
 
 # --- Secrets & Config ---
 .env
@@ -21,39 +32,24 @@ local.properties
 *.pem
 *.key
 *.p12
-*.jks
 auth_token.txt
-
-# --- Logs & Reports ---
-*.log
-problems-report.html
-android/app/src/main/jniLibs/
-android/java_pid7424.hprof
-.agents/rules/dependency.md
-android/java_pid10748.hprof
-android/.kotlin/sessions/kotlin-compiler-7764236979662921806.salive
-android/app/release/mavi_vpn.apk
-android/app/release/output-metadata.json
-android/app/release/baselineProfiles/0/app-release.dm
-android/app/release/baselineProfiles/1/app-release.dm
 mavi-vpn.json
-gui/src-tauri/gen/schemas/acl-manifests.json
-gui/src-tauri/gen/schemas/capabilities.json
-gui/src-tauri/gen/schemas/desktop-schema.json
-gui/src-tauri/gen/schemas/windows-schema.json
-gui/src-tauri/gen/schemas/linux-schema.json
-android/app/release/
-android/gradle/gradle-daemon-jvm.properties
-android/app/release/app-release.apk
-android/.kotlin/sessions/kotlin-compiler-9575080087113769916.salive
+.claude/settings.local.json
+
+# --- Logs, Reports & OS ---
+*.log
+.DS_Store
+problems-report.html
 pr_commit.patch
 query
 schema.json
 docs/server-performance-tuning.md
+.agents/rules/dependency.md
+
+# --- Tauri / UI ---
+gui/src-tauri/gen/
+gui/src-tauri/wix_binaries/
 gui/src-tauri/build_error.txt
-gui/src-tauri/wix_binaries/mavi-vpn-client.exe
-gui/src-tauri/wix_binaries/mavi-vpn-service.exe
 
 # --- Backend ---
 /backend/data/
-.claude/settings.local.json

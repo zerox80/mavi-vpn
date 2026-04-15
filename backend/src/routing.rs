@@ -4,6 +4,7 @@ use tracing::{error, warn};
 use bytes::Bytes;
 use crate::state::AppState;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
+use shared::masque::DATAGRAM_PREFIX;
 
 pub fn spawn_tun_writer(mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>, mut rx_tun: tokio::sync::mpsc::Receiver<Bytes>) {
     tokio::spawn(async move {
@@ -18,17 +19,21 @@ pub fn spawn_tun_writer(mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>, 
 
 pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, state_reader: Arc<AppState>) {
     tokio::spawn(async move {
+        const PREFIX_LEN: usize = DATAGRAM_PREFIX.len();
         let mut buf = vec![0u8; 65536];
+        buf[..PREFIX_LEN].copy_from_slice(&DATAGRAM_PREFIX);
+        
         let mut local_peers_v4 = std::collections::HashMap::new();
         let mut local_peers_v6 = std::collections::HashMap::new();
 
         loop {
-            match tun_reader.read(&mut buf).await {
-                Ok(0) => break, 
+            match tun_reader.read(&mut buf[PREFIX_LEN..]).await {
+                Ok(0) => break,
                 Ok(n) => {
-                    if n == 0 { continue; }
-                    let packet = Bytes::copy_from_slice(&buf[..n]);
-                    
+                    let framed = Bytes::copy_from_slice(&buf[..PREFIX_LEN + n]);
+                    let packet = framed.slice(PREFIX_LEN..);
+                    if packet.is_empty() { continue; }
+
                     let version = packet[0] >> 4;
                     if version == 4 {
                          if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&packet) {
@@ -42,7 +47,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                             }
                             
                             if let Some(tx_client) = local_peers_v4.get(&dest_ip) {
-                                if let Err(e) = tx_client.try_send(packet) {
+                                if let Err(e) = tx_client.try_send(framed) {
                                     if let tokio::sync::mpsc::error::TrySendError::Closed(_) = e {
                                         remove = true;
                                     } else {
@@ -67,7 +72,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                             }
                             
                             if let Some(tx_client) = local_peers_v6.get(&dest_ip) {
-                                if let Err(e) = tx_client.try_send(packet) {
+                                if let Err(e) = tx_client.try_send(framed) {
                                     if let tokio::sync::mpsc::error::TrySendError::Closed(_) = e {
                                         remove = true;
                                     } else {

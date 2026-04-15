@@ -30,7 +30,8 @@
       "PowerShell(cargo check:*)",
       "PowerShell(rustup target:*)",
       "PowerShell(\\(Get-Content C:\\\\Daten5\\\\mavi-vpn\\\\windows\\\\src\\\\vpn_core.rs\\).Length; \\(Get-Content C:\\\\Daten5\\\\mavi-vpn\\\\linux\\\\src\\\\vpn_core.rs\\).Length)",
-      "PowerShell(Get-ChildItem 'C:\\\\Users\\\\Rujbin.Nassereslam\\\\.cargo\\\\registry\\\\src' -Filter 'h3-0.0.8' -Recurse -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })"
+      "PowerShell(Get-ChildItem 'C:\\\\Users\\\\Rujbin.Nassereslam\\\\.cargo\\\\registry\\\\src' -Filter 'h3-0.0.8' -Recurse -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })",
+      "Bash(grep -n \"tokio::main\\\\|new_current_thread\\\\|new_multi_thread\\\\|worker_threads\\\\|Runtime::new\\\\|runtime::Builder\\\\|#\\\\[tokio\" c:/Daten5/mavi-vpn/backend/src/main.rs c:/Daten5/mavi-vpn/android/app/src/main/rust/src/*.rs)"
     ]
   }
 }

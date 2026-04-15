@@ -284,7 +284,10 @@ pub async fn handle_connection(
     let tunnel_mtu = config.mtu;
     
     let tun_to_quic = tokio::spawn(async move {
-        while let Some(packet) = rx_client.recv().await {
+        while let Some(framed) = rx_client.recv().await {
+            // `framed` is [H3 prefix][IP packet] from spawn_tun_reader. Raw mode sends only the
+            // IP packet; `slice` is an O(1) refcount op, no copy.
+            let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
             if let Err(e) = conn_send.send_datagram(packet.clone()) {
                 if matches!(e, quinn::SendDatagramError::TooLarge) {
                     if packet.is_empty() {
@@ -598,16 +601,15 @@ pub async fn handle_h3_connection(
     let gv6 = state.gateway_ip_v6();
     let tunnel_mtu = config.mtu;
 
-    // TUN -> QUIC (with connect-ip datagram framing)
+    // TUN -> QUIC (connect-ip datagram framing). `framed` is already
+    // [Quarter Stream ID = 0][Context ID = 0][IP Packet] per RFC 9484 §5 because
+    // spawn_tun_reader reserved the 2-byte headroom during the TUN read — no
+    // per-packet alloc or memcpy needed here.
     let tun_to_quic = tokio::spawn(async move {
-        while let Some(packet) = rx_client.recv().await {
-            // Prepend [Quarter Stream ID = 0] [Context ID = 0] per RFC 9484 §5
-            let mut h3_payload = Vec::with_capacity(packet.len() + masque::DATAGRAM_PREFIX.len());
-            h3_payload.extend_from_slice(&masque::DATAGRAM_PREFIX);
-            h3_payload.extend_from_slice(&packet);
-
-            if let Err(e) = conn_send.send_datagram(Bytes::from(h3_payload)) {
+        while let Some(framed) = rx_client.recv().await {
+            if let Err(e) = conn_send.send_datagram(framed.clone()) {
                 if matches!(e, quinn::SendDatagramError::TooLarge) {
+                    let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
                     if packet.is_empty() { continue; }
                     let ver = packet[0] >> 4;
                     let gw = if ver == 4 {

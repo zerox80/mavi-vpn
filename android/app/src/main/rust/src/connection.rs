@@ -74,8 +74,10 @@ pub async fn connect_and_handshake(
     // Android's `ring` provider lacks HPKE so we cannot offer ECH GREASE, but
     // SNI override alone already hides the real hostname from on-path censors
     // (the server uses cert pinning, not SNI, for auth).
-    let server_name = match ech_config_hex.as_deref().and_then(crate::ech_client::outer_sni_from_hex) {
-        Some(sni) => {
+    let server_name = match ech_config_hex.as_deref() {
+        Some(hex) => {
+            let sni = crate::ech_client::outer_sni_from_hex(hex)
+                .ok_or_else(|| anyhow::anyhow!("Failed to parse provided ECH config hex"))?;
             info!("ECH config parsed, overriding outer SNI: {}", sni);
             sni
         }

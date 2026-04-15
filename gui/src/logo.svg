@@ -1,92 +1,122 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <linearGradient id="shieldGrad" x1="0.5" y1="0" x2="0.5" y2="1">
-      <stop offset="0%" stop-color="#3b82f6"/>
-      <stop offset="100%" stop-color="#1d3a8a"/>
+    <!-- Light teal highlight -->
+    <linearGradient id="a" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a4f0ff"/>
+      <stop offset="100%" stop-color="#38b8d8"/>
     </linearGradient>
-    <linearGradient id="eyeGrad" x1="0.5" y1="0" x2="0.5" y2="1">
-      <stop offset="0%" stop-color="#bfdbfe"/>
-      <stop offset="100%" stop-color="#60a5fa"/>
+    <!-- Mid blue-teal -->
+    <linearGradient id="b" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38b8d8"/>
+      <stop offset="100%" stop-color="#0a4e6e"/>
     </linearGradient>
-    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="7" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
+    <!-- Dark navy -->
+    <linearGradient id="c" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a4e6e"/>
+      <stop offset="100%" stop-color="#061f30"/>
+    </linearGradient>
+    <!-- Orange collar -->
+    <linearGradient id="d" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffa030"/>
+      <stop offset="100%" stop-color="#bf4f00"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
-    <filter id="shadow">
-      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000" flood-opacity="0.35"/>
+    <filter id="halo">
+      <feGaussianBlur stdDeviation="22" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
 
-  <!-- Shield body with cat ears integrated -->
-  <path d="
-    M118 16
-    L192 138
-    Q256 96 320 138
-    L394 16
-    L440 108
-    L440 300
-    Q440 438 256 496
-    Q72 438 72 300
-    L72 108
-    Z
-  " fill="url(#shieldGrad)" filter="url(#shadow)"/>
+  <!-- Cyan glow halo behind dog -->
+  <ellipse cx="262" cy="272" rx="192" ry="138" fill="#00c0e0" opacity="0.13" filter="url(#halo)"/>
 
-  <!-- Shield border glow -->
-  <path d="
-    M118 16
-    L192 138
-    Q256 96 320 138
-    L394 16
-    L440 108
-    L440 300
-    Q440 438 256 496
-    Q72 438 72 300
-    L72 108
-    Z
-  " fill="none" stroke="#60a5fa" stroke-width="4" opacity="0.35"/>
+  <!-- FAR BACK LEG (lower z-order, slightly darker) -->
+  <polygon points="156,280 178,270 186,352 164,360" fill="url(#c)" opacity="0.7"/>
+  <polygon points="164,358 186,350 184,394 162,397" fill="url(#b)" opacity="0.65"/>
+  <ellipse cx="173" cy="397" rx="17" ry="8" fill="url(#c)" opacity="0.65"/>
 
-  <!-- Inner ear shading -->
-  <path d="M140 46 L190 138 L156 104 Z" fill="#1e40af" opacity="0.5"/>
-  <path d="M372 46 L322 138 L356 104 Z" fill="#1e40af" opacity="0.5"/>
+  <!-- TAIL (curls up and left from the back of the body) -->
+  <path d="M163,236 C138,198 114,154 136,112 C150,88 180,86 194,104"
+        stroke="url(#b)" stroke-width="32" fill="none" stroke-linecap="round"/>
+  <path d="M163,236 C138,198 114,154 136,112 C150,88 180,86 194,104"
+        stroke="#a4f0ff" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.48"/>
 
-  <!-- Subtle face area -->
-  <ellipse cx="256" cy="316" rx="140" ry="128" fill="#1e3a8a" opacity="0.3"/>
+  <!-- FAR FRONT LEG (slightly darker, behind main front leg) -->
+  <polygon points="316,282 342,272 350,354 324,362" fill="url(#c)" opacity="0.7"/>
+  <polygon points="324,360 350,352 348,396 322,399" fill="url(#b)" opacity="0.65"/>
+  <ellipse cx="335" cy="399" rx="19" ry="9" fill="url(#c)" opacity="0.65"/>
 
-  <!-- Glowing eyes -->
-  <g filter="url(#glow)">
-    <!-- Left eye -->
-    <path d="M130 264 Q196 212 256 264 Q196 316 130 264 Z" fill="url(#eyeGrad)"/>
-    <!-- Right eye -->
-    <path d="M256 264 Q316 212 382 264 Q316 316 256 264 Z" fill="url(#eyeGrad)"/>
-  </g>
+  <!-- BACK BODY section -->
+  <polygon points="160,236 224,212 242,302 178,320" fill="url(#b)"/>
+  <polygon points="160,236 224,212 208,170 156,184" fill="url(#a)" opacity="0.78"/>
 
-  <!-- Vertical slit pupils -->
-  <path d="M188 240 Q196 230 204 240 L204 288 Q196 298 188 288 Z" fill="#0c1629"/>
-  <path d="M308 240 Q316 230 324 240 L324 288 Q316 298 308 288 Z" fill="#0c1629"/>
+  <!-- MAIN BODY (central mass) -->
+  <polygon points="222,214 344,184 360,296 240,306" fill="url(#b)"/>
+  <polygon points="222,214 344,184 324,148 206,172" fill="url(#a)" opacity="0.82"/>
+  <polygon points="240,306 360,296 350,340 228,348" fill="url(#c)" opacity="0.82"/>
+  <!-- Body shimmer facet -->
+  <polygon points="260,196 330,176 340,218 270,234" fill="#c0f6ff" opacity="0.16"/>
 
-  <!-- Eye highlights -->
-  <circle cx="210" cy="248" r="7" fill="white" opacity="0.8"/>
-  <circle cx="330" cy="248" r="7" fill="white" opacity="0.8"/>
-  <circle cx="192" cy="276" r="3.5" fill="white" opacity="0.35"/>
-  <circle cx="312" cy="276" r="3.5" fill="white" opacity="0.35"/>
+  <!-- NEAR BACK LEG -->
+  <polygon points="180,318 214,308 224,390 190,400" fill="url(#b)"/>
+  <polygon points="190,398 224,388 222,428 188,432" fill="url(#a)" opacity="0.72"/>
+  <ellipse cx="205" cy="432" rx="22" ry="10" fill="url(#b)" opacity="0.75"/>
 
+  <!-- NECK -->
+  <polygon points="348,190 390,176 403,232 361,244" fill="url(#a)"/>
+  <polygon points="361,244 403,232 398,254 356,260" fill="url(#b)" opacity="0.6"/>
+
+  <!-- COLLAR (orange) -->
+  <path d="M354,220 Q378,208 406,220 Q404,244 377,250 Q352,244 354,220Z"
+        fill="url(#d)" filter="url(#glow)"/>
+  <!-- Collar shine highlight -->
+  <path d="M358,220 Q379,210 404,220" stroke="#ffd880" stroke-width="3.5"
+        fill="none" stroke-linecap="round" opacity="0.55"/>
+
+  <!-- NEAR FRONT LEG -->
+  <polygon points="346,288 380,276 391,360 357,370" fill="url(#b)"/>
+  <polygon points="357,368 391,358 389,402 355,406" fill="url(#a)" opacity="0.72"/>
+  <ellipse cx="372" cy="406" rx="24" ry="10" fill="url(#b)" opacity="0.8"/>
+
+  <!-- HEAD (back/dark side) -->
+  <polygon points="384,118 432,108 456,150 430,180 388,174 374,142" fill="url(#b)"/>
+  <!-- HEAD (front/lit face) -->
+  <polygon points="432,108 470,124 480,170 456,190 430,180 456,150" fill="url(#a)"/>
+  <!-- Top highlight -->
+  <polygon points="393,118 432,108 446,132 410,128" fill="#c8f8ff" opacity="0.35"/>
+  <!-- Face highlight -->
+  <polygon points="438,112 468,126 472,150 446,142" fill="#e2faff" opacity="0.22"/>
+
+  <!-- FAR EAR (behind, darker) -->
+  <polygon points="392,116 406,78 422,114 408,122" fill="url(#c)" opacity="0.72"/>
+
+  <!-- NEAR EAR -->
+  <polygon points="416,112 436,70 460,112 440,122" fill="url(#b)"/>
+  <!-- Inner ear shadow -->
+  <polygon points="421,110 436,76 454,110" fill="#011520" opacity="0.32"/>
+
+  <!-- EYE -->
+  <ellipse cx="460" cy="150" rx="15" ry="12" fill="#001824"/>
+  <ellipse cx="460" cy="150" rx="10" ry="8" fill="#82eaf8"/>
+  <ellipse cx="460" cy="150" rx="5" ry="7" fill="#001824"/>
+  <circle cx="463" cy="146" r="3.5" fill="white" opacity="0.88"/>
+  <!-- Eye rim glow -->
+  <ellipse cx="460" cy="150" rx="15" ry="12" fill="none" stroke="#00d0f0"
+           stroke-width="2" opacity="0.45" filter="url(#glow)"/>
+
+  <!-- MUZZLE/SNOUT -->
+  <polygon points="463,164 492,160 498,182 476,190 458,182 460,166" fill="url(#a)" opacity="0.84"/>
   <!-- Nose -->
-  <path d="M246 354 Q256 344 266 354 L256 368 Z" fill="#93c5fd" opacity="0.7"/>
+  <ellipse cx="492" cy="164" rx="8" ry="6" fill="#01161e"/>
+  <circle cx="490" cy="162" r="2.5" fill="white" opacity="0.45"/>
+  <!-- Mouth hint -->
+  <path d="M484,178 Q492,186 500,178" stroke="#01161e" stroke-width="2"
+        fill="none" stroke-linecap="round" opacity="0.55"/>
 
-  <!-- Mouth -->
-  <path d="M256 368 Q242 386 228 380" fill="none" stroke="#93c5fd" stroke-width="2.5" stroke-linecap="round" opacity="0.4"/>
-  <path d="M256 368 Q270 386 284 380" fill="none" stroke="#93c5fd" stroke-width="2.5" stroke-linecap="round" opacity="0.4"/>
-
-  <!-- Whiskers -->
-  <g stroke="#93c5fd" stroke-width="2" stroke-linecap="round" opacity="0.25">
-    <line x1="86" y1="318" x2="160" y2="332"/>
-    <line x1="80" y1="352" x2="158" y2="352"/>
-    <line x1="86" y1="386" x2="160" y2="372"/>
-    <line x1="426" y1="318" x2="352" y2="332"/>
-    <line x1="432" y1="352" x2="354" y2="352"/>
-    <line x1="426" y1="386" x2="352" y2="372"/>
-  </g>
+  <!-- Subtle glow outline on main body -->
+  <polygon points="222,214 344,184 360,296 240,306" fill="none"
+           stroke="#00d4e8" stroke-width="1.5" opacity="0.28" filter="url(#glow)"/>
 </svg>

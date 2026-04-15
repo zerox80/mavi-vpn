@@ -1,63 +1,126 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Running dog logo — matches the Mavi VPN brand identity.
+  Viewport 512x512 matches the desktop logo.svg for consistency.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="512"
     android:viewportHeight="512">
 
-    <!-- Shield body with cat ears -->
+    <!-- Cyan background glow (approximated, no filter support in VectorDrawable) -->
     <path
-        android:fillColor="#3b82f6"
-        android:pathData="M118,16 L192,138 Q256,96 320,138 L394,16 L440,108 L440,300 Q440,438 256,496 Q72,438 72,300 L72,108 Z" />
+        android:fillColor="#1A00c0e0"
+        android:pathData="M262,134 A192,138 0,1 0,262,410 A192,138 0,1 0,262,134 Z"/>
 
-    <!-- Inner ear shading left -->
-    <path
-        android:fillColor="#1e40af"
-        android:fillAlpha="0.5"
-        android:pathData="M140,46 L190,138 L156,104 Z" />
-    <!-- Inner ear shading right -->
-    <path
-        android:fillColor="#1e40af"
-        android:fillAlpha="0.5"
-        android:pathData="M372,46 L322,138 L356,104 Z" />
+    <!-- FAR BACK LEG -->
+    <path android:fillColor="#0a4e6e" android:fillAlpha="0.7"
+          android:pathData="M156,280 L178,270 L186,352 L164,360 Z"/>
+    <path android:fillColor="#38b8d8" android:fillAlpha="0.65"
+          android:pathData="M164,358 L186,350 L184,394 L162,397 Z"/>
+    <path android:fillColor="#0a4e6e" android:fillAlpha="0.65"
+          android:pathData="M156,393 A17,8 0,1 0,190,393 A17,8 0,1 0,156,393 Z"/>
 
-    <!-- Face area -->
-    <path
-        android:fillColor="#1e3a8a"
-        android:fillAlpha="0.3"
-        android:pathData="M256,316m-140,0a140,128 0,1 1,280 0a140,128 0,1 1,-280 0" />
+    <!-- TAIL -->
+    <path android:strokeColor="#38b8d8" android:strokeWidth="32"
+          android:strokeLineCap="round" android:fillColor="#00000000"
+          android:pathData="M163,236 C138,198 114,154 136,112 C150,88 180,86 194,104"/>
+    <path android:strokeColor="#a4f0ff" android:strokeWidth="10" android:fillAlpha="0.48"
+          android:strokeLineCap="round" android:fillColor="#00000000"
+          android:pathData="M163,236 C138,198 114,154 136,112 C150,88 180,86 194,104"/>
 
-    <!-- Left eye -->
-    <path
-        android:fillColor="#93c5fd"
-        android:pathData="M130,264 Q196,212 256,264 Q196,316 130,264 Z" />
-    <!-- Right eye -->
-    <path
-        android:fillColor="#93c5fd"
-        android:pathData="M256,264 Q316,212 382,264 Q316,316 256,264 Z" />
+    <!-- FAR FRONT LEG -->
+    <path android:fillColor="#0a4e6e" android:fillAlpha="0.7"
+          android:pathData="M316,282 L342,272 L350,354 L324,362 Z"/>
+    <path android:fillColor="#38b8d8" android:fillAlpha="0.65"
+          android:pathData="M324,360 L350,352 L348,396 L322,399 Z"/>
+    <path android:fillColor="#0a4e6e" android:fillAlpha="0.65"
+          android:pathData="M316,395 A19,9 0,1 0,354,395 A19,9 0,1 0,316,395 Z"/>
 
-    <!-- Left pupil -->
-    <path
-        android:fillColor="#0c1629"
-        android:pathData="M188,240 Q196,230 204,240 L204,288 Q196,298 188,288 Z" />
-    <!-- Right pupil -->
-    <path
-        android:fillColor="#0c1629"
-        android:pathData="M308,240 Q316,230 324,240 L324,288 Q316,298 308,288 Z" />
+    <!-- BACK BODY -->
+    <path android:fillColor="#38b8d8"
+          android:pathData="M160,236 L224,212 L242,302 L178,320 Z"/>
+    <path android:fillColor="#a4f0ff" android:fillAlpha="0.78"
+          android:pathData="M160,236 L224,212 L208,170 L156,184 Z"/>
 
-    <!-- Eye highlights -->
-    <path
-        android:fillColor="#ffffff"
-        android:fillAlpha="0.8"
-        android:pathData="M210,248m-7,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
-    <path
-        android:fillColor="#ffffff"
-        android:fillAlpha="0.8"
-        android:pathData="M330,248m-7,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+    <!-- MAIN BODY -->
+    <path android:fillColor="#38b8d8"
+          android:pathData="M222,214 L344,184 L360,296 L240,306 Z"/>
+    <path android:fillColor="#a4f0ff" android:fillAlpha="0.82"
+          android:pathData="M222,214 L344,184 L324,148 L206,172 Z"/>
+    <path android:fillColor="#0a4e6e" android:fillAlpha="0.82"
+          android:pathData="M240,306 L360,296 L350,340 L228,348 Z"/>
 
+    <!-- NEAR BACK LEG -->
+    <path android:fillColor="#38b8d8"
+          android:pathData="M180,318 L214,308 L224,390 L190,400 Z"/>
+    <path android:fillColor="#a4f0ff" android:fillAlpha="0.72"
+          android:pathData="M190,398 L224,388 L222,428 L188,432 Z"/>
+    <path android:fillColor="#38b8d8" android:fillAlpha="0.75"
+          android:pathData="M183,428 A22,10 0,1 0,227,428 A22,10 0,1 0,183,428 Z"/>
+
+    <!-- NECK -->
+    <path android:fillColor="#a4f0ff"
+          android:pathData="M348,190 L390,176 L403,232 L361,244 Z"/>
+    <path android:fillColor="#38b8d8" android:fillAlpha="0.6"
+          android:pathData="M361,244 L403,232 L398,254 L356,260 Z"/>
+
+    <!-- COLLAR (orange) -->
+    <path android:fillColor="#f07820"
+          android:pathData="M354,220 Q378,208 406,220 Q404,244 377,250 Q352,244 354,220 Z"/>
+    <!-- Collar shine -->
+    <path android:strokeColor="#ffd880" android:strokeWidth="3.5"
+          android:strokeLineCap="round" android:fillColor="#00000000" android:strokeAlpha="0.55"
+          android:pathData="M358,220 Q379,210 404,220"/>
+
+    <!-- NEAR FRONT LEG -->
+    <path android:fillColor="#38b8d8"
+          android:pathData="M346,288 L380,276 L391,360 L357,370 Z"/>
+    <path android:fillColor="#a4f0ff" android:fillAlpha="0.72"
+          android:pathData="M357,368 L391,358 L389,402 L355,406 Z"/>
+    <path android:fillColor="#38b8d8" android:fillAlpha="0.8"
+          android:pathData="M348,402 A24,10 0,1 0,396,402 A24,10 0,1 0,348,402 Z"/>
+
+    <!-- HEAD back/dark side -->
+    <path android:fillColor="#38b8d8"
+          android:pathData="M384,118 L432,108 L456,150 L430,180 L388,174 L374,142 Z"/>
+    <!-- HEAD front/lit face -->
+    <path android:fillColor="#a4f0ff"
+          android:pathData="M432,108 L470,124 L480,170 L456,190 L430,180 L456,150 Z"/>
+    <!-- Top highlight -->
+    <path android:fillColor="#c8f8ff" android:fillAlpha="0.35"
+          android:pathData="M393,118 L432,108 L446,132 L410,128 Z"/>
+
+    <!-- FAR EAR -->
+    <path android:fillColor="#0a4e6e" android:fillAlpha="0.72"
+          android:pathData="M392,116 L406,78 L422,114 L408,122 Z"/>
+
+    <!-- NEAR EAR -->
+    <path android:fillColor="#38b8d8"
+          android:pathData="M416,112 L436,70 L460,112 L440,122 Z"/>
+    <!-- Inner ear shadow -->
+    <path android:fillColor="#011520" android:fillAlpha="0.32"
+          android:pathData="M421,110 L436,76 L454,110 Z"/>
+
+    <!-- EYE outer -->
+    <path android:fillColor="#001824"
+          android:pathData="M445,150 A15,12 0,1 0,475,150 A15,12 0,1 0,445,150 Z"/>
+    <!-- EYE iris -->
+    <path android:fillColor="#82eaf8"
+          android:pathData="M450,150 A10,8 0,1 0,470,150 A10,8 0,1 0,450,150 Z"/>
+    <!-- EYE pupil -->
+    <path android:fillColor="#001824"
+          android:pathData="M455,150 A5,7 0,1 0,465,150 A5,7 0,1 0,455,150 Z"/>
+    <!-- EYE highlight -->
+    <path android:fillColor="#ffffff" android:fillAlpha="0.88"
+          android:pathData="M459,143 A3.5,3.5 0,1 0,466,143 A3.5,3.5 0,1 0,459,143 Z"/>
+
+    <!-- MUZZLE -->
+    <path android:fillColor="#a4f0ff" android:fillAlpha="0.84"
+          android:pathData="M463,164 L492,160 L498,182 L476,190 L458,182 L460,166 Z"/>
     <!-- Nose -->
-    <path
-        android:fillColor="#93c5fd"
-        android:fillAlpha="0.7"
-        android:pathData="M246,354 Q256,344 266,354 L256,368 Z" />
+    <path android:fillColor="#01161e"
+          android:pathData="M484,164 A8,6 0,1 0,500,164 A8,6 0,1 0,484,164 Z"/>
+
 </vector>

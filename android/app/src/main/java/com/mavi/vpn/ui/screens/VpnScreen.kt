@@ -39,6 +39,7 @@ fun VpnScreen(
     val serverPort by viewModel.serverPort.collectAsState()
     val authToken by viewModel.authToken.collectAsState()
     val certPin by viewModel.certPin.collectAsState()
+    val echConfig by viewModel.echConfig.collectAsState()
     
     val useKeycloak by viewModel.useKeycloak.collectAsState()
     val kcUrl by viewModel.kcUrl.collectAsState()
@@ -143,6 +144,16 @@ fun VpnScreen(
                     value = certPin,
                     onValueChange = { viewModel.certPin.value = it },
                     label = "Certificate PIN (SHA256 Hex)",
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                MaviTextField(
+                    value = echConfig,
+                    onValueChange = { viewModel.echConfig.value = it },
+                    label = "ECH Config List (Hex) - Optional",
+                    placeholder = "Enter to bypass SNI inspection",
                     modifier = Modifier.fillMaxWidth()
                 )
 

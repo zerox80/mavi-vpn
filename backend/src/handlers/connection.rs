@@ -8,7 +8,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use constant_time_eq::constant_time_eq;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
-use futures_util::FutureExt;
+
 use http::Response;
 use shared::{
     icmp,
@@ -338,44 +338,33 @@ pub async fn handle_connection(
         }
     });
 
-    let mut batch = Vec::with_capacity(64);
-    let res = 'outer_loop: loop {
-        let first_packet = match connection.read_datagram().await {
+    let res = loop {
+        let data = match connection.read_datagram().await {
             Ok(data) => data,
             Err(e) => break Err(anyhow::anyhow!("Lost: {}", e)),
         };
 
-        batch.push(first_packet);
-
-        for _ in 0..63 {
-            if let Some(Ok(p)) = connection.read_datagram().now_or_never() {
-                batch.push(p);
-            } else {
-                break;
+        if data.is_empty() { continue; }
+        let ver = data[0] >> 4;
+        let mut valid = false;
+        if ver == 4 {
+            if let Ok(h) = Ipv4HeaderSlice::from_slice(&data) {
+                if h.source_addr() == assigned_ip { valid = true; }
+            }
+        } else if ver == 6 {
+            if let Ok(h) = Ipv6HeaderSlice::from_slice(&data) {
+                if h.source_addr() == assigned_ip6 { valid = true; }
             }
         }
-
-        for data in batch.drain(..) {
-            if data.is_empty() { continue; }
-            let ver = data[0] >> 4;
-            let mut valid = false;
-            if ver == 4 {
-                if let Ok(h) = Ipv4HeaderSlice::from_slice(&data) {
-                    if h.source_addr() == assigned_ip { valid = true; }
-                }
-            } else if ver == 6 {
-                if let Ok(h) = Ipv6HeaderSlice::from_slice(&data) {
-                    if h.source_addr() == assigned_ip6 { valid = true; }
+        
+        if valid {
+            if let Err(e) = tx_tun.try_send(data) {
+                if matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
+                    break Err(anyhow::anyhow!("TUN closed"));
                 }
             }
-            
-            if valid {
-                if tx_tun.send(data).await.is_err() {
-                    break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
-                }
-            } else if tx_tun.is_closed() {
-                break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
-            }
+        } else if tx_tun.is_closed() {
+            break Err(anyhow::anyhow!("TUN closed"));
         }
     };
 
@@ -629,52 +618,42 @@ pub async fn handle_h3_connection(
     });
 
     // QUIC -> TUN (strip connect-ip datagram framing)
-    let mut batch = Vec::with_capacity(64);
-    let res = 'outer_loop: loop {
-        let first_dg = match connection.read_datagram().await {
+    let res = loop {
+        let datagram = match connection.read_datagram().await {
             Ok(data) => data,
             Err(e) => break Err(anyhow::anyhow!("H3 connection lost: {}", e)),
         };
 
-        batch.push(first_dg);
-        for _ in 0..63 {
-            if let Some(Ok(p)) = connection.read_datagram().now_or_never() {
-                batch.push(p);
-            } else {
-                break;
+        // Strip [Quarter Stream ID] [Context ID] per RFC 9484 §5.
+        let inner_len = match masque::unwrap_datagram(&datagram) {
+            Some(slice) => slice.len(),
+            None => continue,
+        };
+        if inner_len == 0 { continue; }
+        let prefix_len = datagram.len() - inner_len;
+        let packet = datagram.slice(prefix_len..);
+        if packet.is_empty() { continue; }
+
+        let ver = packet[0] >> 4;
+        let mut valid = false;
+        if ver == 4 {
+            if let Ok(h) = Ipv4HeaderSlice::from_slice(&packet) {
+                if h.source_addr() == assigned_ip { valid = true; }
+            }
+        } else if ver == 6 {
+            if let Ok(h) = Ipv6HeaderSlice::from_slice(&packet) {
+                if h.source_addr() == assigned_ip6 { valid = true; }
             }
         }
 
-        for datagram in batch.drain(..) {
-            // Strip [Quarter Stream ID] [Context ID] per RFC 9484 §5.
-            let inner_len = match masque::unwrap_datagram(&datagram) {
-                Some(slice) => slice.len(),
-                None => continue,
-            };
-            if inner_len == 0 { continue; }
-            let prefix_len = datagram.len() - inner_len;
-            let packet = datagram.slice(prefix_len..);
-            if packet.is_empty() { continue; }
-
-            let ver = packet[0] >> 4;
-            let mut valid = false;
-            if ver == 4 {
-                if let Ok(h) = Ipv4HeaderSlice::from_slice(&packet) {
-                    if h.source_addr() == assigned_ip { valid = true; }
-                }
-            } else if ver == 6 {
-                if let Ok(h) = Ipv6HeaderSlice::from_slice(&packet) {
-                    if h.source_addr() == assigned_ip6 { valid = true; }
+        if valid {
+            if let Err(e) = tx_tun.try_send(packet) {
+                if matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
+                    break Err(anyhow::anyhow!("TUN closed"));
                 }
             }
-
-            if valid {
-                if tx_tun.send(packet).await.is_err() {
-                    break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
-                }
-            } else if tx_tun.is_closed() {
-                break 'outer_loop Err(anyhow::anyhow!("TUN closed"));
-            }
+        } else if tx_tun.is_closed() {
+            break Err(anyhow::anyhow!("TUN closed"));
         }
     };
 

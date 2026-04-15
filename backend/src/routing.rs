@@ -60,11 +60,13 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                     }
                                 }
                             } else {
-                                // Slow-path: fetch from DashMap
-                                if let Some(tx_ref) = state_reader.peers.get(&dest_ip) {
-                                    let tx_client = tx_ref.value().clone();
+                                // Slow-path: fetch from DashMap, immediately dropping the read lock
+                                let tx_client_opt = state_reader.peers.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
+                                if let Some(tx_client) = tx_client_opt {
                                     if let Err(e) = tx_client.try_send(framed) {
-                                        if !matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
+                                        if matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
+                                            state_reader.peers.remove(&dest_ip);
+                                        } else {
                                             warn!("Dropped IPv4 packet for {}: client channel full", dest_ip);
                                             local_peers_v4.insert(dest_ip, tx_client);
                                         }
@@ -76,6 +78,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                             
                             if remove {
                                 local_peers_v4.remove(&dest_ip);
+                                state_reader.peers.remove(&dest_ip);
                             }
                         }
                     } else if version == 6 {
@@ -93,10 +96,13 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                     }
                                 }
                             } else {
-                                if let Some(tx_ref) = state_reader.peers_v6.get(&dest_ip) {
-                                    let tx_client = tx_ref.value().clone();
+                                // Slow-path: fetch from DashMap, immediately dropping the read lock
+                                let tx_client_opt = state_reader.peers_v6.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
+                                if let Some(tx_client) = tx_client_opt {
                                     if let Err(e) = tx_client.try_send(framed) {
-                                        if !matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
+                                        if matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
+                                            state_reader.peers_v6.remove(&dest_ip);
+                                        } else {
                                             warn!("Dropped IPv6 packet for {}: client channel full", dest_ip);
                                             local_peers_v6.insert(dest_ip, tx_client);
                                         }
@@ -108,6 +114,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                             
                             if remove {
                                 local_peers_v6.remove(&dest_ip);
+                                state_reader.peers_v6.remove(&dest_ip);
                             }
                         }
                     }

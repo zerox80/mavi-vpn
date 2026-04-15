@@ -340,7 +340,6 @@ pub async fn handle_connection(
 
     let mut batch = Vec::with_capacity(64);
     let res = 'outer_loop: loop {
-        batch.clear();
         let first_packet = match connection.read_datagram().await {
             Ok(data) => data,
             Err(e) => break Err(anyhow::anyhow!("Lost: {}", e)),
@@ -632,7 +631,6 @@ pub async fn handle_h3_connection(
     // QUIC -> TUN (strip connect-ip datagram framing)
     let mut batch = Vec::with_capacity(64);
     let res = 'outer_loop: loop {
-        batch.clear();
         let first_dg = match connection.read_datagram().await {
             Ok(data) => data,
             Err(e) => break Err(anyhow::anyhow!("H3 connection lost: {}", e)),

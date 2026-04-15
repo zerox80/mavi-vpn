@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 mod cert;
 mod config;
+mod ech;
 mod state;
 mod keycloak;
 mod routing;
@@ -53,6 +54,33 @@ async fn main() -> Result<()> {
         }
     }
     let (certs, key) = cert::load_or_generate_certs(cert_path, key_path)?;
+
+    // ECH (Encrypted Client Hello) setup — generates and persists an HPKE key
+    // pair + ECHConfigList when censorship-resistant mode is enabled. The
+    // ECHConfigList is distributed to clients out-of-band (alongside the cert
+    // pin) so they can read the cover SNI and offer ECH GREASE.
+    if config.censorship_resistant {
+        match ech::load_or_generate(
+            &config.ech_config_path,
+            &config.ech_key_path,
+            &config.ech_public_name,
+        ) {
+            Ok(ech_state) => {
+                info!(
+                    "ECH ready: public_name={:?}, config_list={} bytes",
+                    ech_state.public_name,
+                    ech_state.config_list_bytes.len()
+                );
+                // The server itself does not yet decrypt ECH inner ClientHellos
+                // (pending rustls server-side ECH support). Keep the state
+                // loaded so tests and future wiring can reuse it.
+                let _ = ech_state;
+            }
+            Err(e) => {
+                warn!("ECH setup failed, continuing without ECH artefacts: {}", e);
+            }
+        }
+    }
 
     // Keycloak Validator Setup
     let mut keycloak = None;

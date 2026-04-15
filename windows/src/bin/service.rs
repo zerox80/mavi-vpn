@@ -16,6 +16,8 @@ use base64::Engine;
 
 #[path = "../ipc.rs"]
 mod ipc;
+#[path = "../ech_client.rs"]
+mod ech_client;
 #[path = "../vpn_core.rs"]
 mod vpn_core;
 

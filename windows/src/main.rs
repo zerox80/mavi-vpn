@@ -298,6 +298,26 @@ async fn prompt_new_config() -> Result<Config> {
     let h3_input = read_line()?.to_lowercase();
     let http3_framing = h3_input == "j" || h3_input == "ja" || h3_input == "y" || h3_input == "yes";
 
+    // Prefer $VPN_ECH_CONFIG (for headless/scripted use). Fall back to an
+    // interactive prompt when censorship_resistant mode is on.
+    let ech_config = match std::env::var("VPN_ECH_CONFIG") {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ if censorship_resistant => {
+            print!("ECHConfigList (hex, optional – Enter zum Überspringen): ");
+            stdout.flush()?;
+            let input = read_line()?;
+            if input.is_empty() {
+                None
+            } else if shared::hex::decode_hex(&input).is_none() {
+                eprintln!("Warnung: ECHConfigList-Hex ist ungültig (ungerade Länge oder kein gültiges Hex) – ECH wird deaktiviert");
+                None
+            } else {
+                Some(input)
+            }
+        }
+        _ => None,
+    };
+
     println!();
 
     Ok(Config {
@@ -310,6 +330,7 @@ async fn prompt_new_config() -> Result<Config> {
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,
         kc_client_id: saved_kc_client_id,
+        ech_config,
     })
 }
 

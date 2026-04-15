@@ -37,8 +37,9 @@ pub async fn connect_and_handshake(
     cert_pin: String,
     censorship_resistant: bool,
     http3_framing: bool,
+    ech_config_hex: Option<String>,
 ) -> anyhow::Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
-    
+
     info!("Connect and Handshake started. Pin: {}", cert_pin);
 
     // Verifier Setup
@@ -69,7 +70,19 @@ pub async fn connect_and_handshake(
     info!("Resolving host: {}", endpoint_str);
     let addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
     let addr = *addrs.first().ok_or(anyhow::anyhow!("Invalid address"))?;
-    let server_name = endpoint_host(&endpoint_str);
+    // If an ECHConfigList was provided, spoof the outer SNI to its `public_name`.
+    // Android's `ring` provider lacks HPKE so we cannot offer ECH GREASE, but
+    // SNI override alone already hides the real hostname from on-path censors
+    // (the server uses cert pinning, not SNI, for auth).
+    let server_name = match ech_config_hex.as_deref() {
+        Some(hex) => {
+            let sni = crate::ech_client::outer_sni_from_hex(hex)
+                .ok_or_else(|| anyhow::anyhow!("Failed to parse provided ECH config hex"))?;
+            info!("ECH config parsed, overriding outer SNI: {}", sni);
+            sni
+        }
+        None => endpoint_host(&endpoint_str),
+    };
     if server_name.is_empty() {
         return Err(anyhow::anyhow!("Endpoint host missing"));
     }

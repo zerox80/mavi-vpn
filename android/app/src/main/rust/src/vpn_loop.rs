@@ -65,25 +65,35 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                 _ = shutdown_rx.recv() => break,
             };
 
-            let packet = match guard.try_io(|inner| {
-                 if buf.capacity() < 2048 {
-                     buf.reserve(2048);
+            let framed = match guard.try_io(|inner| {
+                 const PREFIX_LEN: usize = masque::DATAGRAM_PREFIX.len();
+                 if buf.capacity() < 2048 + PREFIX_LEN {
+                     buf.reserve(2048 + PREFIX_LEN);
                  }
+
+                 // Reserve H3 DATAGRAM_PREFIX headroom in-place. H3 mode ships `framed` as-is
+                 // (zero per-packet alloc); non-H3 mode slices past the prefix in O(1).
+                 buf.extend_from_slice(&masque::DATAGRAM_PREFIX);
+
                  let chunk = buf.chunk_mut();
                  let max_len = 2048.min(chunk.len());
-                 
+
                  let n = unsafe { libc::read(inner.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
-                 
+
                  if n < 0 {
                      let err = std::io::Error::last_os_error();
+                     buf.truncate(buf.len() - PREFIX_LEN);
                      return Err(err);
                  }
                  let n = n as usize;
-                 if n == 0 { return Ok(None); } 
-                 
+                 if n == 0 {
+                     buf.truncate(buf.len() - PREFIX_LEN);
+                     return Ok(None);
+                 }
+
                  unsafe { buf.advance_mut(n); }
-                 let packet = buf.split_to(n).freeze();
-                 Ok(Some(packet))
+                 let framed = buf.split_to(n + PREFIX_LEN).freeze();
+                 Ok(Some(framed))
             }) {
                 Ok(Ok(Some(p))) => p,
                 Ok(Ok(None)) => break,
@@ -102,18 +112,15 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                 Err(_) => continue, // WouldBlock, let tokio select re-await
             };
 
+            // `framed` is [Quarter Stream ID = 0][Context ID = 0][IP packet] per RFC 9484 §5.
+            // `packet` is the raw IP payload (O(1) refcount slice, no copy).
+            let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
             let packet_len = packet.len();
-            let packet_bytes = packet.clone(); 
 
-            // In H3/MASQUE mode, prepend connect-ip datagram header:
-            // [Quarter Stream ID varint = 0x00] [Context ID varint = 0x00] [IP packet]
             let payload = if http3_framing {
-                let mut h3_payload = bytes::BytesMut::with_capacity(packet.len() + masque::DATAGRAM_PREFIX.len());
-                h3_payload.put_slice(&masque::DATAGRAM_PREFIX);
-                h3_payload.put(packet);
-                h3_payload.freeze()
+                framed
             } else {
-                packet
+                packet.clone()
             };
 
             // Send to QUIC
@@ -128,11 +135,11 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                         let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
                         warn!("MTU Limit hit! Packet: {} bytes, Limit: {} bytes", packet_len, current_limit);
 
-                        if packet_bytes.is_empty() {
+                        if packet.is_empty() {
                             continue;
                         }
 
-                        let version = (packet_bytes[0] >> 4) & 0xF;
+                        let version = (packet[0] >> 4) & 0xF;
                         let gw = if version == 4 {
                             Some(std::net::IpAddr::V4(gateway_v4))
                         } else if version == 6 {
@@ -146,7 +153,7 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                             tunnel_mtu
                         };
 
-                        if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet_bytes, reported_mtu, gw) {
+                        if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet, reported_mtu, gw) {
                             let _ = tx_feedback.try_send(icmp_packet);
                         }
                     },

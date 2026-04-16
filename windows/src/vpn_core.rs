@@ -266,21 +266,24 @@ async fn run_session(
     let gateway_v6_for_ptb = gateway_v6;
     let is_h3_framing = config.http3_framing;
     let tun_to_quic = std::thread::spawn(move || {
+        let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
         loop {
             if !run_pump.load(Ordering::Relaxed) || !alive_pump.load(Ordering::Relaxed) { break; }
             match session_tun.try_receive() {
                 Ok(Some(packet)) => {
                     // In H3 mode, prepend [Quarter Stream ID] [Context ID]
                     // (connect-ip datagram framing, RFC 9484 §5 — 2 bytes).
+                    let packet_bytes = packet.bytes();
+                    if pool.capacity() < packet_bytes.len() + masque::DATAGRAM_PREFIX.len() {
+                        pool.reserve(4 * 1024 * 1024);
+                    }
                     let payload = if is_h3_framing {
-                        let packet_bytes = packet.bytes();
-                        let mut h3_payload =
-                            Vec::with_capacity(packet_bytes.len() + masque::DATAGRAM_PREFIX.len());
-                        h3_payload.extend_from_slice(&masque::DATAGRAM_PREFIX);
-                        h3_payload.extend_from_slice(packet_bytes);
-                        Bytes::from(h3_payload)
+                        pool.extend_from_slice(&masque::DATAGRAM_PREFIX);
+                        pool.extend_from_slice(packet_bytes);
+                        pool.split().freeze()
                     } else {
-                        Bytes::copy_from_slice(packet.bytes())
+                        pool.extend_from_slice(packet_bytes);
+                        pool.split().freeze()
                     };
                     if let Err(e) = conn_quic.send_datagram(payload) {
                         if matches!(e, quinn::SendDatagramError::TooLarge) {
@@ -374,7 +377,11 @@ async fn run_session(
                 }
                 Err(e) if is_wintun_ring_full(&e) => {
                     pending_datagram = Some(data);
-                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    // On Windows, the system timer resolution is typically ~15.6ms.
+                    // Using `tokio::time::sleep(100us)` inadvertently sleeps for ~15ms,
+                    // reintroducing the exact artificial backpressure we want to avoid.
+                    // `yield_now` gracefully yields time to the runtime without the timer penalty.
+                    tokio::task::yield_now().await;
                 }
                 Err(_) => {
                     alive_quic_in.store(false, Ordering::SeqCst);

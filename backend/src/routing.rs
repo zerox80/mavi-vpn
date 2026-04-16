@@ -19,17 +19,23 @@ pub fn spawn_tun_writer(mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>, 
 
 pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, state_reader: Arc<AppState>) {
     tokio::spawn(async move {
-        let mut buf = vec![0u8; 65536 + DATAGRAM_PREFIX.len()];
-        buf[..DATAGRAM_PREFIX.len()].copy_from_slice(&DATAGRAM_PREFIX);
-        
+        let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
+        let mut scratch = vec![0u8; 65536];
+
         let mut local_peers_v4: std::collections::HashMap<std::net::Ipv4Addr, tokio::sync::mpsc::Sender<bytes::Bytes>> = std::collections::HashMap::new();
         let mut local_peers_v6: std::collections::HashMap<std::net::Ipv6Addr, tokio::sync::mpsc::Sender<bytes::Bytes>> = std::collections::HashMap::new();
 
         loop {
-            match tun_reader.read(&mut buf[DATAGRAM_PREFIX.len()..]).await {
+            if pool.capacity() < 65536 + DATAGRAM_PREFIX.len() {
+                pool.reserve(4 * 1024 * 1024);
+            }
+
+            match tun_reader.read(&mut scratch).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    let framed = bytes::Bytes::copy_from_slice(&buf[..DATAGRAM_PREFIX.len() + n]);
+                    pool.extend_from_slice(&DATAGRAM_PREFIX);
+                    pool.extend_from_slice(&scratch[..n]);
+                    let framed = pool.split().freeze();
                     let packet = framed.slice(DATAGRAM_PREFIX.len()..);
                     
                     if packet.is_empty() { continue; }

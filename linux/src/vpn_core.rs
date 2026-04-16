@@ -266,30 +266,33 @@ async fn run_session(
     let run_tun = global_running.clone();
     let is_h3_framing = config.http3_framing;
     let tun_to_quic = tokio::spawn(async move {
-        let mut buf = vec![0u8; 65536];
+        let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
+        let mut scratch = vec![0u8; 65536];
         loop {
             if !run_tun.load(Ordering::Relaxed) || !alive_tun.load(Ordering::Relaxed) {
                 break;
             }
-            match tun_reader.read(&mut buf).await {
+            if pool.capacity() < 65536 + masque::DATAGRAM_PREFIX.len() {
+                pool.reserve(4 * 1024 * 1024);
+            }
+            match tun_reader.read(&mut scratch).await {
                 Ok(n) if n > 0 => {
                     // In H3 mode, prepend [Quarter Stream ID] [Context ID]
                     // (connect-ip datagram framing, RFC 9484 §5 — 2 bytes).
                     let payload = if is_h3_framing {
-                        let mut h3_payload =
-                            Vec::with_capacity(n + masque::DATAGRAM_PREFIX.len());
-                        h3_payload.extend_from_slice(&masque::DATAGRAM_PREFIX);
-                        h3_payload.extend_from_slice(&buf[..n]);
-                        Bytes::from(h3_payload)
+                        pool.extend_from_slice(&masque::DATAGRAM_PREFIX);
+                        pool.extend_from_slice(&scratch[..n]);
+                        pool.split().freeze()
                     } else {
-                        Bytes::copy_from_slice(&buf[..n])
+                        pool.extend_from_slice(&scratch[..n]);
+                        pool.split().freeze()
                     };
                     if let Err(e) = conn_sender.send_datagram(payload) {
                         if matches!(e, quinn::SendDatagramError::TooLarge) {
                             let current_mtu =
                                 conn_sender.max_datagram_size().unwrap_or(1200) as u16;
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(
-                                &buf[..n],
+                                &scratch[..n],
                                 current_mtu,
                                 Some(std::net::IpAddr::V4(gateway)),
                             ) {

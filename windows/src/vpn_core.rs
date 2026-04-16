@@ -339,6 +339,7 @@ async fn run_session(
     let is_h3_framing_dl = config.http3_framing;
     let quic_to_tun = tokio::spawn(async move {
         let mut pending_datagram: Option<Bytes> = None;
+        let mut yield_count = 0u8;
 
         loop {
             if !run_quic_in.load(Ordering::Relaxed) || !alive_quic_in.load(Ordering::Relaxed) { break; }
@@ -372,16 +373,20 @@ async fn run_session(
 
             match session_quic_in.allocate_send_packet(data.len() as u16) {
                 Ok(mut packet) => {
+                    yield_count = 0;
                     packet.bytes_mut().copy_from_slice(&data);
                     session_quic_in.send_packet(packet);
                 }
                 Err(e) if is_wintun_ring_full(&e) => {
                     pending_datagram = Some(data);
-                    // On Windows, the system timer resolution is typically ~15.6ms.
-                    // Using `tokio::time::sleep(100us)` inadvertently sleeps for ~15ms,
-                    // reintroducing the exact artificial backpressure we want to avoid.
-                    // `yield_now` gracefully yields time to the runtime without the timer penalty.
-                    tokio::task::yield_now().await;
+                    // Hybrid backoff: gracefully yield time to the runtime without triggering
+                    // the ~15.6ms system timer penalty on Windows for short bursts of backpressure.
+                    if yield_count < 10 {
+                        yield_count += 1;
+                        tokio::task::yield_now().await;
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
                 }
                 Err(_) => {
                     alive_quic_in.store(false, Ordering::SeqCst);

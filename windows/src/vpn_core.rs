@@ -377,11 +377,10 @@ async fn run_session(
                 }
                 Err(e) if is_wintun_ring_full(&e) => {
                     pending_datagram = Some(data);
-                    // On Windows, the system timer resolution is typically ~15.6ms.
-                    // Using `tokio::time::sleep(100us)` inadvertently sleeps for ~15ms,
-                    // reintroducing the exact artificial backpressure we want to avoid.
-                    // `yield_now` gracefully yields time to the runtime without the timer penalty.
-                    tokio::task::yield_now().await;
+                    // Sleep to allow the WinTUN ring buffer to drain without burning 100% CPU.
+                    // A 1ms sleep typically resolves to 1 OS timer tick, providing genuine
+                    // backpressure and saving CPU cycles while keeping latency acceptable.
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 Err(_) => {
                     alive_quic_in.store(false, Ordering::SeqCst);

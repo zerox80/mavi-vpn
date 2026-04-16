@@ -88,7 +88,7 @@ Mavi VPN provides native drivers rather than relying on generic user-space wrapp
 
 Operating a Layer 3 VPN over TCP leads to catastrophic "TCP Meltdown" when packets are lost. Operating over raw UDP leaves the implementation solely responsible for congestion control and encryption. 
 
-Mavi VPN leverages \textbf{QUIC} (specifically, a highly tuned fork of the \texttt{quinn} crate) to provide the best of both worlds: independent, unreliable datagrams encapsulated in a state-of-the-art encrypted, congestion-controlled wrapper.
+Mavi VPN leverages \textbf{QUIC}. We use the \texttt{quinn} Rust crate (implementation of IETF QUIC) to provide the best of both worlds: independent, unreliable datagrams encapsulated in a state-of-the-art encrypted, congestion-controlled wrapper.
 
 \subsection{Datagrams vs. Streams}
 \begin{itemize}

@@ -33,9 +33,11 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                 pool.reserve(4 * 1024 * 1024);
             }
 
-            match tun_reader.read(&mut scratch).await {
-                Ok(0) => break,
-                Ok(n) => {
+            // Wrap reading in a 5-second timeout to catch trailing drops when idle
+            let read_req = tun_reader.read(&mut scratch);
+            match tokio::time::timeout(std::time::Duration::from_secs(5), read_req).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
                     pool.extend_from_slice(&DATAGRAM_PREFIX);
                     pool.extend_from_slice(&scratch[..n]);
                     let framed = pool.split().freeze();
@@ -57,7 +59,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                         remove = true;
                                     } else {
                                         drop_count += 1;
-                                        if last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+                                        if drop_count % 1000 == 0 && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
                                             warn!("Dropped {} packets: client channel(s) full", drop_count);
                                             drop_count = 0;
                                             last_drop_warn = std::time::Instant::now();
@@ -70,7 +72,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                     if let Err(e) = tx_client.try_send(framed) {
                                         if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
                                             drop_count += 1;
-                                            if last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+                                            if drop_count % 1000 == 0 && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
                                                 warn!("Dropped {} packets: client channel(s) full", drop_count);
                                                 drop_count = 0;
                                                 last_drop_warn = std::time::Instant::now();
@@ -99,7 +101,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                         remove = true;
                                     } else {
                                         drop_count += 1;
-                                        if last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+                                        if drop_count % 1000 == 0 && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
                                             warn!("Dropped {} packets: client channel(s) full", drop_count);
                                             drop_count = 0;
                                             last_drop_warn = std::time::Instant::now();
@@ -112,7 +114,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                     if let Err(e) = tx_client.try_send(framed) {
                                         if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
                                             drop_count += 1;
-                                            if last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+                                            if drop_count % 1000 == 0 && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
                                                 warn!("Dropped {} packets: client channel(s) full", drop_count);
                                                 drop_count = 0;
                                                 last_drop_warn = std::time::Instant::now();
@@ -131,9 +133,17 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                         }
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!("CRITICAL: Error reading from TUN: {}. Potential interface crash.", e);
                     break;
+                }
+                Err(_) => {
+                    // Timeout hit (5 seconds idle) -> log any trailing drops to avoid silent loss
+                    if drop_count > 0 {
+                        warn!("Dropped {} packets: client channel(s) full (trailing drops)", drop_count);
+                        drop_count = 0;
+                        last_drop_warn = std::time::Instant::now();
+                    }
                 }
             }
         }

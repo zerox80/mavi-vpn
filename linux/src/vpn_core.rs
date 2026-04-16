@@ -685,3 +685,44 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
         self.supported.supported_schemes()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+    #[test]
+    fn test_pinned_server_verifier_matches() {
+        let dummy_cert_bytes = b"dummy certificate";
+        let hash = Sha256::digest(dummy_cert_bytes).to_vec();
+
+        let verifier = PinnedServerVerifier::new(hash);
+
+        let end_entity = CertificateDer::from(dummy_cert_bytes.as_slice());
+        let server_name = ServerName::try_from("example.com").unwrap();
+        let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(0));
+
+        let result = verifier.verify_server_cert(&end_entity, &[], &server_name, &[], now);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pinned_server_verifier_mismatches() {
+        let expected_hash = vec![0; 32];
+        let verifier = PinnedServerVerifier::new(expected_hash);
+
+        let dummy_cert_bytes = b"wrong certificate";
+        let end_entity = CertificateDer::from(dummy_cert_bytes.as_slice());
+        let server_name = ServerName::try_from("example.com").unwrap();
+        let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(0));
+
+        let result = verifier.verify_server_cert(&end_entity, &[], &server_name, &[], now);
+        assert!(result.is_err());
+        if let Err(rustls::Error::General(msg)) = result {
+            assert_eq!(msg, "Certificate PIN mismatch");
+        } else {
+            panic!("Expected General error, got {:?}", result);
+        }
+    }
+}

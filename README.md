@@ -20,29 +20,29 @@
 
 Mavi VPN tunnels all network traffic over **QUIC** (via a [patched `quinn`](external/quinn)) to deliver secure, reliable, low-latency connectivity — even on unstable mobile networks. It supports **Windows**, **Linux**, and **Android** with native clients and an optional cross-platform **Tauri GUI**.
 
-## ✨ Key Features
+## Key Features
 
 | Category | Feature | Details |
 |---|---|---|
-| 🛡️ **Censorship Resistance** | Layer 7 Obfuscation | VPN traffic masquerades as **HTTP/3** via ALPN `h3` |
+| **Censorship Resistance** | Layer 7 Obfuscation | VPN traffic masquerades as **HTTP/3** via ALPN `h3` |
 | | Probe Resistance | Unauthorized connections receive a fake **nginx** welcome page (H3 200 OK) |
 | | MASQUE / RFC 9484 | Optional `connect-ip` capsule framing for DPI-proof wire format |
 | | Encrypted Client Hello | **ECH GREASE** + SNI spoofing via X25519/HPKE (RFC 9180) |
 | | Certificate Pinning | SHA-256 cert fingerprint verification on all clients |
-| 🚀 **Performance** | Zero-Copy Path | `bytes`/`BytesMut` across the entire packet pipeline |
+| **Performance** | Zero-Copy Path | `bytes`/`BytesMut` across the entire packet pipeline |
 | | BBR Congestion Control | Optimized for high-bandwidth, high-latency mobile networks |
 | | GSO/GRO | Generic Segmentation Offload to reduce syscall overhead |
 | | 4 MB UDP Buffers | Auto-tuned OS-level socket buffers for burst resilience |
 | | mimalloc | High-performance memory allocator on the server |
-| 📱 **Mobile-First** | Seamless Roaming | QUIC connection migration — no handshake restart on IP change |
+| **Mobile-First** | Seamless Roaming | QUIC connection migration — no handshake restart on IP change |
 | | MTU Pinning (1280/1360) | Avoids PMTUD black holes; ICMP PTB signal generation (RFC 4443) |
 | | Split Tunneling | Per-app VPN bypass on Android |
-| 🔐 **Auth** | Static Token | Simple pre-shared key authentication |
+| **Auth** | Static Token | Simple pre-shared key authentication |
 | | Keycloak OIDC | Enterprise SSO with JWT validation, PKCE, and JWKS rotation |
-| 🌐 **Network** | Dual-Stack | Full IPv4 + IPv6 support (NAT66 via ip6tables) |
+| **Network** | Dual-Stack | Full IPv4 + IPv6 support (NAT66 via ip6tables) |
 | | DNS Isolation | NRPT rules on Windows; per-tunnel DNS on Linux/Android |
 
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 graph TD
@@ -73,7 +73,7 @@ graph TD
     QUIC <-->|"QUIC payload ≤1360 bytes"| HUB
 ```
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 mavi-vpn/
@@ -132,7 +132,7 @@ mavi-vpn/
 └── .github/workflows/  # CI: build (Linux CLI, Android APK, Linux/Windows GUI), tests
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Server Deployment (Docker)
 
@@ -202,7 +202,7 @@ npm run tauri -- dev       # Development
 npm run tauri -- build     # Production (generates MSI/DEB/RPM)
 ```
 
-## 🛡️ Censorship Resistance Modes
+## Censorship Resistance Modes
 
 Mavi VPN offers three escalating levels of traffic obfuscation:
 
@@ -217,7 +217,7 @@ When CR Mode is enabled, the server responds to unauthorized connections with a 
 
 **ECH** is supported on clients via `EchMode::Grease` — the real SNI is hidden behind a cover domain (e.g. `cloudflare-ech.com`). The server generates and persists the ECH keypair in `data/ech_config_hex.txt`.
 
-## 🔐 Authentication
+## Authentication
 
 ### Static Token
 Set `VPN_AUTH_TOKEN` on the server. Clients send this token during the QUIC handshake.
@@ -241,7 +241,7 @@ Full enterprise SSO with Keycloak:
 
 > The server validates JWTs using Keycloak's JWKS endpoint with automatic key rotation and constant-time `azp` comparison.
 
-## ⚡ Performance Tuning
+## Performance Tuning
 
 | Setting | Value | Why |
 |---|---|---|
@@ -252,7 +252,7 @@ Full enterprise SSO with Keycloak:
 | Allocator | **mimalloc** | Reduces memory allocation latency on the server |
 | Release Profile | `lto=true, codegen-units=1, strip=true` | Maximally optimized binary |
 
-## 🔧 Configuration Reference
+## Configuration Reference
 
 All server settings can be configured via environment variables or CLI flags:
 
@@ -272,7 +272,7 @@ All server settings can be configured via environment variables or CLI flags:
 | `VPN_KEYCLOAK_REALM` | `mavi-vpn` | Keycloak realm name |
 | `VPN_KEYCLOAK_CLIENT_ID` | `mavi-client` | Keycloak OIDC client ID |
 
-## 🧪 Testing
+## Testing
 
 ```bash
 # Run unit tests (shared crate + backend)
@@ -286,7 +286,7 @@ cargo run -p quic-tester -- <server:port>
 # Expects HTTP/3 nginx response → confirms probe resistance is active
 ```
 
-## 📚 Documentation
+## Documentation
 
 | Document | Description |
 |---|---|
@@ -295,13 +295,13 @@ cargo run -p quic-tester -- <server:port>
 | [`CODEWIKI.md`](CODEWIKI.md) | Deep technical encyclopedia of the entire codebase |
 | [`docs/whitepaper.tex`](docs/whitepaper.tex) | Academic whitepaper (LaTeX) |
 
-## 🗺️ Roadmap
+## Roadmap
 
 - [ ] **Socket Sharding** — `SO_REUSEPORT` for multi-core UDP scaling
 - [ ] **eBPF Data Plane** — Kernel-level packet routing for zero-copy efficiency
 - [ ] **iOS Support** — Rust core via C-FFI + `NEPacketTunnelProvider`
 - [ ] **Server-side ECH** — Full ECH decryption when rustls adds support
 
-## 📄 License
+## License
 
 [MIT](LICENSE) — Copyright © 2026 [zerox80](https://github.com/zerox80)

@@ -4,7 +4,10 @@
 //! Listens on `127.0.0.1:14433` for commands from the CLI or GUI.
 
 use anyhow::Result;
+use constant_time_eq::constant_time_eq;
 use shared::ipc::{self, Config, IpcRequest, IpcResponse, LOCAL_IPC_ADDR};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +31,23 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
     if let Some(parent) = token_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&token_path, &auth_token) {
+    // Pre-emptively remove any stale file so a previous world-readable token
+    // from an unpatched version cannot leak via a race between create+chmod.
+    let _ = std::fs::remove_file(&token_path);
+    let write_result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&token_path)
+        .and_then(|mut f| f.write_all(auth_token.as_bytes()));
+
+    if let Err(e) = write_result {
         error!("Failed to write IPC token to {:?}: {}", token_path, e);
+    } else if let Err(e) =
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+    {
+        error!("Failed to harden IPC token permissions on {:?}: {}", token_path, e);
     }
     info!("Daemon listening on {} (Auth token generated)", LOCAL_IPC_ADDR);
 
@@ -72,7 +90,10 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
                 };
 
                 // Handle request
-                let resp = if req_msg.auth_token != auth_token {
+                let resp = if !constant_time_eq(
+                    req_msg.auth_token.as_bytes(),
+                    auth_token.as_bytes(),
+                ) {
                     error!("Rejecting IPC request due to invalid auth token");
                     IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
                 } else {

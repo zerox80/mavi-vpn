@@ -1,0 +1,5 @@
+* text=auto
+
+# These files must have LF line endings because they are executed on Linux/macOS
+android/gradlew text eol=lf
+*.sh text eol=lf

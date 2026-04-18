@@ -61,8 +61,13 @@ pub fn create_quic_endpoint(
 }
 
 fn setup_transport_config(transport_config: &mut TransportConfig) {
-    // We disable the max_idle_timeout so mobile clients in Doze mode don't get forcefully disconnected
-    transport_config.max_idle_timeout(None);
+    // Bound idle so a stalled peer cannot hold a connection slot forever
+    // (the connection accept loop is gated by a fixed-size semaphore — without
+    // a timeout, silent peers would DoS legitimate clients). 60s is well above
+    // the 15s server-initiated keep-alive, so any responsive client stays up.
+    let idle_timeout = quinn::IdleTimeout::try_from(std::time::Duration::from_secs(60))
+        .expect("60s fits in a QUIC IdleTimeout");
+    transport_config.max_idle_timeout(Some(idle_timeout));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
     transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); 
     transport_config.datagram_send_buffer_size(4 * 1024 * 1024); 

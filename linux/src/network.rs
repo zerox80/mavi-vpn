@@ -5,7 +5,7 @@
 //! direct /etc/resolv.conf manipulation for DNS.
 
 use anyhow::{Context, Result};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 use tracing::{info, warn};
 
@@ -76,20 +76,37 @@ impl NetworkConfig {
 
         // 5. Detect the physical gateway and device (before we add VPN routes)
         let (physical_gateway, physical_device) = detect_physical_gateway();
+        let (physical_gateway_v6, physical_device_v6) = detect_physical_gateway_v6();
 
         // 6. Add host route exception for the VPN server IP via the physical gateway
         //    This prevents routing loops (VPN traffic going back into the tunnel).
-        if let (Some(ref gw), Some(ref dev)) = (&physical_gateway, &physical_device) {
-            let server_ip = endpoint_ip
-                .split(':')
-                .next()
-                .unwrap_or(endpoint_ip)
-                .trim_start_matches('[')
-                .trim_end_matches(']');
-            let _ = run_cmd(
-                "ip",
-                &["route", "add", &format!("{}/32", server_ip), "via", gw, "dev", dev],
-            );
+        //    The endpoint may be IPv4 or IPv6, so route via the matching family.
+        match parse_endpoint_ip(endpoint_ip) {
+            Ok(IpAddr::V4(v4)) => {
+                if let (Some(ref gw), Some(ref dev)) = (&physical_gateway, &physical_device) {
+                    let route = format!("{}/32", v4);
+                    let _ = run_cmd(
+                        "ip",
+                        &["route", "add", &route, "via", gw, "dev", dev],
+                    );
+                } else {
+                    warn!("No physical IPv4 gateway detected; skipping host route exception for {}", v4);
+                }
+            }
+            Ok(IpAddr::V6(v6)) => {
+                if let (Some(ref gw), Some(ref dev)) = (&physical_gateway_v6, &physical_device_v6) {
+                    let route = format!("{}/128", v6);
+                    let _ = run_cmd(
+                        "ip",
+                        &["-6", "route", "add", &route, "via", gw, "dev", dev],
+                    );
+                } else {
+                    warn!("No physical IPv6 gateway detected; skipping host route exception for {}", v6);
+                }
+            }
+            Err(e) => {
+                warn!("Could not parse endpoint IP {:?}: {}; skipping host route exception", endpoint_ip, e);
+            }
         }
 
         // 7. Split routes: 0.0.0.0/1 and 128.0.0.0/1
@@ -162,15 +179,16 @@ impl NetworkConfig {
             let _ = run_cmd("ip", &["-6", "route", "del", "8000::/1"]);
         }
 
-        // Remove host route exception
-        let server_ip = self
-            .endpoint_ip
-            .split(':')
-            .next()
-            .unwrap_or(&self.endpoint_ip)
-            .trim_start_matches('[')
-            .trim_end_matches(']');
-        let _ = run_cmd("ip", &["route", "del", &format!("{}/32", server_ip)]);
+        // Remove host route exception (must match the family used in apply()).
+        match parse_endpoint_ip(&self.endpoint_ip) {
+            Ok(IpAddr::V4(v4)) => {
+                let _ = run_cmd("ip", &["route", "del", &format!("{}/32", v4)]);
+            }
+            Ok(IpAddr::V6(v6)) => {
+                let _ = run_cmd("ip", &["-6", "route", "del", &format!("{}/128", v6)]);
+            }
+            Err(_) => {}
+        }
 
         // Restore DNS
         restore_dns(&self.dns_backup, self.used_resolvconf);
@@ -182,11 +200,21 @@ impl NetworkConfig {
     }
 }
 
-/// Detects the current physical default gateway and interface.
+/// Detects the current physical IPv4 default gateway and interface.
 fn detect_physical_gateway() -> (Option<String>, Option<String>) {
-    let output = Command::new("ip")
-        .args(["route", "show", "default"])
-        .output();
+    detect_physical_gateway_for(&["route", "show", "default"], "IPv4")
+}
+
+/// Detects the current physical IPv6 default gateway and interface.
+fn detect_physical_gateway_v6() -> (Option<String>, Option<String>) {
+    detect_physical_gateway_for(&["-6", "route", "show", "default"], "IPv6")
+}
+
+fn detect_physical_gateway_for(
+    ip_args: &[&str],
+    family_label: &str,
+) -> (Option<String>, Option<String>) {
+    let output = Command::new("ip").args(ip_args).output();
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -205,13 +233,23 @@ fn detect_physical_gateway() -> (Option<String>, Option<String>) {
             .map(|s| s.to_string());
 
         if let (Some(ref gw), Some(ref dev)) = (&gateway, &device) {
-            info!("Detected physical gateway: {} via {}", gw, dev);
+            info!("Detected physical {} gateway: {} via {}", family_label, gw, dev);
         }
         (gateway, device)
     } else {
-        warn!("Could not detect physical gateway");
+        warn!("Could not detect physical {} gateway", family_label);
         (None, None)
     }
+}
+
+/// Parses an endpoint IP string that may be plain (`1.2.3.4`, `2606:4700::1`)
+/// or bracketed (`[2606:4700::1]`). Rejects host:port forms — callers are
+/// expected to pass the IP only.
+fn parse_endpoint_ip(s: &str) -> Result<IpAddr> {
+    let cleaned = s.trim().trim_start_matches('[').trim_end_matches(']');
+    cleaned
+        .parse::<IpAddr>()
+        .with_context(|| format!("not a valid IP address: {:?}", s))
 }
 
 /// Configures DNS to use the VPN's DNS servers.

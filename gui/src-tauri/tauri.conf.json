@@ -43,7 +43,9 @@
           "/lib/systemd/system/mavi-vpn.service": "../../linux/mavi-vpn.service"
         },
         "postInst": "linux/postinst",
-        "preRm": "linux/prerm"
+        "preRm": "linux/prerm",
+        "conflicts": ["mavi-vpn-cli"],
+        "replaces": ["mavi-vpn-cli"]
       },
       "rpm": {
         "files": {
@@ -51,7 +53,8 @@
           "/lib/systemd/system/mavi-vpn.service": "../../linux/mavi-vpn.service"
         },
         "postInstall": "linux/postinst",
-        "preRemove": "linux/prerm"
+        "preRemove": "linux/prerm",
+        "conflicts": ["mavi-vpn-cli"]
       }
     },
     "icon": [

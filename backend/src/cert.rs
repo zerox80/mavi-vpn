@@ -1,8 +1,41 @@
 use rcgen::generate_simple_self_signed;
-use std::{fs, path::PathBuf};
+use std::{fs, path::{Path, PathBuf}};
 use anyhow::{Result, Context};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
+
+/// Write `contents` to `path` with an owner-only (0o600) permission mask from
+/// the start, so the TLS private key never exists on disk with world- or
+/// group-readable bits — even briefly. On Unix, we use `O_CREAT | O_EXCL`
+/// with `mode(0o600)` and `O_NOFOLLOW` to avoid clobbering a symlink-attacked
+/// target. On other platforms, fall back to `fs::write`.
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    // Remove any stale file so previously-created world-readable keys from
+    // older builds cannot persist with their old mode.
+    let _ = fs::remove_file(path);
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .with_context(|| format!("failed to create {:?} with 0600 mode", path))?;
+        f.write_all(contents)
+            .with_context(|| format!("failed to write {:?}", path))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents)
+            .with_context(|| format!("failed to write {:?}", path))?;
+    }
+    Ok(())
+}
 
 /// Loads existing TLS certificates from disk or generates a new self-signed pair if missing.
 ///
@@ -19,6 +52,31 @@ use sha2::{Digest, Sha256};
 pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     if cert_path.exists() && key_path.exists() {
         tracing::info!("Loading existing certificates from {:?}", cert_path);
+
+        // Defensive migration: older builds persisted the key via `fs::write`,
+        // which honoured the process umask and typically left the file
+        // world-readable (0o644). On upgrade, tighten the permissions to 0o600
+        // so an already-generated key does not stay exposed on disk.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = fs::metadata(&key_path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode != 0o600 {
+                    match fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)) {
+                        Ok(()) => tracing::info!(
+                            "Tightened permissions on existing key file {:?} from {:o} to 0600",
+                            key_path, mode
+                        ),
+                        Err(e) => tracing::warn!(
+                            "Failed to tighten permissions on {:?} (current mode {:o}): {}",
+                            key_path, mode, e
+                        ),
+                    }
+                }
+            }
+        }
+
         let cert_chain = fs::read(&cert_path).context("failed to read certificate chain")?;
         let key = fs::read(&key_path).context("failed to read private key")?;
 
@@ -50,7 +108,7 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
         let key_pem = cert.signing_key.serialize_pem();
 
         fs::write(&cert_path, &cert_pem).context("failed to write cert file")?;
-        fs::write(&key_path, &key_pem).context("failed to write key file")?;
+        write_private_file(&key_path, key_pem.as_bytes())?;
 
         // Re-parse the PEMs into rustls-internal DER formats
         let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())

@@ -113,7 +113,5 @@ pub struct Config {
 pub fn load() -> Config {
     // Load .env file if it exists
     dotenv::dotenv().ok();
-    let mut config = Config::parse();
-    config.mtu = 1280;
-    config
+    Config::parse()
 }

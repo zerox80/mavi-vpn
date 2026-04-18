@@ -130,6 +130,9 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
+      - name: Build Linux CLI & Service
+        run: cargo build --release -p linux-vpn
+
       - name: Install npm dependencies
         working-directory: gui
         run: npm install

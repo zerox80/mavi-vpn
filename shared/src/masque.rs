@@ -417,7 +417,20 @@ mod tests {
 
     #[test]
     fn unwrap_datagram_rejects_truncation() {
+        // Fast path truncation
         assert!(unwrap_datagram(&[]).is_none());
         assert!(unwrap_datagram(&[0x00]).is_none());
+
+        // General path: Truncated first varint (requires 2 bytes, 1 provided)
+        assert!(unwrap_datagram(&[0x40]).is_none());
+
+        // General path: Valid first varint (2 bytes), missing second varint (0 bytes left)
+        assert!(unwrap_datagram(&[0x40, 0x00]).is_none());
+
+        // General path: Valid first varint (1 byte), truncated second varint (requires 2 bytes, 1 provided)
+        assert!(unwrap_datagram(&[0x00, 0x40]).is_none());
+
+        // General path: Valid first varint (2 bytes), truncated second varint (requires 4 bytes, 2 provided)
+        assert!(unwrap_datagram(&[0x40, 0x00, 0x80, 0x00]).is_none());
     }
 }

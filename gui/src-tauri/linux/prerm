@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+
+# Stop and disable the Mavi VPN background service before uninstallation
+systemctl stop mavi-vpn.service || true
+systemctl disable mavi-vpn.service || true

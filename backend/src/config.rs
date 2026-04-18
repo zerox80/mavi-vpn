@@ -1,5 +1,23 @@
-use clap::Parser;
+use clap::{value_parser, Parser};
 use std::net::SocketAddr;
+
+/// Inclusive lower bound for the inner tunnel MTU.
+/// 1280 is mandated as the minimum by RFC 8200 (IPv6). Anything lower would
+/// break IPv6 entirely and is almost always a misconfiguration.
+const MIN_MTU: u16 = 1280;
+
+/// Inclusive upper bound for the inner tunnel MTU.
+///
+/// This is the MTU of the TUN device and the value pushed to clients; it is
+/// *not* the outer UDP/QUIC path MTU. The inner MTU must stay below the
+/// outer path MTU by the combined QUIC + UDP + IP overhead (~50–80 bytes).
+///
+/// 1360 is the hard ceiling: it is the usable inner MTU for a residential
+/// PPPoE/DSL path (outer path MTU 1460) after subtracting QUIC + UDP + IP
+/// overhead, and it works on both IPv4 and IPv6 outer packets. Anything
+/// larger would fragment or blackhole on that very common class of last-mile
+/// link and is rejected as misconfiguration.
+const MAX_MTU: u16 = 1360;
 
 /// Command-line configuration for the Mavi VPN Server.
 /// All fields can be set via environment variables (prefixed with `VPN_`)
@@ -41,13 +59,28 @@ pub struct Config {
     #[arg(long, env = "VPN_KEY", default_value = "data/key.pem")]
     pub key_path: std::path::PathBuf,
 
-    /// Maximum Transmission Unit for the virtual interface.
+    /// Maximum Transmission Unit for the virtual interface (inner tunnel MTU).
     ///
-    /// WHY 1280?
-    /// 1280 is the minimum MTU required for IPv6. By matching the inner MTU
-    /// to the path MTU limit of many mobile networks, we minimise fragmentation
-    /// overhead and "Black Hole" issues where larger packets are silently dropped.
-    #[arg(long, env = "VPN_MTU", default_value = "1280")]
+    /// This is **not** the outer UDP/QUIC MTU — it is the size of the inner
+    /// packets handed to QUIC for encapsulation. Pick it so that
+    /// `mtu + QUIC/UDP/IP overhead ≤ path MTU`, where the overhead is ~50–80
+    /// bytes depending on IP family and QUIC header flavour.
+    ///
+    /// WHY 1280 AS DEFAULT?
+    /// 1280 is the minimum MTU required for IPv6 and happens to be the path
+    /// MTU floor on many mobile networks. It minimises fragmentation and the
+    /// "black hole" class of bugs where larger packets are silently dropped.
+    ///
+    /// RECOMMENDED VALUES
+    /// * 1280 — safest default, works everywhere (IPv6 minimum)
+    /// * 1360 — maximum; matches a PPPoE/DSL path (outer MTU 1460) minus
+    ///   QUIC + UDP + IP overhead, works on both IPv4 and IPv6 outer packets
+    #[arg(
+        long,
+        env = "VPN_MTU",
+        default_value = "1280",
+        value_parser = value_parser!(u16).range(MIN_MTU as i64..=MAX_MTU as i64),
+    )]
     pub mtu: u16,
 
     /// Enable Layer 7 Obfuscation (Probe Resistance).

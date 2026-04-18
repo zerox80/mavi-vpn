@@ -54,3 +54,4 @@ gui/src-tauri/build_error.txt
 # --- Backend ---
 /backend/data/
 .agents/workflows/gemini.md
+android/gradlew

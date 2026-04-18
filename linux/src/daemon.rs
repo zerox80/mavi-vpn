@@ -13,14 +13,28 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info};
+use tokio::sync::Mutex;
+use tracing::{error, info, warn};
 use base64::Engine;
+
+/// Hard limit on how long an IPC client may take to send the length prefix and
+/// the request body combined. Prevents a local process from holding the daemon
+/// state lock indefinitely by opening a connection and stalling mid-read.
+const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct DaemonState {
+    vpn_running: Arc<AtomicBool>,
+    vpn_task: Option<tokio::task::JoinHandle<()>>,
+    active_config: Option<Config>,
+}
 
 /// Runs the IPC daemon loop. Accepts commands from CLI/GUI clients.
 pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
-    let vpn_running = Arc::new(AtomicBool::new(false));
-    let mut vpn_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut active_config: Option<Config> = None;
+    let state = Arc::new(Mutex::new(DaemonState {
+        vpn_running: Arc::new(AtomicBool::new(false)),
+        vpn_task: None,
+        active_config: None,
+    }));
 
     let listener = TcpListener::bind(LOCAL_IPC_ADDR).await?;
     
@@ -51,11 +65,15 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
     }
     info!("Daemon listening on {} (Auth token generated)", LOCAL_IPC_ADDR);
 
+    let auth_token = Arc::new(auth_token);
+
     loop {
         if !running_flag.load(Ordering::SeqCst) {
             info!("Stop signal received, shutting down daemon...");
-            vpn_running.store(false, Ordering::SeqCst);
-            if let Some(t) = vpn_task {
+            let mut guard = state.lock().await;
+            guard.vpn_running.store(false, Ordering::SeqCst);
+            if let Some(t) = guard.vpn_task.take() {
+                drop(guard);
                 let _ = t.await;
             }
             break;
@@ -72,80 +90,107 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
                     }
                 };
 
-                info!("IPC client connected from {}", peer);
-                let (mut rx, mut tx) = socket.into_split();
-
-                // Read request
-                let mut len_buf = [0u8; 4];
-                if rx.read_exact(&mut len_buf).await.is_err() { continue; }
-                let len = u32::from_le_bytes(len_buf) as usize;
-                if len > 65536 { continue; }
-
-                let mut buf = vec![0u8; len];
-                if rx.read_exact(&mut buf).await.is_err() { continue; }
-
-                let req_msg: ipc::SecureIpcRequest = match bincode::serde::decode_from_slice(&buf, bincode::config::standard()) {
-                    Ok((r, _)) => r,
-                    Err(_) => continue,
-                };
-
-                // Handle request
-                let resp = if !constant_time_eq(
-                    req_msg.auth_token.as_bytes(),
-                    auth_token.as_bytes(),
-                ) {
-                    error!("Rejecting IPC request due to invalid auth token");
-                    IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
-                } else {
-                    match req_msg.request {
-                    IpcRequest::Status => {
-                        IpcResponse::Status {
-                            running: vpn_running.load(Ordering::SeqCst),
-                            endpoint: active_config.as_ref().map(|c| c.endpoint.clone()),
-                        }
+                // Hand each client off to its own task so a stalled peer cannot
+                // block the accept loop (previously: inline read_exact with no
+                // timeout made the daemon trivially DoS-able by any local
+                // process that connected and never sent data).
+                let state = state.clone();
+                let auth_token = auth_token.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_ipc_client(socket, peer, state, auth_token).await {
+                        warn!("IPC client {} handler exited: {}", peer, e);
                     }
-                    IpcRequest::Stop => {
-                        info!("Handling Stop request");
-                        vpn_running.store(false, Ordering::SeqCst);
-                        active_config = None;
-                        IpcResponse::Ok
-                    }
-                    IpcRequest::Start(config) => {
-                        info!("Handling Start request for endpoint: {}", config.endpoint);
-                        let still_running = vpn_running.load(Ordering::SeqCst)
-                            || vpn_task.as_ref().map_or(false, |t| !t.is_finished());
-                        if still_running {
-                            IpcResponse::Error("VPN is already running".to_string())
-                        } else {
-                            active_config = Some(config.clone());
-                            vpn_running.store(true, Ordering::SeqCst);
-                            let flag = vpn_running.clone();
-
-                            vpn_task = Some(tokio::spawn(async move {
-                                if let Err(e) = crate::vpn_core::run_vpn(config, flag.clone()).await {
-                                    error!("VPN task failed: {}", e);
-                                }
-                                flag.store(false, Ordering::SeqCst);
-                            }));
-                            IpcResponse::Ok
-                        }
-                    }
-                    }
-                };
-
-                // Send response
-                match bincode::serde::encode_to_vec(&resp, bincode::config::standard()) {
-                    Ok(resp_buf) => {
-                        let _ = tx.write_u32_le(resp_buf.len() as u32).await;
-                        let _ = tx.write_all(&resp_buf).await;
-                    }
-                    Err(e) => error!("Failed to serialize IPC response: {}", e),
-                }
+                });
             }
         }
     }
 
     Ok(())
+}
+
+async fn handle_ipc_client(
+    socket: TcpStream,
+    peer: std::net::SocketAddr,
+    state: Arc<Mutex<DaemonState>>,
+    auth_token: Arc<String>,
+) -> Result<()> {
+    info!("IPC client connected from {}", peer);
+    let (mut rx, mut tx) = socket.into_split();
+
+    // Bound the entire header+body read with a single timeout so a client that
+    // opens a socket and then goes silent cannot hold resources indefinitely.
+    let req_msg = tokio::time::timeout(IPC_REQUEST_TIMEOUT, async {
+        let mut len_buf = [0u8; 4];
+        rx.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > 65536 {
+            anyhow::bail!("IPC request too large: {} bytes", len);
+        }
+        let mut buf = vec![0u8; len];
+        rx.read_exact(&mut buf).await?;
+        let (msg, _): (ipc::SecureIpcRequest, _) =
+            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+                .map_err(|e| anyhow::anyhow!("IPC decode error: {}", e))?;
+        Ok::<_, anyhow::Error>(msg)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("IPC request timeout from {}", peer))??;
+
+    let resp = if !constant_time_eq(req_msg.auth_token.as_bytes(), auth_token.as_bytes()) {
+        error!("Rejecting IPC request from {} due to invalid auth token", peer);
+        IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
+    } else {
+        dispatch_request(req_msg.request, &state).await
+    };
+
+    let resp_buf = bincode::serde::encode_to_vec(&resp, bincode::config::standard())
+        .map_err(|e| anyhow::anyhow!("Failed to serialize IPC response: {}", e))?;
+
+    tokio::time::timeout(IPC_REQUEST_TIMEOUT, async {
+        tx.write_u32_le(resp_buf.len() as u32).await?;
+        tx.write_all(&resp_buf).await?;
+        Ok::<_, std::io::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("IPC response write timeout to {}", peer))??;
+
+    Ok(())
+}
+
+async fn dispatch_request(req: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> IpcResponse {
+    let mut guard = state.lock().await;
+    match req {
+        IpcRequest::Status => IpcResponse::Status {
+            running: guard.vpn_running.load(Ordering::SeqCst),
+            endpoint: guard.active_config.as_ref().map(|c| c.endpoint.clone()),
+        },
+        IpcRequest::Stop => {
+            info!("Handling Stop request");
+            guard.vpn_running.store(false, Ordering::SeqCst);
+            guard.active_config = None;
+            IpcResponse::Ok
+        }
+        IpcRequest::Start(config) => {
+            info!("Handling Start request for endpoint: {}", config.endpoint);
+            let still_running = guard.vpn_running.load(Ordering::SeqCst)
+                || guard.vpn_task.as_ref().map_or(false, |t| !t.is_finished());
+            if still_running {
+                IpcResponse::Error("VPN is already running".to_string())
+            } else {
+                guard.active_config = Some(config.clone());
+                guard.vpn_running.store(true, Ordering::SeqCst);
+                let flag = guard.vpn_running.clone();
+
+                guard.vpn_task = Some(tokio::spawn(async move {
+                    if let Err(e) = crate::vpn_core::run_vpn(config, flag.clone()).await {
+                        error!("VPN task failed: {}", e);
+                    }
+                    flag.store(false, Ordering::SeqCst);
+                }));
+                IpcResponse::Ok
+            }
+        }
+    }
 }
 
 /// Sends a single IPC request to the running daemon and returns the response.

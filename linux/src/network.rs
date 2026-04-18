@@ -399,15 +399,17 @@ fn write_resolv_conf(data: &[u8], source_label: &str) -> bool {
 /// pre-created as a symlink to somewhere else and so it isn't world-readable.
 fn save_persistent_backup(bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
     if let Some(parent) = std::path::Path::new(BACKUP_PATH).parent() {
-        std::fs::create_dir_all(parent)?;
-        // Tighten the directory so the backup (which mirrors /etc/resolv.conf,
-        // normally world-readable but potentially containing search-domain
-        // hints an attacker shouldn't easily enumerate) isn't listable by
-        // non-root users.
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        // Create the directory securely with 0o700 permissions from the start.
+        // This ensures the backup (which mirrors /etc/resolv.conf, normally
+        // world-readable but potentially containing search-domain hints) isn't
+        // listable by non-root users at any point.
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
     }
 
     // Best-effort unlink of any stale file (old mode, wrong owner, symlink).

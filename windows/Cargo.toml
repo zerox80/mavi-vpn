@@ -37,6 +37,7 @@ ctrlc = "3.4"
 sha2 = "0.11.0"
 rand = "0.10"
 base64 = "0.22"
+constant_time_eq = "0.4"
 url = "2.5"
 webbrowser = "1.0"
 

@@ -13,6 +13,7 @@ use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
 use tracing::{error, info, warn};
 use tracing_subscriber;
 use base64::Engine;
+use constant_time_eq::constant_time_eq;
 
 #[path = "../ipc.rs"]
 mod ipc;
@@ -281,7 +282,10 @@ async fn run_service_loop(
                     Err(_) => continue,
                 };
                 
-                let resp = if req_msg.auth_token != auth_token {
+                let resp = if !constant_time_eq(
+                    req_msg.auth_token.as_bytes(),
+                    auth_token.as_bytes(),
+                ) {
                     error!("Rejecting IPC request due to invalid auth token");
                     ipc::IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
                 } else {

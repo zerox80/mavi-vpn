@@ -13,7 +13,7 @@
   <a href="https://github.com/zerox80/mavi-vpn/actions"><img src="https://img.shields.io/github/actions/workflow/status/zerox80/mavi-vpn/build.yml?style=flat-square&label=Build" alt="Build" /></a>
   <a href="https://github.com/zerox80/mavi-vpn/actions"><img src="https://img.shields.io/github/actions/workflow/status/zerox80/mavi-vpn/test.yml?style=flat-square&label=Tests" alt="Tests" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="MIT License" /></a>
-  <img src="https://img.shields.io/badge/Rust-1.94+-orange?style=flat-square&logo=rust" alt="Rust" />
+  <img src="https://img.shields.io/badge/Rust-1.95+-orange?style=flat-square&logo=rust" alt="Rust" />
 </p>
 
 <img width="948" height="709" alt="image" src="https://github.com/user-attachments/assets/a56f2e27-9065-4115-80c4-81084605df61" />

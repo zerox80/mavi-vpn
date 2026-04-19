@@ -93,9 +93,6 @@ fun VpnScreen(
                     context = context,
                     isConnected = isConnected
                 )
-                "stats", "you" -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Coming Soon", color = T.mute)
-                }
             }
         }
 
@@ -112,13 +109,12 @@ fun VpnScreen(
             verticalAlignment = Alignment.Top
         ) {
             val tabs = listOf(
-                Triple("home", "Tunnel", "◉"),
-                Triple("config", "Config", "◎"),
-                Triple("stats", "Stats", "≡"),
-                Triple("you", "You", "◇")
+                Pair("home", "Tunnel" to "◉"),
+                Pair("config", "Config" to "◎")
             )
             
-            tabs.forEach { (id, label, glyph) ->
+            tabs.forEach { (id, info) ->
+                val (label, glyph) = info
                 val isSelected = currentTab == id
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,

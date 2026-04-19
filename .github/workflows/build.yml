@@ -31,15 +31,44 @@ jobs:
           restore-keys: linux-cli-cargo-
 
       - name: Install build dependencies
-        run: sudo apt-get update -q && sudo apt-get install -y cmake pkg-config
+        run: sudo apt-get update -q && sudo apt-get install -y cmake pkg-config rpm
 
       - name: Build
         run: cargo build --release -p linux-vpn
 
+      - name: Install FPM
+        run: sudo gem install fpm
+
+      - name: Package DEB and RPM
+        run: |
+          VERSION="0.1.0"
+          mkdir -p dist
+          fpm -s dir -t deb -n mavi-vpn-cli -v $VERSION \
+            --after-install gui/src-tauri/linux/postinst \
+            --before-remove gui/src-tauri/linux/prerm \
+            --conflicts mavi-vpn \
+            --replaces mavi-vpn \
+            --description "Mavi VPN Background Service" \
+            -p dist/mavi-vpn-cli_${VERSION}_amd64.deb \
+            target/release/mavi-vpn=/usr/local/bin/mavi-vpn \
+            linux/mavi-vpn.service=/lib/systemd/system/mavi-vpn.service
+          
+          fpm -s dir -t rpm -n mavi-vpn-cli -v $VERSION \
+            --after-install gui/src-tauri/linux/postinst \
+            --before-remove gui/src-tauri/linux/prerm \
+            --conflicts mavi-vpn \
+            --description "Mavi VPN Background Service" \
+            -p dist/mavi-vpn-cli-${VERSION}-1.x86_64.rpm \
+            target/release/mavi-vpn=/usr/local/bin/mavi-vpn \
+            linux/mavi-vpn.service=/lib/systemd/system/mavi-vpn.service
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-cli
-          path: target/release/mavi-vpn
+          path: |
+            target/release/mavi-vpn
+            dist/*.deb
+            dist/*.rpm
 
 
   # ── Android APK ──────────────────────────────────────────────────────────────
@@ -129,6 +158,9 @@ jobs:
             libxdo-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
+
+      - name: Build Linux CLI & Service
+        run: cargo build --release -p linux-vpn
 
       - name: Install npm dependencies
         working-directory: gui

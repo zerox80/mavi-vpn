@@ -1,9 +1,12 @@
 package com.mavi.vpn.ui.screens
 
+import android.content.Context
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -13,18 +16,23 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mavi.vpn.ui.components.MaviTextField
 import com.mavi.vpn.viewmodel.VpnViewModel
 import com.mavi.vpn.OAuthHelper
+import com.mavi.vpn.ui.components.MaviCore
+import com.mavi.vpn.ui.components.MaviCoreState
+import com.mavi.vpn.ui.theme.MaviTheme
 import kotlinx.coroutines.delay
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VpnScreen(
     viewModel: VpnViewModel,
@@ -35,6 +43,291 @@ fun VpnScreen(
     val context = LocalContext.current
     val isConnected by viewModel.isConnected.collectAsState()
     
+    val authToken by viewModel.authToken.collectAsState()
+    val useKeycloak by viewModel.useKeycloak.collectAsState()
+
+    // Keycloak token refresh loop logic
+    LaunchedEffect(useKeycloak, authToken, isConnected) {
+        if (!useKeycloak || authToken.isEmpty()) return@LaunchedEffect
+
+        while (true) {
+            val prefs = com.mavi.vpn.data.PrefsManager(viewModel.getApplication())
+            val freshToken = prefs.savedToken
+            if (freshToken.isNotEmpty() && freshToken != authToken) {
+                viewModel.authToken.value = freshToken
+            }
+            if (freshToken.isNotEmpty() && !OAuthHelper.isAccessTokenUsable(freshToken, skewSeconds = 0)) {
+                if (isConnected) onDisconnect()
+                viewModel.clearAuthToken()
+                viewModel.updateErrorMessage("Keycloak access token expired. Please login again.")
+                break
+            }
+            delay(5_000)
+        }
+    }
+
+    var currentTab by remember { mutableStateOf("home") }
+    val T = MaviTheme.colors
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(T.bg)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = 88.dp)
+        ) {
+            when (currentTab) {
+                "home" -> HomeView(
+                    viewModel = viewModel,
+                    isConnected = isConnected,
+                    onConnect = onConnect,
+                    onDisconnect = onDisconnect,
+                    onOpenSettings = onOpenSettings,
+                    onGoToConfig = { currentTab = "config" }
+                )
+                "config" -> ConfigView(
+                    viewModel = viewModel,
+                    context = context,
+                    isConnected = isConnected
+                )
+            }
+        }
+
+        // Bottom Tab Bar
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(88.dp)
+                .background(T.surface)
+                .border(width = 1.dp, color = T.line)
+                .padding(top = 12.dp, start = 20.dp, end = 20.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            val tabs = listOf(
+                Pair("home", "Tunnel" to "◉"),
+                Pair("config", "Config" to "◎")
+            )
+            
+            tabs.forEach { (id, info) ->
+                val (label, glyph) = info
+                val isSelected = currentTab == id
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            currentTab = id
+                        }
+                ) {
+                    Text(
+                        text = glyph,
+                        fontSize = 18.sp,
+                        color = if (isSelected) T.accent else T.mute,
+                        fontFamily = MaterialTheme.typography.labelSmall.fontFamily
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = label.uppercase(),
+                        fontSize = 10.sp,
+                        letterSpacing = 1.sp,
+                        color = if (isSelected) T.accent else T.mute,
+                        fontFamily = MaterialTheme.typography.labelSmall.fontFamily
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HomeView(
+    viewModel: VpnViewModel,
+    isConnected: Boolean,
+    onConnect: (String, String, String, String) -> Unit,
+    onDisconnect: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onGoToConfig: () -> Unit
+) {
+    val T = MaviTheme.colors
+    val serverIp by viewModel.serverIp.collectAsState()
+    val serverPort by viewModel.serverPort.collectAsState()
+    val authToken by viewModel.authToken.collectAsState()
+    val certPin by viewModel.certPin.collectAsState()
+    val useKeycloak by viewModel.useKeycloak.collectAsState()
+    val kcUrl by viewModel.kcUrl.collectAsState()
+
+    val state = if (isConnected) MaviCoreState.ON else MaviCoreState.OFF
+    val labelColor = if (isConnected) T.ok else T.mute
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = 58.dp, bottom = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Wordmark
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom
+        ) {
+            Text(
+                text = "mavi",
+                fontFamily = MaterialTheme.typography.displayLarge.fontFamily,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = (-0.8).sp,
+                color = T.ink
+            )
+            Text(
+                text = "PRIVATE · TUNNEL",
+                fontFamily = MaterialTheme.typography.labelSmall.fontFamily,
+                fontSize = 10.sp,
+                letterSpacing = 1.5.sp,
+                color = T.mute
+            )
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        // Core Area
+        Box(contentAlignment = Alignment.Center) {
+            MaviCore(state = state, accent = T.accent, isDark = isDark, sizeDp = 240)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Status Text
+        Text(
+            text = "// ${if (isConnected) "ENCRYPTED" else "NOT CONNECTED"}",
+            fontFamily = MaterialTheme.typography.labelSmall.fontFamily,
+            fontSize = 10.sp,
+            letterSpacing = 2.sp,
+            color = labelColor
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = if (serverIp.isNotEmpty()) serverIp else "Unknown",
+            fontFamily = MaterialTheme.typography.displayLarge.fontFamily,
+            fontSize = 36.sp,
+            color = T.ink,
+            lineHeight = 36.sp,
+            letterSpacing = (-0.8).sp
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Port $serverPort · ${if (isConnected) "tunnel active" else "ready"}",
+            fontSize = 13.sp,
+            color = T.ink2
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Connect Button
+        Button(
+            onClick = {
+                if (isConnected) {
+                    onDisconnect()
+                } else {
+                    viewModel.updateErrorMessage("")
+                    if (serverIp.isEmpty()) {
+                        viewModel.updateErrorMessage("Please enter a server endpoint in Config.")
+                        onGoToConfig()
+                    } else if (useKeycloak) {
+                        if (kcUrl.isEmpty() || authToken.isEmpty()) {
+                            viewModel.updateErrorMessage("Please login with Keycloak first in Config.")
+                            onGoToConfig()
+                        } else if (!OAuthHelper.isAccessTokenUsable(authToken)) {
+                            viewModel.clearAuthToken()
+                            viewModel.updateErrorMessage("Keycloak login expired. Please login again.")
+                            onGoToConfig()
+                        } else {
+                            viewModel.saveKeycloakDetails()
+                            onConnect(serverIp, serverPort, authToken, certPin)
+                        }
+                    } else {
+                        if (authToken.isEmpty()) {
+                            viewModel.updateErrorMessage("Please enter a Preshared Key in Config.")
+                            onGoToConfig()
+                        } else {
+                            viewModel.saveServerDetails()
+                            onConnect(serverIp, serverPort, authToken, certPin)
+                        }
+                    }
+                }
+            },
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isConnected) Color.Transparent else T.accent,
+                contentColor = if (isConnected) T.ink else Color.White
+            ),
+            shape = CircleShape,
+            modifier = Modifier
+                .height(56.dp)
+                .width(220.dp)
+                .border(
+                    width = if (isConnected) 1.5.dp else 0.dp,
+                    color = if (isConnected) T.ink else Color.Transparent,
+                    shape = CircleShape
+                )
+        ) {
+            Text(
+                text = if (isConnected) "Disconnect" else "Connect",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.3.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        // Bottom Card
+        Box(
+            modifier = Modifier
+                .padding(horizontal = 16.dp)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(T.surface)
+                .border(1.dp, T.line, RoundedCornerShape(18.dp))
+                .clickable { onOpenSettings() }
+                .padding(16.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Settings, contentDescription = null, tint = T.ink, modifier = Modifier.size(26.dp))
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Text("ADVANCED", fontFamily = MaterialTheme.typography.labelSmall.fontFamily, fontSize = 9.sp, letterSpacing = 1.5.sp, color = T.mute)
+                        Text("Split Tunneling", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = T.ink)
+                    }
+                }
+                Text("›", fontSize = 24.sp, color = T.mute, fontFamily = MaterialTheme.typography.labelSmall.fontFamily)
+            }
+        }
+    }
+}
+
+@Composable
+fun ConfigView(
+    viewModel: VpnViewModel,
+    context: Context,
+    isConnected: Boolean
+) {
+    val T = MaviTheme.colors
     val serverIp by viewModel.serverIp.collectAsState()
     val serverPort by viewModel.serverPort.collectAsState()
     val authToken by viewModel.authToken.collectAsState()
@@ -50,105 +343,60 @@ fun VpnScreen(
     val hasKeycloakToken = useKeycloak && authToken.isNotEmpty()
     val keycloakTokenUsableLocally = hasKeycloakToken && OAuthHelper.isAccessTokenUsable(authToken, skewSeconds = 0)
 
-    LaunchedEffect(useKeycloak, authToken, isConnected) {
-        if (!useKeycloak || authToken.isEmpty()) {
-            return@LaunchedEffect
-        }
-
-        while (true) {
-            // Re-sync the latest token from prefs in case the background service refreshed it
-            val prefs = com.mavi.vpn.data.PrefsManager(viewModel.getApplication())
-            val freshToken = prefs.savedToken
-            if (freshToken.isNotEmpty() && freshToken != authToken) {
-                viewModel.authToken.value = freshToken
-            }
-            
-            // Check the most up-to-date token
-            if (freshToken.isNotEmpty() && !OAuthHelper.isAccessTokenUsable(freshToken, skewSeconds = 0)) {
-                // Background service failed to refresh it in time or we are totally expired.
-                if (isConnected) {
-                    onDisconnect()
-                }
-                viewModel.clearAuthToken()
-                viewModel.updateErrorMessage("Keycloak access token expired. Please login again.")
-                break
-            }
-
-            // Local token check only; the active HTTP check was removed to prevent UI-driven disconnects
-            delay(5_000)
-        }
-    }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .verticalScroll(rememberScrollState())
+            .padding(top = 58.dp, bottom = 16.dp, start = 16.dp, end = 16.dp)
     ) {
-        // Scrollable content area
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 14.dp)) {
+            Text(
+                text = "/ CONFIGURATION",
+                fontFamily = MaterialTheme.typography.labelSmall.fontFamily,
+                fontSize = 10.sp,
+                color = T.mute,
+                letterSpacing = 1.5.sp
+            )
+            Text(
+                text = "Tunnel Endpoint",
+                fontFamily = MaterialTheme.typography.displayLarge.fontFamily,
+                fontSize = 34.sp,
+                color = T.ink,
+                letterSpacing = (-0.8).sp,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = T.surface),
+            shape = RoundedCornerShape(14.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, T.line),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Spacer(modifier = Modifier.height(48.dp))
-
-            Icon(
-                imageVector = if (isConnected) Icons.Default.Lock else Icons.Default.Settings,
-                contentDescription = null,
-                modifier = Modifier
-                    .size(80.dp)
-                    .clickable { onOpenSettings() },
-                tint = if (isConnected) Color(0xFF00FF7F) else Color(0xFF007AFF)
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Text(
-                text = "MAVI VPN",
-                fontSize = 32.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
-
-            Text(
-                text = if (isConnected) "SECURED CONNECTION" else "READY TO CONNECT",
-                fontSize = 14.sp,
-                color = if (isConnected) Color(0xFF00FF7F) else Color.Gray
-            )
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            if (!isConnected) {
-                // --- Server fields ---
+            Column(modifier = Modifier.padding(16.dp)) {
                 MaviTextField(
                     value = serverIp,
                     onValueChange = { viewModel.serverIp.value = it },
                     label = "Server IP / Endpoint",
                     modifier = Modifier.fillMaxWidth()
                 )
-
                 Spacer(modifier = Modifier.height(12.dp))
-
                 MaviTextField(
                     value = serverPort,
                     onValueChange = { viewModel.serverPort.value = it },
                     label = "Port",
                     modifier = Modifier.fillMaxWidth()
                 )
-
                 Spacer(modifier = Modifier.height(12.dp))
-
                 MaviTextField(
                     value = certPin,
                     onValueChange = { viewModel.certPin.value = it },
                     label = "Certificate PIN (SHA256 Hex)",
                     modifier = Modifier.fillMaxWidth()
                 )
-
                 Spacer(modifier = Modifier.height(12.dp))
-
                 MaviTextField(
                     value = echConfig,
                     onValueChange = { viewModel.echConfig.value = it },
@@ -156,35 +404,57 @@ fun VpnScreen(
                     placeholder = "Enter to bypass SNI inspection",
                     modifier = Modifier.fillMaxWidth()
                 )
+            }
+        }
 
-                Spacer(modifier = Modifier.height(16.dp))
-                Divider(color = Color(0xFF2C2C2C))
+        Spacer(modifier = Modifier.height(24.dp))
 
-                // --- Auth mode toggle ---
+        Column(modifier = Modifier.padding(horizontal = 8.dp)) {
+            Text(
+                text = "/ AUTHENTICATION",
+                fontFamily = MaterialTheme.typography.labelSmall.fontFamily,
+                fontSize = 10.sp,
+                color = T.mute,
+                letterSpacing = 1.5.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = T.surface),
+            shape = RoundedCornerShape(14.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, T.line),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 8.dp),
+                        .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Checkbox(
+                    Switch(
                         checked = useKeycloak,
                         onCheckedChange = { checked ->
                             if (checked && !useKeycloak) {
-                                // Switching to KC
                                 viewModel.saveServerDetails()
                             }
                             viewModel.useKeycloak.value = checked
                             viewModel.updateErrorMessage("")
                         },
-                        colors = CheckboxDefaults.colors(
-                            checkedColor = Color(0xFF673AB7),
-                            uncheckedColor = Color.Gray,
-                            checkmarkColor = Color.White
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = T.accent,
+                            uncheckedThumbColor = T.mute,
+                            uncheckedTrackColor = T.bg
                         )
                     )
-                    Text("Keycloak Authentication", color = Color.White, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("Keycloak Authentication", color = T.ink, fontSize = 15.sp)
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
 
                 if (useKeycloak) {
                     MaviTextField(
@@ -194,18 +464,14 @@ fun VpnScreen(
                         placeholder = "https://auth.example.com",
                         modifier = Modifier.fillMaxWidth()
                     )
-
                     Spacer(modifier = Modifier.height(8.dp))
-
                     MaviTextField(
                         value = kcRealm,
                         onValueChange = { viewModel.kcRealm.value = it },
                         label = "Realm",
                         modifier = Modifier.fillMaxWidth()
                     )
-
                     Spacer(modifier = Modifier.height(8.dp))
-
                     MaviTextField(
                         value = kcClientId,
                         onValueChange = { viewModel.kcClientId.value = it },
@@ -213,7 +479,7 @@ fun VpnScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
 
                     Button(
                         onClick = {
@@ -226,12 +492,12 @@ fun VpnScreen(
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF673AB7)),
+                        colors = ButtonDefaults.buttonColors(containerColor = T.accent),
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color.White)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Login with Keycloak")
+                        Text("Login with Keycloak", color = Color.White)
                     }
 
                     if (hasKeycloakToken) {
@@ -240,15 +506,15 @@ fun VpnScreen(
                             else -> "Token expired locally"
                         }
                         val statusColor = when {
-                            keycloakTokenUsableLocally -> Color(0xFF00FF7F)
-                            else -> Color(0xFFFF3B30)
+                            keycloakTokenUsableLocally -> T.ok
+                            else -> T.warn
                         }
 
                         Text(
                             text = statusText,
                             color = statusColor,
                             fontSize = 12.sp,
-                            modifier = Modifier.padding(top = 4.dp)
+                            modifier = Modifier.padding(top = 8.dp)
                         )
                     }
                 } else {
@@ -261,83 +527,12 @@ fun VpnScreen(
                         visualTransformation = PasswordVisualTransformation()
                     )
                 }
-
-                if (errorMessage.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(text = errorMessage, color = Color(0xFFFF3B30), fontSize = 12.sp)
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                OutlinedButton(
-                    onClick = onOpenSettings,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-                ) {
-                    Text("Split Tunneling Settings")
-                }
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
-                        .padding(24.dp)
-                ) {
-                    Column {
-                        Text("Connected to:", color = Color.Gray, fontSize = 12.sp)
-                        Text(serverIp, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                    }
-                }
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Button(
-            onClick = {
-                if (isConnected) {
-                    onDisconnect()
-                } else {
-                    viewModel.updateErrorMessage("")
-                    if (serverIp.isEmpty()) {
-                        viewModel.updateErrorMessage("Please enter a server endpoint.")
-                    } else if (useKeycloak) {
-                        if (kcUrl.isEmpty()) {
-                            viewModel.updateErrorMessage("Please enter Keycloak server details.")
-                        } else if (authToken.isEmpty()) {
-                            viewModel.updateErrorMessage("Please login with Keycloak first.")
-                        } else if (!OAuthHelper.isAccessTokenUsable(authToken)) {
-                            viewModel.clearAuthToken()
-                            viewModel.updateErrorMessage("Keycloak login expired. Please login again.")
-                        } else {
-                            viewModel.saveKeycloakDetails()
-                            onConnect(serverIp, serverPort, authToken, certPin)
-                        }
-                    } else {
-                        if (authToken.isEmpty()) {
-                            viewModel.updateErrorMessage("Please enter a Preshared Key.")
-                        } else {
-                            viewModel.saveServerDetails()
-                            onConnect(serverIp, serverPort, authToken, certPin)
-                        }
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth().height(56.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (isConnected) Color(0xFFFF3B30) else Color(0xFF007AFF)
-            )
-        ) {
-            Text(
-                text = if (isConnected) "DISCONNECT" else "CONNECT",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
+        if (errorMessage.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(text = errorMessage, color = T.warn, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 8.dp))
         }
-        
-        Spacer(modifier = Modifier.height(24.dp))
     }
 }

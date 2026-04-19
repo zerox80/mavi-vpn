@@ -31,7 +31,13 @@
       "PowerShell(rustup target:*)",
       "PowerShell(\\(Get-Content C:\\\\Daten5\\\\mavi-vpn\\\\windows\\\\src\\\\vpn_core.rs\\).Length; \\(Get-Content C:\\\\Daten5\\\\mavi-vpn\\\\linux\\\\src\\\\vpn_core.rs\\).Length)",
       "PowerShell(Get-ChildItem 'C:\\\\Users\\\\Rujbin.Nassereslam\\\\.cargo\\\\registry\\\\src' -Filter 'h3-0.0.8' -Recurse -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })",
-      "Bash(grep -n \"tokio::main\\\\|new_current_thread\\\\|new_multi_thread\\\\|worker_threads\\\\|Runtime::new\\\\|runtime::Builder\\\\|#\\\\[tokio\" c:/Daten5/mavi-vpn/backend/src/main.rs c:/Daten5/mavi-vpn/android/app/src/main/rust/src/*.rs)"
+      "Bash(grep -n \"tokio::main\\\\|new_current_thread\\\\|new_multi_thread\\\\|worker_threads\\\\|Runtime::new\\\\|runtime::Builder\\\\|#\\\\[tokio\" c:/Daten5/mavi-vpn/backend/src/main.rs c:/Daten5/mavi-vpn/android/app/src/main/rust/src/*.rs)",
+      "Bash(~/.cargo/bin/cargo --version)",
+      "Read(//home/rujbin/.cargo/bin/**)",
+      "Bash(mkdir -p /home/rujbin/mavi-vpn/gui/src/fonts)",
+      "Bash(curl -sS --connect-timeout 5 -o /tmp/gfonts-test.css \"https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300..700&display=swap\" -H \"User-Agent: Mozilla/5.0\")",
+      "Read(//tmp/**)",
+      "Bash(curl -sS --connect-timeout 5 -H \"User-Agent: Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/120.0.0.0 Safari/537.36\" \"https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300..700&family=Geist:wght@300..700&family=JetBrains+Mono:wght@400;500&display=swap\")"
     ]
   }
 }

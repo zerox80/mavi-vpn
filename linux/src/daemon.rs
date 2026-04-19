@@ -51,7 +51,7 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
     let write_result = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .mode(0o644)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&token_path)
         .and_then(|mut f| f.write_all(auth_token.as_bytes()));
@@ -59,7 +59,7 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
     if let Err(e) = write_result {
         error!("Failed to write IPC token to {:?}: {}", token_path, e);
     } else if let Err(e) =
-        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644))
     {
         error!("Failed to harden IPC token permissions on {:?}: {}", token_path, e);
     }

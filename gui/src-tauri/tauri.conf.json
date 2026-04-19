@@ -42,8 +42,8 @@
           "/usr/local/bin/mavi-vpn": "../../target/release/mavi-vpn",
           "/lib/systemd/system/mavi-vpn.service": "../../linux/mavi-vpn.service"
         },
-        "postInst": "linux/postinst",
-        "preRm": "linux/prerm",
+        "postInstallScript": "linux/postinst",
+        "preRemoveScript": "linux/prerm",
         "conflicts": ["mavi-vpn-cli"],
         "replaces": ["mavi-vpn-cli"]
       },
@@ -52,8 +52,6 @@
           "/usr/local/bin/mavi-vpn": "../../target/release/mavi-vpn",
           "/lib/systemd/system/mavi-vpn.service": "../../linux/mavi-vpn.service"
         },
-        "postInstall": "linux/postinst",
-        "preRemove": "linux/prerm",
         "conflicts": ["mavi-vpn-cli"]
       }
     },

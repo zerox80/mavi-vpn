@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/Rust-1.94+-orange?style=flat-square&logo=rust" alt="Rust" />
 </p>
 
-<img width="945" height="720" alt="image" src="https://github.com/user-attachments/assets/918deb37-97f9-42ef-99ca-faa725238db6" />
+<img width="948" height="709" alt="image" src="https://github.com/user-attachments/assets/a9471399-fa2d-42ea-a01c-766e1c13db36" />
 
 
 ---

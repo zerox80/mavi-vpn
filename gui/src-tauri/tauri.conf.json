@@ -36,6 +36,25 @@
         "componentGroupRefs": ["CustomComponents"]
       }
     },
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/local/bin/mavi-vpn": "../../target/release/mavi-vpn",
+          "/lib/systemd/system/mavi-vpn.service": "../../linux/mavi-vpn.service"
+        },
+        "postInstallScript": "linux/postinst",
+        "preRemoveScript": "linux/prerm",
+        "conflicts": ["mavi-vpn-cli"],
+        "replaces": ["mavi-vpn-cli"]
+      },
+      "rpm": {
+        "files": {
+          "/usr/local/bin/mavi-vpn": "../../target/release/mavi-vpn",
+          "/lib/systemd/system/mavi-vpn.service": "../../linux/mavi-vpn.service"
+        },
+        "conflicts": ["mavi-vpn-cli"]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -3,7 +3,7 @@ use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
     masque::{self, CAPSULE_MAVI_CONFIG},
-    ControlMessage,
+    ControlMessage, DEFAULT_TUN_MTU, QUIC_OVERHEAD_BYTES,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -87,11 +87,20 @@ pub async fn connect_and_handshake(
         return Err(anyhow::anyhow!("Endpoint host missing"));
     }
 
-    // Rule 2: Outgoing QUIC Payload (Initial MTU) MUST be 1360.
-    // IPv4 Wire: 1360 + 20 (IP) + 8 (UDP) = 1388 bytes.
-    // IPv6 Wire: 1360 + 40 (IP) + 8 (UDP) = 1408 bytes.
-    let quic_mtu = 1360;
-    info!("Hard-pinning QUIC MTU: {} (Target Wire: 1388-1408)", quic_mtu);
+    // Outer QUIC payload MTU is derived from the default inner TUN MTU
+    // (1280) + 80-byte QUIC/AEAD overhead budget. Android has no runtime knob
+    // for `VPN_MTU` yet — if the server is reconfigured, the Android build
+    // must be updated to match, otherwise the larger side will send UDP
+    // payloads the smaller side considers out-of-spec.
+    let tun_mtu = DEFAULT_TUN_MTU;
+    let quic_mtu = tun_mtu + QUIC_OVERHEAD_BYTES;
+    info!(
+        "Setting QUIC MTU: {} (TUN MTU: {}, Target Wire: {} IPv4 / {} IPv6)",
+        quic_mtu,
+        tun_mtu,
+        quic_mtu + 20 + 8,
+        quic_mtu + 40 + 8,
+    );
 
     // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();

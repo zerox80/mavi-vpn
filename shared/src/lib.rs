@@ -6,6 +6,20 @@ pub mod icmp;
 pub mod ipc;
 pub mod masque;
 
+/// Fixed overhead budget (in bytes) reserved on top of the inner TUN MTU to
+/// cover QUIC short-header framing + AEAD tag + connection-ID bytes. The outer
+/// QUIC payload MTU is derived as `tun_mtu + QUIC_OVERHEAD_BYTES`, so the inner
+/// MTU remains the single knob operators turn. Server and client must agree on
+/// `tun_mtu`, otherwise the larger side will send packets the smaller side
+/// considers out-of-spec.
+pub const QUIC_OVERHEAD_BYTES: u16 = 80;
+
+/// Default inner TUN MTU when the operator has not overridden `VPN_MTU`.
+/// 1280 is the IPv6 minimum (RFC 8200) and is safe on every residential path
+/// we have measured. It yields a QUIC payload MTU of 1360, matching the
+/// pre-knob pinning.
+pub const DEFAULT_TUN_MTU: u16 = 1280;
+
 /// Control-plane messages exchanged over the QUIC bidirectional stream during
 /// connection setup (the "handshake phase").
 ///

@@ -170,6 +170,87 @@ async fn load_config(app: AppHandle) -> Result<Option<Config>, String> {
 }
 
 // =============================================================================
+// UI Preferences (frontend-only state, not shared with daemon)
+// =============================================================================
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+struct SavedConn {
+    id: String,
+    label: String,
+    endpoint: String,
+    cert_pin: String,
+    #[serde(default)]
+    ech_config: Option<String>,
+    #[serde(default)]
+    http3_framing: bool,
+    #[serde(default)]
+    censorship_resistant: bool,
+    #[serde(default)]
+    kc_auth: Option<bool>,
+    #[serde(default)]
+    kc_url: Option<String>,
+    #[serde(default)]
+    kc_realm: Option<String>,
+    #[serde(default)]
+    kc_client_id: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+struct Prefs {
+    #[serde(default = "default_theme")]
+    theme: String,
+    #[serde(default = "default_accent")]
+    accent: String,
+    #[serde(default)]
+    connections: Vec<SavedConn>,
+    #[serde(default)]
+    active_id: Option<String>,
+}
+
+fn default_theme() -> String { "light".into() }
+fn default_accent() -> String { "#2B44FF".into() }
+
+#[tauri::command]
+async fn load_prefs(app: AppHandle) -> Result<Prefs, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
+    let prefs_path = config_dir.join("prefs.json");
+    if !prefs_path.exists() {
+        return Ok(Prefs {
+            theme: default_theme(),
+            accent: default_accent(),
+            connections: vec![],
+            active_id: None,
+        });
+    }
+    let content = std::fs::read_to_string(prefs_path).map_err(|e| e.to_string())?;
+    let prefs: Prefs = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    Ok(prefs)
+}
+
+#[tauri::command]
+async fn save_prefs(app: AppHandle, prefs: Prefs) -> Result<(), String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    let prefs_path = config_dir.join("prefs.json");
+    let content = serde_json::to_string_pretty(&prefs).map_err(|e| e.to_string())?;
+    std::fs::write(&prefs_path, content).map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&prefs_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // System Tray
 // =============================================================================
 
@@ -241,6 +322,8 @@ pub fn run() {
             vpn_status,
             save_config,
             load_config,
+            load_prefs,
+            save_prefs,
         ])
         .setup(|app| {
             setup_tray(app)?;

@@ -338,4 +338,36 @@ mod tests {
         // /0 is too large (> 2^32 usable addresses, rejected by the prefix < 8 guard)
         assert!(AppState::new("0.0.0.0/0").is_err());
     }
+
+    #[tokio::test]
+    async fn test_concurrent_ip_assignment() {
+        use std::sync::Arc;
+        
+        let state = Arc::new(AppState::new("10.8.0.0/16").unwrap());
+        let mut handles = vec![];
+        
+        for _ in 0..100 {
+            let state_clone = state.clone();
+            handles.push(tokio::spawn(async move {
+                let mut ips = vec![];
+                for _ in 0..10 {
+                    if let Ok(ip) = state_clone.assign_ip() {
+                        ips.push(ip);
+                    }
+                }
+                ips
+            }));
+        }
+        
+        let mut all_assigned = std::collections::HashSet::new();
+        for handle in handles {
+            let ips = handle.await.unwrap();
+            for ip in ips {
+                assert!(all_assigned.insert(ip), "Duplicate IP assigned: {}", ip);
+            }
+        }
+        
+        // 100 threads * 10 IPs = 1000 unique IPs
+        assert_eq!(all_assigned.len(), 1000);
+    }
 }

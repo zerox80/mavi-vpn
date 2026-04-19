@@ -186,4 +186,19 @@ mod tests {
             other => panic!("Expected Error, got {:?}", other),
         }
     }
+
+    #[test]
+    fn test_malformed_bincode_data() {
+        // Try decoding garbage data
+        let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let result: Result<(ControlMessage, usize), _> = bincode::serde::decode_from_slice(&garbage, bincode::config::standard());
+        assert!(result.is_err(), "Decoding garbage data should fail");
+
+        // Try decoding an incomplete message
+        let msg = ControlMessage::Auth { token: "123".to_string() };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let incomplete = &encoded[..encoded.len() - 1]; // strip last byte
+        let result_incomplete: Result<(ControlMessage, usize), _> = bincode::serde::decode_from_slice(incomplete, bincode::config::standard());
+        assert!(result_incomplete.is_err(), "Decoding incomplete data should fail");
+    }
 }

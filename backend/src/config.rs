@@ -148,3 +148,56 @@ pub fn load() -> Config {
     dotenv::dotenv().ok();
     Config::parse()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = Config::parse_from(&["mavi-vpn", "--auth-token", "secret123"]);
+        assert_eq!(config.mtu, 1280);
+        assert_eq!(config.network_cidr, "10.8.0.0/24");
+        assert_eq!(config.dns, std::net::Ipv4Addr::new(1, 1, 1, 1));
+        assert_eq!(config.auth_token, "secret123");
+        assert!(!config.censorship_resistant);
+        assert!(!config.mss_clamping);
+    }
+
+    #[test]
+    fn test_mtu_valid_range() {
+        let config = Config::parse_from(&["mavi-vpn", "--auth-token", "secret123", "--mtu", "1360"]);
+        assert_eq!(config.mtu, 1360);
+        
+        let config = Config::parse_from(&["mavi-vpn", "--auth-token", "secret123", "--mtu", "1280"]);
+        assert_eq!(config.mtu, 1280);
+    }
+
+    #[test]
+    fn test_custom_arguments() {
+        let config = Config::parse_from(&[
+            "mavi-vpn",
+            "--auth-token", "super_secret",
+            "--network-cidr", "192.168.10.0/24",
+            "--dns", "8.8.8.8",
+            "--censorship-resistant",
+            "--mss-clamping",
+        ]);
+        assert_eq!(config.auth_token, "super_secret");
+        assert_eq!(config.network_cidr, "192.168.10.0/24");
+        assert_eq!(config.dns, std::net::Ipv4Addr::new(8, 8, 8, 8));
+        assert!(config.censorship_resistant);
+        assert!(config.mss_clamping);
+    }
+
+    #[test]
+    fn test_whitelist_domains() {
+        let config = Config::parse_from(&[
+            "mavi-vpn",
+            "--auth-token", "secret",
+            "--whitelist-domains", "github.com,google.com"
+        ]);
+        assert_eq!(config.whitelist_domains, vec!["github.com", "google.com"]);
+    }
+}
+

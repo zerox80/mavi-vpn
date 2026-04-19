@@ -8,7 +8,11 @@ use crate::config::Config;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
-const QUIC_PAYLOAD_MTU: u16 = 1360;
+/// Fixed overhead budget reserved on top of the inner TUN MTU to account for
+/// QUIC short-header framing + AEAD tag + connection-ID bytes. The outer QUIC
+/// payload MTU is derived as `config.mtu + QUIC_OVERHEAD_BYTES`, so the inner
+/// MTU remains the single knob operators turn.
+const QUIC_OVERHEAD_BYTES: u16 = 80;
 
 pub fn create_quic_endpoint(
     config: &Config,
@@ -32,7 +36,7 @@ pub fn create_quic_endpoint(
     let transport_config = Arc::get_mut(&mut server_config.transport)
         .ok_or_else(|| anyhow::anyhow!("Failed to access transport config"))?;
     
-    setup_transport_config(transport_config);
+    setup_transport_config(transport_config, config.mtu + QUIC_OVERHEAD_BYTES);
     
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
     let socket2_sock = socket2::Socket::from(socket);
@@ -60,7 +64,7 @@ pub fn create_quic_endpoint(
     Ok(endpoint)
 }
 
-fn setup_transport_config(transport_config: &mut TransportConfig) {
+fn setup_transport_config(transport_config: &mut TransportConfig, quic_payload_mtu: u16) {
     // Bound idle so a stalled peer cannot hold a connection slot forever
     // (the connection accept loop is gated by a fixed-size semaphore — without
     // a timeout, silent peers would DoS legitimate clients). 60s is well above
@@ -75,8 +79,8 @@ fn setup_transport_config(transport_config: &mut TransportConfig) {
     transport_config.stream_receive_window(quinn::VarInt::from(1024u32 * 1024)); 
     transport_config.send_window(4 * 1024 * 1024); 
     transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
-    transport_config.mtu_discovery_config(None); 
-    transport_config.initial_mtu(QUIC_PAYLOAD_MTU); 
-    transport_config.min_mtu(QUIC_PAYLOAD_MTU);
+    transport_config.mtu_discovery_config(None);
+    transport_config.initial_mtu(quic_payload_mtu);
+    transport_config.min_mtu(quic_payload_mtu);
     transport_config.enable_segmentation_offload(true);
 }

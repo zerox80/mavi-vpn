@@ -14,7 +14,7 @@ use shared::{
     icmp,
     ipc::Config,
     masque::{self, CAPSULE_MAVI_CONFIG},
-    ControlMessage,
+    ControlMessage, DEFAULT_TUN_MTU, QUIC_OVERHEAD_BYTES,
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +34,26 @@ const RECONNECT_MAX_SECS: u64 = 30;
 
 /// TUN device name used by the VPN.
 const TUN_DEVICE_NAME: &str = "mavi0";
+
+/// Read the inner TUN MTU the client expects the server to push. Must match
+/// the server's `VPN_MTU`. Invalid or absent values fall back to
+/// [`DEFAULT_TUN_MTU`] with a warning. Accepted range mirrors the backend
+/// validator: 1280–1360.
+fn read_tun_mtu_from_env() -> u16 {
+    match std::env::var("VPN_MTU") {
+        Err(_) => DEFAULT_TUN_MTU,
+        Ok(s) => match s.trim().parse::<u16>() {
+            Ok(v) if (1280..=1360).contains(&v) => v,
+            _ => {
+                warn!(
+                    "Ignoring invalid VPN_MTU={:?} (expected 1280-1360); falling back to {}",
+                    s, DEFAULT_TUN_MTU
+                );
+                DEFAULT_TUN_MTU
+            }
+        },
+    }
+}
 
 /// Entry point for the VPN runner. Manages the reconnection loop and TUN lifecycle.
 pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
@@ -431,11 +451,21 @@ async fn connect_and_handshake(
         .next()
         .context("Failed to resolve endpoint")?;
 
-    // Rule 2: Outgoing QUIC Payload (Initial MTU) MUST be 1360.
-    // IPv4 Wire: 1360 + 20 (IP) + 8 (UDP) = 1388 bytes.
-    // IPv6 Wire: 1360 + 40 (IP) + 8 (UDP) = 1408 bytes.
-    let quic_mtu = 1360;
-    info!("Address family: {}. Setting QUIC MTU: 1360 (Target Wire: 1388-1408)", if addr.is_ipv4() { "IPv4" } else { "IPv6" });
+    // Outer QUIC payload MTU is derived from the operator-configured inner TUN
+    // MTU (`VPN_MTU`, default 1280). The 80-byte overhead reserves room for
+    // QUIC short-header framing + AEAD tag + connection-ID bytes. Server and
+    // client MUST be configured with the same `VPN_MTU`, otherwise the larger
+    // side will send UDP payloads the smaller side considers out-of-spec.
+    let tun_mtu = read_tun_mtu_from_env();
+    let quic_mtu = tun_mtu + QUIC_OVERHEAD_BYTES;
+    let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20 } else { 40 }, 8);
+    info!(
+        "Address family: {}. Setting QUIC MTU: {} (TUN MTU: {}, Target Wire: {})",
+        if addr.is_ipv4() { "IPv4" } else { "IPv6" },
+        quic_mtu,
+        tun_mtu,
+        quic_mtu + ip_overhead + udp_overhead,
+    );
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(

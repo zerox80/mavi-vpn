@@ -13,12 +13,12 @@ use sha2::{Sha256, Digest};
 use shared::{
     icmp,
     masque::{self, CAPSULE_MAVI_CONFIG},
-    ControlMessage,
+    ControlMessage, DEFAULT_TUN_MTU, QUIC_OVERHEAD_BYTES,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
@@ -32,8 +32,29 @@ const KEEPALIVE_SECS: u64 = 10;
 const IDLE_TIMEOUT_SECS: u64 = 60;
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
-const TUN_MTU: u16 = 1280;
-const QUIC_PAYLOAD_MTU: u16 = 1360;
+/// Inner TUN MTU the client expects the server to push, resolved once per
+/// process from `VPN_MTU` with a 1280 fallback.
+static CLIENT_TUN_MTU: LazyLock<u16> = LazyLock::new(read_tun_mtu_from_env);
+
+/// Read the inner TUN MTU the client expects the server to push. Must match
+/// the server's `VPN_MTU`. Invalid or absent values fall back to
+/// [`DEFAULT_TUN_MTU`] with a warning. Accepted range mirrors the backend
+/// validator: 1280–1360.
+fn read_tun_mtu_from_env() -> u16 {
+    match std::env::var("VPN_MTU") {
+        Err(_) => DEFAULT_TUN_MTU,
+        Ok(s) => match s.trim().parse::<u16>() {
+            Ok(v) if (1280..=1360).contains(&v) => v,
+            _ => {
+                warn!(
+                    "Ignoring invalid VPN_MTU={:?} (expected 1280-1360); falling back to {}",
+                    s, DEFAULT_TUN_MTU
+                );
+                DEFAULT_TUN_MTU
+            }
+        },
+    }
+}
 
 pub use crate::ipc::Config;
 
@@ -301,9 +322,9 @@ async fn run_session(
                                 None
                             };
                             let reported_mtu = if version == 6 {
-                                TUN_MTU.max(1280)
+                                (*CLIENT_TUN_MTU).max(1280)
                             } else {
-                                TUN_MTU
+                                *CLIENT_TUN_MTU
                             };
 
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(
@@ -481,11 +502,21 @@ async fn connect_and_handshake(
         anyhow::bail!("Endpoint host missing");
     }
 
-    // Rule 2: Outgoing QUIC Payload (Initial MTU) MUST be 1360.
-    // IPv4 Wire: 1360 + 20 (IP) + 8 (UDP) = 1388 bytes.
-    // IPv6 Wire: 1360 + 40 (IP) + 8 (UDP) = 1408 bytes.
-    let quic_mtu = QUIC_PAYLOAD_MTU;
-    info!("Address family: {}. Setting QUIC MTU: 1360 (Target Wire: 1388-1408)", if addr.is_ipv4() { "IPv4" } else { "IPv6" });
+    // Outer QUIC payload MTU is derived from the operator-configured inner TUN
+    // MTU (`VPN_MTU`, default 1280). The 80-byte overhead reserves room for
+    // QUIC short-header framing + AEAD tag + connection-ID bytes. Server and
+    // client MUST be configured with the same `VPN_MTU`, otherwise the larger
+    // side will send UDP payloads the smaller side considers out-of-spec.
+    let tun_mtu = *CLIENT_TUN_MTU;
+    let quic_mtu = tun_mtu + QUIC_OVERHEAD_BYTES;
+    let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20u16 } else { 40u16 }, 8u16);
+    info!(
+        "Address family: {}. Setting QUIC MTU: {} (TUN MTU: {}, Target Wire: {})",
+        if addr.is_ipv4() { "IPv4" } else { "IPv6" },
+        quic_mtu,
+        tun_mtu,
+        quic_mtu + ip_overhead + udp_overhead,
+    );
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
@@ -899,11 +930,12 @@ fn set_adapter_network_config(
         run_cmd("netsh", &["interface", "ipv6", "add", "dnsservers", &adapter_name, &dv6_str, "index=1"]);
     }
 
-    // 5. Set MTU (Rule 1: Always 1280)
-    let _ = adapter.set_mtu(usize::from(TUN_MTU));
-    let mtu_val = "mtu=1280";
-    run_cmd("netsh", &["interface", "ipv4", "set", "subinterface", &adapter_name, mtu_val, "store=active"]);
-    run_cmd("netsh", &["interface", "ipv6", "set", "subinterface", &adapter_name, mtu_val, "store=active"]);
+    // 5. Set MTU from the operator-configured inner TUN MTU (default 1280).
+    let tun_mtu = *CLIENT_TUN_MTU;
+    let _ = adapter.set_mtu(usize::from(tun_mtu));
+    let mtu_val = format!("mtu={}", tun_mtu);
+    run_cmd("netsh", &["interface", "ipv4", "set", "subinterface", &adapter_name, &mtu_val, "store=active"]);
+    run_cmd("netsh", &["interface", "ipv6", "set", "subinterface", &adapter_name, &mtu_val, "store=active"]);
 
     // 6. Host exception FIRST — must run before split routes so that
     //    Get-NetRoute still sees the real physical default route.

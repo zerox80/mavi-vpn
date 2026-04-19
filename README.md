@@ -16,6 +16,9 @@
   <img src="https://img.shields.io/badge/Rust-1.94+-orange?style=flat-square&logo=rust" alt="Rust" />
 </p>
 
+<img width="945" height="720" alt="image" src="https://github.com/user-attachments/assets/918deb37-97f9-42ef-99ca-faa725238db6" />
+
+
 ---
 
 Mavi VPN tunnels all network traffic over **QUIC** (via the [`quinn`](external/quinn) crate) to deliver secure, reliable, low-latency connectivity — even on unstable mobile networks. It supports **Windows**, **Linux**, and **Android** with native clients and an optional cross-platform **Tauri GUI**.

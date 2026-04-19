@@ -178,7 +178,7 @@ mod tests {
         let config = Config::parse_from(&[
             "mavi-vpn",
             "--auth-token", "super_secret",
-            "--network", "192.168.10.0/24",
+            "--network-cidr", "192.168.10.0/24",
             "--dns", "8.8.8.8",
             "--censorship-resistant",
             "--mss-clamping",

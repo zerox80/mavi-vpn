@@ -263,13 +263,14 @@ fn configure_dns(
     if is_systemd_resolved_active() {
         info!("Using systemd-resolved for DNS configuration");
 
-        let mut dns_servers = dns_v4.to_string();
-        if let Some(v6) = dns_v6 {
-            dns_servers.push(' ');
-            dns_servers.push_str(&v6.to_string());
+        let dns_v4_s = dns_v4.to_string();
+        let dns_v6_s = dns_v6.map(|v6| v6.to_string());
+        let mut dns_args: Vec<&str> = vec!["dns", tun_name, &dns_v4_s];
+        if let Some(ref v6) = dns_v6_s {
+            dns_args.push(v6);
         }
 
-        let _ = run_cmd("resolvectl", &["dns", tun_name, &dns_servers]);
+        let _ = run_cmd("resolvectl", &dns_args);
         let _ = run_cmd("resolvectl", &["domain", tun_name, "~."]);
         // Set the VPN interface as default route for DNS
         let _ = run_cmd("resolvectl", &["default-route", tun_name, "true"]);

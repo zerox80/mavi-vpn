@@ -29,6 +29,8 @@ dashmap = "6.1"
 thiserror = "2.0"
 h3 = "0.0.8"
 h3-quinn = { version = "0.0.10", features = ["datagram"] }
+tempfile = "3"
+proptest = "1"
 
 [patch.crates-io]
 quinn = { path = "external/quinn/quinn" }

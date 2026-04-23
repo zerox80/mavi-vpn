@@ -18,7 +18,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     // 1. Generate PKCE verifier and challenge
     let verifier_bytes: [u8; 32] = rand::random();
     let code_verifier =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&verifier_bytes);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
 
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());

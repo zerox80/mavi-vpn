@@ -30,3 +30,28 @@ pub fn outer_sni_from_bytes(bytes: &[u8]) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outer_sni_from_bytes_empty() {
+        assert!(outer_sni_from_bytes(&[]).is_none());
+    }
+
+    #[test]
+    fn outer_sni_from_bytes_garbage() {
+        assert!(outer_sni_from_bytes(&[0xDE, 0xAD]).is_none());
+    }
+
+    #[test]
+    fn outer_sni_from_hex_invalid() {
+        assert!(outer_sni_from_hex("zz").is_none());
+    }
+
+    #[test]
+    fn outer_sni_from_hex_odd_length() {
+        assert!(outer_sni_from_hex("abc").is_none());
+    }
+}

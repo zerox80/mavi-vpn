@@ -11,7 +11,7 @@ pub fn create_tun_device(config: &Config, state: &AppState) -> Result<(tun::Asyn
 
     tun_config.address(gateway_ip)
               .netmask(netmask)
-              .mtu(config.mtu as u16)
+              .mtu(config.mtu)
               .up();
 
     if let Some(tun_name_override) = &config.tun_device_path {
@@ -37,7 +37,7 @@ pub fn create_tun_device(config: &Config, state: &AppState) -> Result<(tun::Asyn
 fn setup_ipv6(tun_name: &str, state: &AppState) -> bool {
     let gateway_ip6 = state.gateway_ip_v6();
     match std::process::Command::new("ip")
-        .args(&["-6", "addr", "add", &format!("{}/64", gateway_ip6), "dev", tun_name])
+        .args(["-6", "addr", "add", &format!("{}/64", gateway_ip6), "dev", tun_name])
         .output() {
             Ok(output) if output.status.success() => {
                  info!("IPv6 address {} successfully assigned to {}", gateway_ip6, tun_name);

@@ -155,6 +155,7 @@ jobs:
             cmake \
             pkg-config \
             libssl-dev \
+            libglib2.0-dev \
             libxdo-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev

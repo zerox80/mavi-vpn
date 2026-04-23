@@ -26,6 +26,9 @@ url = "2"
 reqwest = { version = "0.13", features = ["json", "rustls", "form"], default-features = false }
 webbrowser = "1.0"
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [profile.release]
 lto = true
 codegen-units = 1

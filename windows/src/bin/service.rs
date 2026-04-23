@@ -19,7 +19,7 @@ use constant_time_eq::constant_time_eq;
 mod ipc;
 #[path = "../ech_client.rs"]
 mod ech_client;
-#[path = "../vpn_core.rs"]
+#[path = "../vpn_core/mod.rs"]
 mod vpn_core;
 
 const SERVICE_NAME: &str = "MaviVPNService";

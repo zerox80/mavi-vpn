@@ -186,6 +186,7 @@ pub fn split_endpoint(endpoint: &str) -> (&str, Option<&str>) {
 }
 
 /// Comprehensive helper to apply all Windows networking settings for the VPN.
+#[allow(clippy::too_many_arguments)]
 pub fn set_adapter_network_config(
     adapter: &Adapter,
     ip: Ipv4Addr,

@@ -265,11 +265,8 @@ async fn connect_and_handshake_h3(
             anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule");
         }
 
-        loop {
-            let (ctype, payload, consumed) = match masque::read_capsule(&capsule_buf) {
-                Some((t, p, n)) => (t, p.to_vec(), n),
-                None => break,
-            };
+        while let Some((t, p, n)) = masque::read_capsule(&capsule_buf) {
+            let (ctype, payload, consumed) = (t, p.to_vec(), n);
             capsule_buf.drain(..consumed);
 
             if ctype == CAPSULE_MAVI_CONFIG {

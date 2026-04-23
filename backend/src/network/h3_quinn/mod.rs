@@ -63,6 +63,7 @@ impl Connection {
     }
 
     /// Create a [`Connection`] from a [`quinn::Connection`] and a pre-accepted uni stream.
+    #[allow(dead_code)]
     pub fn with_pre_uni(conn: quinn::Connection, pre_uni: quinn::RecvStream) -> Self {
         Self::with_pre_streams(conn, None, Some(pre_uni))
     }

@@ -18,6 +18,7 @@ use crate::handlers::auth::authenticate_client;
 use crate::handlers::tunnel::run_tunnel;
 use crate::handlers::utils::{IpGuard, prefix_len_from_mask};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_h3_connection(
     connection: quinn::Connection,
     pre_bi: Option<(quinn::SendStream, quinn::RecvStream)>,

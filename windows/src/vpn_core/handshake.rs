@@ -264,11 +264,8 @@ async fn connect_and_handshake_h3(
         }
 
         // Try to decode any fully-received capsules in the buffer first.
-        loop {
-            let (ctype, payload, consumed) = match masque::read_capsule(&capsule_buf) {
-                Some(parts) => (parts.0, parts.1.to_vec(), parts.2),
-                None => break,
-            };
+        while let Some(parts) = masque::read_capsule(&capsule_buf) {
+            let (ctype, payload, consumed) = (parts.0, parts.1.to_vec(), parts.2);
             capsule_buf.drain(..consumed);
             if ctype == CAPSULE_MAVI_CONFIG {
                 config = Some(

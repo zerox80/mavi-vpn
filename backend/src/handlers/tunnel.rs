@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use shared::{icmp, masque};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tunnel(
     connection: Arc<quinn::Connection>,
     mut rx_client: mpsc::Receiver<Bytes>,

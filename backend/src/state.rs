@@ -370,4 +370,46 @@ mod tests {
         // 100 threads * 10 IPs = 1000 unique IPs
         assert_eq!(all_assigned.len(), 1000);
     }
+
+    #[test]
+    fn deregister_removes_peer() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let (v4, v6) = state.assign_ip_pair().unwrap();
+        let (tx, _rx) = mpsc::channel::<bytes::Bytes>(16);
+        state.register_client(v4, v6, tx);
+        assert!(state.peers.contains_key(&v4));
+
+        state.release_ips(v4, v6);
+        assert!(!state.peers.contains_key(&v4));
+        assert!(!state.peers_v6.contains_key(&v6));
+    }
+
+    #[test]
+    fn multiple_registrations_overwrite() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let (v4, v6) = state.assign_ip_pair().unwrap();
+        let (tx1, _rx1) = mpsc::channel::<bytes::Bytes>(16);
+        let (tx2, _rx2) = mpsc::channel::<bytes::Bytes>(16);
+
+        state.register_client(v4, v6, tx1);
+        state.register_client(v4, v6, tx2);
+
+        assert!(state.peers.contains_key(&v4));
+    }
+
+    #[test]
+    fn gateway_ip_v6_different_networks() {
+        let state = AppState::new("192.168.1.0/24").unwrap();
+        assert_eq!(state.gateway_ip_v6(), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+    }
+
+    #[test]
+    fn assign_ip_pair_release_and_reassign_cycle() {
+        let state = AppState::new("10.0.0.0/30").unwrap();
+        let (v4, v6) = state.assign_ip_pair().unwrap();
+        state.release_ips(v4, v6);
+        let (v4_2, v6_2) = state.assign_ip_pair().unwrap();
+        assert_eq!(v4, v4_2);
+        assert_eq!(v6, v6_2);
+    }
 }

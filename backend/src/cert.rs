@@ -1,8 +1,11 @@
+use anyhow::{Context, Result};
 use rcgen::generate_simple_self_signed;
-use std::{fs, path::{Path, PathBuf}};
-use anyhow::{Result, Context};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// Write `contents` to `path` with an owner-only (0o600) permission mask from
 /// the start, so the TLS private key never exists on disk with world- or
@@ -31,8 +34,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        fs::write(path, contents)
-            .with_context(|| format!("failed to write {:?}", path))?;
+        fs::write(path, contents).with_context(|| format!("failed to write {:?}", path))?;
     }
     Ok(())
 }
@@ -49,7 +51,10 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
 ///
 /// # Returns
 /// A tuple containing the certificate chain and the private key in `rustls` compatible formats.
-pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+pub fn load_or_generate_certs(
+    cert_path: PathBuf,
+    key_path: PathBuf,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     if cert_path.exists() && key_path.exists() {
         tracing::info!("Loading existing certificates from {:?}", cert_path);
 
@@ -66,11 +71,14 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
                     match fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)) {
                         Ok(()) => tracing::info!(
                             "Tightened permissions on existing key file {:?} from {:o} to 0600",
-                            key_path, mode
+                            key_path,
+                            mode
                         ),
                         Err(e) => tracing::warn!(
                             "Failed to tighten permissions on {:?} (current mode {:o}): {}",
-                            key_path, mode, e
+                            key_path,
+                            mode,
+                            e
                         ),
                     }
                 }
@@ -88,8 +96,11 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
             .into_iter()
             .map(PrivateKeyDer::Pkcs8)
             .collect();
-            
-        let key = keys.into_iter().next().ok_or_else(|| anyhow::anyhow!("No PKCS#8 private key found in {:?}", key_path))?;
+
+        let key = keys
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No PKCS#8 private key found in {:?}", key_path))?;
 
         // Calculate and log the SHA-256 fingerprint of the end-entity certificate
         if let Some(cert) = certs.first() {
@@ -99,11 +110,16 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
         Ok((certs, key))
     } else {
         tracing::info!("Certificates not found. Generating new self-signed certificates...");
-        let subject_alt_names = vec!["localhost".to_string(), "vpn-server".to_string(), "mavivpn".to_string()];
-        
+        let subject_alt_names = vec![
+            "localhost".to_string(),
+            "vpn-server".to_string(),
+            "mavivpn".to_string(),
+        ];
+
         // Generate a new self-signed certificate (valid for 365 days by default in rcgen)
-        let cert = generate_simple_self_signed(subject_alt_names).context("Failed to generate self-signed certificate")?;
-        
+        let cert = generate_simple_self_signed(subject_alt_names)
+            .context("Failed to generate self-signed certificate")?;
+
         let cert_pem = cert.cert.pem();
         let key_pem = cert.signing_key.serialize_pem();
 
@@ -118,7 +134,9 @@ pub fn load_or_generate_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<(
             .into_iter()
             .map(PrivateKeyDer::Pkcs8)
             .collect();
-        let key = keys.into_iter().next().ok_or_else(|| anyhow::anyhow!("No PKCS#8 private key found in generated certificate"))?;
+        let key = keys.into_iter().next().ok_or_else(|| {
+            anyhow::anyhow!("No PKCS#8 private key found in generated certificate")
+        })?;
 
         if let Some(cert) = certs.first() {
             write_cert_pin(&cert_path, cert)?;
@@ -134,9 +152,9 @@ fn write_cert_pin(cert_path: &std::path::Path, cert: &CertificateDer) -> Result<
     hasher.update(cert.as_ref());
     let hash = hasher.finalize();
     let pin_hex = hex::encode(hash);
-    
+
     tracing::info!("Server Certificate PIN (SHA256 Hex): {}", pin_hex);
-    
+
     // Save to file alongside the cert for easy access by administrators
     if let Some(parent) = cert_path.parent() {
         let pin_path = parent.join("cert_pin.txt");
@@ -147,4 +165,127 @@ fn write_cert_pin(cert_path: &std::path::Path, cert: &CertificateDer) -> Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn load_or_generate_creates_new_certs() {
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        assert!(!cert_path.exists());
+        assert!(!key_path.exists());
+
+        let (certs, _key) = load_or_generate_certs(cert_path.clone(), key_path.clone()).unwrap();
+        assert!(!certs.is_empty());
+        assert!(cert_path.exists());
+        assert!(key_path.exists());
+    }
+
+    #[test]
+    fn load_or_generate_loads_existing() {
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        let (certs1, _key1) = load_or_generate_certs(cert_path.clone(), key_path.clone()).unwrap();
+        let (certs2, _key2) = load_or_generate_certs(cert_path, key_path).unwrap();
+
+        assert_eq!(certs1.len(), certs2.len());
+        assert_eq!(certs1[0].as_ref(), certs2[0].as_ref());
+    }
+
+    #[test]
+    fn cert_pin_file_is_written() {
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        let _ = load_or_generate_certs(cert_path.clone(), key_path).unwrap();
+
+        let pin_path = dir.path().join("cert_pin.txt");
+        assert!(pin_path.exists());
+        let pin = std::fs::read_to_string(&pin_path).unwrap();
+        assert_eq!(pin.len(), 64); // SHA-256 hex is 64 chars
+        assert!(pin.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generated_key_file_permissions() {
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        let _ = load_or_generate_certs(cert_path, key_path.clone()).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn invalid_cert_pem_fails() {
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        std::fs::write(&cert_path, "not a valid PEM").unwrap();
+        std::fs::write(&key_path, "not a valid PEM").unwrap();
+
+        let result = load_or_generate_certs(cert_path, key_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cert_and_key_are_valid_rustls_types() {
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        let (certs, key) = load_or_generate_certs(cert_path, key_path).unwrap();
+        assert!(!certs.is_empty());
+        // PrivateKeyDer should be non-empty
+        assert!(!key.secret_der().is_empty());
+    }
+
+    #[test]
+    fn regenerated_certs_are_different() {
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+
+        let (certs1, _) =
+            load_or_generate_certs(dir1.path().join("cert.pem"), dir1.path().join("key.pem"))
+                .unwrap();
+        let (certs2, _) =
+            load_or_generate_certs(dir2.path().join("cert.pem"), dir2.path().join("key.pem"))
+                .unwrap();
+
+        assert_ne!(certs1[0].as_ref(), certs2[0].as_ref());
+    }
+
+    #[test]
+    fn sha256_pin_is_correct_length() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        let (certs, _) = load_or_generate_certs(cert_path, key_path).unwrap();
+        let cert = &certs[0];
+
+        let mut hasher = Sha256::new();
+        hasher.update(cert.as_ref());
+        let hash = hasher.finalize();
+        let pin = hex::encode(hash);
+        assert_eq!(pin.len(), 64);
+    }
 }

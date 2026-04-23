@@ -157,7 +157,10 @@ mod tests {
     #[test]
     fn ipc_response_error_roundtrip() {
         let resp = IpcResponse::Error("something broke".to_string());
-        assert_eq!(roundtrip_response(&resp), IpcResponse::Error("something broke".to_string()));
+        assert_eq!(
+            roundtrip_response(&resp),
+            IpcResponse::Error("something broke".to_string())
+        );
     }
 
     #[test]
@@ -262,5 +265,75 @@ mod tests {
             }
             other => panic!("Expected Status, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn secure_ipc_request_with_start_config() {
+        let config = Config {
+            endpoint: "vpn.example.com:4433".to_string(),
+            token: "secret".to_string(),
+            cert_pin: "abcdef".to_string(),
+            censorship_resistant: true,
+            http3_framing: true,
+            kc_auth: Some(true),
+            kc_url: Some("https://auth.example.com".to_string()),
+            kc_realm: Some("my-realm".to_string()),
+            kc_client_id: Some("my-client".to_string()),
+            ech_config: Some("deadbeef".to_string()),
+        };
+        let secure = SecureIpcRequest {
+            auth_token: "ipc-token".to_string(),
+            request: IpcRequest::Start(config),
+        };
+        let encoded = bincode::serde::encode_to_vec(&secure, bincode::config::standard()).unwrap();
+        let (decoded, _): (SecureIpcRequest, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(decoded.auth_token, "ipc-token");
+        match decoded.request {
+            IpcRequest::Start(c) => {
+                assert_eq!(c.endpoint, "vpn.example.com:4433");
+                assert!(c.censorship_resistant);
+                assert!(c.http3_framing);
+                assert_eq!(c.kc_auth, Some(true));
+                assert_eq!(c.ech_config.as_deref(), Some("deadbeef"));
+            }
+            other => panic!("Expected Start, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipc_request_start_all_keycloak_fields() {
+        let config = Config {
+            endpoint: "vpn.test.com:4433".to_string(),
+            token: "tok".to_string(),
+            cert_pin: "pin".to_string(),
+            censorship_resistant: false,
+            http3_framing: true,
+            kc_auth: Some(true),
+            kc_url: Some("https://kc.test.com".to_string()),
+            kc_realm: Some("test-realm".to_string()),
+            kc_client_id: Some("test-client".to_string()),
+            ech_config: None,
+        };
+        let req = IpcRequest::Start(config);
+        let decoded = roundtrip_request(&req);
+        match decoded {
+            IpcRequest::Start(c) => {
+                assert!(c.http3_framing);
+                assert_eq!(c.kc_url.as_deref(), Some("https://kc.test.com"));
+                assert_eq!(c.kc_realm.as_deref(), Some("test-realm"));
+                assert_eq!(c.kc_client_id.as_deref(), Some("test-client"));
+            }
+            other => panic!("Expected Start, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipc_response_error_empty_string() {
+        let resp = IpcResponse::Error("".to_string());
+        assert_eq!(
+            roundtrip_response(&resp),
+            IpcResponse::Error("".to_string())
+        );
     }
 }

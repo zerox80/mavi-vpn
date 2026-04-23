@@ -85,27 +85,30 @@ impl NetworkConfig {
             Ok(IpAddr::V4(v4)) => {
                 if let (Some(ref gw), Some(ref dev)) = (&physical_gateway, &physical_device) {
                     let route = format!("{}/32", v4);
-                    let _ = run_cmd(
-                        "ip",
-                        &["route", "add", &route, "via", gw, "dev", dev],
-                    );
+                    let _ = run_cmd("ip", &["route", "add", &route, "via", gw, "dev", dev]);
                 } else {
-                    warn!("No physical IPv4 gateway detected; skipping host route exception for {}", v4);
+                    warn!(
+                        "No physical IPv4 gateway detected; skipping host route exception for {}",
+                        v4
+                    );
                 }
             }
             Ok(IpAddr::V6(v6)) => {
                 if let (Some(ref gw), Some(ref dev)) = (&physical_gateway_v6, &physical_device_v6) {
                     let route = format!("{}/128", v6);
-                    let _ = run_cmd(
-                        "ip",
-                        &["-6", "route", "add", &route, "via", gw, "dev", dev],
-                    );
+                    let _ = run_cmd("ip", &["-6", "route", "add", &route, "via", gw, "dev", dev]);
                 } else {
-                    warn!("No physical IPv6 gateway detected; skipping host route exception for {}", v6);
+                    warn!(
+                        "No physical IPv6 gateway detected; skipping host route exception for {}",
+                        v6
+                    );
                 }
             }
             Err(e) => {
-                warn!("Could not parse endpoint IP {:?}: {}; skipping host route exception", endpoint_ip, e);
+                warn!(
+                    "Could not parse endpoint IP {:?}: {}; skipping host route exception",
+                    endpoint_ip, e
+                );
             }
         }
 
@@ -114,14 +117,24 @@ impl NetworkConfig {
         run_cmd(
             "ip",
             &[
-                "route", "add", "0.0.0.0/1", "dev", tun_name, "via",
+                "route",
+                "add",
+                "0.0.0.0/1",
+                "dev",
+                tun_name,
+                "via",
                 &gateway.to_string(),
             ],
         )?;
         run_cmd(
             "ip",
             &[
-                "route", "add", "128.0.0.0/1", "dev", tun_name, "via",
+                "route",
+                "add",
+                "128.0.0.0/1",
+                "dev",
+                tun_name,
+                "via",
                 &gateway.to_string(),
             ],
         )?;
@@ -131,22 +144,33 @@ impl NetworkConfig {
             let _ = run_cmd(
                 "ip",
                 &[
-                    "-6", "route", "add", "::/1", "dev", tun_name, "via",
+                    "-6",
+                    "route",
+                    "add",
+                    "::/1",
+                    "dev",
+                    tun_name,
+                    "via",
                     &gv6.to_string(),
                 ],
             );
             let _ = run_cmd(
                 "ip",
                 &[
-                    "-6", "route", "add", "8000::/1", "dev", tun_name, "via",
+                    "-6",
+                    "route",
+                    "add",
+                    "8000::/1",
+                    "dev",
+                    tun_name,
+                    "via",
                     &gv6.to_string(),
                 ],
             );
         }
 
         // 9. DNS configuration
-        let (dns_backup, used_resolvconf) =
-            configure_dns(tun_name, dns, dns_v6)?;
+        let (dns_backup, used_resolvconf) = configure_dns(tun_name, dns, dns_v6)?;
 
         info!(
             "Network configured: {} via {}, DNS={}",
@@ -233,7 +257,10 @@ fn detect_physical_gateway_for(
             .map(|s| s.to_string());
 
         if let (Some(ref gw), Some(ref dev)) = (&gateway, &device) {
-            info!("Detected physical {} gateway: {} via {}", family_label, gw, dev);
+            info!(
+                "Detected physical {} gateway: {} via {}",
+                family_label, gw, dev
+            );
         }
         (gateway, device)
     } else {
@@ -432,7 +459,10 @@ fn load_persistent_backup() -> Option<Vec<u8>> {
         Ok(_) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
-            warn!("Failed to read persistent resolv.conf backup at {}: {}", BACKUP_PATH, e);
+            warn!(
+                "Failed to read persistent resolv.conf backup at {}: {}",
+                BACKUP_PATH, e
+            );
             None
         }
     }
@@ -506,8 +536,6 @@ mod tests {
 
     #[test]
     fn marker_requires_prefix_not_substring() {
-        // Marker must be at the very start; a line deeper in the file
-        // doesn't count (and could appear in a user comment).
         let bytes = b"nameserver 1.1.1.1\n# Generated by Mavi VPN\n";
         assert!(!is_mavi_generated_resolv_conf(bytes));
     }
@@ -519,9 +547,6 @@ mod tests {
 
     #[test]
     fn fallback_resolv_conf_is_parseable() {
-        // Smoke-test: every non-empty, non-comment line is `nameserver <IP>`
-        // with a valid address. This guards against an accidental edit that
-        // would ship a broken fallback to production.
         let mut nameservers = 0;
         for line in FALLBACK_RESOLV_CONF.lines() {
             let line = line.trim();
@@ -543,10 +568,24 @@ mod tests {
 
     #[test]
     fn marker_detected_with_crlf_line_endings() {
-        // Some editors normalise to CRLF; the marker must still match since
-        // we only check the prefix bytes.
         let bytes = b"# Generated by Mavi VPN - DO NOT EDIT\r\nnameserver 10.8.0.1\r\n";
         assert!(is_mavi_generated_resolv_conf(bytes));
+    }
+
+    #[test]
+    fn fallback_has_two_nameservers() {
+        let count = FALLBACK_RESOLV_CONF
+            .lines()
+            .filter(|l| l.trim().starts_with("nameserver "))
+            .count();
+        assert!(count >= 2);
+    }
+
+    #[test]
+    fn marker_prefix_is_exact() {
+        assert!(!is_mavi_generated_resolv_conf(
+            b"# generated by mavi vpn - do not edit\n"
+        ));
     }
 }
 

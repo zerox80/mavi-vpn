@@ -1,7 +1,7 @@
 /// Decode a lowercase or uppercase hexadecimal string into bytes.
 /// Returns `None` if the string has an odd length or contains non-hex characters.
 pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -34,5 +34,26 @@ mod tests {
     #[test]
     fn decode_hex_invalid_chars() {
         assert_eq!(decode_hex("zz"), None);
+    }
+
+    #[test]
+    fn decode_hex_mixed_case() {
+        assert_eq!(decode_hex("dEaDbEeF"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn hex_roundtrip_proptest(bytes in proptest::collection::vec(0u8..=255, 0..100)) {
+            let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+            let decoded = decode_hex(&hex_str).unwrap();
+            assert_eq!(decoded, bytes);
+        }
+    }
+
+    #[test]
+    fn decode_hex_single_byte() {
+        assert_eq!(decode_hex("ff"), Some(vec![0xff]));
+        assert_eq!(decode_hex("00"), Some(vec![0x00]));
+        assert_eq!(decode_hex("01"), Some(vec![0x01]));
     }
 }

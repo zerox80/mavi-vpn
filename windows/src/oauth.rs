@@ -15,10 +15,10 @@ fn html_escape(s: &str) -> String {
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
     // 1. Generate PKCE verifier and challenge
     let verifier_bytes: [u8; 32] = rand::random();
-    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&verifier_bytes);
+    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
 
     let state_bytes: [u8; 32] = rand::random();
-    let oauth_state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&state_bytes);
+    let oauth_state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(state_bytes);
 
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
@@ -118,4 +118,40 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     let access_token = json["access_token"].as_str().ok_or_else(|| anyhow::anyhow!("Kein access_token gefunden"))?;
 
     Ok(access_token.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_escape_empty() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    fn html_escape_no_special_chars() {
+        assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn html_escape_double_escapes_already_escaped_ampersand() {
+        assert_eq!(html_escape("<script>alert(\"xss\")&amp;</script>"),
+            "&lt;script&gt;alert(&quot;xss&quot;)&amp;amp;&lt;/script&gt;");
+    }
+
+    #[test]
+    fn html_escape_angle_brackets() {
+        assert_eq!(html_escape("a<b>c"), "a&lt;b&gt;c");
+    }
+
+    #[test]
+    fn html_escape_ampersand() {
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn html_escape_quotes() {
+        assert_eq!(html_escape("say \"hello\""), "say &quot;hello&quot;");
+    }
 }

@@ -96,7 +96,9 @@ pub fn generate_packet_too_big(
                 client_ip.octets(), // Destination: the VPN client
                 64,                 // Hop Limit (equiv. of TTL)
             )
-            .icmpv6(Icmpv6Type::PacketTooBig { mtu: u32::from(mtu) });
+            .icmpv6(Icmpv6Type::PacketTooBig {
+                mtu: u32::from(mtu),
+            });
 
             let mut result = Vec::with_capacity(builder.size(payload_slice.len()));
             builder.write(&mut result, payload_slice).ok()?;
@@ -111,27 +113,8 @@ pub fn generate_packet_too_big(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::{make_ipv4_packet, make_ipv6_packet};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-    /// Build a minimal valid IPv4 UDP packet (src → dst).
-    fn make_ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
-        let builder = PacketBuilder::ipv4(src.octets(), dst.octets(), 64)
-            .udp(12345, 80);
-        let payload = b"hello!!!"; // 8 bytes payload
-        let mut buf = Vec::with_capacity(builder.size(payload.len()));
-        builder.write(&mut buf, payload).unwrap();
-        buf
-    }
-
-    /// Build a minimal valid IPv6 UDP packet (src → dst).
-    fn make_ipv6_packet(src: Ipv6Addr, dst: Ipv6Addr) -> Vec<u8> {
-        let builder = PacketBuilder::ipv6(src.octets(), dst.octets(), 64)
-            .udp(12345, 80);
-        let payload = b"hello!!!";
-        let mut buf = Vec::with_capacity(builder.size(payload.len()));
-        builder.write(&mut buf, payload).unwrap();
-        buf
-    }
 
     #[test]
     fn empty_packet_returns_none() {
@@ -180,12 +163,7 @@ mod tests {
         let gateway = Ipv4Addr::new(10, 8, 0, 1);
         let packet = make_ipv4_packet(client, internet);
 
-        let result = generate_packet_too_big(
-            &packet,
-            1280,
-            Some(IpAddr::V4(gateway)),
-        )
-        .unwrap();
+        let result = generate_packet_too_big(&packet, 1280, Some(IpAddr::V4(gateway))).unwrap();
 
         let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
         if let Some(etherparse::NetSlice::Ipv4(ip4)) = parsed.net {
@@ -198,15 +176,8 @@ mod tests {
 
     #[test]
     fn ipv4_rejects_v6_override() {
-        let packet = make_ipv4_packet(
-            Ipv4Addr::new(10, 8, 0, 2),
-            Ipv4Addr::new(93, 184, 216, 34),
-        );
-        let result = generate_packet_too_big(
-            &packet,
-            1280,
-            Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
-        );
+        let packet = make_ipv4_packet(Ipv4Addr::new(10, 8, 0, 2), Ipv4Addr::new(93, 184, 216, 34));
+        let result = generate_packet_too_big(&packet, 1280, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         assert!(result.is_none());
     }
 
@@ -235,12 +206,7 @@ mod tests {
         let gateway = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
         let packet = make_ipv6_packet(client, internet);
 
-        let result = generate_packet_too_big(
-            &packet,
-            1280,
-            Some(IpAddr::V6(gateway)),
-        )
-        .unwrap();
+        let result = generate_packet_too_big(&packet, 1280, Some(IpAddr::V6(gateway))).unwrap();
 
         let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
         if let Some(etherparse::NetSlice::Ipv6(ip6)) = parsed.net {
@@ -257,11 +223,7 @@ mod tests {
             Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
             Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
         );
-        let result = generate_packet_too_big(
-            &packet,
-            1280,
-            Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        );
+        let result = generate_packet_too_big(&packet, 1280, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         assert!(result.is_none());
     }
 
@@ -281,16 +243,12 @@ mod tests {
 
         let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
         match parsed.transport {
-            Some(etherparse::TransportSlice::Icmpv4(icmp)) => {
-                match icmp.icmp_type() {
-                    etherparse::Icmpv4Type::DestinationUnreachable(
-                        etherparse::icmpv4::DestUnreachableHeader::FragmentationNeeded {
-                            next_hop_mtu,
-                        },
-                    ) => assert_eq!(next_hop_mtu, 1400),
-                    other => panic!("Expected FragmentationNeeded, got {:?}", other),
-                }
-            }
+            Some(etherparse::TransportSlice::Icmpv4(icmp)) => match icmp.icmp_type() {
+                etherparse::Icmpv4Type::DestinationUnreachable(
+                    etherparse::icmpv4::DestUnreachableHeader::FragmentationNeeded { next_hop_mtu },
+                ) => assert_eq!(next_hop_mtu, 1400),
+                other => panic!("Expected FragmentationNeeded, got {:?}", other),
+            },
             other => panic!("Expected ICMPv4 transport, got {:?}", other),
         }
     }
@@ -305,15 +263,52 @@ mod tests {
 
         let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
         match parsed.transport {
-            Some(etherparse::TransportSlice::Icmpv6(icmp)) => {
-                match icmp.icmp_type() {
-                    etherparse::Icmpv6Type::PacketTooBig { mtu } => {
-                        assert_eq!(mtu, 1400);
-                    }
-                    other => panic!("Expected PacketTooBig, got {:?}", other),
+            Some(etherparse::TransportSlice::Icmpv6(icmp)) => match icmp.icmp_type() {
+                etherparse::Icmpv6Type::PacketTooBig { mtu } => {
+                    assert_eq!(mtu, 1400);
                 }
-            }
+                other => panic!("Expected PacketTooBig, got {:?}", other),
+            },
             other => panic!("Expected ICMPv6 transport, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn ipv4_small_mtu_value() {
+        let client = Ipv4Addr::new(10, 8, 0, 2);
+        let internet = Ipv4Addr::new(93, 184, 216, 34);
+        let packet = make_ipv4_packet(client, internet);
+        let result = generate_packet_too_big(&packet, 576, None).unwrap();
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        match parsed.transport {
+            Some(etherparse::TransportSlice::Icmpv4(icmp)) => match icmp.icmp_type() {
+                etherparse::Icmpv4Type::DestinationUnreachable(
+                    etherparse::icmpv4::DestUnreachableHeader::FragmentationNeeded { next_hop_mtu },
+                ) => assert_eq!(next_hop_mtu, 576),
+                other => panic!("Expected FragmentationNeeded, got {:?}", other),
+            },
+            other => panic!("Expected ICMPv4 transport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipv6_uses_gateway_as_source() {
+        let client = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let internet = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let gateway = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+        let packet = make_ipv6_packet(client, internet);
+        let result = generate_packet_too_big(&packet, 1280, Some(IpAddr::V6(gateway))).unwrap();
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        if let Some(etherparse::NetSlice::Ipv6(ip6)) = parsed.net {
+            assert_eq!(ip6.header().source_addr(), gateway);
+            assert_eq!(ip6.header().destination_addr(), client);
+        } else {
+            panic!("Expected IPv6 header");
+        }
+    }
+
+    #[test]
+    fn single_byte_returns_none() {
+        assert!(generate_packet_too_big(&[0x45], 1280, None).is_none());
     }
 }

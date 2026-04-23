@@ -1,10 +1,13 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
 use serde::{Deserialize, Serialize};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub mod hex;
 pub mod icmp;
 pub mod ipc;
 pub mod masque;
+
+#[cfg(test)]
+pub mod test_helpers;
 
 /// Fixed overhead budget (in bytes) reserved on top of the inner TUN MTU to
 /// cover QUIC short-header framing + AEAD tag + connection-ID bytes. The outer
@@ -129,11 +132,20 @@ mod tests {
                 assert_eq!(gateway, Ipv4Addr::new(10, 8, 0, 1));
                 assert_eq!(dns_server, Ipv4Addr::new(1, 1, 1, 1));
                 assert_eq!(mtu, 1280);
-                assert_eq!(assigned_ipv6, Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)));
+                assert_eq!(
+                    assigned_ipv6,
+                    Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2))
+                );
                 assert_eq!(netmask_v6, Some(64));
                 assert_eq!(gateway_v6, Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)));
-                assert_eq!(dns_server_v6, Some(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)));
-                assert_eq!(whitelist_domains, Some(vec!["example.com".to_string(), "test.org".to_string()]));
+                assert_eq!(
+                    dns_server_v6,
+                    Some(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111))
+                );
+                assert_eq!(
+                    whitelist_domains,
+                    Some(vec!["example.com".to_string(), "test.org".to_string()])
+                );
             }
             other => panic!("Expected Config, got {:?}", other),
         }
@@ -191,14 +203,77 @@ mod tests {
     fn test_malformed_bincode_data() {
         // Try decoding garbage data
         let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let result: Result<(ControlMessage, usize), _> = bincode::serde::decode_from_slice(&garbage, bincode::config::standard());
+        let result: Result<(ControlMessage, usize), _> =
+            bincode::serde::decode_from_slice(&garbage, bincode::config::standard());
         assert!(result.is_err(), "Decoding garbage data should fail");
 
         // Try decoding an incomplete message
-        let msg = ControlMessage::Auth { token: "123".to_string() };
+        let msg = ControlMessage::Auth {
+            token: "123".to_string(),
+        };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let incomplete = &encoded[..encoded.len() - 1]; // strip last byte
-        let result_incomplete: Result<(ControlMessage, usize), _> = bincode::serde::decode_from_slice(incomplete, bincode::config::standard());
-        assert!(result_incomplete.is_err(), "Decoding incomplete data should fail");
+        let result_incomplete: Result<(ControlMessage, usize), _> =
+            bincode::serde::decode_from_slice(incomplete, bincode::config::standard());
+        assert!(
+            result_incomplete.is_err(),
+            "Decoding incomplete data should fail"
+        );
+    }
+
+    #[test]
+    fn test_empty_token_roundtrip() {
+        let msg = ControlMessage::Auth {
+            token: "".to_string(),
+        };
+        let decoded = roundtrip(&msg);
+        match decoded {
+            ControlMessage::Auth { token } => assert!(token.is_empty()),
+            other => panic!("Expected Auth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_config_all_none_optional_fields() {
+        let msg = ControlMessage::Config {
+            assigned_ip: Ipv4Addr::new(10, 8, 0, 2),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Ipv4Addr::new(10, 8, 0, 1),
+            dns_server: Ipv4Addr::new(1, 1, 1, 1),
+            mtu: 1280,
+            assigned_ipv6: None,
+            netmask_v6: None,
+            gateway_v6: None,
+            dns_server_v6: None,
+            whitelist_domains: Some(vec![]),
+        };
+        let decoded = roundtrip(&msg);
+        match decoded {
+            ControlMessage::Config {
+                whitelist_domains, ..
+            } => {
+                assert_eq!(whitelist_domains, Some(vec![]));
+            }
+            other => panic!("Expected Config, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_empty_message() {
+        let msg = ControlMessage::Error {
+            message: "".to_string(),
+        };
+        let decoded = roundtrip(&msg);
+        match decoded {
+            ControlMessage::Error { message } => assert!(message.is_empty()),
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decode_empty_bytes() {
+        let result: Result<(ControlMessage, usize), _> =
+            bincode::serde::decode_from_slice(&[], bincode::config::standard());
+        assert!(result.is_err());
     }
 }

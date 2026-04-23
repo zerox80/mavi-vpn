@@ -129,7 +129,11 @@ pub struct Config {
     /// ECH "public_name" — the cover/outer SNI that clients will send on the
     /// wire. Must be a plausible-looking domain (e.g. a CDN). Only used when
     /// `censorship_resistant` is enabled.
-    #[arg(long, env = "VPN_ECH_PUBLIC_NAME", default_value = "cloudflare-ech.com")]
+    #[arg(
+        long,
+        env = "VPN_ECH_PUBLIC_NAME",
+        default_value = "cloudflare-ech.com"
+    )]
     pub ech_public_name: String,
 
     /// Path to the persisted ECHConfigList bytes (clients consume this).
@@ -155,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let config = Config::parse_from(&["mavi-vpn", "--auth-token", "secret123"]);
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret123"]);
         assert_eq!(config.mtu, 1280);
         assert_eq!(config.network_cidr, "10.8.0.0/24");
         assert_eq!(config.dns, std::net::Ipv4Addr::new(1, 1, 1, 1));
@@ -166,20 +170,37 @@ mod tests {
 
     #[test]
     fn test_mtu_valid_range() {
-        let config = Config::parse_from(&["mavi-vpn", "--auth-token", "secret123", "--mtu", "1360"]);
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1360"]);
         assert_eq!(config.mtu, 1360);
-        
-        let config = Config::parse_from(&["mavi-vpn", "--auth-token", "secret123", "--mtu", "1280"]);
+
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1280"]);
         assert_eq!(config.mtu, 1280);
     }
 
     #[test]
+    fn test_mtu_below_range_rejected() {
+        let result =
+            Config::try_parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1279"]);
+        assert!(result.is_err(), "MTU 1279 should be rejected");
+    }
+
+    #[test]
+    fn test_mtu_above_range_rejected() {
+        let result =
+            Config::try_parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1361"]);
+        assert!(result.is_err(), "MTU 1361 should be rejected");
+    }
+
+    #[test]
     fn test_custom_arguments() {
-        let config = Config::parse_from(&[
+        let config = Config::parse_from([
             "mavi-vpn",
-            "--auth-token", "super_secret",
-            "--network-cidr", "192.168.10.0/24",
-            "--dns", "8.8.8.8",
+            "--auth-token",
+            "super_secret",
+            "--network-cidr",
+            "192.168.10.0/24",
+            "--dns",
+            "8.8.8.8",
             "--censorship-resistant",
             "--mss-clamping",
         ]);
@@ -192,12 +213,117 @@ mod tests {
 
     #[test]
     fn test_whitelist_domains() {
-        let config = Config::parse_from(&[
+        let config = Config::parse_from([
             "mavi-vpn",
-            "--auth-token", "secret",
-            "--whitelist-domains", "github.com,google.com"
+            "--auth-token",
+            "secret",
+            "--whitelist-domains",
+            "github.com,google.com",
         ]);
         assert_eq!(config.whitelist_domains, vec!["github.com", "google.com"]);
     }
-}
 
+    #[test]
+    fn test_keycloak_flags() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--auth-token",
+            "secret",
+            "--keycloak-enabled",
+            "--keycloak-url",
+            "https://auth.example.com",
+            "--keycloak-realm",
+            "my-realm",
+            "--keycloak-client-id",
+            "my-client",
+        ]);
+        assert!(config.keycloak_enabled);
+        assert_eq!(
+            config.keycloak_url.as_deref(),
+            Some("https://auth.example.com")
+        );
+        assert_eq!(config.keycloak_realm, "my-realm");
+        assert_eq!(config.keycloak_client_id, "my-client");
+    }
+
+    #[test]
+    fn test_keycloak_defaults() {
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret"]);
+        assert!(!config.keycloak_enabled);
+        assert!(config.keycloak_url.is_none());
+        assert_eq!(config.keycloak_realm, "mavi-vpn");
+        assert_eq!(config.keycloak_client_id, "mavi-client");
+    }
+
+    #[test]
+    fn test_ech_flags() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--auth-token",
+            "secret",
+            "--ech-public-name",
+            "cover.example.com",
+        ]);
+        assert_eq!(config.ech_public_name, "cover.example.com");
+    }
+
+    #[test]
+    fn test_ech_defaults() {
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret"]);
+        assert_eq!(config.ech_public_name, "cloudflare-ech.com");
+    }
+
+    #[test]
+    fn test_dns_v6_flag() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--auth-token",
+            "secret",
+            "--dns-v6",
+            "2001:4860:4860::8888",
+        ]);
+        assert_eq!(config.dns_v6, Some("2001:4860:4860::8888".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_dns_v6_default() {
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret"]);
+        assert!(config.dns_v6.is_none());
+    }
+
+    #[test]
+    fn test_bind_addr_default() {
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret"]);
+        assert_eq!(
+            config.bind_addr,
+            "0.0.0.0:4433".parse::<std::net::SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_bind_addr_custom() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--auth-token",
+            "secret",
+            "--bind-addr",
+            "127.0.0.1:8443",
+        ]);
+        assert_eq!(
+            config.bind_addr,
+            "127.0.0.1:8443".parse::<std::net::SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_tun_device_path() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--auth-token",
+            "secret",
+            "--tun-device-path",
+            "tun1",
+        ]);
+        assert_eq!(config.tun_device_path.as_deref(), Some("tun1"));
+    }
+}

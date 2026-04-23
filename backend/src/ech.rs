@@ -32,6 +32,7 @@ use std::path::Path;
 
 /// An ECH key pair + its corresponding `EchConfigList` bytes.
 pub struct ServerEch {
+    #[allow(dead_code)]
     pub private_key: HpkePrivateKey,
     pub config_list_bytes: Vec<u8>,
     pub public_name: String,
@@ -119,8 +120,7 @@ pub fn load_or_generate(
     }
     fs::write(ech_key_path, private_key.secret_bytes())
         .context("failed to write ECH private key")?;
-    fs::write(ech_config_path, &config_list_bytes)
-        .context("failed to write ECH config list")?;
+    fs::write(ech_config_path, &config_list_bytes).context("failed to write ECH config list")?;
 
     // Write a hex-encoded copy next to cert_pin.txt for easy client
     // distribution.
@@ -154,4 +154,78 @@ fn parse_ech_public_name(bytes: &[u8]) -> Result<String> {
         }
     }
     anyhow::bail!("no supported V18 ECH config in list")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn load_or_generate_creates_new_ech() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("ech_config.bin");
+        let key_path = dir.path().join("ech_key.bin");
+
+        let ech = load_or_generate(&config_path, &key_path, "cover.example.com").unwrap();
+        assert_eq!(ech.public_name, "cover.example.com");
+        assert!(!ech.config_list_bytes.is_empty());
+        assert!(!ech.private_key.secret_bytes().is_empty());
+        assert!(config_path.exists());
+        assert!(key_path.exists());
+    }
+
+    #[test]
+    fn load_or_generate_loads_existing() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("ech_config.bin");
+        let key_path = dir.path().join("ech_key.bin");
+
+        let ech1 = load_or_generate(&config_path, &key_path, "cover.example.com").unwrap();
+        let ech2 = load_or_generate(&config_path, &key_path, "cover.example.com").unwrap();
+
+        assert_eq!(ech1.config_list_bytes, ech2.config_list_bytes);
+        assert_eq!(ech1.public_name, ech2.public_name);
+        assert_eq!(
+            ech1.private_key.secret_bytes(),
+            ech2.private_key.secret_bytes()
+        );
+    }
+
+    #[test]
+    fn ech_config_hex_file_written() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("ech_config.bin");
+        let key_path = dir.path().join("ech_key.bin");
+
+        let _ = load_or_generate(&config_path, &key_path, "cover.example.com").unwrap();
+
+        let hex_path = dir.path().join("ech_config_hex.txt");
+        assert!(hex_path.exists());
+        let hex_content = std::fs::read_to_string(&hex_path).unwrap();
+        assert!(hex_content.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn parse_ech_public_name_from_generated() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("ech_config.bin");
+        let key_path = dir.path().join("ech_key.bin");
+
+        let ech = load_or_generate(&config_path, &key_path, "my-cover.com").unwrap();
+        let name = parse_ech_public_name(&ech.config_list_bytes).unwrap();
+        assert_eq!(name, "my-cover.com");
+    }
+
+    #[test]
+    fn parse_ech_public_name_invalid_bytes() {
+        let result = parse_ech_public_name(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ech_public_name_empty() {
+        let result = parse_ech_public_name(&[]);
+        assert!(result.is_err());
+    }
 }

@@ -35,6 +35,9 @@ url = "2.5"
 libc = "0.2"
 nix = { version = "0.31", features = ["ioctl", "net", "fs"] }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [profile.release]
 lto = true
 codegen-units = 1

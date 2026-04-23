@@ -10,6 +10,7 @@ etherparse = { workspace = true }
 
 [dev-dependencies]
 bincode = { workspace = true }
+proptest = { workspace = true }
 
 [features]
 default = []

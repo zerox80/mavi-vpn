@@ -18,6 +18,7 @@ use crate::handlers::auth::authenticate_client;
 use crate::handlers::tunnel::run_tunnel;
 use crate::handlers::utils::{IpGuard, prefix_len_from_mask};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_h3_connection(
     connection: quinn::Connection,
     pre_bi: Option<(quinn::SendStream, quinn::RecvStream)>,
@@ -115,7 +116,7 @@ pub async fn handle_h3_connection(
         netmask: state.network.mask(),
         gateway: state.gateway_ip(),
         dns_server: config.dns,
-        mtu: config.mtu as u16,
+        mtu: config.mtu,
         assigned_ipv6: if ipv6_enabled { Some(assigned_ip6) } else { None },
         netmask_v6: if ipv6_enabled { Some(64) } else { None },
         gateway_v6: if ipv6_enabled { Some(state.gateway_ip_v6()) } else { None },

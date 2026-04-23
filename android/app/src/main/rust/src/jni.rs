@@ -80,7 +80,8 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     info!("JNI init called. CR Mode: {}", censorship_resistant);
     
     let get_string = |env: &mut Env, jstr: &JString| -> Option<String> {
-         match env.get_string(jstr) {
+        #[allow(deprecated)]
+        match env.get_string(jstr) {
              Ok(s) => Some(s.into()),
              Err(e) => {
                  error!("Failed to get string from JNI: {}", e);
@@ -372,6 +373,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn fatal_errors_are_negative() {
         assert!(INIT_FATAL_AUTH < 0);
         assert!(INIT_FATAL_CERT < 0);

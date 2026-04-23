@@ -137,6 +137,12 @@ mod tests {
         setup_transport_config(&mut tc, 1280);
     }
 
+    #[test]
+    fn setup_transport_config_minimum_mtu() {
+        let mut tc = TransportConfig::default();
+        setup_transport_config(&mut tc, 1200);
+    }
+
     #[tokio::test]
     async fn create_quic_endpoint_standard_mode() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

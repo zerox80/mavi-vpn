@@ -170,13 +170,25 @@ mod tests {
 
     #[test]
     fn test_mtu_valid_range() {
-        let config =
-            Config::parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1360"]);
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1360"]);
         assert_eq!(config.mtu, 1360);
 
-        let config =
-            Config::parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1280"]);
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1280"]);
         assert_eq!(config.mtu, 1280);
+    }
+
+    #[test]
+    fn test_mtu_below_range_rejected() {
+        let result =
+            Config::try_parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1279"]);
+        assert!(result.is_err(), "MTU 1279 should be rejected");
+    }
+
+    #[test]
+    fn test_mtu_above_range_rejected() {
+        let result =
+            Config::try_parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1361"]);
+        assert!(result.is_err(), "MTU 1361 should be rejected");
     }
 
     #[test]

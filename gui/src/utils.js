@@ -22,7 +22,7 @@ export function bandwidthWalk(n, seed = 42) {
 
 export function friendlyError(e) {
   const s = String(e);
-  if (s.includes('10061') || s.includes('connection refused') || s.includes('Verbindung verweigerte'))
+  if (s.includes('10061') || s.includes('connection refused') || s.includes('Verbindung verweigert'))
     return 'VPN daemon is not running.';
   if (s.includes('10060') || s.includes('timed out'))
     return 'Connection timed out. Check endpoint and firewall.';

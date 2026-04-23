@@ -43,7 +43,7 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn hex_roundtrip_proptest(bytes in proptest::collection::vec(0u8..255, 0..100)) {
+        fn hex_roundtrip_proptest(bytes in proptest::collection::vec(0u8..=255, 0..100)) {
             let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
             let decoded = decode_hex(&hex_str).unwrap();
             assert_eq!(decoded, bytes);

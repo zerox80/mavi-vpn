@@ -469,6 +469,22 @@ mod tests {
     }
 
     #[test]
+    fn decode_route_advertisement_invalid_version() {
+        // Version byte 0x05 is not a valid IP version (must be 4 or 6).
+        assert!(decode_route_advertisement(&[0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn encode_route_advertisement_skips_mixed_versions() {
+        let ranges = vec![IpAddressRange {
+            start: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            end: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip_protocol: 6,
+        }];
+        assert!(encode_route_advertisement(&ranges).is_empty());
+    }
+
+    #[test]
     fn capsule_truncated_returns_none() {
         let mut buf = Vec::new();
         encode_capsule(CAPSULE_ADDRESS_ASSIGN, &[0xaa, 0xbb], &mut buf);
@@ -486,7 +502,7 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn varint_roundtrip_proptest(v in 0u64..(1u64 << 62) - 1) {
+        fn varint_roundtrip_proptest(v in 0u64..(1u64 << 62)) {
             let mut buf = Vec::new();
             write_varint(v, &mut buf);
             let (decoded, n) = read_varint(&buf).unwrap();
@@ -495,7 +511,7 @@ mod tests {
         }
 
         #[test]
-        fn datagram_roundtrip_proptest(data in proptest::collection::vec(0u8..255, 0..1500)) {
+        fn datagram_roundtrip_proptest(data in proptest::collection::vec(0u8..=255, 0..1500)) {
             let wrapped = wrap_datagram(&data);
             let unwrapped = unwrap_datagram(&wrapped).unwrap();
             assert_eq!(unwrapped, &data[..]);

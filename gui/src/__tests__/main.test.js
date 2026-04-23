@@ -1,10 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { escapeHtml, initials, bandwidthWalk, friendlyError, toConfig } from '../utils.js';
-
-vi.stubGlobal('__TAURI__', {
-  core: { invoke: vi.fn() },
-  event: { listen: vi.fn() },
-});
 
 describe('escapeHtml', () => {
   it('returns empty string unchanged', () => {
@@ -30,6 +25,11 @@ describe('escapeHtml', () => {
   it('leaves safe text unchanged', () => {
     expect(escapeHtml('hello world 123')).toBe('hello world 123');
   });
+
+  it('converts non-string input via String()', () => {
+    expect(escapeHtml(null)).toBe('null');
+    expect(escapeHtml(42)).toBe('42');
+  });
 });
 
 describe('initials', () => {
@@ -45,7 +45,7 @@ describe('initials', () => {
     expect(initials('my-server')).toBe('MS');
   });
 
-  it('returns ?? for empty string', () => {
+  it('returns ? for empty string', () => {
     expect(initials('')).toBe('?');
   });
 
@@ -70,7 +70,7 @@ describe('bandwidthWalk', () => {
     const values = bandwidthWalk(100);
     for (const v of values) {
       expect(v).toBeGreaterThan(0);
-      expect(v).toBeLessThan(2);
+      expect(v).toBeLessThanOrEqual(1.1);
     }
   });
 
@@ -103,7 +103,15 @@ describe('friendlyError', () => {
   });
 
   it('detects German connection refused', () => {
-    expect(friendlyError('Verbindung verweigerte')).toBe('VPN daemon is not running.');
+    expect(friendlyError('Verbindung verweigert')).toBe('VPN daemon is not running.');
+  });
+
+  it('detects Windows error code 10061', () => {
+    expect(friendlyError('error 10061')).toBe('VPN daemon is not running.');
+  });
+
+  it('detects Windows error code 10060', () => {
+    expect(friendlyError('error 10060')).toBe('Connection timed out. Check endpoint and firewall.');
   });
 });
 
@@ -122,6 +130,7 @@ describe('toConfig', () => {
     expect(config.censorship_resistant).toBe(true);
     expect(config.http3_framing).toBe(false);
     expect(config.kc_auth).toBeNull();
+    expect(config.ech_config).toBeNull();
   });
 
   it('includes keycloak fields when present', () => {

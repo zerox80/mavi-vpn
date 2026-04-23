@@ -1,10 +1,19 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use bytes::BufMut;
-use log::{info, warn, error};
-use futures_util::future::FutureExt;
-use shared::{ControlMessage, masque};
+use std::sync::atomic::AtomicBool;
+use shared::ControlMessage;
+use log::error;
 use jni::sys::jint;
+
+#[cfg(target_os = "android")]
+use std::sync::atomic::Ordering;
+#[cfg(target_os = "android")]
+use bytes::BufMut;
+#[cfg(target_os = "android")]
+use log::{info, warn};
+#[cfg(target_os = "android")]
+use futures_util::future::FutureExt;
+#[cfg(target_os = "android")]
+use shared::masque;
 
 #[cfg(target_os = "android")]
 use std::os::unix::io::{FromRawFd, RawFd, AsRawFd};
@@ -12,6 +21,7 @@ use std::os::unix::io::{FromRawFd, RawFd, AsRawFd};
 use tokio::io::unix::AsyncFd;
 
 #[cfg(not(target_os = "android"))]
+#[allow(dead_code)]
 pub type RawFd = std::os::raw::c_int;
 
 #[cfg(target_os = "android")]

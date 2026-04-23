@@ -25,10 +25,7 @@ use crate::utils::cleanup_legacy_rules;
 use crate::network::tun::create_tun_device;
 use crate::server::quic::create_quic_endpoint;
 
-// Proxy module to bridge between main.rs and existing directory structure
-mod handlers {
-    pub mod connection;
-}
+mod handlers;
 
 #[tokio::main]
 async fn main() -> Result<()> {

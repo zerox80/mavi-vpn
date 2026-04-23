@@ -1,56 +1,22 @@
-use std::{
-    net::{Ipv4Addr, Ipv6Addr},
-    sync::Arc,
-    time::Duration,
-};
-
+use std::sync::Arc;
+use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
-use constant_time_eq::constant_time_eq;
-use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
-
-use http::Response;
-use shared::{
-    icmp,
-    masque::{
-        self, AssignedAddress, IpAddressRange, CAPSULE_ADDRESS_ASSIGN, CAPSULE_MAVI_CONFIG,
-        CAPSULE_ROUTE_ADVERTISEMENT,
-    },
-    ControlMessage,
-};
-use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 
-use crate::{config::Config, keycloak::KeycloakValidator, state::AppState};
+use shared::ControlMessage;
+
+use crate::config::Config;
+use crate::keycloak::KeycloakValidator;
+use crate::state::AppState;
+
+use crate::handlers::auth::authenticate_client;
+use crate::handlers::h3::handle_h3_connection;
+use crate::handlers::tunnel::run_tunnel;
+use crate::handlers::utils::{emulate_http3, negotiated_alpn, negotiated_sni, IpGuard};
 
 const H3_DETECTION_GRACE: Duration = Duration::from_millis(50);
-
-/// Convert an IPv4 dotted-decimal netmask to a CIDR prefix length in bits.
-/// Non-contiguous masks (not realistic on a VPN subnet) fall back to `/32`.
-fn prefix_len_from_mask(mask: std::net::Ipv4Addr) -> u8 {
-    let bits = u32::from(mask);
-    let ones = bits.count_ones() as u8;
-    // Require the mask to be contiguous: all ones followed by all zeros.
-    if bits.leading_ones() + bits.trailing_zeros() == 32 {
-        ones
-    } else {
-        32
-    }
-}
-
-pub struct IpGuard {
-    pub state: Arc<AppState>,
-    pub ip4: Ipv4Addr,
-    pub ip6: Ipv6Addr,
-}
-
-impl Drop for IpGuard {
-    fn drop(&mut self) {
-        self.state.release_ips(self.ip4, self.ip6);
-        info!("Released IPs for dropped connection: {} / {}", self.ip4, self.ip6);
-    }
-}
 
 enum InitialStreams {
     Raw {
@@ -61,25 +27,6 @@ enum InitialStreams {
         pre_bi: Option<(quinn::SendStream, quinn::RecvStream)>,
         pre_uni: quinn::RecvStream,
     },
-}
-
-fn negotiated_alpn(connection: &quinn::Connection) -> Option<Vec<u8>> {
-    let handshake_data = connection.handshake_data()?;
-    let handshake_data = handshake_data
-        .downcast::<quinn::crypto::rustls::HandshakeData>()
-        .ok()?;
-    handshake_data.protocol.clone()
-}
-
-/// Extract the SNI (Server Name Indication) that the client presented during
-/// the TLS handshake.  Returns `None` when the client omitted the SNI
-/// extension (uncommon but valid) or when the handshake data is unavailable.
-fn negotiated_sni(connection: &quinn::Connection) -> Option<String> {
-    let handshake_data = connection.handshake_data()?;
-    let handshake_data = handshake_data
-        .downcast::<quinn::crypto::rustls::HandshakeData>()
-        .ok()?;
-    handshake_data.server_name.clone()
 }
 
 async fn detect_initial_streams(connection: &quinn::Connection) -> Result<InitialStreams> {
@@ -188,7 +135,7 @@ pub async fn handle_connection(
 
     let (mut send_stream, mut recv_stream) = pre_bi.expect("raw detection always includes a bidi stream");
     
-    let auth_result: Result<(Ipv4Addr, Ipv6Addr)> = async {
+    let auth_result = async {
         let buf = tokio::time::timeout(Duration::from_secs(5), async {
             let len = recv_stream.read_u32_le().await? as usize;
             if len > 16384 {
@@ -208,15 +155,7 @@ pub async fn handle_connection(
         
         match msg {
             ControlMessage::Auth { token } => {
-                if let Some(kc) = &keycloak {
-                    if !kc.validate_token(&token).await? {
-                         anyhow::bail!("Access Denied: Invalid Keycloak Token");
-                    }
-                } else if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
-                    anyhow::bail!("Access Denied: Invalid Token");
-                }
-
-                state.assign_ip_pair()
+                authenticate_client(&token, &state, &config, &keycloak).await
             }
             _ => anyhow::bail!("Protocol error: Expected Auth"),
         }
@@ -254,7 +193,6 @@ pub async fn handle_connection(
         netmask_v6: if ipv6_enabled { Some(64) } else { None },
         gateway_v6: if ipv6_enabled { Some(state.gateway_ip_v6()) } else { None },
         dns_server_v6: if ipv6_enabled {
-            // Use Ipv6Addr::new() instead of parsing a string to avoid a potential panic.
             Some(config.dns_v6.unwrap_or_else(|| std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)))
         } else { None },
         whitelist_domains: Some(config.whitelist_domains.clone()),
@@ -273,54 +211,11 @@ pub async fn handle_connection(
         assigned_ip6
     );
 
-    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(4096);
+    let (tx_client, rx_client) = tokio::sync::mpsc::channel::<Bytes>(4096);
     state.register_client(assigned_ip, assigned_ip6, tx_client);
 
-    let connection = Arc::new(connection);
-    let conn_send = connection.clone();
-    let tx_tun_icmp = tx_tun.clone();
-    let gv4 = state.gateway_ip();
-    let gv6 = state.gateway_ip_v6();
-    let tunnel_mtu = config.mtu;
-    
-    let tun_to_quic = tokio::spawn(async move {
-        while let Some(framed) = rx_client.recv().await {
-            // `framed` is [H3 prefix][IP packet] from spawn_tun_reader. Raw mode sends only the
-            // IP packet; `slice` is an O(1) refcount op, no copy.
-            let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
-            if let Err(e) = conn_send.send_datagram(packet.clone()) {
-                if matches!(e, quinn::SendDatagramError::TooLarge) {
-                    if packet.is_empty() {
-                        continue;
-                    }
-
-                    let ver = packet[0] >> 4;
-                    let gw = if ver == 4 {
-                        Some(std::net::IpAddr::V4(gv4))
-                    } else if ver == 6 {
-                        Some(std::net::IpAddr::V6(gv6))
-                    } else {
-                        None
-                    };
-                    let reported_mtu = if ver == 6 {
-                        tunnel_mtu.max(1280)
-                    } else {
-                        tunnel_mtu
-                    };
-
-                    if let Some(icmp_p) = icmp::generate_packet_too_big(
-                        &packet,
-                        reported_mtu,
-                        gw,
-                    ) {
-                        let _ = tx_tun_icmp.try_send(Bytes::from(icmp_p));
-                    }
-                }
-            }
-        }
-    });
-
-    let conn_stats = connection.clone();
+    let connection_arc = Arc::new(connection);
+    let conn_stats = connection_arc.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
@@ -338,366 +233,15 @@ pub async fn handle_connection(
         }
     });
 
-    let res = loop {
-        let data = match connection.read_datagram().await {
-            Ok(data) => data,
-            Err(e) => break Err(anyhow::anyhow!("Lost: {}", e)),
-        };
-
-        if data.is_empty() { continue; }
-        let ver = data[0] >> 4;
-        let mut valid = false;
-        if ver == 4 {
-            if let Ok(h) = Ipv4HeaderSlice::from_slice(&data) {
-                if h.source_addr() == assigned_ip { valid = true; }
-            }
-        } else if ver == 6 {
-            if let Ok(h) = Ipv6HeaderSlice::from_slice(&data) {
-                if h.source_addr() == assigned_ip6 { valid = true; }
-            }
-        }
-        
-        if valid {
-            if let Err(e) = tx_tun.try_send(data) {
-                if matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
-                    break Err(anyhow::anyhow!("TUN closed"));
-                }
-            }
-        } else if tx_tun.is_closed() {
-            break Err(anyhow::anyhow!("TUN closed"));
-        }
-    };
-
-    tun_to_quic.abort();
-    res
-}
-
-async fn emulate_http3(conn: &quinn::Connection, stream: &mut quinn::SendStream) -> Result<()> {
-    if let Ok(mut ctrl) = conn.open_uni().await {
-        let _ = ctrl.write_all(&[0x00, 0x04, 0x00]).await;
-        let _ = ctrl.finish();
-    }
-    let mut resp = vec![0x01, 0x19];
-    resp.extend_from_slice(&[0x00, 0x00, 0xd9, 0x5f, 0x4d, 0x84, 0xaa, 0x63, 0x55, 0xe7, 0x5f, 0x1d, 0x87, 0x49, 0x7c, 0xa5, 0x89, 0xd3, 0x4d, 0x1f, 0x54, 0x03, 0x31, 0x37, 0x33]);
-    let body = b"<html><body><h1>Welcome</h1></body></html>";
-    resp.push(0x00); resp.push(body.len() as u8);
-    resp.extend_from_slice(body);
-    let _ = stream.write_all(&resp).await;
-    let _ = stream.finish();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    Ok(())
-}
-
-pub async fn handle_h3_connection(
-    connection: quinn::Connection,
-    pre_bi: Option<(quinn::SendStream, quinn::RecvStream)>,
-    pre_uni: quinn::RecvStream,
-    state: Arc<AppState>,
-    config: Config,
-    tx_tun: tokio::sync::mpsc::Sender<Bytes>,
-    keycloak: Option<Arc<KeycloakValidator>>,
-    ipv6_enabled: bool,
-    sni: Option<String>,
-) -> Result<()> {
-    let remote_addr = connection.remote_address();
-    info!(
-        "Detected HTTP/3 L7 client from {} | SNI: {}",
-        remote_addr,
-        sni.as_deref().unwrap_or("<none>")
-    );
-
-    let h3_conn_wrapper =
-        crate::network::h3_quinn::Connection::with_pre_streams(connection.clone(), pre_bi, Some(pre_uni));
-    let mut h3_conn = h3::server::builder()
-        .enable_datagram(true)
-        .enable_extended_connect(true)
-        .build(h3_conn_wrapper)
-        .await
-        .map_err(|e| anyhow::anyhow!("H3 build failed: {}", e))?;
-
-    // accept() returns a RequestResolver; call resolve_request() to get (Request, RequestStream)
-    let resolver = h3_conn.accept().await
-        .map_err(|e| anyhow::anyhow!("H3 accept error: {}", e))?
-        .ok_or_else(|| anyhow::anyhow!("Expected H3 request"))?;
-    let (req, mut req_stream) = resolver.resolve_request().await
-        .map_err(|e| anyhow::anyhow!("H3 resolve error: {}", e))?;
-    let connect_ip_requested = req
-        .extensions()
-        .get::<h3::ext::Protocol>()
-        .copied()
-        == Some(h3::ext::Protocol::CONNECT_IP);
-    info!(
-        "H3 Request: {} {} (connect-ip={})",
-        req.method(),
-        req.uri(),
-        connect_ip_requested
-    );
-
-    // Reject anything that is not an extended CONNECT with `:protocol=connect-ip`.
-    // Responding with capsules to a plain GET would be an immediate DPI tell, and
-    // it would also be a protocol violation (the MAVI_CONFIG/ADDRESS_ASSIGN flow
-    // below is only meaningful for a real connect-ip session). We emit a generic
-    // 404 + tiny HTML body so the stream looks like an ordinary web server
-    // answering for an unknown path, then finish the stream cleanly.
-    if !connect_ip_requested {
-        warn!(
-            "Rejecting non-connect-ip H3 request from {}: {} {}",
-            remote_addr,
-            req.method(),
-            req.uri()
-        );
-        let response = Response::builder()
-            .status(http::StatusCode::NOT_FOUND)
-            .header("content-type", "text/html; charset=utf-8")
-            .body(())
-            .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
-        let _ = req_stream.send_response(response).await;
-        let _ = req_stream
-            .send_data(Bytes::from_static(
-                b"<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>",
-            ))
-            .await;
-        let _ = req_stream.finish().await;
-        return Ok(());
-    }
-
-    let token = req.headers().get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .unwrap_or("")
-        .to_string();
-
-    let auth_result: Result<(Ipv4Addr, Ipv6Addr)> = async {
-        if let Some(kc) = &keycloak {
-            if !kc.validate_token(&token).await? {
-                anyhow::bail!("Access Denied: Invalid Keycloak Token");
-            }
-        } else if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
-            anyhow::bail!("Access Denied: Invalid Token");
-        }
-        state.assign_ip_pair()
-    }.await;
-
-    let (assigned_ip, assigned_ip6) = match auth_result {
-        Ok(ips) => ips,
-        Err(e) => {
-            let error_msg = format!("Unauthorized: {}", e);
-            warn!("H3 Unauthorized from {}: {}", remote_addr, e);
-            let response = Response::builder()
-                .status(http::StatusCode::UNAUTHORIZED)
-                .body(())
-                .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
-            let _ = req_stream.send_response(response).await;
-            let _ = req_stream.send_data(Bytes::from("Unauthorized")).await;
-            let _ = req_stream.finish().await;
-            return Err(anyhow::anyhow!("H3 Error: {}", error_msg));
-        }
-    };
-
-    let _ip_guard = IpGuard { state: state.clone(), ip4: assigned_ip, ip6: assigned_ip6 };
-
-    let success_msg = ControlMessage::Config {
+    run_tunnel(
+        connection_arc,
+        rx_client,
+        tx_tun,
         assigned_ip,
-        netmask: state.network.mask(),
-        gateway: state.gateway_ip(),
-        dns_server: config.dns,
-        mtu: config.mtu as u16,
-        assigned_ipv6: if ipv6_enabled { Some(assigned_ip6) } else { None },
-        netmask_v6: if ipv6_enabled { Some(64) } else { None },
-        gateway_v6: if ipv6_enabled { Some(state.gateway_ip_v6()) } else { None },
-        dns_server_v6: if ipv6_enabled {
-            Some(config.dns_v6.unwrap_or_else(|| std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)))
-        } else { None },
-        whitelist_domains: Some(config.whitelist_domains.clone()),
-    };
-    
-    // Build the MASQUE capsule stream. We always emit IETF-standard
-    // `ADDRESS_ASSIGN` (0x01) and `ROUTE_ADVERTISEMENT` (0x03) capsules so
-    // the wire format matches RFC 9484 byte-for-byte, then append a vendor
-    // `MAVI_CONFIG` capsule (0x4D56) carrying the full bincode-encoded
-    // `ControlMessage::Config`. Unknown capsules MUST be ignored per RFC 9297,
-    // so standard MASQUE clients see only valid connect-ip framing.
-    let mut capsule_stream: Vec<u8> = Vec::with_capacity(256);
-
-    let mut address_assigns = vec![AssignedAddress {
-        request_id: 0,
-        ip: IpAddr::V4(assigned_ip),
-        prefix_len: prefix_len_from_mask(state.network.mask()),
-    }];
-    if ipv6_enabled {
-        address_assigns.push(AssignedAddress {
-            request_id: 0,
-            ip: IpAddr::V6(assigned_ip6),
-            prefix_len: 64,
-        });
-    }
-    masque::encode_capsule(
-        CAPSULE_ADDRESS_ASSIGN,
-        &masque::encode_address_assign(&address_assigns),
-        &mut capsule_stream,
-    );
-
-    let mut routes = vec![IpAddressRange {
-        start: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        end: IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
-        ip_protocol: 0,
-    }];
-    if ipv6_enabled {
-        routes.push(IpAddressRange {
-            start: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-            end: IpAddr::V6(std::net::Ipv6Addr::from([0xff; 16])),
-            ip_protocol: 0,
-        });
-    }
-    masque::encode_capsule(
-        CAPSULE_ROUTE_ADVERTISEMENT,
-        &masque::encode_route_advertisement(&routes),
-        &mut capsule_stream,
-    );
-
-    let mavi_config_bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
-    masque::encode_capsule(CAPSULE_MAVI_CONFIG, &mavi_config_bytes, &mut capsule_stream);
-
-    let response = Response::builder()
-        .status(http::StatusCode::OK)
-        .body(())
-        .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
-    req_stream.send_response(response).await
-        .map_err(|e| anyhow::anyhow!("H3 send_response error: {}", e))?;
-    req_stream.send_data(Bytes::from(capsule_stream)).await
-        .map_err(|e| anyhow::anyhow!("H3 send_data error: {}", e))?;
-    // IMPORTANT: the request stream must stay open for the whole connect-ip
-    // session so we can push additional capsules later and so the client side
-    // does not interpret a FIN as session teardown. Do NOT call req_stream.finish().
-
-    info!(
-        "H3 Authenticated {} | SNI: {} -> IPv4: {}, IPv6: {}",
-        remote_addr,
-        sni.as_deref().unwrap_or("<none>"),
-        assigned_ip,
-        assigned_ip6
-    );
-
-    // VPN data plane: connect-ip datagrams on the request stream (RFC 9484 §5).
-    // Each datagram is framed as: [Quarter Stream ID varint] [Context ID varint] [IP Packet].
-    // For stream ID 0 + Context ID 0 this is a 2-byte 0x00 0x00 prefix.
-    let (tx_client, mut rx_client) = tokio::sync::mpsc::channel::<Bytes>(4096);
-    state.register_client(assigned_ip, assigned_ip6, tx_client);
-
-    let conn_send = connection.clone();
-    let tx_tun_icmp = tx_tun.clone();
-    let gv4 = state.gateway_ip();
-    let gv6 = state.gateway_ip_v6();
-    let tunnel_mtu = config.mtu;
-
-    // TUN -> QUIC (connect-ip datagram framing). `framed` is already
-    // [Quarter Stream ID = 0][Context ID = 0][IP Packet] per RFC 9484 §5 because
-    // spawn_tun_reader reserved the 2-byte headroom during the TUN read — no
-    // per-packet alloc or memcpy needed here.
-    let tun_to_quic = tokio::spawn(async move {
-        while let Some(framed) = rx_client.recv().await {
-            if let Err(e) = conn_send.send_datagram(framed.clone()) {
-                if matches!(e, quinn::SendDatagramError::TooLarge) {
-                    let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
-                    if packet.is_empty() { continue; }
-                    let ver = packet[0] >> 4;
-                    let gw = if ver == 4 {
-                        Some(std::net::IpAddr::V4(gv4))
-                    } else if ver == 6 {
-                        Some(std::net::IpAddr::V6(gv6))
-                    } else {
-                        None
-                    };
-                    let reported_mtu = if ver == 6 { tunnel_mtu.max(1280) } else { tunnel_mtu };
-                    if let Some(icmp_p) = icmp::generate_packet_too_big(&packet, reported_mtu, gw) {
-                        let _ = tx_tun_icmp.try_send(Bytes::from(icmp_p));
-                    }
-                }
-            }
-        }
-    });
-
-    // QUIC -> TUN (strip connect-ip datagram framing)
-    let res = loop {
-        let datagram = match connection.read_datagram().await {
-            Ok(data) => data,
-            Err(e) => break Err(anyhow::anyhow!("H3 connection lost: {}", e)),
-        };
-
-        // Strip [Quarter Stream ID] [Context ID] per RFC 9484 §5.
-        let inner_len = match masque::unwrap_datagram(&datagram) {
-            Some(slice) => slice.len(),
-            None => continue,
-        };
-        if inner_len == 0 { continue; }
-        let prefix_len = datagram.len() - inner_len;
-        let packet = datagram.slice(prefix_len..);
-        if packet.is_empty() { continue; }
-
-        let ver = packet[0] >> 4;
-        let mut valid = false;
-        if ver == 4 {
-            if let Ok(h) = Ipv4HeaderSlice::from_slice(&packet) {
-                if h.source_addr() == assigned_ip { valid = true; }
-            }
-        } else if ver == 6 {
-            if let Ok(h) = Ipv6HeaderSlice::from_slice(&packet) {
-                if h.source_addr() == assigned_ip6 { valid = true; }
-            }
-        }
-
-        if valid {
-            if let Err(e) = tx_tun.try_send(packet) {
-                if matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
-                    break Err(anyhow::anyhow!("TUN closed"));
-                }
-            }
-        } else if tx_tun.is_closed() {
-            break Err(anyhow::anyhow!("TUN closed"));
-        }
-    };
-
-    tun_to_quic.abort();
-    res
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prefix_len_slash_24() {
-        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 255, 0)), 24);
-    }
-
-    #[test]
-    fn prefix_len_slash_16() {
-        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 0, 0)), 16);
-    }
-
-    #[test]
-    fn prefix_len_slash_8() {
-        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 0, 0, 0)), 8);
-    }
-
-    #[test]
-    fn prefix_len_slash_32() {
-        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 255, 255)), 32);
-    }
-
-    #[test]
-    fn prefix_len_slash_0() {
-        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(0, 0, 0, 0)), 0);
-    }
-
-    #[test]
-    fn prefix_len_slash_25() {
-        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 255, 128)), 25);
-    }
-
-    #[test]
-    fn prefix_len_non_contiguous_fallback() {
-        // Non-contiguous mask like 255.0.255.0 should fall back to /32
-        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 0, 255, 0)), 32);
-    }
+        assigned_ip6,
+        state.gateway_ip(),
+        state.gateway_ip_v6(),
+        config.mtu,
+        false, // is_h3
+    ).await
 }

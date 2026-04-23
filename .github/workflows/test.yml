@@ -29,8 +29,67 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Install system dependencies
-        run: sudo apt-get update -q && sudo apt-get install -y cmake pkg-config
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            cmake \
+            pkg-config \
+            libglib2.0-dev \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
+            libxdo-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
       - name: Test shared crate
         run: cargo test -p shared --verbose
+      - name: Test android crate
+        run: cargo test -p mavivpn --verbose
       - name: Test backend
         run: cargo test -p mavi-vpn --verbose
+      - name: Test linux client
+        run: cargo test -p linux-vpn --verbose
+      - name: Test quic-tester
+        run: cargo test -p quic-tester --verbose
+      - name: Test GUI backend
+        run: cargo test -p mavi-vpn-gui --verbose
+
+  test-windows:
+    name: Windows Unit Tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Test windows crate
+        run: cargo test -p windows-vpn --verbose
+
+  test-gui:
+    name: GUI Frontend Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run frontend tests
+        run: npm test

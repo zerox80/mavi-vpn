@@ -195,7 +195,7 @@ struct SavedConn {
     kc_client_id: Option<String>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct Prefs {
     #[serde(default = "default_theme")]
     theme: String,
@@ -205,6 +205,17 @@ struct Prefs {
     connections: Vec<SavedConn>,
     #[serde(default)]
     active_id: Option<String>,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            accent: default_accent(),
+            connections: vec![],
+            active_id: None,
+        }
+    }
 }
 
 fn default_theme() -> String { "light".into() }
@@ -332,4 +343,77 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Mavi VPN GUI");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_theme_is_light() {
+        assert_eq!(default_theme(), "light");
+    }
+
+    #[test]
+    fn default_accent_is_blue() {
+        assert_eq!(default_accent(), "#2B44FF");
+    }
+
+    #[test]
+    fn prefs_default_values() {
+        let prefs = Prefs::default();
+        assert_eq!(prefs.theme, "light");
+        assert_eq!(prefs.accent, "#2B44FF");
+        assert!(prefs.connections.is_empty());
+        assert!(prefs.active_id.is_none());
+    }
+
+    #[test]
+    fn prefs_serialization_roundtrip() {
+        let prefs = Prefs {
+            theme: "dark".into(),
+            accent: "#FF0000".into(),
+            connections: vec![SavedConn {
+                id: "abc123".into(),
+                label: "My Server".into(),
+                endpoint: "vpn.example.com:443".into(),
+                cert_pin: "deadbeef".into(),
+                ech_config: None,
+                http3_framing: false,
+                censorship_resistant: true,
+                kc_auth: None,
+                kc_url: None,
+                kc_realm: None,
+                kc_client_id: None,
+            }],
+            active_id: Some("abc123".into()),
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let deserialized: Prefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.theme, "dark");
+        assert_eq!(deserialized.connections.len(), 1);
+        assert_eq!(deserialized.connections[0].label, "My Server");
+    }
+
+    #[test]
+    fn saved_conn_missing_optional_fields_defaults() {
+        let json = r#"{"id":"x","label":"test","endpoint":"ep","cert_pin":"pin"}"#;
+        let conn: SavedConn = serde_json::from_str(json).unwrap();
+        assert!(conn.ech_config.is_none());
+        assert!(!conn.http3_framing);
+        assert!(!conn.censorship_resistant);
+        assert!(conn.kc_auth.is_none());
+    }
+
+    #[test]
+    fn vpn_status_serialization() {
+        let status = VpnStatus {
+            running: true,
+            endpoint: Some("vpn.example.com:443".into()),
+            service_available: true,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("true"));
+        assert!(json.contains("vpn.example.com:443"));
+    }
 }

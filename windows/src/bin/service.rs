@@ -11,7 +11,6 @@ use windows_service::{
 use std::{ffi::OsString, path::Path, sync::Arc, sync::atomic::{AtomicBool, Ordering}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::Mutex};
 use tracing::{error, info, warn};
-use tracing_subscriber;
 use base64::Engine;
 use constant_time_eq::constant_time_eq;
 
@@ -358,7 +357,7 @@ async fn dispatch_request(
         ipc::IpcRequest::Start(config) => {
             info!("Handling Start request for endpoint: {}", config.endpoint);
             let still_running = guard.vpn_running.load(Ordering::SeqCst)
-                || guard.vpn_task.as_ref().map_or(false, |t| !t.is_finished());
+                || guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished());
             if still_running {
                 ipc::IpcResponse::Error("VPN is already running".to_string())
             } else {

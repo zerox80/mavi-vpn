@@ -2,7 +2,7 @@ use jni::objects::{JClass, JString, JObject};
 use jni::{JValue, Env, AttachGuard, EnvUnowned};
 use jni::sys::{jint, jlong};
 use log::{info, error};
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 use std::sync::atomic::Ordering;
 use android_logger::Config;
 
@@ -63,7 +63,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     ech_config: JString<'local>,
 ) -> jlong {
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
-    let mut env = guard.borrow_env_mut();
+    let env = guard.borrow_env_mut();
     clear_last_init_error();
     
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -89,21 +89,21 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
          }
     };
 
-    let token = match get_string(&mut env, &token) {
+    let token = match get_string(env, &token) {
         Some(s) => s,
         None => {
             set_last_init_error("Failed to read VPN token from JNI");
             return INIT_FATAL_CONFIG;
         }
     };
-    let endpoint = match get_string(&mut env, &endpoint) {
+    let endpoint = match get_string(env, &endpoint) {
         Some(s) => s,
         None => {
             set_last_init_error("Failed to read VPN endpoint from JNI");
             return INIT_FATAL_CONFIG;
         }
     };
-    let cert_pin_str = match get_string(&mut env, &cert_pin) {
+    let cert_pin_str = match get_string(env, &cert_pin) {
         Some(s) => s,
         None => {
             set_last_init_error("Failed to read certificate pin from JNI");
@@ -112,7 +112,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     };
 
     // Optional: hex-encoded ECHConfigList. Empty string → no ECH override.
-    let ech_config_hex: Option<String> = get_string(&mut env, &ech_config)
+    let ech_config_hex: Option<String> = get_string(env, &ech_config)
         .filter(|s| !s.is_empty());
 
     if cert_pin_str.is_empty() {
@@ -195,13 +195,13 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     };
 
     let result = rt.block_on(async {
-        connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant.into(), http3_framing.into(), ech_config_hex).await
+        connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant, http3_framing, ech_config_hex).await
     });
 
     match result {
         Ok((connection, config, h3_guard)) => {
             clear_last_init_error();
-            let session = VpnSession::new(rt, connection, config, http3_framing.into(), h3_guard);
+            let session = VpnSession::new(rt, connection, config, http3_framing, h3_guard);
             Box::into_raw(Box::new(session)) as jlong
         },
         Err(e) => {
@@ -244,7 +244,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getConfig<'local>
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let env = guard.borrow_env_mut();
     
-    if handle >= -3 && handle <= 0 { return env.new_string("{}").unwrap().into_raw(); }
+    if (-3..=0).contains(&handle) { return env.new_string("{}").unwrap().into_raw(); }
     
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
@@ -266,7 +266,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_startLoop<'local>
     handle: jlong,
     tun_fd: jint,
 ) {
-    if handle >= -3 && handle <= 0 { return; }
+    if (-3..=0).contains(&handle) { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &mut *(handle as *mut VpnSession) };
         let stop_flag = session.stop_flag.clone();
@@ -287,7 +287,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_stop<'local>(
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    if handle >= -3 && handle <= 0 { return; }
+    if (-3..=0).contains(&handle) { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
         session.stop_flag.store(true, Ordering::SeqCst);
@@ -303,7 +303,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_free<'local>(
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    if handle >= -3 && handle <= 0 { return; }
+    if (-3..=0).contains(&handle) { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         unsafe { let _ = Box::from_raw(handle as *mut VpnSession); }
     }));
@@ -316,7 +316,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_networkChanged<'l
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    if handle >= -3 && handle <= 0 { return; }
+    if (-3..=0).contains(&handle) { return; }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
         let conn = session.connection.clone();
@@ -327,4 +327,54 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_networkChanged<'l
             }
         });
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_cert_pin_mismatch() {
+        assert_eq!(classify_init_error("invalid certificate pin"), INIT_FATAL_CERT);
+        assert_eq!(classify_init_error("pin mismatch"), INIT_FATAL_CERT);
+        assert_eq!(classify_init_error("certificate pin mismatch"), INIT_FATAL_CERT);
+    }
+
+    #[test]
+    fn classify_auth_errors() {
+        assert_eq!(classify_init_error("server error: Unauthorized"), INIT_FATAL_AUTH);
+        assert_eq!(classify_init_error("Access Denied"), INIT_FATAL_AUTH);
+        assert_eq!(classify_init_error("Invalid Keycloak Token"), INIT_FATAL_AUTH);
+        assert_eq!(classify_init_error("Invalid Token"), INIT_FATAL_AUTH);
+    }
+
+    #[test]
+    fn classify_config_errors() {
+        assert_eq!(classify_init_error("endpoint host missing"), INIT_FATAL_CONFIG);
+        assert_eq!(classify_init_error("invalid address"), INIT_FATAL_CONFIG);
+    }
+
+    #[test]
+    fn classify_unknown_returns_retryable() {
+        assert_eq!(classify_init_error("connection timed out"), INIT_RETRYABLE_FAILURE);
+        assert_eq!(classify_init_error("network unreachable"), INIT_RETRYABLE_FAILURE);
+    }
+
+    #[test]
+    fn classify_case_insensitive() {
+        assert_eq!(classify_init_error("INVALID CERTIFICATE PIN"), INIT_FATAL_CERT);
+        assert_eq!(classify_init_error("ACCESS DENIED"), INIT_FATAL_AUTH);
+    }
+
+    #[test]
+    fn retryable_failure_is_zero() {
+        assert_eq!(INIT_RETRYABLE_FAILURE, 0);
+    }
+
+    #[test]
+    fn fatal_errors_are_negative() {
+        assert!(INIT_FATAL_AUTH < 0);
+        assert!(INIT_FATAL_CERT < 0);
+        assert!(INIT_FATAL_CONFIG < 0);
+    }
 }

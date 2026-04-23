@@ -71,7 +71,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                                 remove = true;
                                             } else {
                                                 drop_count += 1;
-                                                if drop_count % 1000 == 0 && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+                                                if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
                                                     warn!("Dropped {} packets: client channel(s) full", drop_count);
                                                     drop_count = 0;
                                                     last_drop_warn = std::time::Instant::now();
@@ -84,7 +84,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                             if let Err(e) = tx_client.try_send(framed) {
                                                 if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
                                                     drop_count += 1;
-                                                    if drop_count % 1000 == 0 && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+                                                    if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
                                                         warn!("Dropped {} packets: client channel(s) full", drop_count);
                                                         drop_count = 0;
                                                         last_drop_warn = std::time::Instant::now();
@@ -113,7 +113,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                                 remove = true;
                                             } else {
                                                 drop_count += 1;
-                                                if drop_count % 1000 == 0 && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+                                                if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
                                                     warn!("Dropped {} packets: client channel(s) full", drop_count);
                                                     drop_count = 0;
                                                     last_drop_warn = std::time::Instant::now();
@@ -126,7 +126,7 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
                                             if let Err(e) = tx_client.try_send(framed) {
                                                 if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
                                                     drop_count += 1;
-                                                    if drop_count % 1000 == 0 && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+                                                    if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
                                                         warn!("Dropped {} packets: client channel(s) full", drop_count);
                                                         drop_count = 0;
                                                         last_drop_warn = std::time::Instant::now();
@@ -162,4 +162,89 @@ pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, s
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use etherparse::PacketBuilder;
+
+    fn make_test_ipv4_packet(src: std::net::Ipv4Addr, dst: std::net::Ipv4Addr) -> Vec<u8> {
+        let builder = PacketBuilder::ipv4(src.octets(), dst.octets(), 64).udp(12345, 80);
+        let payload = b"test";
+        let mut buf = Vec::with_capacity(builder.size(payload.len()));
+        builder.write(&mut buf, payload).unwrap();
+        buf
+    }
+
+    fn make_test_ipv6_packet(src: std::net::Ipv6Addr, dst: std::net::Ipv6Addr) -> Vec<u8> {
+        let builder = PacketBuilder::ipv6(src.octets(), dst.octets(), 64).udp(12345, 80);
+        let payload = b"test";
+        let mut buf = Vec::with_capacity(builder.size(payload.len()));
+        builder.write(&mut buf, payload).unwrap();
+        buf
+    }
+
+    #[test]
+    fn ipv4_packet_parses_correctly() {
+        let src = std::net::Ipv4Addr::new(10, 8, 0, 2);
+        let dst = std::net::Ipv4Addr::new(93, 184, 216, 34);
+        let packet = make_test_ipv4_packet(src, dst);
+
+        let header = Ipv4HeaderSlice::from_slice(&packet).unwrap();
+        assert_eq!(header.source_addr(), src);
+        assert_eq!(header.destination_addr(), dst);
+        assert_eq!(header.version(), 4);
+    }
+
+    #[test]
+    fn ipv6_packet_parses_correctly() {
+        let src = std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let dst = std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let packet = make_test_ipv6_packet(src, dst);
+
+        let header = Ipv6HeaderSlice::from_slice(&packet).unwrap();
+        assert_eq!(header.source_addr(), src);
+        assert_eq!(header.destination_addr(), dst);
+    }
+
+    #[test]
+    fn datagram_prefix_is_correct() {
+        assert_eq!(DATAGRAM_PREFIX, [0x00, 0x00]);
+    }
+
+    #[test]
+    fn ipv4_version_detection() {
+        let packet = make_test_ipv4_packet(
+            std::net::Ipv4Addr::new(10, 8, 0, 2),
+            std::net::Ipv4Addr::new(1, 1, 1, 1),
+        );
+        assert_eq!(packet[0] >> 4, 4);
+    }
+
+    #[test]
+    fn ipv6_version_detection() {
+        let packet = make_test_ipv6_packet(
+            std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+            std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+        );
+        assert_eq!(packet[0] >> 4, 6);
+    }
+
+    #[tokio::test]
+    async fn channel_send_receive() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+        let data = Bytes::from_static(b"hello world");
+        tx.send(data.clone()).await.unwrap();
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received, data);
+    }
+
+    #[tokio::test]
+    async fn channel_try_send_full() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+        let data = Bytes::from_static(b"hello");
+        assert!(tx.try_send(data.clone()).is_ok());
+        assert!(tx.try_send(data).is_err());
+    }
 }

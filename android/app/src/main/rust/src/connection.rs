@@ -69,7 +69,7 @@ pub async fn connect_and_handshake(
     // Connect & MTU Logic
     info!("Resolving host: {}", endpoint_str);
     let addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
-    let addr = *addrs.first().ok_or(anyhow::anyhow!("Invalid address"))?;
+    let _addr = *addrs.first().ok_or(anyhow::anyhow!("Invalid address"))?;
     // If an ECHConfigList was provided, spoof the outer SNI to its `public_name`.
     // Android's `ring` provider lacks HPKE so we cannot offer ECH GREASE, but
     // SNI override alone already hides the real hostname from on-path censors
@@ -328,4 +328,34 @@ fn endpoint_host(endpoint: &str) -> String {
     }
 
     endpoint.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_host_simple() {
+        assert_eq!(endpoint_host("vpn.example.com:4433"), "vpn.example.com");
+    }
+
+    #[test]
+    fn endpoint_host_ipv4() {
+        assert_eq!(endpoint_host("192.168.1.1:4433"), "192.168.1.1");
+    }
+
+    #[test]
+    fn endpoint_host_ipv6_bracketed() {
+        assert_eq!(endpoint_host("[::1]:4433"), "::1");
+    }
+
+    #[test]
+    fn endpoint_host_no_port() {
+        assert_eq!(endpoint_host("vpn.example.com"), "vpn.example.com");
+    }
+
+    #[test]
+    fn endpoint_host_ipv6_no_brackets() {
+        assert_eq!(endpoint_host("::1"), "::1");
+    }
 }

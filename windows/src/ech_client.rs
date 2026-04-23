@@ -32,8 +32,9 @@ pub struct ClientEch {
 /// ECH).
 pub fn parse(ech_config_list: &[u8]) -> Result<Option<ClientEch>> {
     let mut reader = Reader::init(ech_config_list);
-    let payloads: Vec<EchConfigPayload> = <Vec<EchConfigPayload> as rustls::internal::msgs::codec::Codec>::read(&mut reader)
-        .map_err(|e| anyhow::anyhow!("failed to decode ECHConfigList: {:?}", e))?;
+    let payloads: Vec<EchConfigPayload> =
+        <Vec<EchConfigPayload> as rustls::internal::msgs::codec::Codec>::read(&mut reader)
+            .map_err(|e| anyhow::anyhow!("failed to decode ECHConfigList: {:?}", e))?;
 
     for payload in payloads {
         let contents = match payload {
@@ -47,12 +48,11 @@ pub fn parse(ech_config_list: &[u8]) -> Result<Option<ClientEch>> {
         // Pick the first symmetric suite that our HPKE provider supports.
         for sym in &contents.key_config.symmetric_cipher_suites {
             let suite = HpkeSuite { kem, sym: *sym };
-            if let Some(hpke) = ALL_SUPPORTED_SUITES
-                .iter()
-                .find(|h| h.suite() == suite)
-            {
-                let grease =
-                    EchGreaseConfig::new(*hpke as &'static dyn Hpke, HpkePublicKey(public_key_bytes));
+            if let Some(hpke) = ALL_SUPPORTED_SUITES.iter().find(|h| h.suite() == suite) {
+                let grease = EchGreaseConfig::new(
+                    *hpke as &'static dyn Hpke,
+                    HpkePublicKey(public_key_bytes),
+                );
                 return Ok(Some(ClientEch { outer_sni, grease }));
             }
         }
@@ -81,15 +81,10 @@ fn encoded_public_key(
     if buf.len() < 1 + 2 + 2 {
         bail!("HpkeKeyConfig too short");
     }
-    let pk_len = u16::from_be_bytes(
-        buf[3..5]
-            .try_into()
-            .context("reading pk_len failed")?,
-    ) as usize;
+    let pk_len =
+        u16::from_be_bytes(buf[3..5].try_into().context("reading pk_len failed")?) as usize;
     let start = 5usize;
-    let end = start
-        .checked_add(pk_len)
-        .context("pk_len overflow")?;
+    let end = start.checked_add(pk_len).context("pk_len overflow")?;
     if end > buf.len() {
         bail!("HpkeKeyConfig pk_len out of range");
     }
@@ -131,9 +126,28 @@ mod tests {
         key_config.encode(&mut buf);
         // Wire: u8 config_id(0) | u16 kem_id | u16 pk_len(32) | 32 pk_bytes | ...
         assert!(buf.len() >= 5 + 32, "encoded buffer shorter than expected");
-        assert_eq!(u16::from_be_bytes([buf[3], buf[4]]) as usize, 32, "pk_len field mismatch");
+        assert_eq!(
+            u16::from_be_bytes([buf[3], buf[4]]) as usize,
+            32,
+            "pk_len field mismatch"
+        );
 
         let extracted = encoded_public_key(&key_config).expect("extraction must not fail");
-        assert_eq!(extracted, pk_bytes, "extracted bytes must equal the original public key");
+        assert_eq!(
+            extracted, pk_bytes,
+            "extracted bytes must equal the original public key"
+        );
+    }
+
+    #[test]
+    fn parse_empty_ech_config_returns_none_or_err() {
+        let result = parse(&[]);
+        assert!(matches!(result, Ok(None) | Err(_)));
+    }
+
+    #[test]
+    fn parse_garbage_bytes_returns_err() {
+        let result = parse(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(result.is_err());
     }
 }

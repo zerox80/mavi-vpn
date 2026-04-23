@@ -190,6 +190,32 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_escape_empty() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    fn html_escape_no_special_chars() {
+        assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn html_escape_special_chars() {
+        assert_eq!(html_escape("<b>\"test\"&</b>"),
+            "&lt;b&gt;&quot;test&quot;&amp;&lt;/b&gt;");
+    }
+
+    #[test]
+    fn html_escape_only_ampersand() {
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+    }
+}
+
 /// Open a URL in the user's default browser.
 ///
 /// When running under `sudo`, desktop-session env vars are stripped, so plain

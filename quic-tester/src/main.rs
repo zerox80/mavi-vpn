@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::DigitallySignedStruct;
-use quinn::crypto::rustls::QuicClientConfig;
 
 // A dummy verifier that accepts all SSL certificates (simulating a real DPI scanner)
 #[derive(Debug)]
@@ -90,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Fake HTTP/3 Request sent. Waiting for response...");
     
     // 5. Read response from server (read everything available before connection dies)
-    let mut buf: Vec<u8> = Vec::new();
+    let _buf: Vec<u8> = Vec::new();
     let read_result = tokio::time::timeout(
         std::time::Duration::from_secs(5), 
         recv.read_to_end(1024)
@@ -127,4 +126,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::client::danger::ServerCertVerifier;
+
+    #[test]
+    fn skip_verification_accepts_any_cert() {
+        let verifier = SkipServerVerification::new();
+        let fake_cert = CertificateDer::from(vec![0u8; 10]);
+        let result = verifier.verify_server_cert(
+            &fake_cert,
+            &[],
+            &ServerName::try_from("example.com").unwrap(),
+            &[],
+            UnixTime::since_unix_epoch(std::time::Duration::from_secs(1000000)),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn skip_verification_supported_schemes() {
+        let verifier = SkipServerVerification::new();
+        let schemes = verifier.supported_verify_schemes();
+        assert!(schemes.contains(&rustls::SignatureScheme::RSA_PKCS1_SHA256));
+        assert!(schemes.contains(&rustls::SignatureScheme::ED25519));
+    }
+
+    #[test]
+    fn server_addr_parses() {
+        let addr: SocketAddr = "194.242.56.169:10443".parse().unwrap();
+        assert_eq!(addr.port(), 10443);
+    }
 }

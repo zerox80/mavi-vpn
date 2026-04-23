@@ -9,6 +9,13 @@ use tokio::net::TcpListener;
 /// once in Keycloak: `http://127.0.0.1:18923/callback`
 const OAUTH_CALLBACK_PORT: u16 = 18923;
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// Run the Keycloak PKCE OAuth2 flow in the user's browser session.
 ///
 /// This must be called from the GUI process (not the service) because it needs
@@ -18,7 +25,11 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     // 1. Generate PKCE verifier and challenge
     let verifier_bytes: [u8; 32] = rand::random();
     let code_verifier =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&verifier_bytes);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
+
+    let state_bytes: [u8; 32] = rand::random();
+    let oauth_state =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(state_bytes);
 
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
@@ -48,7 +59,8 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .append_pair("response_type", "code")
         .append_pair("scope", "openid")
         .append_pair("code_challenge", &code_challenge)
-        .append_pair("code_challenge_method", "S256");
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &oauth_state);
 
     // 4. Open the browser (works on Windows and Linux/Wayland via xdg-open)
     let url_str = auth_url.as_str().to_string();
@@ -75,6 +87,20 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
                 url::Url::parse(&format!("http://localhost{}", path)).ok();
 
             if let Some(u) = parsed {
+                let returned_state = u
+                    .query_pairs()
+                    .find(|(k, _)| k == "state")
+                    .map(|(_, v)| v.into_owned());
+                if returned_state.as_deref() != Some(oauth_state.as_str()) {
+                    let html = "<html><body><h1 style='color:red'>Login failed</h1><p>OAuth state invalid.</p></body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
+                        html
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    return Err(anyhow::anyhow!("OAuth state mismatch"));
+                }
+
                 if let Some(code) = u
                     .query_pairs()
                     .find(|(k, _)| k == "code")
@@ -100,10 +126,10 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
                 {
                     let html = format!(
                         "<html><body><h1 style='color:red'>Login failed</h1><p>{}</p></body></html>",
-                        err
+                        html_escape(&err)
                     );
                     let resp = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
                         html
                     );
                     let _ = socket.write_all(resp.as_bytes()).await;
@@ -155,4 +181,45 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
 /// Open a URL in the default browser (cross-platform via `webbrowser` crate).
 fn open_browser(url: &str) {
     let _ = webbrowser::open(url);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_escape_empty() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    fn html_escape_no_special_chars() {
+        assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn html_escape_angle_brackets() {
+        assert_eq!(html_escape("a<b>c"), "a&lt;b&gt;c");
+    }
+
+    #[test]
+    fn html_escape_ampersand() {
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn html_escape_quotes() {
+        assert_eq!(
+            html_escape("say \"hello\""),
+            "say &quot;hello&quot;"
+        );
+    }
+
+    #[test]
+    fn html_escape_double_escapes_already_escaped_ampersand() {
+        assert_eq!(
+            html_escape("<script>alert(\"xss\")&amp;</script>"),
+            "&lt;script&gt;alert(&quot;xss&quot;)&amp;amp;&lt;/script&gt;"
+        );
+    }
 }

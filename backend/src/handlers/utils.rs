@@ -100,7 +100,46 @@ mod tests {
 
     #[test]
     fn prefix_len_non_contiguous_fallback() {
-        // Non-contiguous mask like 255.0.255.0 should fall back to /32
         assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 0, 255, 0)), 32);
+    }
+
+    #[test]
+    fn prefix_len_slash_1() {
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(128, 0, 0, 0)), 1);
+    }
+
+    #[test]
+    fn prefix_len_slash_31() {
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 255, 254)), 31);
+    }
+
+    #[test]
+    fn ip_guard_drop_releases_ips() {
+        use crate::state::AppState;
+        use std::sync::Arc;
+
+        let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
+        let (ip4, ip6) = state.assign_ip_pair().unwrap();
+        assert!(!state.peers.contains_key(&ip4));
+
+        {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+            state.register_client(ip4, ip6, tx);
+            assert!(state.peers.contains_key(&ip4));
+
+            let _guard = IpGuard {
+                state: state.clone(),
+                ip4,
+                ip6,
+            };
+            assert!(state.peers.contains_key(&ip4));
+        }
+        assert!(!state.peers.contains_key(&ip4));
+        assert!(!state.peers_v6.contains_key(&ip6));
+    }
+
+    #[test]
+    fn prefix_len_non_contiguous_2() {
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 0, 255)), 32);
     }
 }

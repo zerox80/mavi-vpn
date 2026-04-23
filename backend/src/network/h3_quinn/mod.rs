@@ -19,7 +19,7 @@ use futures_util::{
 };
 
 use quinn::ReadError;
-pub use quinn::{self, AcceptBi, AcceptUni, Endpoint, OpenBi, OpenUni, VarInt};
+pub use quinn::{self, AcceptBi, AcceptUni, OpenBi, OpenUni, VarInt};
 
 use h3::{
     error::Code,

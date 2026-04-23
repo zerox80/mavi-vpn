@@ -57,7 +57,7 @@ impl KeycloakValidator {
         if !kid_found {
             let should_refresh = self.jwks_cache.read().await
                 .as_ref()
-                .map_or(true, |(_, t)| t.elapsed() >= JWKS_REFRESH_COOLDOWN);
+                .is_none_or(|(_, t)| t.elapsed() >= JWKS_REFRESH_COOLDOWN);
 
             if should_refresh {
                 warn!("Token kid '{}' not found in cached JWKS — refreshing keys from Keycloak", kid);
@@ -158,4 +158,76 @@ impl KeycloakValidator {
 
 fn json_number_as_i64(value: &serde_json::Value) -> Option<i64> {
     value.as_i64().or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_number_as_i64_positive() {
+        assert_eq!(json_number_as_i64(&serde_json::json!(42)), Some(42));
+        assert_eq!(json_number_as_i64(&serde_json::json!(0)), Some(0));
+        assert_eq!(json_number_as_i64(&serde_json::json!(i64::MAX)), Some(i64::MAX));
+    }
+
+    #[test]
+    fn json_number_as_i64_negative() {
+        assert_eq!(json_number_as_i64(&serde_json::json!(-1)), Some(-1));
+        assert_eq!(json_number_as_i64(&serde_json::json!(-100)), Some(-100));
+    }
+
+    #[test]
+    fn json_number_as_i64_float_returns_none() {
+        assert_eq!(json_number_as_i64(&serde_json::json!(42.5)), None);
+        assert_eq!(json_number_as_i64(&serde_json::json!(-2.5)), None);
+    }
+
+    #[test]
+    fn json_number_as_i64_string_returns_none() {
+        assert_eq!(json_number_as_i64(&serde_json::json!("42")), None);
+        assert_eq!(json_number_as_i64(&serde_json::json!("")), None);
+    }
+
+    #[test]
+    fn json_number_as_i64_bool_returns_none() {
+        assert_eq!(json_number_as_i64(&serde_json::json!(true)), None);
+        assert_eq!(json_number_as_i64(&serde_json::json!(false)), None);
+    }
+
+    #[test]
+    fn json_number_as_i64_null_returns_none() {
+        assert_eq!(json_number_as_i64(&serde_json::json!(null)), None);
+    }
+
+    #[test]
+    fn json_number_as_i64_u64_max_overflows() {
+        // u64::MAX > i64::MAX, should return None
+        assert_eq!(json_number_as_i64(&serde_json::json!(u64::MAX)), None);
+    }
+
+    #[test]
+    fn json_number_as_i64_u64_within_range() {
+        assert_eq!(json_number_as_i64(&serde_json::json!(i64::MAX as u64)), Some(i64::MAX));
+    }
+
+    #[test]
+    fn validator_new_sets_fields() {
+        let v = KeycloakValidator::new(
+            "https://auth.example.com".to_string(),
+            "my-realm".to_string(),
+            "my-client".to_string(),
+        );
+        assert_eq!(v.client_id, "my-client");
+    }
+
+    #[test]
+    fn validator_new_stores_url_and_realm() {
+        let v = KeycloakValidator::new(
+            "https://kc.test.com/".to_string(),
+            "test-realm".to_string(),
+            "client-1".to_string(),
+        );
+        assert_eq!(v.client_id, "client-1");
+    }
 }

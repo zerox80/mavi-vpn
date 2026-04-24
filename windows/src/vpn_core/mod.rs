@@ -9,9 +9,9 @@ mod network;
 use anyhow::{Context, Result};
 use bytes::{Buf, Bytes};
 use crate::ipc::Config;
-use shared::{icmp, masque, ControlMessage, DEFAULT_TUN_MTU};
+use shared::{icmp, masque, ControlMessage, resolve_tun_mtu};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 use wintun::Adapter;
@@ -24,29 +24,6 @@ use self::network::{create_udp_socket, set_adapter_network_config, cleanup_route
 // --- Default timing parameters ---
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
-/// Inner TUN MTU the client expects the server to push, resolved once per
-/// process from `VPN_MTU` with a 1280 fallback.
-pub(super) static CLIENT_TUN_MTU: LazyLock<u16> = LazyLock::new(read_tun_mtu_from_env);
-
-/// Read the inner TUN MTU the client expects the server to push. Must match
-/// the server's `VPN_MTU`. Invalid or absent values fall back to
-/// [`DEFAULT_TUN_MTU`] with a warning. Accepted range mirrors the backend
-/// validator: 1280–1360.
-fn read_tun_mtu_from_env() -> u16 {
-    match std::env::var("VPN_MTU") {
-        Err(_) => DEFAULT_TUN_MTU,
-        Ok(s) => match s.trim().parse::<u16>() {
-            Ok(v) if (1280..=1360).contains(&v) => v,
-            _ => {
-                warn!(
-                    "Ignoring invalid VPN_MTU={:?} (expected 1280-1360); falling back to {}",
-                    s, DEFAULT_TUN_MTU
-                );
-                DEFAULT_TUN_MTU
-            }
-        },
-    }
-}
 
 
 /// Entry point for the VPN runner. Manages the reconnection loop and WinTUN lifecycle.
@@ -131,6 +108,7 @@ async fn run_session(
         config.censorship_resistant,
         config.http3_framing,
         ech_bytes,
+        config.vpn_mtu,
     ).await?;
 
     // 2. Extract Network Configuration
@@ -191,6 +169,7 @@ async fn run_session(
     let run_pump = global_running.clone();
     let gateway_v6_for_ptb = gateway_v6;
     let is_h3_framing = config.http3_framing;
+    let tun_mtu_for_ptb = resolve_tun_mtu(config.vpn_mtu);
     let tun_to_quic = std::thread::spawn(move || {
         let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
         loop {
@@ -227,9 +206,9 @@ async fn run_session(
                                 None
                             };
                             let reported_mtu = if version == 6 {
-                                (*CLIENT_TUN_MTU).max(1280)
+                                tun_mtu_for_ptb.max(1280)
                             } else {
-                                *CLIENT_TUN_MTU
+                                tun_mtu_for_ptb
                             };
 
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(

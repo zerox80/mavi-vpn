@@ -3,7 +3,7 @@ use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
     masque::{self, CAPSULE_MAVI_CONFIG},
-    ControlMessage, DEFAULT_TUN_MTU, QUIC_OVERHEAD_BYTES,
+    ControlMessage, QUIC_OVERHEAD_BYTES, resolve_tun_mtu,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,6 +38,7 @@ pub async fn connect_and_handshake(
     censorship_resistant: bool,
     http3_framing: bool,
     ech_config_hex: Option<String>,
+    vpn_mtu: Option<u16>,
 ) -> anyhow::Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
 
     info!("Connect and Handshake started. Pin: {}", cert_pin);
@@ -87,12 +88,11 @@ pub async fn connect_and_handshake(
         return Err(anyhow::anyhow!("Endpoint host missing"));
     }
 
-    // Outer QUIC payload MTU is derived from the default inner TUN MTU
-    // (1280) + 80-byte QUIC/AEAD overhead budget. Android has no runtime knob
-    // for `VPN_MTU` yet — if the server is reconfigured, the Android build
-    // must be updated to match, otherwise the larger side will send UDP
-    // payloads the smaller side considers out-of-spec.
-    let tun_mtu = DEFAULT_TUN_MTU;
+    // Outer QUIC payload MTU is derived from the inner TUN MTU (configurable
+    // via vpn_mtu, env VPN_MTU, or default 1280) + 80-byte QUIC/AEAD overhead.
+    // Server and client MUST agree on the TUN MTU, otherwise the larger side
+    // will send UDP payloads the smaller side considers out-of-spec.
+    let tun_mtu = resolve_tun_mtu(vpn_mtu);
     let quic_mtu = tun_mtu + QUIC_OVERHEAD_BYTES;
     info!(
         "Setting QUIC MTU: {} (TUN MTU: {}, Target Wire: {} IPv4 / {} IPv6)",

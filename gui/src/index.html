@@ -108,6 +108,10 @@
             <input type="checkbox" id="h3_framing" />
             <label for="h3_framing">HTTP/3 framing (RFC 9297)</label>
           </div>
+          <div class="field">
+            <label for="vpn_mtu">VPN MTU (1280–1360, default 1280)</label>
+            <input type="number" id="vpn_mtu" placeholder="1280" min="1280" max="1360" />
+          </div>
 
           <hr />
           <div class="checkbox-field">
@@ -218,6 +222,10 @@
       <div class="checkbox-field">
         <input type="checkbox" id="m_h3_framing" />
         <label for="m_h3_framing">HTTP/3 framing</label>
+      </div>
+      <div class="field">
+        <label for="m_vpn_mtu">VPN MTU (1280–1360, default 1280)</label>
+        <input type="number" id="m_vpn_mtu" placeholder="1280" min="1280" max="1360" />
       </div>
       <hr style="border:none;border-top:1px solid var(--line);margin:12px 0" />
       <div class="checkbox-field">

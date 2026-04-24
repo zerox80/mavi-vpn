@@ -35,10 +35,29 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     
     let config = config::load();
+
+    let quic_overhead: u16 = 80;
+    let quic_payload_mtu = config.mtu + quic_overhead;
+    let wire_overhead_ipv4 = 20u16 + 8; // IP + UDP
+    let wire_overhead_ipv6 = 40u16 + 8;
+    let mtu_source = if std::env::var("VPN_MTU").is_ok() {
+        "VPN_MTU env / .env"
+    } else {
+        "default"
+    };
+
     info!("Starting Mavi VPN Server...");
     info!("Network: {}", config.network_cidr);
     info!("Bind Address: {}", config.bind_addr);
     info!("MSS Clamping: {}", if config.mss_clamping { "enabled" } else { "disabled" });
+    info!(
+        "MTU: {} (source: {}) → QUIC Payload: {} → Wire IPv4: {} / IPv6: {}",
+        config.mtu,
+        mtu_source,
+        quic_payload_mtu,
+        quic_payload_mtu + wire_overhead_ipv4,
+        quic_payload_mtu + wire_overhead_ipv6,
+    );
 
     let state = Arc::new(AppState::new(&config.network_cidr)?);
 

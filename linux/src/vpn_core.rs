@@ -14,7 +14,7 @@ use shared::{
     icmp,
     ipc::Config,
     masque::{self, CAPSULE_MAVI_CONFIG},
-    ControlMessage, DEFAULT_TUN_MTU, QUIC_OVERHEAD_BYTES, resolve_tun_mtu,
+    ControlMessage, QUIC_OVERHEAD_BYTES, resolve_tun_mtu,
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};

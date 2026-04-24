@@ -406,6 +406,7 @@ mod tests {
         assert!(!conn.http3_framing);
         assert!(!conn.censorship_resistant);
         assert!(conn.kc_auth.is_none());
+        assert!(conn.vpn_mtu.is_none());
     }
 
     #[test]

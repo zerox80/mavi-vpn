@@ -23,6 +23,7 @@ import com.mavi.vpn.data.InstalledApp
 import com.mavi.vpn.ui.components.drawableToBitmap
 import com.mavi.vpn.ui.components.toImageBitmap
 import com.mavi.vpn.viewmodel.VpnViewModel
+import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -43,6 +44,16 @@ fun SettingsScreen(
     var censorshipResistant by remember { mutableStateOf(initialCensorshipResistant) }
     var http3Framing by remember { mutableStateOf(initialHttp3Framing) }
     var vpnMtuText by remember { mutableStateOf(if (initialVpnMtu > 0) initialVpnMtu.toString() else "") }
+
+    fun parseValidatedMtu(): Int {
+        if (vpnMtuText.isBlank()) return 0
+        val value = vpnMtuText.toIntOrNull() ?: return 0
+        if (value !in 1280..1360) {
+            Toast.makeText(context, "VPN MTU must be between 1280 and 1360", Toast.LENGTH_SHORT).show()
+            return 0
+        }
+        return value
+    }
     
     val selectedPackages = remember { 
         mutableStateListOf<String>().apply { 
@@ -91,7 +102,7 @@ fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
         ) {
-            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, vpnMtuText.toIntOrNull() ?: 0) }) {
+            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
             Text(
@@ -275,7 +286,7 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(16.dp))
         
         Button(
-            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, vpnMtuText.toIntOrNull() ?: 0) },
+            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) },
             modifier = Modifier.fillMaxWidth().height(50.dp),
             shape = RoundedCornerShape(12.dp)
         ) {

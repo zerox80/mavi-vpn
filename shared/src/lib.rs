@@ -23,6 +23,42 @@ pub const QUIC_OVERHEAD_BYTES: u16 = 80;
 /// pre-knob pinning.
 pub const DEFAULT_TUN_MTU: u16 = 1280;
 
+/// Minimum allowed inner TUN MTU (inclusive).
+pub const MIN_TUN_MTU: u16 = 1280;
+
+/// Maximum allowed inner TUN MTU (inclusive).
+pub const MAX_TUN_MTU: u16 = 1360;
+
+/// Resolve the inner TUN MTU from an explicit config value, the `VPN_MTU`
+/// environment variable, or the compiled-in default (1280). The explicit
+/// `vpn_mtu` parameter takes highest priority; it must be within the
+/// 1280–1360 range. Invalid values fall through to the next source with a
+/// warning.
+///
+/// QUIC Payload MTU is always derived as `tun_mtu + QUIC_OVERHEAD_BYTES`
+/// (i.e. +80) and must never be set independently.
+pub fn resolve_tun_mtu(vpn_mtu: Option<u16>) -> u16 {
+    // 1. Explicit config field (highest priority)
+    if let Some(v) = vpn_mtu {
+        if v >= MIN_TUN_MTU && v <= MAX_TUN_MTU {
+            return v;
+        }
+        // Fall through to env / default on out-of-range values
+    }
+
+    // 2. Environment variable (CLI / daemon use)
+    if let Ok(s) = std::env::var("VPN_MTU") {
+        if let Ok(v) = s.trim().parse::<u16>() {
+            if v >= MIN_TUN_MTU && v <= MAX_TUN_MTU {
+                return v;
+            }
+        }
+    }
+
+    // 3. Compiled-in default
+    DEFAULT_TUN_MTU
+}
+
 /// Control-plane messages exchanged over the QUIC bidirectional stream during
 /// connection setup (the "handshake phase").
 ///

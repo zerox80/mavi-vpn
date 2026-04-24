@@ -314,19 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tun_mtu_none_returns_default() {
-        // Env var tests run in a single function to avoid parallel race conditions
-        // on std::env::set_var/remove_var.
-        let prev = std::env::var("VPN_MTU").ok();
-        std::env::remove_var("VPN_MTU");
-        assert_eq!(resolve_tun_mtu(None), DEFAULT_TUN_MTU);
-        // Restore
-        if let Some(v) = prev {
-            std::env::set_var("VPN_MTU", v);
-        }
-    }
-
-    #[test]
     fn resolve_tun_mtu_explicit_valid() {
         assert_eq!(resolve_tun_mtu(Some(1300)), 1300);
         assert_eq!(resolve_tun_mtu(Some(1280)), 1280);
@@ -334,60 +321,38 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tun_mtu_explicit_out_of_range_falls_through() {
+    fn resolve_tun_mtu_env_var_scenarios() {
+        // All env var scenarios are in a single test to avoid race conditions
+        // from parallel tests mutating std::env concurrently.
         let prev = std::env::var("VPN_MTU").ok();
+
+        // None + no env → default
         std::env::remove_var("VPN_MTU");
+        assert_eq!(resolve_tun_mtu(None), DEFAULT_TUN_MTU);
+
+        // Explicit out-of-range + no env → default (falls through)
         assert_eq!(resolve_tun_mtu(Some(500)), DEFAULT_TUN_MTU);
         assert_eq!(resolve_tun_mtu(Some(2000)), DEFAULT_TUN_MTU);
         assert_eq!(resolve_tun_mtu(Some(0)), DEFAULT_TUN_MTU);
-        if let Some(v) = prev {
-            std::env::set_var("VPN_MTU", v);
-        }
-    }
 
-    #[test]
-    fn resolve_tun_mtu_env_var_fallback() {
-        let prev = std::env::var("VPN_MTU").ok();
+        // Env var fallback
         std::env::set_var("VPN_MTU", "1300");
         assert_eq!(resolve_tun_mtu(None), 1300);
-        if let Some(v) = prev {
-            std::env::set_var("VPN_MTU", v);
-        } else {
-            std::env::remove_var("VPN_MTU");
-        }
-    }
 
-    #[test]
-    fn resolve_tun_mtu_explicit_takes_priority_over_env() {
-        let prev = std::env::var("VPN_MTU").ok();
-        std::env::set_var("VPN_MTU", "1300");
+        // Explicit takes priority over env
         assert_eq!(resolve_tun_mtu(Some(1340)), 1340);
-        if let Some(v) = prev {
-            std::env::set_var("VPN_MTU", v);
-        } else {
-            std::env::remove_var("VPN_MTU");
-        }
-    }
 
-    #[test]
-    fn resolve_tun_mtu_invalid_env_falls_through() {
-        let prev = std::env::var("VPN_MTU").ok();
+        // Invalid env falls through to default
         std::env::set_var("VPN_MTU", "not_a_number");
         assert_eq!(resolve_tun_mtu(None), DEFAULT_TUN_MTU);
         std::env::set_var("VPN_MTU", "99999");
         assert_eq!(resolve_tun_mtu(None), DEFAULT_TUN_MTU);
-        if let Some(v) = prev {
-            std::env::set_var("VPN_MTU", v);
-        } else {
-            std::env::remove_var("VPN_MTU");
-        }
-    }
 
-    #[test]
-    fn resolve_tun_mtu_invalid_env_with_valid_explicit() {
-        let prev = std::env::var("VPN_MTU").ok();
+        // Invalid env with valid explicit → explicit wins
         std::env::set_var("VPN_MTU", "bad");
         assert_eq!(resolve_tun_mtu(Some(1300)), 1300);
+
+        // Restore previous env state
         if let Some(v) = prev {
             std::env::set_var("VPN_MTU", v);
         } else {

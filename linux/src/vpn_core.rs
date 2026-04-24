@@ -14,7 +14,7 @@ use shared::{
     icmp,
     ipc::Config,
     masque::{self, CAPSULE_MAVI_CONFIG},
-    ControlMessage, DEFAULT_TUN_MTU, QUIC_OVERHEAD_BYTES,
+    ControlMessage, QUIC_OVERHEAD_BYTES, resolve_tun_mtu,
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,26 +34,6 @@ const RECONNECT_MAX_SECS: u64 = 30;
 
 /// TUN device name used by the VPN.
 const TUN_DEVICE_NAME: &str = "mavi0";
-
-/// Read the inner TUN MTU the client expects the server to push. Must match
-/// the server's `VPN_MTU`. Invalid or absent values fall back to
-/// [`DEFAULT_TUN_MTU`] with a warning. Accepted range mirrors the backend
-/// validator: 1280–1360.
-fn read_tun_mtu_from_env() -> u16 {
-    match std::env::var("VPN_MTU") {
-        Err(_) => DEFAULT_TUN_MTU,
-        Ok(s) => match s.trim().parse::<u16>() {
-            Ok(v) if (1280..=1360).contains(&v) => v,
-            _ => {
-                warn!(
-                    "Ignoring invalid VPN_MTU={:?} (expected 1280-1360); falling back to {}",
-                    s, DEFAULT_TUN_MTU
-                );
-                DEFAULT_TUN_MTU
-            }
-        },
-    }
-}
 
 /// Entry point for the VPN runner. Manages the reconnection loop and TUN lifecycle.
 pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
@@ -185,6 +165,7 @@ async fn run_session(
         config.censorship_resistant,
         config.http3_framing,
         ech_bytes,
+        config.vpn_mtu,
     )
     .await?;
 
@@ -402,6 +383,7 @@ async fn connect_and_handshake(
     censorship_resistant: bool,
     http3_framing: bool,
     ech_config_list: Option<Vec<u8>>,
+    vpn_mtu: Option<u16>,
 ) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
@@ -456,7 +438,7 @@ async fn connect_and_handshake(
     // QUIC short-header framing + AEAD tag + connection-ID bytes. Server and
     // client MUST be configured with the same `VPN_MTU`, otherwise the larger
     // side will send UDP payloads the smaller side considers out-of-spec.
-    let tun_mtu = read_tun_mtu_from_env();
+    let tun_mtu = resolve_tun_mtu(vpn_mtu);
     let quic_mtu = tun_mtu + QUIC_OVERHEAD_BYTES;
     let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20 } else { 40 }, 8);
     info!(

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::Buf;
-use shared::{ControlMessage, QUIC_OVERHEAD_BYTES, masque::{self, CAPSULE_MAVI_CONFIG}};
+use shared::{ControlMessage, QUIC_OVERHEAD_BYTES, resolve_tun_mtu, masque::{self, CAPSULE_MAVI_CONFIG}};
 use tracing::{info, warn};
 use sha2::{Sha256, Digest};
 use std::sync::Arc;
@@ -8,7 +8,6 @@ use std::time::Duration;
 use h3_quinn::Connection as H3QuinnConnection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::network::split_endpoint;
-use super::CLIENT_TUN_MTU;
 
 /// Holds the h3 `SendRequest` + driver task for the lifetime of the VPN session.
 ///
@@ -41,6 +40,7 @@ pub async fn connect_and_handshake(
     censorship_resistant: bool,
     http3_framing: bool,
     ech_config_list: Option<Vec<u8>>,
+    vpn_mtu: Option<u16>,
 ) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
@@ -105,7 +105,7 @@ pub async fn connect_and_handshake(
     // QUIC short-header framing + AEAD tag + connection-ID bytes. Server and
     // client MUST be configured with the same `VPN_MTU`, otherwise the larger
     // side will send UDP payloads the smaller side considers out-of-spec.
-    let tun_mtu = *CLIENT_TUN_MTU;
+    let tun_mtu = resolve_tun_mtu(vpn_mtu);
     let quic_mtu = tun_mtu + QUIC_OVERHEAD_BYTES;
     let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20u16 } else { 40u16 }, 8u16);
     info!(

@@ -32,6 +32,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     var splitPackages = MutableStateFlow(prefs.savedSplitPackages)
     var censorshipResistant = MutableStateFlow(prefs.savedCensorshipResistant)
     var http3Framing = MutableStateFlow(prefs.savedHttp3Framing)
+    var vpnMtu = MutableStateFlow(prefs.savedVpnMtu)
 
     private val _errorMessage = MutableStateFlow("")
     val errorMessage: StateFlow<String> = _errorMessage.asStateFlow()
@@ -70,15 +71,17 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         prefs.savedUseKeycloak = useKeycloak.value
     }
 
-    fun saveSettings(mode: String, packages: String, crMode: Boolean, h3Mode: Boolean) {
+    fun saveSettings(mode: String, packages: String, crMode: Boolean, h3Mode: Boolean, vpnMtuValue: Int) {
         splitMode.value = mode
         splitPackages.value = packages
         censorshipResistant.value = crMode
         http3Framing.value = h3Mode
+        vpnMtu.value = vpnMtuValue
         
         prefs.savedSplitMode = mode
         prefs.savedSplitPackages = packages
         prefs.savedCensorshipResistant = crMode
         prefs.savedHttp3Framing = h3Mode
+        prefs.savedVpnMtu = vpnMtuValue
     }
 }

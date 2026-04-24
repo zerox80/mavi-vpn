@@ -52,6 +52,10 @@ pub struct Config {
     /// spoofs the SNI to the config's `public_name`.
     #[serde(default)]
     pub ech_config: Option<String>,
+    /// Inner TUN MTU override. Must match the server's `VPN_MTU` (1280–1360).
+    /// `None` or absent → fall back to `VPN_MTU` env var, then `DEFAULT_TUN_MTU` (1280).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vpn_mtu: Option<u16>,
 }
 
 /// Commands sent from the client UI to the background service.
@@ -122,6 +126,7 @@ mod tests {
             kc_realm: Some("mavi-vpn".to_string()),
             kc_client_id: Some("mavi-client".to_string()),
             ech_config: None,
+            vpn_mtu: None,
         };
         let req = IpcRequest::Start(config);
         let decoded = roundtrip_request(&req);
@@ -211,6 +216,7 @@ mod tests {
             kc_realm: None,
             kc_client_id: None,
             ech_config: Some("deadbeef01020304".to_string()),
+            vpn_mtu: None,
         };
         let req = IpcRequest::Start(config);
         let decoded = roundtrip_request(&req);
@@ -236,6 +242,7 @@ mod tests {
             kc_realm: None,
             kc_client_id: None,
             ech_config: None,
+            vpn_mtu: None,
         };
         let req = IpcRequest::Start(config);
         let decoded = roundtrip_request(&req);
@@ -280,6 +287,7 @@ mod tests {
             kc_realm: Some("my-realm".to_string()),
             kc_client_id: Some("my-client".to_string()),
             ech_config: Some("deadbeef".to_string()),
+            vpn_mtu: None,
         };
         let secure = SecureIpcRequest {
             auth_token: "ipc-token".to_string(),
@@ -314,6 +322,7 @@ mod tests {
             kc_realm: Some("test-realm".to_string()),
             kc_client_id: Some("test-client".to_string()),
             ech_config: None,
+            vpn_mtu: None,
         };
         let req = IpcRequest::Start(config);
         let decoded = roundtrip_request(&req);

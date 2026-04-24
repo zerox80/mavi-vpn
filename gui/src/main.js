@@ -221,6 +221,7 @@ async function selectConnection(id) {
     $('kc_url').value = conn.kc_url || '';
     $('kc_realm').value = conn.kc_realm || '';
     $('kc_client_id').value = conn.kc_client_id || '';
+    $('vpn_mtu').value = conn.vpn_mtu || '';
     $('kc-fields').classList.toggle('hidden', !conn.kc_auth);
     $('token-field').classList.toggle('hidden', !!conn.kc_auth);
   }
@@ -260,6 +261,7 @@ function openModal(id) {
   $('m_kc_url').value = existing?.kc_url ?? '';
   $('m_kc_realm').value = existing?.kc_realm ?? '';
   $('m_kc_client_id').value = existing?.kc_client_id ?? '';
+  $('m_vpn_mtu').value = existing?.vpn_mtu ?? '';
   $('m-kc-fields').classList.toggle('hidden', !$('m_kc_auth').checked);
   $('modal-delete').classList.toggle('hidden', !existing);
   $('modal-backdrop').classList.add('visible');
@@ -280,6 +282,7 @@ async function saveModal() {
   if (!cert_pin) return showToast('Certificate PIN is required.', 'error');
 
   const kc_auth = $('m_kc_auth').checked || null;
+  const mtuVal = parseInt($('m_vpn_mtu').value, 10);
   const conn = {
     id: _editingId || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
     label,
@@ -292,6 +295,7 @@ async function saveModal() {
     kc_url: kc_auth ? ($('m_kc_url').value.trim() || null) : null,
     kc_realm: kc_auth ? ($('m_kc_realm').value.trim() || null) : null,
     kc_client_id: kc_auth ? ($('m_kc_client_id').value.trim() || null) : null,
+    vpn_mtu: (mtuVal >= 1280 && mtuVal <= 1360) ? mtuVal : null,
   };
 
   if (_editingId) {
@@ -339,6 +343,7 @@ function wireSettingsForm() {
 
 function readSettings() {
   const kcAuth = $('kc_auth').checked;
+  const mtuVal = parseInt($('vpn_mtu').value, 10);
   return {
     endpoint: $('endpoint').value.trim(),
     token: $('token').value.trim(),
@@ -350,6 +355,7 @@ function readSettings() {
     kc_url: kcAuth ? ($('kc_url').value.trim() || null) : null,
     kc_realm: kcAuth ? ($('kc_realm').value.trim() || null) : null,
     kc_client_id: kcAuth ? ($('kc_client_id').value.trim() || null) : null,
+    vpn_mtu: (mtuVal >= 1280 && mtuVal <= 1360) ? mtuVal : null,
   };
 }
 
@@ -360,6 +366,7 @@ function fillSettings(config) {
   $('ech_config').value = config.ech_config || '';
   $('cr_mode').checked = !!config.censorship_resistant;
   $('h3_framing').checked = !!config.http3_framing;
+  $('vpn_mtu').value = config.vpn_mtu || '';
   $('kc_auth').checked = !!config.kc_auth;
   $('kc_url').value = config.kc_url || '';
   $('kc_realm').value = config.kc_realm || '';

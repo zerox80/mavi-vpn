@@ -53,5 +53,6 @@ gui/src-tauri/build_error.txt
 
 # --- Backend ---
 /backend/data/
+/backend/letsencrypt/
 .agents/workflows/gemini.md
 android/gradlew

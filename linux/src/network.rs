@@ -42,8 +42,10 @@ impl NetworkConfig {
         // 1. Bring up the TUN interface
         run_cmd("ip", &["link", "set", tun_name, "up"])?;
 
-        // 2. Set MTU (Rule 1: Always 1280)
-        run_cmd("ip", &["link", "set", tun_name, "mtu", "1280"])?;
+        // 2. Set MTU
+        let mtu_str = mtu.to_string();
+        info!("Setting TUN MTU: {} on {}", mtu, tun_name);
+        run_cmd("ip", &["link", "set", tun_name, "mtu", &mtu_str])?;
 
         // 3. Set IPv4 address
         run_cmd(

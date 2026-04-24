@@ -43,5 +43,6 @@ export function toConfig(conn, token) {
     kc_realm: conn.kc_realm ?? null,
     kc_client_id: conn.kc_client_id ?? null,
     ech_config: conn.ech_config ?? null,
+    vpn_mtu: conn.vpn_mtu ?? null,
   };
 }

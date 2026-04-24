@@ -203,6 +203,9 @@ async fn load_or_prompt_config() -> Result<Config> {
         }
         println!("  CR Mode: {}", if saved.censorship_resistant { "Ja" } else { "Nein" });
         println!("  HTTP/3 Framing: {}", if saved.http3_framing { "Ja" } else { "Nein" });
+        if let Some(mtu) = saved.vpn_mtu {
+            println!("  VPN MTU: {}", mtu);
+        }
         println!();
         
         print!("Diese Konfiguration verwenden? [J/n]: ");
@@ -318,6 +321,21 @@ async fn prompt_new_config() -> Result<Config> {
         _ => None,
     };
 
+    print!("VPN MTU (1280–1360, optional – Enter für Standard 1280): ");
+    stdout.flush()?;
+    let vpn_mtu_input = read_line()?;
+    let vpn_mtu = if vpn_mtu_input.is_empty() {
+        None
+    } else {
+        match vpn_mtu_input.parse::<u16>() {
+            Ok(v) if v >= 1280 && v <= 1360 => Some(v),
+            _ => {
+                eprintln!("Warnung: Ungültiger MTU-Wert – Standard (1280) wird verwendet");
+                None
+            }
+        }
+    };
+
     println!();
 
     Ok(Config {
@@ -331,6 +349,7 @@ async fn prompt_new_config() -> Result<Config> {
         kc_realm: saved_kc_realm,
         kc_client_id: saved_kc_client_id,
         ech_config,
+        vpn_mtu,
     })
 }
 

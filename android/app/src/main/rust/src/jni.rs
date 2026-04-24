@@ -61,6 +61,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     censorship_resistant: jni::sys::jboolean,
     http3_framing: jni::sys::jboolean,
     ech_config: JString<'local>,
+    vpn_mtu: jint,
 ) -> jlong {
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let env = guard.borrow_env_mut();
@@ -195,8 +196,10 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
         }
     };
 
+    let vpn_mtu_opt = if vpn_mtu > 0 { Some(vpn_mtu as u16) } else { None };
+
     let result = rt.block_on(async {
-        connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant, http3_framing, ech_config_hex).await
+        connect_and_handshake(socket, token, endpoint, cert_pin_str, censorship_resistant, http3_framing, ech_config_hex, vpn_mtu_opt).await
     });
 
     match result {

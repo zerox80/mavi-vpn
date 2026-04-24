@@ -66,6 +66,10 @@ class PrefsManager(context: Context) {
         get() = prefs.getString("saved_preshared_key", "") ?: ""
         set(value) = prefs.edit().putString("saved_preshared_key", value).apply()
 
+    var savedVpnMtu: Int
+        get() = prefs.getInt("saved_vpn_mtu", 0)
+        set(value) = prefs.edit().putInt("saved_vpn_mtu", value).apply()
+
     var tempSplitMode: String
         get() = prefs.getString("temp_split_mode", "exclude") ?: "exclude"
         set(value) = prefs.edit().putString("temp_split_mode", value).apply()

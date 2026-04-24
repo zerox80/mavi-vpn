@@ -23,13 +23,14 @@ import com.mavi.vpn.data.InstalledApp
 import com.mavi.vpn.ui.components.drawableToBitmap
 import com.mavi.vpn.ui.components.toImageBitmap
 import com.mavi.vpn.viewmodel.VpnViewModel
+import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen(
     viewModel: VpnViewModel,
-    onBack: (String, String, Boolean, Boolean) -> Unit
+    onBack: (String, String, Boolean, Boolean, Int) -> Unit
 ) {
     val context = LocalContext.current
     
@@ -37,10 +38,22 @@ fun SettingsScreen(
     val initialSelection by viewModel.splitPackages.collectAsState()
     val initialCensorshipResistant by viewModel.censorshipResistant.collectAsState()
     val initialHttp3Framing by viewModel.http3Framing.collectAsState()
+    val initialVpnMtu by viewModel.vpnMtu.collectAsState()
     
     var mode by remember { mutableStateOf(initialMode) }
     var censorshipResistant by remember { mutableStateOf(initialCensorshipResistant) }
     var http3Framing by remember { mutableStateOf(initialHttp3Framing) }
+    var vpnMtuText by remember { mutableStateOf(if (initialVpnMtu > 0) initialVpnMtu.toString() else "") }
+
+    fun parseValidatedMtu(): Int {
+        if (vpnMtuText.isBlank()) return 0
+        val value = vpnMtuText.toIntOrNull() ?: return 0
+        if (value !in 1280..1360) {
+            Toast.makeText(context, "VPN MTU must be between 1280 and 1360", Toast.LENGTH_SHORT).show()
+            return 0
+        }
+        return value
+    }
     
     val selectedPackages = remember { 
         mutableStateListOf<String>().apply { 
@@ -89,7 +102,7 @@ fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
         ) {
-            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing) }) {
+            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
             Text(
@@ -148,6 +161,32 @@ fun SettingsScreen(
                     uncheckedThumbColor = Color.Gray,
                     uncheckedTrackColor = Color.DarkGray
                 )
+            )
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
+                .padding(16.dp)
+        ) {
+            Text(text = "VPN MTU", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(text = "Inner TUN MTU (1280–1360). Default: 1280. Must match server.", color = Color.Gray, fontSize = 12.sp)
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = vpnMtuText,
+                onValueChange = { vpnMtuText = it.filter { c -> c.isDigit() } },
+                placeholder = { Text("1280", color = Color.Gray) },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedBorderColor = Color.DarkGray
+                ),
+                modifier = Modifier.fillMaxWidth()
             )
         }
         
@@ -247,7 +286,7 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(16.dp))
         
         Button(
-            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing) },
+            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) },
             modifier = Modifier.fillMaxWidth().height(50.dp),
             shape = RoundedCornerShape(12.dp)
         ) {

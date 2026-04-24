@@ -193,6 +193,8 @@ struct SavedConn {
     kc_realm: Option<String>,
     #[serde(default)]
     kc_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vpn_mtu: Option<u16>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -385,6 +387,7 @@ mod tests {
                 kc_url: None,
                 kc_realm: None,
                 kc_client_id: None,
+                vpn_mtu: None,
             }],
             active_id: Some("abc123".into()),
         };
@@ -403,6 +406,7 @@ mod tests {
         assert!(!conn.http3_framing);
         assert!(!conn.censorship_resistant);
         assert!(conn.kc_auth.is_none());
+        assert!(conn.vpn_mtu.is_none());
     }
 
     #[test]

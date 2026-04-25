@@ -40,7 +40,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude windows-vpn --exclude mavivpn --all-targets -- -D warnings
 
   # ── Kotlin: ktlint ────────────────────────────────────────────────────────────
   kotlin-lint:

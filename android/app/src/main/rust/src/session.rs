@@ -1,6 +1,6 @@
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use shared::ControlMessage;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::connection::H3SessionGuard;

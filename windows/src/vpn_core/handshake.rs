@@ -1,13 +1,16 @@
+use super::network::split_endpoint;
 use anyhow::{Context, Result};
 use bytes::Buf;
-use shared::{ControlMessage, QUIC_OVERHEAD_BYTES, resolve_tun_mtu, masque::{self, CAPSULE_MAVI_CONFIG}};
-use tracing::{info, warn};
-use sha2::{Sha256, Digest};
+use h3_quinn::Connection as H3QuinnConnection;
+use sha2::{Digest, Sha256};
+use shared::{
+    masque::{self, CAPSULE_MAVI_CONFIG},
+    resolve_tun_mtu, ControlMessage, QUIC_OVERHEAD_BYTES,
+};
 use std::sync::Arc;
 use std::time::Duration;
-use h3_quinn::Connection as H3QuinnConnection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use super::network::split_endpoint;
+use tracing::{info, warn};
 
 /// Holds the h3 `SendRequest` + driver task for the lifetime of the VPN session.
 ///
@@ -51,7 +54,11 @@ pub async fn connect_and_handshake(
         Some(bytes) => {
             let parsed = crate::ech_client::parse(bytes)
                 .context("Failed to parse ECH config list")?
-                .ok_or_else(|| anyhow::anyhow!("ECH config list contained no HPKE suites supported by aws-lc-rs"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ECH config list contained no HPKE suites supported by aws-lc-rs"
+                    )
+                })?;
             info!("ECH GREASE enabled, outer SNI: {}", parsed.outer_sni);
             Some(parsed)
         }
@@ -117,33 +124,46 @@ pub async fn connect_and_handshake(
     );
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap()));
+    transport_config.max_idle_timeout(Some(
+        Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap(),
+    ));
     transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
-    
+
     // MTU PINNING
     transport_config.mtu_discovery_config(None);
     transport_config.initial_mtu(quic_mtu);
     transport_config.min_mtu(quic_mtu);
 
-    // Rule 1: TUN MTU MUST be 1280. 
+    // Rule 1: TUN MTU MUST be 1280.
     // Handled in NetworkConfig::apply. Peer datagram size is implicitly limited by path MTU discovery.
 
     transport_config.enable_segmentation_offload(true);
-    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
-    
+    transport_config
+        .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+
     // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // Increased from 256KB
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
+    ));
     client_config.transport_config(Arc::new(transport_config));
-    let mut endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
+    let mut endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )?;
     endpoint.set_default_client_config(client_config);
 
     let mut last_error = None;
     let mut connection = None;
     for addr in addrs {
-        info!("Connecting to {} (resolved: {}, SNI: {})", endpoint_str, addr, server_name);
+        info!(
+            "Connecting to {} (resolved: {}, SNI: {})",
+            endpoint_str, addr, server_name
+        );
         match endpoint.connect(addr, &server_name) {
             Ok(connecting) => match connecting.await {
                 Ok(conn) => {
@@ -163,9 +183,15 @@ pub async fn connect_and_handshake(
     }
     let connection = match connection {
         Some(conn) => conn,
-        None => return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str))),
+        None => {
+            return Err(last_error
+                .unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str)))
+        }
     };
-    info!("QUIC handshake OK, sending auth token ({} bytes)", token.len());
+    info!(
+        "QUIC handshake OK, sending auth token ({} bytes)",
+        token.len()
+    );
 
     let (config, h3_guard) = if http3_framing {
         let (cfg, guard) = connect_and_handshake_h3(connection.clone(), token).await?;
@@ -180,7 +206,9 @@ pub async fn connect_and_handshake(
         let _ = send.finish(); // properly close the send side of the auth stream
 
         let len = recv.read_u32_le().await? as usize;
-        if len > 65536 { anyhow::bail!("Server response too large: {} bytes", len); }
+        if len > 65536 {
+            anyhow::bail!("Server response too large: {} bytes", len);
+        }
         if len == 0x1901 {
             // This magic length happens when the server sends the HTTP/3 spoof payload
             // [0x01, 0x19, 0x00, 0x00] in censorship_resistant mode due to Auth Failure.
@@ -188,7 +216,8 @@ pub async fn connect_and_handshake(
         }
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
-        let cfg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
+        let cfg: ControlMessage =
+            bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
         (cfg, None)
     };
 
@@ -212,7 +241,9 @@ async fn connect_and_handshake_h3(
     let mut builder = h3::client::builder();
     builder.enable_datagram(true);
     builder.enable_extended_connect(true);
-    let (mut driver, mut send_request) = builder.build::<_, _, bytes::Bytes>(h3_conn).await
+    let (mut driver, mut send_request) = builder
+        .build::<_, _, bytes::Bytes>(h3_conn)
+        .await
         .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
 
     // Drive the H3 connection in the background. This task lives for the whole
@@ -235,12 +266,16 @@ async fn connect_and_handshake_h3(
         .body(())
         .context("Failed to build H3 CONNECT request")?;
 
-    let mut stream = send_request.send_request(req).await
+    let mut stream = send_request
+        .send_request(req)
+        .await
         .map_err(|e| anyhow::anyhow!("H3 send_request failed: {}", e))?;
     // NB: do NOT finish the stream — connect-ip keeps the request stream open
     // for bidirectional capsule traffic throughout the session.
 
-    let resp = stream.recv_response().await
+    let resp = stream
+        .recv_response()
+        .await
         .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {}", e))?;
 
     if resp.status() != http::StatusCode::OK {
@@ -302,12 +337,20 @@ async fn connect_and_handshake_h3(
 
     // Intentionally do NOT abort drive_handle or drop send_request here.
     // Both are moved into the guard and kept alive for the whole session.
-    let guard = H3SessionGuard { _send_request: send_request, drive_handle };
+    let guard = H3SessionGuard {
+        _send_request: send_request,
+        drive_handle,
+    };
     Ok((config, guard))
 }
 pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) { return None; }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 /// Custom certificate verifier that trusts only a specific SHA-256 fingerprint.
 #[derive(Debug)]
@@ -318,7 +361,11 @@ struct PinnedServerVerifier {
 
 impl PinnedServerVerifier {
     fn new(expected_hash: Vec<u8>) -> Self {
-        Self { expected_hash, supported: rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms }
+        Self {
+            expected_hash,
+            supported: rustls::crypto::aws_lc_rs::default_provider()
+                .signature_verification_algorithms,
+        }
     }
 }
 
@@ -339,13 +386,25 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
         }
     }
 
-    fn verify_tls12_signature(&self, message: &[u8], cert: &rustls::pki_types::CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls12_signature(message, cert, dss, &self.supported)
     }
 
-    fn verify_tls13_signature(&self, message: &[u8], cert: &rustls::pki_types::CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls13_signature(message, cert, dss, &self.supported)
     }
 
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> { self.supported.supported_schemes() }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.supported.supported_schemes()
+    }
 }

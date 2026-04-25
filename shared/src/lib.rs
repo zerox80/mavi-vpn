@@ -40,7 +40,7 @@ pub const MAX_TUN_MTU: u16 = 1360;
 pub fn resolve_tun_mtu(vpn_mtu: Option<u16>) -> u16 {
     // 1. Explicit config field (highest priority)
     if let Some(v) = vpn_mtu {
-        if v >= MIN_TUN_MTU && v <= MAX_TUN_MTU {
+        if (MIN_TUN_MTU..=MAX_TUN_MTU).contains(&v) {
             return v;
         }
         // Fall through to env / default on out-of-range values
@@ -49,7 +49,7 @@ pub fn resolve_tun_mtu(vpn_mtu: Option<u16>) -> u16 {
     // 2. Environment variable (CLI / daemon use)
     if let Ok(s) = std::env::var("VPN_MTU") {
         if let Ok(v) = s.trim().parse::<u16>() {
-            if v >= MIN_TUN_MTU && v <= MAX_TUN_MTU {
+            if (MIN_TUN_MTU..=MAX_TUN_MTU).contains(&v) {
                 return v;
             }
         }

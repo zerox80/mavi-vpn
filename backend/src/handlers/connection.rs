@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 
@@ -133,8 +133,9 @@ pub async fn handle_connection(
         .await;
     }
 
-    let (mut send_stream, mut recv_stream) = pre_bi.expect("raw detection always includes a bidi stream");
-    
+    let (mut send_stream, mut recv_stream) =
+        pre_bi.expect("raw detection always includes a bidi stream");
+
     let auth_result = async {
         let buf = tokio::time::timeout(Duration::from_secs(5), async {
             let len = recv_stream.read_u32_le().await? as usize;
@@ -148,30 +149,39 @@ pub async fn handle_connection(
         })
         .await
         .map_err(|_| anyhow::anyhow!("Handshake timeout"))??;
-        
-        let msg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-            .map(|(v, _)| v)
-            .map_err(|e| anyhow::anyhow!("Protocol error: {}", e))?;
-        
+
+        let msg: ControlMessage =
+            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+                .map(|(v, _)| v)
+                .map_err(|e| anyhow::anyhow!("Protocol error: {}", e))?;
+
         match msg {
             ControlMessage::Auth { token } => {
                 authenticate_client(&token, &state, &config, &keycloak).await
             }
             _ => anyhow::bail!("Protocol error: Expected Auth"),
         }
-    }.await;
+    }
+    .await;
 
     let (assigned_ip, assigned_ip6) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
             let error_msg = format!("Unauthorized: {}", e);
             if config.censorship_resistant {
-                warn!("Unauthorized probe from {}. Emulating HTTP/3. Error: {}", remote_addr, e);
+                warn!(
+                    "Unauthorized probe from {}. Emulating HTTP/3. Error: {}",
+                    remote_addr, e
+                );
                 let _ = emulate_http3(&connection, &mut send_stream).await;
                 return Err(anyhow::anyhow!("HTTP/3 probe response sent: {}", e));
             } else {
-                let err_payload = ControlMessage::Error { message: error_msg.clone() };
-                if let Ok(encoded) = bincode::serde::encode_to_vec(&err_payload, bincode::config::standard()) {
+                let err_payload = ControlMessage::Error {
+                    message: error_msg.clone(),
+                };
+                if let Ok(encoded) =
+                    bincode::serde::encode_to_vec(&err_payload, bincode::config::standard())
+                {
                     let _ = send_stream.write_u32_le(encoded.len() as u32).await;
                     let _ = send_stream.write_all(&encoded).await;
                     let _ = send_stream.finish();
@@ -181,7 +191,11 @@ pub async fn handle_connection(
         }
     };
 
-    let _ip_guard = IpGuard { state: state.clone(), ip4: assigned_ip, ip6: assigned_ip6 };
+    let _ip_guard = IpGuard {
+        state: state.clone(),
+        ip4: assigned_ip,
+        ip6: assigned_ip6,
+    };
 
     let success_msg = ControlMessage::Config {
         assigned_ip,
@@ -189,15 +203,27 @@ pub async fn handle_connection(
         gateway: state.gateway_ip(),
         dns_server: config.dns,
         mtu: config.mtu,
-        assigned_ipv6: if ipv6_enabled { Some(assigned_ip6) } else { None },
+        assigned_ipv6: if ipv6_enabled {
+            Some(assigned_ip6)
+        } else {
+            None
+        },
         netmask_v6: if ipv6_enabled { Some(64) } else { None },
-        gateway_v6: if ipv6_enabled { Some(state.gateway_ip_v6()) } else { None },
+        gateway_v6: if ipv6_enabled {
+            Some(state.gateway_ip_v6())
+        } else {
+            None
+        },
         dns_server_v6: if ipv6_enabled {
-            Some(config.dns_v6.unwrap_or_else(|| std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)))
-        } else { None },
+            Some(config.dns_v6.unwrap_or_else(|| {
+                std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
+            }))
+        } else {
+            None
+        },
         whitelist_domains: Some(config.whitelist_domains.clone()),
     };
-    
+
     let bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
     send_stream.write_u32_le(bytes.len() as u32).await?;
     send_stream.write_all(&bytes).await?;
@@ -229,7 +255,9 @@ pub async fn handle_connection(
                 stats.path.lost_packets,
                 conn_stats.max_datagram_size().unwrap_or(0)
             );
-            if conn_stats.close_reason().is_some() { break; }
+            if conn_stats.close_reason().is_some() {
+                break;
+            }
         }
     });
 
@@ -243,5 +271,6 @@ pub async fn handle_connection(
         state.gateway_ip_v6(),
         config.mtu,
         false, // is_h3
-    ).await
+    )
+    .await
 }

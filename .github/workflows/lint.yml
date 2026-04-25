@@ -1,0 +1,61 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Rust: cargo fmt + clippy ──────────────────────────────────────────────────
+  rust-lint:
+    name: Rust Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: rust-lint-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: rust-lint-cargo-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake pkg-config libglib2.0-dev libwebkit2gtk-4.1-dev libssl-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --exclude windows-vpn --exclude mavivpn --all-targets -- -D warnings
+
+  # ── Kotlin: ktlint ────────────────────────────────────────────────────────────
+  kotlin-lint:
+    name: Kotlin Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: ktlint check
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew ktlintCheck

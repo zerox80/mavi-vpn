@@ -3,6 +3,7 @@ import org.apache.tools.ant.taskdefs.condition.Os
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jlleitschuh.gradle.ktlint")
 }
 
 android {
@@ -37,9 +38,9 @@ android {
 
 tasks.register<Exec>("cargoBuild") {
     workingDir = file("src/main/rust")
-    
+
     val cargoCommand = if (Os.isFamily(Os.FAMILY_WINDOWS)) "cargo.exe" else "cargo"
-    
+
     commandLine(
         cargoCommand, "ndk",
         "-t", "armeabi-v7a",
@@ -47,7 +48,7 @@ tasks.register<Exec>("cargoBuild") {
         "-t", "x86",
         "-t", "x86_64",
         "-o", "../jniLibs",
-        "build", "--release"
+        "build", "--release",
     )
 }
 

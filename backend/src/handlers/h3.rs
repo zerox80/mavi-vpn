@@ -1,22 +1,22 @@
-use std::net::IpAddr;
-use std::sync::Arc;
 use anyhow::Result;
 use bytes::Bytes;
 use http::Response;
+use std::net::IpAddr;
+use std::sync::Arc;
 use tracing::{info, warn};
 
-use shared::ControlMessage;
 use shared::masque::{
     self, AssignedAddress, IpAddressRange, CAPSULE_ADDRESS_ASSIGN, CAPSULE_MAVI_CONFIG,
     CAPSULE_ROUTE_ADVERTISEMENT,
 };
+use shared::ControlMessage;
 
 use crate::config::Config;
-use crate::keycloak::KeycloakValidator;
-use crate::state::AppState;
 use crate::handlers::auth::authenticate_client;
 use crate::handlers::tunnel::run_tunnel;
-use crate::handlers::utils::{IpGuard, prefix_len_from_mask};
+use crate::handlers::utils::{prefix_len_from_mask, IpGuard};
+use crate::keycloak::KeycloakValidator;
+use crate::state::AppState;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_h3_connection(
@@ -37,8 +37,11 @@ pub async fn handle_h3_connection(
         sni.as_deref().unwrap_or("<none>")
     );
 
-    let h3_conn_wrapper =
-        crate::network::h3_quinn::Connection::with_pre_streams(connection.clone(), pre_bi, Some(pre_uni));
+    let h3_conn_wrapper = crate::network::h3_quinn::Connection::with_pre_streams(
+        connection.clone(),
+        pre_bi,
+        Some(pre_uni),
+    );
     let mut h3_conn = h3::server::builder()
         .enable_datagram(true)
         .enable_extended_connect(true)
@@ -46,16 +49,17 @@ pub async fn handle_h3_connection(
         .await
         .map_err(|e| anyhow::anyhow!("H3 build failed: {}", e))?;
 
-    let resolver = h3_conn.accept().await
+    let resolver = h3_conn
+        .accept()
+        .await
         .map_err(|e| anyhow::anyhow!("H3 accept error: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Expected H3 request"))?;
-    let (req, mut req_stream) = resolver.resolve_request().await
+    let (req, mut req_stream) = resolver
+        .resolve_request()
+        .await
         .map_err(|e| anyhow::anyhow!("H3 resolve error: {}", e))?;
-    let connect_ip_requested = req
-        .extensions()
-        .get::<h3::ext::Protocol>()
-        .copied()
-        == Some(h3::ext::Protocol::CONNECT_IP);
+    let connect_ip_requested =
+        req.extensions().get::<h3::ext::Protocol>().copied() == Some(h3::ext::Protocol::CONNECT_IP);
     info!(
         "H3 Request: {} {} (connect-ip={})",
         req.method(),
@@ -85,7 +89,9 @@ pub async fn handle_h3_connection(
         return Ok(());
     }
 
-    let token = req.headers().get("authorization")
+    let token = req
+        .headers()
+        .get("authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .unwrap_or("")
@@ -109,7 +115,11 @@ pub async fn handle_h3_connection(
         }
     };
 
-    let _ip_guard = IpGuard { state: state.clone(), ip4: assigned_ip, ip6: assigned_ip6 };
+    let _ip_guard = IpGuard {
+        state: state.clone(),
+        ip4: assigned_ip,
+        ip6: assigned_ip6,
+    };
 
     let success_msg = ControlMessage::Config {
         assigned_ip,
@@ -117,15 +127,27 @@ pub async fn handle_h3_connection(
         gateway: state.gateway_ip(),
         dns_server: config.dns,
         mtu: config.mtu,
-        assigned_ipv6: if ipv6_enabled { Some(assigned_ip6) } else { None },
+        assigned_ipv6: if ipv6_enabled {
+            Some(assigned_ip6)
+        } else {
+            None
+        },
         netmask_v6: if ipv6_enabled { Some(64) } else { None },
-        gateway_v6: if ipv6_enabled { Some(state.gateway_ip_v6()) } else { None },
+        gateway_v6: if ipv6_enabled {
+            Some(state.gateway_ip_v6())
+        } else {
+            None
+        },
         dns_server_v6: if ipv6_enabled {
-            Some(config.dns_v6.unwrap_or_else(|| std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)))
-        } else { None },
+            Some(config.dns_v6.unwrap_or_else(|| {
+                std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
+            }))
+        } else {
+            None
+        },
         whitelist_domains: Some(config.whitelist_domains.clone()),
     };
-    
+
     let mut capsule_stream: Vec<u8> = Vec::with_capacity(256);
 
     let mut address_assigns = vec![AssignedAddress {
@@ -164,16 +186,21 @@ pub async fn handle_h3_connection(
         &mut capsule_stream,
     );
 
-    let mavi_config_bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
+    let mavi_config_bytes =
+        bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
     masque::encode_capsule(CAPSULE_MAVI_CONFIG, &mavi_config_bytes, &mut capsule_stream);
 
     let response = Response::builder()
         .status(http::StatusCode::OK)
         .body(())
         .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
-    req_stream.send_response(response).await
+    req_stream
+        .send_response(response)
+        .await
         .map_err(|e| anyhow::anyhow!("H3 send_response error: {}", e))?;
-    req_stream.send_data(Bytes::from(capsule_stream)).await
+    req_stream
+        .send_data(Bytes::from(capsule_stream))
+        .await
         .map_err(|e| anyhow::anyhow!("H3 send_data error: {}", e))?;
 
     info!(
@@ -199,5 +226,6 @@ pub async fn handle_h3_connection(
         state.gateway_ip_v6(),
         config.mtu,
         true, // is_h3
-    ).await
+    )
+    .await
 }

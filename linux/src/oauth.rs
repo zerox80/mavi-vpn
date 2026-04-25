@@ -17,20 +17,22 @@ const OAUTH_CALLBACK_PORT: u16 = 18923;
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
     // 1. Generate PKCE verifier and challenge
     let verifier_bytes: [u8; 32] = rand::random();
-    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&verifier_bytes);
+    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
 
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
-    let code_challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
     let state_bytes: [u8; 16] = rand::random();
-    let oauth_state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&state_bytes);
+    let oauth_state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(state_bytes);
 
     // 2. Start local TCP listener on fixed port
     let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
         .await
-        .context(format!("Could not bind callback port {}. Is another instance running?", OAUTH_CALLBACK_PORT))?;
+        .context(format!(
+            "Could not bind callback port {}. Is another instance running?",
+            OAUTH_CALLBACK_PORT
+        ))?;
     let redirect_uri = format!("http://127.0.0.1:{}/callback", OAUTH_CALLBACK_PORT);
 
     // 3. Construct Authorization URL
@@ -62,10 +64,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
 
     // Always show the URL — xdg-open can silently fail even when spawn()
     // returns Ok (e.g. missing portal, wrong session).
-    println!(
-        "\n  Login URL: \x1b[4m{}\x1b[0m\n",
-        url_str
-    );
+    println!("\n  Login URL: \x1b[4m{}\x1b[0m\n", url_str);
     if !browser_opened {
         println!("\x1b[33mCould not launch browser. Please open the URL above manually.\x1b[0m\n");
     }
@@ -187,33 +186,10 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn html_escape_empty() {
-        assert_eq!(html_escape(""), "");
-    }
-
-    #[test]
-    fn html_escape_no_special_chars() {
-        assert_eq!(html_escape("hello world"), "hello world");
-    }
-
-    #[test]
-    fn html_escape_special_chars() {
-        assert_eq!(html_escape("<b>\"test\"&</b>"),
-            "&lt;b&gt;&quot;test&quot;&amp;&lt;/b&gt;");
-    }
-
-    #[test]
-    fn html_escape_only_ampersand() {
-        assert_eq!(html_escape("a&b"), "a&amp;b");
-    }
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Open a URL in the user's default browser.
@@ -223,17 +199,13 @@ mod tests {
 /// via `SUDO_USER` / `SUDO_UID` and re-run xdg-open as the original user
 /// with the session environment reconstructed.
 fn open_browser_for_user(url: &str) -> bool {
-    if let (Ok(sudo_user), Ok(sudo_uid)) = (
-        std::env::var("SUDO_USER"),
-        std::env::var("SUDO_UID"),
-    ) {
+    if let (Ok(sudo_user), Ok(sudo_uid)) = (std::env::var("SUDO_USER"), std::env::var("SUDO_UID")) {
         let runtime_dir = format!("/run/user/{}", sudo_uid);
 
         // Reconstruct vars that sudo strips but xdg-open/portal needs.
-        let wayland_display = std::env::var("WAYLAND_DISPLAY")
-            .unwrap_or_else(|_| "wayland-0".to_string());
-        let display = std::env::var("DISPLAY")
-            .unwrap_or_else(|_| ":0".to_string());
+        let wayland_display =
+            std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string());
+        let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string());
         let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS")
             .unwrap_or_else(|_| format!("unix:path={}/bus", runtime_dir));
 
@@ -266,4 +238,32 @@ fn open_browser_for_user(url: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .spawn()
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_escape_empty() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    fn html_escape_no_special_chars() {
+        assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn html_escape_special_chars() {
+        assert_eq!(
+            html_escape("<b>\"test\"&</b>"),
+            "&lt;b&gt;&quot;test&quot;&amp;&lt;/b&gt;"
+        );
+    }
+
+    #[test]
+    fn html_escape_only_ampersand() {
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+    }
 }

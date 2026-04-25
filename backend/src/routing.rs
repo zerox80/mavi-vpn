@@ -1,12 +1,15 @@
+use crate::state::AppState;
+use bytes::Bytes;
+use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
+use shared::masque::DATAGRAM_PREFIX;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, warn};
-use bytes::Bytes;
-use crate::state::AppState;
-use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
-use shared::masque::DATAGRAM_PREFIX;
 
-pub fn spawn_tun_writer(mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>, mut rx_tun: tokio::sync::mpsc::Receiver<Bytes>) {
+pub fn spawn_tun_writer(
+    mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>,
+    mut rx_tun: tokio::sync::mpsc::Receiver<Bytes>,
+) {
     tokio::spawn(async move {
         while let Some(packet) = rx_tun.recv().await {
             if let Err(e) = tun_writer.write_all(&packet).await {
@@ -17,13 +20,22 @@ pub fn spawn_tun_writer(mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>, 
     });
 }
 
-pub fn spawn_tun_reader(mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>, state_reader: Arc<AppState>) {
+pub fn spawn_tun_reader(
+    mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>,
+    state_reader: Arc<AppState>,
+) {
     tokio::spawn(async move {
         let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
         let mut scratch = vec![0u8; 65536];
 
-        let mut local_peers_v4: std::collections::HashMap<std::net::Ipv4Addr, tokio::sync::mpsc::Sender<bytes::Bytes>> = std::collections::HashMap::new();
-        let mut local_peers_v6: std::collections::HashMap<std::net::Ipv6Addr, tokio::sync::mpsc::Sender<bytes::Bytes>> = std::collections::HashMap::new();
+        let mut local_peers_v4: std::collections::HashMap<
+            std::net::Ipv4Addr,
+            tokio::sync::mpsc::Sender<bytes::Bytes>,
+        > = std::collections::HashMap::new();
+        let mut local_peers_v6: std::collections::HashMap<
+            std::net::Ipv6Addr,
+            tokio::sync::mpsc::Sender<bytes::Bytes>,
+        > = std::collections::HashMap::new();
 
         let mut last_drop_warn = std::time::Instant::now();
         let mut drop_count = 0u64;

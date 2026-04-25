@@ -11,7 +11,7 @@ static WINTUN_DLL: &[u8] = include_bytes!("../../wintun.dll");
 pub fn extract_wintun_dll() -> Result<PathBuf> {
     let temp_dir = std::env::temp_dir();
     let dll_path = temp_dir.join("mavi_wintun.dll");
-    
+
     if !dll_path.exists() {
         info!("Extracting wintun.dll to {}...", dll_path.display());
         std::fs::write(&dll_path, WINTUN_DLL)

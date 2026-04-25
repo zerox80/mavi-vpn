@@ -4,6 +4,7 @@
 //! Listens on `127.0.0.1:14433` for commands from the CLI or GUI.
 
 use anyhow::Result;
+use base64::Engine;
 use constant_time_eq::constant_time_eq;
 use shared::ipc::{self, Config, IpcRequest, IpcResponse, LOCAL_IPC_ADDR};
 use std::io::Write;
@@ -15,7 +16,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
-use base64::Engine;
 
 /// Hard limit on how long an IPC client may take to send the length prefix and
 /// the request body combined. Prevents a local process from holding the daemon
@@ -37,10 +37,10 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
     }));
 
     let listener = TcpListener::bind(LOCAL_IPC_ADDR).await?;
-    
+
     let token_bytes: [u8; 32] = rand::random();
     let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
-    
+
     let token_path = ipc::ipc_token_path();
     if let Some(parent) = token_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -61,9 +61,15 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
     } else if let Err(e) =
         std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644))
     {
-        error!("Failed to harden IPC token permissions on {:?}: {}", token_path, e);
+        error!(
+            "Failed to harden IPC token permissions on {:?}: {}",
+            token_path, e
+        );
     }
-    info!("Daemon listening on {} (Auth token generated)", LOCAL_IPC_ADDR);
+    info!(
+        "Daemon listening on {} (Auth token generated)",
+        LOCAL_IPC_ADDR
+    );
 
     let auth_token = Arc::new(auth_token);
 
@@ -137,7 +143,10 @@ async fn handle_ipc_client(
     .map_err(|_| anyhow::anyhow!("IPC request timeout from {}", peer))??;
 
     let resp = if !constant_time_eq(req_msg.auth_token.as_bytes(), auth_token.as_bytes()) {
-        error!("Rejecting IPC request from {} due to invalid auth token", peer);
+        error!(
+            "Rejecting IPC request from {} due to invalid auth token",
+            peer
+        );
         IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
     } else {
         dispatch_request(req_msg.request, &state).await
@@ -173,7 +182,7 @@ async fn dispatch_request(req: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> I
         IpcRequest::Start(config) => {
             info!("Handling Start request for endpoint: {}", config.endpoint);
             let still_running = guard.vpn_running.load(Ordering::SeqCst)
-                || guard.vpn_task.as_ref().map_or(false, |t| !t.is_finished());
+                || guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished());
             if still_running {
                 IpcResponse::Error("VPN is already running".to_string())
             } else {

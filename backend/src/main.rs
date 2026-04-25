@@ -1,5 +1,5 @@
 //! # Mavi VPN Backend
-//! 
+//!
 //! High-performance VPN server leveraging QUIC as the transport layer and TUN devices
 //! for network integration.
 
@@ -11,29 +11,29 @@ use tracing::{info, warn};
 mod cert;
 mod config;
 mod ech;
-mod state;
 mod keycloak;
-mod routing;
-mod utils;
 mod network;
+mod routing;
 mod server;
+mod state;
+mod utils;
 
-use crate::state::AppState;
 use crate::handlers::connection::handle_connection;
-use crate::routing::{spawn_tun_reader, spawn_tun_writer};
-use crate::utils::cleanup_legacy_rules;
 use crate::network::tun::create_tun_device;
+use crate::routing::{spawn_tun_reader, spawn_tun_writer};
 use crate::server::quic::create_quic_endpoint;
+use crate::state::AppState;
+use crate::utils::cleanup_legacy_rules;
 
 mod handlers;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    
+
     // Install the cryptographic provider (aws-lc-rs for better performance)
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    
+
     let config = config::load();
 
     let quic_overhead: u16 = 80;
@@ -49,7 +49,14 @@ async fn main() -> Result<()> {
     info!("Starting Mavi VPN Server...");
     info!("Network: {}", config.network_cidr);
     info!("Bind Address: {}", config.bind_addr);
-    info!("MSS Clamping: {}", if config.mss_clamping { "enabled" } else { "disabled" });
+    info!(
+        "MSS Clamping: {}",
+        if config.mss_clamping {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     info!(
         "MTU: {} (source: {}) → QUIC Payload: {} → Wire IPv4: {} / IPv6: {}",
         config.mtu,
@@ -107,7 +114,7 @@ async fn main() -> Result<()> {
                 config.keycloak_realm.clone(),
                 config.keycloak_client_id.clone(),
             );
-            
+
             info!("Initializing Keycloak validator for {}...", url);
 
             // Retry with exponential backoff — Keycloak may not be ready yet
@@ -116,7 +123,10 @@ async fn main() -> Result<()> {
             for attempt in 1..=max_retries {
                 match kc.init_and_fetch().await {
                     Ok(_) => {
-                        info!("Keycloak JWKS loaded successfully (attempt {}/{})", attempt, max_retries);
+                        info!(
+                            "Keycloak JWKS loaded successfully (attempt {}/{})",
+                            attempt, max_retries
+                        );
                         success = true;
                         break;
                     }
@@ -124,7 +134,10 @@ async fn main() -> Result<()> {
                         let delay = std::time::Duration::from_secs(2u64.pow(attempt - 1));
                         warn!(
                             "Failed to fetch Keycloak JWKS (attempt {}/{}): {}. Retrying in {}s...",
-                            attempt, max_retries, e, delay.as_secs()
+                            attempt,
+                            max_retries,
+                            e,
+                            delay.as_secs()
                         );
                         if attempt == max_retries {
                             break;
@@ -159,7 +172,7 @@ async fn main() -> Result<()> {
 
     // Split the TUN device for concurrent reading/writing
     let (tun_reader, tun_writer) = tokio::io::split(tun_device);
-    
+
     // Start background routing tasks
     spawn_tun_reader(tun_reader, state.clone());
     spawn_tun_writer(tun_writer, rx_tun);
@@ -191,7 +204,9 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) = handle_connection(conn, state, config, tx_tun, keycloak, ipv6_enabled).await {
+            if let Err(e) =
+                handle_connection(conn, state, config, tx_tun, keycloak, ipv6_enabled).await
+            {
                 warn!("Connection handler exited: {}", e);
             }
         });

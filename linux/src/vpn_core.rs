@@ -7,16 +7,15 @@
 //! - Dual-stack (IPv4/IPv6) support.
 
 use anyhow::{Context, Result};
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use h3_quinn::Connection as H3QuinnConnection;
 use sha2::{Digest, Sha256};
 use shared::{
     icmp,
     ipc::Config,
     masque::{self, CAPSULE_MAVI_CONFIG},
-    ControlMessage, QUIC_OVERHEAD_BYTES, resolve_tun_mtu,
+    resolve_tun_mtu, ControlMessage, QUIC_OVERHEAD_BYTES,
 };
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,9 +103,12 @@ fn create_udp_socket() -> Result<std::net::UdpSocket> {
     )?;
 
     socket.set_only_v6(false)?;
-    socket.bind(&socket2::SockAddr::from(
-        std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0),
-    ))?;
+    socket.bind(&socket2::SockAddr::from(std::net::SocketAddrV6::new(
+        std::net::Ipv6Addr::UNSPECIFIED,
+        0,
+        0,
+        0,
+    )))?;
 
     // Large socket buffers for high-throughput stability (try 4MB, fall back gracefully)
     for size in [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024] {
@@ -195,10 +197,7 @@ async fn run_session(
                 dns_server_v6,
             ),
             ControlMessage::Error { message } => {
-                return Err(anyhow::anyhow!(
-                    "Server rejected connection: {}",
-                    message
-                ))
+                return Err(anyhow::anyhow!("Server rejected connection: {}", message))
             }
             _ => return Err(anyhow::anyhow!("Unexpected server response")),
         };
@@ -334,7 +333,9 @@ async fn run_session(
                             Some(slice) => slice.len(),
                             None => continue,
                         };
-                        if inner_len == 0 { continue; }
+                        if inner_len == 0 {
+                            continue;
+                        }
                         let prefix = data.len() - inner_len;
                         data.advance(prefix);
                     }
@@ -375,6 +376,7 @@ async fn run_session(
 }
 
 /// QUIC connection setup with custom certificate pinning.
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_handshake(
     socket: std::net::UdpSocket,
     token: String,
@@ -394,7 +396,11 @@ async fn connect_and_handshake(
         Some(bytes) => {
             let parsed = crate::ech_client::parse(bytes)
                 .context("Failed to parse ECH config list")?
-                .ok_or_else(|| anyhow::anyhow!("ECH config list contained no HPKE suites supported by aws-lc-rs"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ECH config list contained no HPKE suites supported by aws-lc-rs"
+                    )
+                })?;
             info!("ECH GREASE enabled, outer SNI: {}", parsed.outer_sni);
             Some(parsed)
         }
@@ -461,12 +467,11 @@ async fn connect_and_handshake(
     transport_config.min_mtu(quic_mtu);
 
     // Rule 1: TUN MTU MUST be 1280.
-    // Handled in NetworkConfig::apply. 
+    // Handled in NetworkConfig::apply.
 
     transport_config.enable_segmentation_offload(true);
-    transport_config.congestion_controller_factory(Arc::new(
-        quinn::congestion::BbrConfig::default(),
-    ));
+    transport_config
+        .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
     // Datagram queue tuning (match Windows/Android: 2MB each direction)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
@@ -491,7 +496,11 @@ async fn connect_and_handshake(
         None => {
             let raw = if endpoint_str.starts_with('[') {
                 // IPv6 literal: [::1]:443 → ::1
-                endpoint_str.trim_start_matches('[').split(']').next().unwrap_or(&endpoint_str)
+                endpoint_str
+                    .trim_start_matches('[')
+                    .split(']')
+                    .next()
+                    .unwrap_or(&endpoint_str)
             } else {
                 // hostname:port or IPv4:port
                 endpoint_str.split(':').next().unwrap_or(&endpoint_str)
@@ -518,10 +527,13 @@ async fn connect_and_handshake(
         let _ = send.finish();
 
         let len = recv.read_u32_le().await? as usize;
-        if len > 65536 { anyhow::bail!("Server response too large: {} bytes", len); }
+        if len > 65536 {
+            anyhow::bail!("Server response too large: {} bytes", len);
+        }
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
-        let cfg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
+        let cfg: ControlMessage =
+            bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
         (cfg, None)
     };
 
@@ -545,7 +557,9 @@ async fn connect_and_handshake_h3(
     let mut builder = h3::client::builder();
     builder.enable_datagram(true);
     builder.enable_extended_connect(true);
-    let (mut driver, mut send_request) = builder.build::<_, _, bytes::Bytes>(h3_conn).await
+    let (mut driver, mut send_request) = builder
+        .build::<_, _, bytes::Bytes>(h3_conn)
+        .await
         .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
 
     // Drive the H3 connection in the background for the lifetime of the session.
@@ -564,12 +578,16 @@ async fn connect_and_handshake_h3(
         .body(())
         .context("Failed to build H3 CONNECT request")?;
 
-    let mut stream = send_request.send_request(req).await
+    let mut stream = send_request
+        .send_request(req)
+        .await
         .map_err(|e| anyhow::anyhow!("H3 send_request failed: {}", e))?;
     // NB: do NOT finish the stream — connect-ip keeps the request stream open
     // for bidirectional capsule traffic throughout the session.
 
-    let resp = stream.recv_response().await
+    let resp = stream
+        .recv_response()
+        .await
         .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {}", e))?;
 
     if resp.status() != http::StatusCode::OK {
@@ -589,11 +607,8 @@ async fn connect_and_handshake_h3(
             anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule");
         }
 
-        loop {
-            let (ctype, payload, consumed) = match masque::read_capsule(&capsule_buf) {
-                Some(parts) => (parts.0, parts.1.to_vec(), parts.2),
-                None => break,
-            };
+        while let Some(parts) = masque::read_capsule(&capsule_buf) {
+            let (ctype, payload, consumed) = (parts.0, parts.1.to_vec(), parts.2);
             capsule_buf.drain(..consumed);
             if ctype == CAPSULE_MAVI_CONFIG {
                 config = Some(
@@ -635,7 +650,7 @@ async fn connect_and_handshake_h3(
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())

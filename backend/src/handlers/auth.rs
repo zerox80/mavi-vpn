@@ -1,7 +1,7 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
 use anyhow::Result;
 use constant_time_eq::constant_time_eq;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::keycloak::KeycloakValidator;
@@ -62,7 +62,9 @@ mod tests {
     async fn valid_token_returns_ip_pair() {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
-        let (ip4, ip6) = authenticate_client("correct-token", &state, &config, &None).await.unwrap();
+        let (ip4, ip6) = authenticate_client("correct-token", &state, &config, &None)
+            .await
+            .unwrap();
         assert_eq!(ip4, Ipv4Addr::new(10, 8, 0, 2));
         assert_eq!(ip6, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
     }
@@ -71,7 +73,9 @@ mod tests {
     async fn pool_exhaustion_returns_error() {
         let state = Arc::new(AppState::new("10.0.0.0/30").unwrap());
         let config = test_config();
-        let _ = authenticate_client("correct-token", &state, &config, &None).await.unwrap();
+        let _ = authenticate_client("correct-token", &state, &config, &None)
+            .await
+            .unwrap();
         let result = authenticate_client("correct-token", &state, &config, &None).await;
         assert!(result.is_err());
     }

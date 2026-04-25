@@ -86,7 +86,10 @@ async fn vpn_connect(mut config: Config) -> Result<String, String> {
     if config.kc_auth.unwrap_or(false) {
         let kc_url = config.kc_url.as_deref().unwrap_or("").to_string();
         let realm = config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into());
-        let client_id = config.kc_client_id.clone().unwrap_or_else(|| "mavi-client".into());
+        let client_id = config
+            .kc_client_id
+            .clone()
+            .unwrap_or_else(|| "mavi-client".into());
 
         if kc_url.is_empty() {
             return Err("Keycloak URL is not configured.".into());
@@ -135,10 +138,7 @@ async fn vpn_status() -> Result<VpnStatus, String> {
 
 #[tauri::command]
 async fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let config_path = config_dir.join("config.json");
     let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
@@ -156,10 +156,7 @@ async fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
 
 #[tauri::command]
 async fn load_config(app: AppHandle) -> Result<Option<Config>, String> {
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     let config_path = config_dir.join("config.json");
     if !config_path.exists() {
         return Ok(None);
@@ -220,15 +217,16 @@ impl Default for Prefs {
     }
 }
 
-fn default_theme() -> String { "light".into() }
-fn default_accent() -> String { "#2B44FF".into() }
+fn default_theme() -> String {
+    "light".into()
+}
+fn default_accent() -> String {
+    "#2B44FF".into()
+}
 
 #[tauri::command]
 async fn load_prefs(app: AppHandle) -> Result<Prefs, String> {
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     let prefs_path = config_dir.join("prefs.json");
     if !prefs_path.exists() {
         return Ok(Prefs {
@@ -245,10 +243,7 @@ async fn load_prefs(app: AppHandle) -> Result<Prefs, String> {
 
 #[tauri::command]
 async fn save_prefs(app: AppHandle, prefs: Prefs) -> Result<(), String> {
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let prefs_path = config_dir.join("prefs.json");
     let content = serde_json::to_string_pretty(&prefs).map_err(|e| e.to_string())?;

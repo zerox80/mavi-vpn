@@ -1,7 +1,11 @@
-use std::{net::{Ipv4Addr, Ipv6Addr}, sync::Arc, time::Duration};
-use anyhow::Result;
-use tracing::info;
 use crate::state::AppState;
+use anyhow::Result;
+use std::{
+    net::{Ipv4Addr, Ipv6Addr},
+    sync::Arc,
+    time::Duration,
+};
+use tracing::info;
 
 /// Convert an IPv4 dotted-decimal netmask to a CIDR prefix length in bits.
 /// Non-contiguous masks (not realistic on a VPN subnet) fall back to `/32`.
@@ -25,7 +29,10 @@ pub struct IpGuard {
 impl Drop for IpGuard {
     fn drop(&mut self) {
         self.state.release_ips(self.ip4, self.ip6);
-        info!("Released IPs for dropped connection: {} / {}", self.ip4, self.ip6);
+        info!(
+            "Released IPs for dropped connection: {} / {}",
+            self.ip4, self.ip6
+        );
     }
 }
 
@@ -54,9 +61,13 @@ pub async fn emulate_http3(conn: &quinn::Connection, stream: &mut quinn::SendStr
         let _ = ctrl.finish();
     }
     let mut resp = vec![0x01, 0x19];
-    resp.extend_from_slice(&[0x00, 0x00, 0xd9, 0x5f, 0x4d, 0x84, 0xaa, 0x63, 0x55, 0xe7, 0x5f, 0x1d, 0x87, 0x49, 0x7c, 0xa5, 0x89, 0xd3, 0x4d, 0x1f, 0x54, 0x03, 0x31, 0x37, 0x33]);
+    resp.extend_from_slice(&[
+        0x00, 0x00, 0xd9, 0x5f, 0x4d, 0x84, 0xaa, 0x63, 0x55, 0xe7, 0x5f, 0x1d, 0x87, 0x49, 0x7c,
+        0xa5, 0x89, 0xd3, 0x4d, 0x1f, 0x54, 0x03, 0x31, 0x37, 0x33,
+    ]);
     let body = b"<html><body><h1>Welcome</h1></body></html>";
-    resp.push(0x00); resp.push(body.len() as u8);
+    resp.push(0x00);
+    resp.push(body.len() as u8);
     resp.extend_from_slice(body);
     let _ = stream.write_all(&resp).await;
     let _ = stream.finish();

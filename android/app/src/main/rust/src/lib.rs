@@ -1,8 +1,8 @@
-mod crypto;
 mod connection;
+mod crypto;
 mod ech_client;
-mod vpn_loop;
-mod session;
 mod jni;
+mod session;
+mod vpn_loop;
 
 pub use jni::*;

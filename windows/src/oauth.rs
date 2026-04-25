@@ -1,15 +1,18 @@
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::time::Duration;
 use base64::Engine;
+use sha2::{Digest, Sha256};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 /// Fixed callback port — register `http://127.0.0.1:18923/callback` in Keycloak.
 const OAUTH_CALLBACK_PORT: u16 = 18923;
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
@@ -25,14 +28,23 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
     // 2. Start local TCP listener on fixed port
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT)).await
-        .context(format!("Could not bind callback port {}. Is another instance running?", OAUTH_CALLBACK_PORT))?;
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
+        .await
+        .context(format!(
+            "Could not bind callback port {}. Is another instance running?",
+            OAUTH_CALLBACK_PORT
+        ))?;
     let redirect_uri = format!("http://127.0.0.1:{}/callback", OAUTH_CALLBACK_PORT);
 
     // 3. Construct Authorization URL
-    let auth_endpoint = format!("{}/realms/{}/protocol/openid-connect/auth", kc_url.trim_end_matches('/'), realm);
+    let auth_endpoint = format!(
+        "{}/realms/{}/protocol/openid-connect/auth",
+        kc_url.trim_end_matches('/'),
+        realm
+    );
     let mut auth_url = url::Url::parse(&auth_endpoint)?;
-    auth_url.query_pairs_mut()
+    auth_url
+        .query_pairs_mut()
         .append_pair("client_id", client_id)
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("response_type", "code")
@@ -44,7 +56,10 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     // 4. Open browser
     println!("\nÖffne Webbrowser für den Login...");
     if webbrowser::open(auth_url.as_str()).is_err() {
-        println!("Konnte Browser nicht automatisch öffnen. Bitte klicke manuell auf diesen Link:\n{}", auth_url.as_str());
+        println!(
+            "Konnte Browser nicht automatisch öffnen. Bitte klicke manuell auf diesen Link:\n{}",
+            auth_url.as_str()
+        );
     }
     println!("Warte auf erfolgreichen Login im Browser (Timeout in 5 Minuten)...");
 
@@ -55,15 +70,15 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
             let mut buf = [0u8; 4096];
             let read_bytes = socket.read(&mut buf).await?;
             if read_bytes == 0 { continue; }
-            
+
             let request = String::from_utf8_lossy(&buf[..read_bytes]);
             let first_line = request.lines().next().unwrap_or("");
             if !first_line.starts_with("GET ") { continue; }
-            
+
             let parts: Vec<&str> = first_line.split_whitespace().collect();
             if parts.len() < 2 { continue; }
             let path_and_query = parts[1];
-            
+
             let parsed_url = url::Url::parse(&format!("http://localhost{}", path_and_query)).ok();
             if let Some(u) = parsed_url {
                 let returned_state = u.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.into_owned());
@@ -80,7 +95,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
                     let _ = socket.write_all(response.as_bytes()).await;
                     return Ok::<String, anyhow::Error>(code);
                 }
-                
+
                 if let Some(err) = u.query_pairs().find(|(k, _)| k == "error").map(|(_, v)| v.into_owned()) {
                     let html = format!("<html><body><h1 style=\"color: red;\">Login fehlgeschlagen!</h1><p>Fehler: {}</p></body></html>", html_escape(&err));
                     let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}", html);
@@ -88,7 +103,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
                     return Err(anyhow::anyhow!("Keycloak Fehler: {}", err));
                 }
             }
-            
+
             let html = "<html><body><h1>Fehler</h1><p>Ungueltiger Callback.</p></body></html>";
             let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}", html);
             let _ = socket.write_all(response.as_bytes()).await;
@@ -98,8 +113,14 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     println!("Login Callback empfangen! Hole Access Token...");
 
     // 6. Exchange code for token
-    let token_endpoint = format!("{}/realms/{}/protocol/openid-connect/token", kc_url.trim_end_matches('/'), realm);
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let token_endpoint = format!(
+        "{}/realms/{}/protocol/openid-connect/token",
+        kc_url.trim_end_matches('/'),
+        realm
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
     let params = [
         ("client_id", client_id),
         ("grant_type", "authorization_code"),
@@ -108,14 +129,24 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         ("code_verifier", &code_verifier),
     ];
 
-    let res = client.post(&token_endpoint).form(&params).send().await.context("Verbindung zu Keycloak fehlgeschlagen")?;
+    let res = client
+        .post(&token_endpoint)
+        .form(&params)
+        .send()
+        .await
+        .context("Verbindung zu Keycloak fehlgeschlagen")?;
     if !res.status().is_success() {
         let error_text = res.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Token Exchange fehlgeschlagen: {}", error_text));
+        return Err(anyhow::anyhow!(
+            "Token Exchange fehlgeschlagen: {}",
+            error_text
+        ));
     }
 
     let json: serde_json::Value = res.json().await?;
-    let access_token = json["access_token"].as_str().ok_or_else(|| anyhow::anyhow!("Kein access_token gefunden"))?;
+    let access_token = json["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Kein access_token gefunden"))?;
 
     Ok(access_token.to_string())
 }
@@ -136,8 +167,10 @@ mod tests {
 
     #[test]
     fn html_escape_double_escapes_already_escaped_ampersand() {
-        assert_eq!(html_escape("<script>alert(\"xss\")&amp;</script>"),
-            "&lt;script&gt;alert(&quot;xss&quot;)&amp;amp;&lt;/script&gt;");
+        assert_eq!(
+            html_escape("<script>alert(\"xss\")&amp;</script>"),
+            "&lt;script&gt;alert(&quot;xss&quot;)&amp;amp;&lt;/script&gt;"
+        );
     }
 
     #[test]

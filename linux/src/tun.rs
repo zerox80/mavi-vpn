@@ -33,7 +33,7 @@ impl TunDevice {
     /// Requires CAP_NET_ADMIN or root privileges.
     pub fn create(name: &str) -> Result<Self> {
         // Open the TUN clone device
-        let fd = unsafe { libc::open(b"/dev/net/tun\0".as_ptr() as *const _, libc::O_RDWR) };
+        let fd = unsafe { libc::open(c"/dev/net/tun".as_ptr() as *const _, libc::O_RDWR) };
         if fd < 0 {
             return Err(anyhow::anyhow!(
                 "Failed to open /dev/net/tun: {}. Are you running as root?",
@@ -82,7 +82,11 @@ impl TunDevice {
             return Err(anyhow::anyhow!("fcntl F_SETFL O_NONBLOCK failed"));
         }
 
-        tracing::info!("TUN device '{}' created (fd={})", actual_name, fd.as_raw_fd());
+        tracing::info!(
+            "TUN device '{}' created (fd={})",
+            actual_name,
+            fd.as_raw_fd()
+        );
 
         Ok(Self {
             fd,
@@ -102,8 +106,7 @@ impl TunDevice {
 
     /// Wraps the TUN fd in tokio's `AsyncFd` for async read/write.
     pub fn into_async(self) -> Result<AsyncTun> {
-        let async_fd =
-            AsyncFd::new(self).context("Failed to register TUN fd with tokio epoll")?;
+        let async_fd = AsyncFd::new(self).context("Failed to register TUN fd with tokio epoll")?;
         Ok(AsyncTun { inner: async_fd })
     }
 }

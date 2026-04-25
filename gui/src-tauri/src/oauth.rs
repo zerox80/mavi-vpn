@@ -24,17 +24,14 @@ fn html_escape(s: &str) -> String {
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
     // 1. Generate PKCE verifier and challenge
     let verifier_bytes: [u8; 32] = rand::random();
-    let code_verifier =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
+    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
 
     let state_bytes: [u8; 32] = rand::random();
-    let oauth_state =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(state_bytes);
+    let oauth_state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(state_bytes);
 
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
-    let code_challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
     // 2. Bind the fixed callback port
     let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
@@ -209,10 +206,7 @@ mod tests {
 
     #[test]
     fn html_escape_quotes() {
-        assert_eq!(
-            html_escape("say \"hello\""),
-            "say &quot;hello&quot;"
-        );
+        assert_eq!(html_escape("say \"hello\""), "say &quot;hello&quot;");
     }
 
     #[test]

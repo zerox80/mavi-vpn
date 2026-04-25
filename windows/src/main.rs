@@ -25,18 +25,12 @@ async fn main() {
     } else {
         let cmd = args[0].to_lowercase();
         match cmd.as_str() {
-            "start" => {
-                match load_or_prompt_config().await {
-                    Ok(config) => send_request(IpcRequest::Start(config)).await,
-                    Err(e) => Err(e),
-                }
-            }
-            "stop" => {
-                send_request(IpcRequest::Stop).await
-            }
-            "status" => {
-                send_request(IpcRequest::Status).await
-            }
+            "start" => match load_or_prompt_config().await {
+                Ok(config) => send_request(IpcRequest::Start(config)).await,
+                Err(e) => Err(e),
+            },
+            "stop" => send_request(IpcRequest::Stop).await,
+            "status" => send_request(IpcRequest::Status).await,
             _ => {
                 println!("Unknown command: {}", cmd);
                 println!("Usage: mavi-vpn-client [start|stop|status]");
@@ -57,10 +51,16 @@ async fn main() {
 async fn interactive_mode() -> Result<()> {
     // First, check status
     let status_res = send_request_internal(IpcRequest::Status).await;
-    
+
     match status_res {
-        Ok(IpcResponse::Status { running: true, endpoint }) => {
-            println!("VPN is currently RUNNING (Endpoint: {}).", endpoint.as_deref().unwrap_or("Unknown"));
+        Ok(IpcResponse::Status {
+            running: true,
+            endpoint,
+        }) => {
+            println!(
+                "VPN is currently RUNNING (Endpoint: {}).",
+                endpoint.as_deref().unwrap_or("Unknown")
+            );
             print!("Do you want to stop it? [y/N]: ");
             io::stdout().flush()?;
             let input = read_line()?.to_lowercase();
@@ -74,11 +74,11 @@ async fn interactive_mode() -> Result<()> {
             println!("VPN is disconnected.");
             let config = load_or_prompt_config().await?;
             send_request(IpcRequest::Start(config)).await?;
-            
+
             println!("\n✅ VPN is now CONNECTED!");
             println!("To safely DISCONNECT and exit, press Enter...");
             let _ = read_line();
-            
+
             println!("Disconnecting...");
             send_request(IpcRequest::Stop).await?;
             println!("✅ Disconnected. Goodbye!");
@@ -120,24 +120,24 @@ async fn send_request_internal(req: IpcRequest) -> Result<IpcResponse> {
     };
 
     let mut client = TcpStream::connect(ipc::LOCAL_IPC_ADDR).await?;
-    
+
     let req_buf = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())?;
     client.write_u32_le(req_buf.len() as u32).await?;
     client.write_all(&req_buf).await?;
-    
+
     let mut len_buf = [0u8; 4];
     client.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > 65536 {
         return Err(anyhow::anyhow!("Response too large"));
     }
-    
+
     let mut buf = vec![0u8; len];
     client.read_exact(&mut buf).await?;
-    
+
     let (resp, _) = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
         .map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
-    
+
     Ok(resp)
 }
 
@@ -199,42 +199,55 @@ async fn load_or_prompt_config() -> Result<Config> {
         if saved.kc_auth.unwrap_or(false) {
             println!("  Auth Mode: Keycloak (SSO)");
         } else {
-            println!("  Token: {}...", &saved.token.chars().take(8).collect::<String>());
+            println!(
+                "  Token: {}...",
+                &saved.token.chars().take(8).collect::<String>()
+            );
         }
-        println!("  CR Mode: {}", if saved.censorship_resistant { "Ja" } else { "Nein" });
-        println!("  HTTP/3 Framing: {}", if saved.http3_framing { "Ja" } else { "Nein" });
+        println!(
+            "  CR Mode: {}",
+            if saved.censorship_resistant {
+                "Ja"
+            } else {
+                "Nein"
+            }
+        );
+        println!(
+            "  HTTP/3 Framing: {}",
+            if saved.http3_framing { "Ja" } else { "Nein" }
+        );
         if let Some(mtu) = saved.vpn_mtu {
             println!("  VPN MTU: {}", mtu);
         }
         println!();
-        
+
         print!("Diese Konfiguration verwenden? [J/n]: ");
         io::stdout().flush()?;
         let input = read_line()?.to_lowercase();
-        
+
         if input.is_empty() || input == "j" || input == "ja" || input == "y" || input == "yes" {
             println!();
-            
+
             // If Keycloak was used, we MUST fetch a fresh token because JWTs expire quickly!
             if saved.kc_auth.unwrap_or(false) {
                 let kc_url = saved.kc_url.as_deref().unwrap_or("");
                 let realm = saved.kc_realm.as_deref().unwrap_or("mavi-vpn");
                 let client_id = saved.kc_client_id.as_deref().unwrap_or("mavi-client");
-                
+
                 println!("Erneuere Keycloak-Sitzung...");
                 let fresh_token = oauth::start_oauth_flow(kc_url, realm, client_id).await?;
                 println!("Sitzung erfolgreich erneuert!");
                 saved.token = fresh_token;
-                
+
                 // Save the fresh token to disk as well (though it expires again soon)
                 save_config(&saved)?;
             }
-            
+
             return Ok(saved);
         }
         println!();
     }
-    
+
     let config = prompt_new_config().await?;
     save_config(&config)?;
     Ok(config)
@@ -252,7 +265,7 @@ async fn prompt_new_config() -> Result<Config> {
     print!("Nutze Keycloak Authentifizierung? [j/N]: ");
     stdout.flush()?;
     let is_keycloak = read_line()?.to_lowercase();
-    
+
     let mut kc_auth = Some(false);
     let mut saved_kc_url = None;
     let mut saved_kc_realm = None;
@@ -264,20 +277,24 @@ async fn prompt_new_config() -> Result<Config> {
         print!("Keycloak Server URL (z.B. https://auth.example.com): ");
         stdout.flush()?;
         let kc_url = read_line()?;
-        
+
         print!("Realm (default: mavi-vpn): ");
         stdout.flush()?;
         let mut realm = read_line()?;
-        if realm.is_empty() { realm = "mavi-vpn".to_string(); }
-        
+        if realm.is_empty() {
+            realm = "mavi-vpn".to_string();
+        }
+
         print!("Client ID (default: mavi-client): ");
         stdout.flush()?;
         let mut client_id = read_line()?;
-        if client_id.is_empty() { client_id = "mavi-client".to_string(); }
-        
+        if client_id.is_empty() {
+            client_id = "mavi-client".to_string();
+        }
+
         token = oauth::start_oauth_flow(&kc_url, &realm, &client_id).await?;
         println!("Keycloak Login abgeschlossen! Speichere Konfiguration...");
-        
+
         saved_kc_url = Some(kc_url);
         saved_kc_realm = Some(realm);
         saved_kc_client_id = Some(client_id);
@@ -294,7 +311,8 @@ async fn prompt_new_config() -> Result<Config> {
     print!("Censorship Resistant Mode? [j/N]: ");
     stdout.flush()?;
     let cr_input = read_line()?.to_lowercase();
-    let censorship_resistant = cr_input == "j" || cr_input == "ja" || cr_input == "y" || cr_input == "yes";
+    let censorship_resistant =
+        cr_input == "j" || cr_input == "ja" || cr_input == "y" || cr_input == "yes";
 
     print!("HTTP/3 Datagram Framing? (Nur nützlich mit CR Mode) [j/N]: ");
     stdout.flush()?;

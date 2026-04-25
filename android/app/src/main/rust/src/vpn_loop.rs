@@ -1,22 +1,22 @@
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use shared::ControlMessage;
-use log::error;
 use jni::sys::jint;
+use log::error;
+use shared::ControlMessage;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
-#[cfg(target_os = "android")]
-use std::sync::atomic::Ordering;
 #[cfg(target_os = "android")]
 use bytes::BufMut;
 #[cfg(target_os = "android")]
-use log::{info, warn};
-#[cfg(target_os = "android")]
 use futures_util::future::FutureExt;
 #[cfg(target_os = "android")]
+use log::{info, warn};
+#[cfg(target_os = "android")]
 use shared::masque;
+#[cfg(target_os = "android")]
+use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "android")]
-use std::os::unix::io::{FromRawFd, RawFd, AsRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 #[cfg(target_os = "android")]
 use tokio::io::unix::AsyncFd;
 
@@ -25,33 +25,51 @@ use tokio::io::unix::AsyncFd;
 pub type RawFd = std::os::raw::c_int;
 
 #[cfg(target_os = "android")]
-pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Arc<AtomicBool>, config: ControlMessage, mut shutdown_rx: tokio::sync::broadcast::Receiver<()>, http3_framing: bool) {
+pub async fn run_vpn_loop(
+    connection: quinn::Connection,
+    fd: jint,
+    stop_flag: Arc<AtomicBool>,
+    config: ControlMessage,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    http3_framing: bool,
+) {
     let raw_fd = fd as RawFd;
 
     // Extract Gateway IPs for ICMP signaling
     let (gateway_v4, gateway_v6_opt, tunnel_mtu) = match &config {
-        ControlMessage::Config { gateway, gateway_v6, mtu, .. } => (*gateway, *gateway_v6, *mtu),
+        ControlMessage::Config {
+            gateway,
+            gateway_v6,
+            mtu,
+            ..
+        } => (*gateway, *gateway_v6, *mtu),
         _ => (std::net::Ipv4Addr::new(10, 0, 0, 1), None, 1280),
     };
-    
+
     // Duplicated FD to manage its lifecycle independently from Java
     let dup_fd = unsafe { libc::dup(raw_fd) };
     if dup_fd < 0 {
-        error!("Could not duplicate FD: {}", std::io::Error::last_os_error());
+        error!(
+            "Could not duplicate FD: {}",
+            std::io::Error::last_os_error()
+        );
         return;
     }
 
     let file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
-    
+
     // Set non-blocking on the DUPLICATED FD
     unsafe {
         let flags = libc::fcntl(dup_fd, libc::F_GETFL);
         libc::fcntl(dup_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
-    
+
     let tun_async_fd = match AsyncFd::new(file) {
         Ok(t) => Arc::new(t),
-        Err(e) => { error!("Failed to create AsyncFd: {}", e); return; }
+        Err(e) => {
+            error!("Failed to create AsyncFd: {}", e);
+            return;
+        }
     };
 
     let connection_arc = Arc::new(connection);
@@ -64,46 +82,56 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
     let tun_upload = tun_async_fd.clone();
     let conn_upload = connection_arc.clone();
     let tx_feedback = tx_tun.clone();
-    
+
     let upload_task = tokio::spawn(async move {
         let mut buf = bytes::BytesMut::with_capacity(65536);
         loop {
-            if stop_upload.load(Ordering::Relaxed) { break; }
-            
+            if stop_upload.load(Ordering::Relaxed) {
+                break;
+            }
+
             let mut guard = tokio::select! {
                 res = tun_upload.readable() => match res { Ok(g) => g, Err(_) => break },
                 _ = shutdown_rx.recv() => break,
             };
 
             let framed = match guard.try_io(|inner| {
-                 const PREFIX_LEN: usize = masque::DATAGRAM_PREFIX.len();
-                 if buf.capacity() < 2048 + PREFIX_LEN {
-                     buf.reserve(2048 + PREFIX_LEN);
-                 }
+                const PREFIX_LEN: usize = masque::DATAGRAM_PREFIX.len();
+                if buf.capacity() < 2048 + PREFIX_LEN {
+                    buf.reserve(2048 + PREFIX_LEN);
+                }
 
-                 // Reserve H3 DATAGRAM_PREFIX headroom in-place. H3 mode ships `framed` as-is
-                 // (zero per-packet alloc); non-H3 mode slices past the prefix in O(1).
-                 buf.extend_from_slice(&masque::DATAGRAM_PREFIX);
+                // Reserve H3 DATAGRAM_PREFIX headroom in-place. H3 mode ships `framed` as-is
+                // (zero per-packet alloc); non-H3 mode slices past the prefix in O(1).
+                buf.extend_from_slice(&masque::DATAGRAM_PREFIX);
 
-                 let chunk = buf.chunk_mut();
-                 let max_len = 2048.min(chunk.len());
+                let chunk = buf.chunk_mut();
+                let max_len = 2048.min(chunk.len());
 
-                 let n = unsafe { libc::read(inner.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, max_len) };
+                let n = unsafe {
+                    libc::read(
+                        inner.as_raw_fd(),
+                        chunk.as_mut_ptr() as *mut libc::c_void,
+                        max_len,
+                    )
+                };
 
-                 if n < 0 {
-                     let err = std::io::Error::last_os_error();
-                     buf.truncate(buf.len() - PREFIX_LEN);
-                     return Err(err);
-                 }
-                 let n = n as usize;
-                 if n == 0 {
-                     buf.truncate(buf.len() - PREFIX_LEN);
-                     return Ok(None);
-                 }
+                if n < 0 {
+                    let err = std::io::Error::last_os_error();
+                    buf.truncate(buf.len() - PREFIX_LEN);
+                    return Err(err);
+                }
+                let n = n as usize;
+                if n == 0 {
+                    buf.truncate(buf.len() - PREFIX_LEN);
+                    return Ok(None);
+                }
 
-                 unsafe { buf.advance_mut(n); }
-                 let framed = buf.split_to(n + PREFIX_LEN).freeze();
-                 Ok(Some(framed))
+                unsafe {
+                    buf.advance_mut(n);
+                }
+                let framed = buf.split_to(n + PREFIX_LEN).freeze();
+                Ok(Some(framed))
             }) {
                 Ok(Ok(Some(p))) => p,
                 Ok(Ok(None)) => break,
@@ -118,7 +146,7 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                         break;
                     }
                     continue;
-                },
+                }
                 Err(_) => continue, // WouldBlock, let tokio select re-await
             };
 
@@ -143,7 +171,10 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                     }
                     quinn::SendDatagramError::TooLarge => {
                         let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
-                        warn!("MTU Limit hit! Packet: {} bytes, Limit: {} bytes", packet_len, current_limit);
+                        warn!(
+                            "MTU Limit hit! Packet: {} bytes, Limit: {} bytes",
+                            packet_len, current_limit
+                        );
 
                         if packet.is_empty() {
                             continue;
@@ -163,10 +194,12 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                             tunnel_mtu
                         };
 
-                        if let Some(icmp_packet) = shared::icmp::generate_packet_too_big(&packet, reported_mtu, gw) {
+                        if let Some(icmp_packet) =
+                            shared::icmp::generate_packet_too_big(&packet, reported_mtu, gw)
+                        {
                             let _ = tx_feedback.try_send(icmp_packet);
                         }
-                    },
+                    }
                     _ => {
                         error!("Unexpected SendDatagramError: {:?}", e);
                     }
@@ -180,11 +213,13 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
     let stop_download = stop_flag.clone();
     let tun_download = tun_async_fd.clone();
     let conn_download = connection_arc.clone();
-    
+
     let download_task = tokio::spawn(async move {
         loop {
-            if stop_download.load(Ordering::Relaxed) { break; }
-            
+            if stop_download.load(Ordering::Relaxed) {
+                break;
+            }
+
             match conn_download.read_datagram().await {
                 Ok(first_packet) => {
                     let mut batch = Vec::with_capacity(64);
@@ -198,66 +233,74 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
                     }
 
                     for _ in 0..63 {
-                         if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
-                             if http3_framing {
-                                 if let Some(inner) = masque::unwrap_datagram(&pkt) {
-                                     let prefix = pkt.len() - inner.len();
-                                     batch.push(pkt.slice(prefix..));
-                                 }
-                             } else {
-                                 batch.push(pkt);
-                             }
-                         } else { break; }
+                        if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
+                            if http3_framing {
+                                if let Some(inner) = masque::unwrap_datagram(&pkt) {
+                                    let prefix = pkt.len() - inner.len();
+                                    batch.push(pkt.slice(prefix..));
+                                }
+                            } else {
+                                batch.push(pkt);
+                            }
+                        } else {
+                            break;
+                        }
                     }
 
                     let mut batch_idx = 0;
                     while batch_idx < batch.len() {
                         let mut guard = match tun_download.writable().await {
-                             Ok(g) => g,
-                             Err(_) => break,
+                            Ok(g) => g,
+                            Err(_) => break,
                         };
-                        
+
                         let res = guard.try_io(|inner| {
                             while batch_idx < batch.len() {
-                                 let packet = &batch[batch_idx];
-                                 let n = unsafe { libc::write(inner.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len()) };
-                                 if n < 0 {
-                                     let err = std::io::Error::last_os_error();
-                                     if let Some(raw) = err.raw_os_error() {
-                                         if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK {
-                                             return Err(err); 
-                                         }
-                                         if raw == libc::ENOBUFS || raw == libc::EINTR {
-                                             // Network internal buffer full or interrupted, just drop the packet immediately
-                                             batch_idx += 1;
-                                             continue;
-                                         }
-                                     }
-                                     if err.kind() == std::io::ErrorKind::WouldBlock {
-                                         return Err(err); 
-                                     }
-                                     return Err(err);
-                                 }
-                                 batch_idx += 1;
+                                let packet = &batch[batch_idx];
+                                let n = unsafe {
+                                    libc::write(
+                                        inner.as_raw_fd(),
+                                        packet.as_ptr() as *const libc::c_void,
+                                        packet.len(),
+                                    )
+                                };
+                                if n < 0 {
+                                    let err = std::io::Error::last_os_error();
+                                    if let Some(raw) = err.raw_os_error() {
+                                        if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK {
+                                            return Err(err);
+                                        }
+                                        if raw == libc::ENOBUFS || raw == libc::EINTR {
+                                            // Network internal buffer full or interrupted, just drop the packet immediately
+                                            batch_idx += 1;
+                                            continue;
+                                        }
+                                    }
+                                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                                        return Err(err);
+                                    }
+                                    return Err(err);
+                                }
+                                batch_idx += 1;
                             }
                             Ok(())
                         });
-                        
+
                         match res {
-                            Ok(Ok(())) => {}, 
+                            Ok(Ok(())) => {}
                             Ok(Err(e)) => {
-                                 if e.kind() == std::io::ErrorKind::WouldBlock {
-                                     continue; // Handled by outer while loop re-awaiting
-                                 }
-                                 error!("TUN Write Error: {}", e);
-                                 if let Some(raw) = e.raw_os_error() {
-                                     if raw == libc::EBADF {
-                                         // Fatal descriptor error
-                                         stop_download.store(true, Ordering::SeqCst);
-                                     }
-                                 }
-                                 break; // this drops the rest of the batch, preserving the loop
-                            },
+                                if e.kind() == std::io::ErrorKind::WouldBlock {
+                                    continue; // Handled by outer while loop re-awaiting
+                                }
+                                error!("TUN Write Error: {}", e);
+                                if let Some(raw) = e.raw_os_error() {
+                                    if raw == libc::EBADF {
+                                        // Fatal descriptor error
+                                        stop_download.store(true, Ordering::SeqCst);
+                                    }
+                                }
+                                break; // this drops the rest of the batch, preserving the loop
+                            }
                             Err(_) => continue, // WouldBlock: wait for writable again
                         }
                     }
@@ -276,10 +319,18 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
     let tun_icmp = tun_async_fd.clone();
     let icmp_task = tokio::spawn(async move {
         while let Some(icmp_pkt) = rx_tun.recv().await {
-            if stop_icmp.load(Ordering::Relaxed) { break; }
+            if stop_icmp.load(Ordering::Relaxed) {
+                break;
+            }
             if let Ok(mut guard) = tun_icmp.writable().await {
                 let _ = guard.try_io(|inner| {
-                    let _ = unsafe { libc::write(inner.as_raw_fd(), icmp_pkt.as_ptr() as *const libc::c_void, icmp_pkt.len()) };
+                    let _ = unsafe {
+                        libc::write(
+                            inner.as_raw_fd(),
+                            icmp_pkt.as_ptr() as *const libc::c_void,
+                            icmp_pkt.len(),
+                        )
+                    };
                     Ok(())
                 });
             }
@@ -293,7 +344,9 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            if stop_stats.load(Ordering::Relaxed) { break; }
+            if stop_stats.load(Ordering::Relaxed) {
+                break;
+            }
             let stats = conn_stats.stats();
             info!(
                 "[QUIC STATS] RTT: {}ms | CWND: {} bytes | Lost Packets: {} | Max Datagram Size: {}",
@@ -312,15 +365,22 @@ pub async fn run_vpn_loop(connection: quinn::Connection, fd: jint, stop_flag: Ar
         r = icmp_task => { error!("ICMP task terminated: {:?}", r); "ICMP" },
         r = stats_task => { error!("Stats task terminated: {:?}", r); "Stats" },
     };
-    
+
     warn!("VPN Loop Hub shutting down. Trigger: {} task exit", res);
     stop_flag.store(true, Ordering::SeqCst);
     let _ = connection_arc.close(0u32.into(), b"loop_exit");
-    
+
     info!("VPN Loop tasks terminated.");
 }
 
 #[cfg(not(target_os = "android"))]
-pub async fn run_vpn_loop(_connection: quinn::Connection, _fd: jint, _stop_flag: Arc<AtomicBool>, _config: ControlMessage, _shutdown_rx: tokio::sync::broadcast::Receiver<()>, _http3_framing: bool) {
+pub async fn run_vpn_loop(
+    _connection: quinn::Connection,
+    _fd: jint,
+    _stop_flag: Arc<AtomicBool>,
+    _config: ControlMessage,
+    _shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    _http3_framing: bool,
+) {
     error!("VPN Loop not supported on this platform");
 }

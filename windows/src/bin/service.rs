@@ -1,23 +1,33 @@
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceControl, ServiceControlAccept, ServiceExitCode, SessionChangeReason, ServiceState,
-        ServiceStatus, ServiceType,
+        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        ServiceType, SessionChangeReason,
     },
     service_control_handler::{self, ServiceControlHandlerResult},
     service_dispatcher,
 };
 
-use std::{ffi::OsString, path::Path, sync::Arc, sync::atomic::{AtomicBool, Ordering}, time::Duration};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::Mutex};
-use tracing::{error, info, warn};
 use base64::Engine;
 use constant_time_eq::constant_time_eq;
+use std::{
+    ffi::OsString,
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+};
+use tracing::{error, info, warn};
 
-#[path = "../ipc.rs"]
-mod ipc;
 #[path = "../ech_client.rs"]
 mod ech_client;
+#[path = "../ipc.rs"]
+mod ipc;
 #[path = "../vpn_core/mod.rs"]
 mod vpn_core;
 
@@ -40,20 +50,18 @@ define_windows_service!(ffi_service_main, my_service_main);
 pub fn main() -> Result<(), windows_service::Error> {
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive("mavi_vpn=info".parse().unwrap());
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     info!("Starting service dispatcher for {}", SERVICE_NAME);
     let args: Vec<OsString> = std::env::args_os().collect();
-    
+
     // Support non-service local running for debugging
     if args.iter().any(|arg| arg == "--console") {
         info!("Running in console mode");
         run_standalone();
         return Ok(());
     }
-    
+
     // Support installation via CLI
     if args.iter().any(|arg| arg == "install") {
         let exe_path = std::env::current_exe().unwrap();
@@ -69,13 +77,16 @@ pub fn main() -> Result<(), windows_service::Error> {
                 "auto",
             ])
             .status();
-        
+
         match status {
             Ok(s) if s.success() => {
                 info!("Service installed successfully.");
                 info!("You can now start it with: net start MaviVPNService");
             }
-            Ok(s) => error!("Failed to install service. Did you run as Administrator? (Exit code: {:?})", s.code()),
+            Ok(s) => error!(
+                "Failed to install service. Did you run as Administrator? (Exit code: {:?})",
+                s.code()
+            ),
             Err(e) => error!("Failed to execute sc command: {}", e),
         }
         return Ok(());
@@ -89,7 +100,7 @@ pub fn main() -> Result<(), windows_service::Error> {
         let _ = std::process::Command::new("sc")
             .args(["stop", SERVICE_NAME])
             .status();
-        
+
         // Brief wait for the service to stop
         std::thread::sleep(Duration::from_secs(2));
 
@@ -97,12 +108,15 @@ pub fn main() -> Result<(), windows_service::Error> {
         let status = std::process::Command::new("sc")
             .args(["delete", SERVICE_NAME])
             .status();
-        
+
         match status {
             Ok(s) if s.success() => {
                 info!("Service uninstalled successfully.");
             }
-            Ok(s) => error!("Failed to uninstall service. Did you run as Administrator? (Exit code: {:?})", s.code()),
+            Ok(s) => error!(
+                "Failed to uninstall service. Did you run as Administrator? (Exit code: {:?})",
+                s.code()
+            ),
             Err(e) => error!("Failed to execute sc command: {}", e),
         }
         return Ok(());
@@ -188,7 +202,10 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
 
     info!("Service is now running");
 
-    let res = rt.block_on(run_service_loop(stop_signal.clone(), reharden_signal.clone()));
+    let res = rt.block_on(run_service_loop(
+        stop_signal.clone(),
+        reharden_signal.clone(),
+    ));
     if let Err(e) = res {
         error!("Service loop failed: {}", e);
     }
@@ -219,7 +236,7 @@ async fn run_service_loop(
     // Generate secure token for IPC and save to file BEFORE binding listener
     let token_bytes: [u8; 32] = rand::random();
     let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
-    
+
     let token_path = ipc::ipc_token_path();
     if let Some(parent) = token_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -234,7 +251,11 @@ async fn run_service_loop(
     let listener = match TcpListener::bind(ipc::LOCAL_IPC_ADDR).await {
         Ok(l) => l,
         Err(e) => {
-            error!("Failed to bind TCP IPC listener on {}: {}", ipc::LOCAL_IPC_ADDR, e);
+            error!(
+                "Failed to bind TCP IPC listener on {}: {}",
+                ipc::LOCAL_IPC_ADDR,
+                e
+            );
             return Err(e.into());
         }
     };
@@ -318,7 +339,10 @@ async fn handle_ipc_client(
     .map_err(|_| anyhow::anyhow!("IPC request timeout from {}", peer))??;
 
     let resp = if !constant_time_eq(req_msg.auth_token.as_bytes(), auth_token.as_bytes()) {
-        error!("Rejecting IPC request from {} due to invalid auth token", peer);
+        error!(
+            "Rejecting IPC request from {} due to invalid auth token",
+            peer
+        );
         ipc::IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
     } else {
         dispatch_request(req_msg.request, &state).await
@@ -419,5 +443,9 @@ fn active_console_user_sid() -> Option<String> {
     }
 
     let sid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if sid.is_empty() { None } else { Some(sid) }
+    if sid.is_empty() {
+        None
+    } else {
+        Some(sid)
+    }
 }

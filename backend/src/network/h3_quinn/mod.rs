@@ -377,7 +377,6 @@ where
     }
 }
 
-
 /// Quinn-backed receive stream
 ///
 /// Implements a [`quic::RecvStream`] backed by a [`quinn::RecvStream`].
@@ -448,8 +447,6 @@ impl quic::RecvStream for RecvStream {
         num.try_into().expect("invalid stream id")
     }
 }
-
-
 
 fn convert_read_error_to_stream_error(error: ReadError) -> StreamErrorIncoming {
     match error {

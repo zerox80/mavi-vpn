@@ -3,7 +3,7 @@ use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
     masque::{self, CAPSULE_MAVI_CONFIG},
-    ControlMessage, QUIC_OVERHEAD_BYTES, resolve_tun_mtu,
+    resolve_tun_mtu, ControlMessage, QUIC_OVERHEAD_BYTES,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,24 +40,25 @@ pub async fn connect_and_handshake(
     ech_config_hex: Option<String>,
     vpn_mtu: Option<u16>,
 ) -> anyhow::Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
-
     info!("Connect and Handshake started. Pin: {}", cert_pin);
 
     // Verifier Setup
     let verifier = if let Some(bytes) = decode_hex(&cert_pin) {
-         info!("Pin decoded successfully. Len: {}", bytes.len());
-         Arc::new(PinnedServerVerifier::new(bytes))
+        info!("Pin decoded successfully. Len: {}", bytes.len());
+        Arc::new(PinnedServerVerifier::new(bytes))
     } else {
-         return Err(anyhow::anyhow!("Invalid Certificate PIN hex string"));
+        return Err(anyhow::anyhow!("Invalid Certificate PIN hex string"));
     };
 
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-    
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .dangerous()
+    .with_custom_certificate_verifier(verifier)
+    .with_no_client_auth();
+
     // HTTP/3 transport requires h3. Raw mode keeps mavivpn as the preferred ALPN.
     if http3_framing || censorship_resistant {
         client_crypto.alpn_protocols = vec![b"h3".to_vec()];
@@ -106,10 +107,10 @@ pub async fn connect_and_handshake(
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(None); // Disable idle timeout for Doze Mode!
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15))); // Less aggressive keep-alives
-    
+
     // MTU Pinning
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(quic_mtu); 
+    transport_config.initial_mtu(quic_mtu);
     transport_config.min_mtu(quic_mtu);
 
     // Enable GSO (Segmentation Offload) for higher throughput.
@@ -121,10 +122,10 @@ pub async fn connect_and_handshake(
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
+    ));
     client_config.transport_config(Arc::new(transport_config));
-
-
 
     let mut endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),
@@ -157,7 +158,10 @@ pub async fn connect_and_handshake(
     }
     let connection = match connection {
         Some(conn) => conn,
-        None => return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str))),
+        None => {
+            return Err(last_error
+                .unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str)))
+        }
     };
     info!("Connection established");
 
@@ -175,7 +179,8 @@ pub async fn connect_and_handshake(
         info!("Stream opened");
 
         let auth_msg = ControlMessage::Auth { token };
-        let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard()).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         send_stream.write_u32_le(bytes.len() as u32).await?;
         send_stream.write_all(&bytes).await?;
         info!("Auth sent");
@@ -193,9 +198,10 @@ pub async fn connect_and_handshake(
             return Err(anyhow::anyhow!("Handshake read error: {}", e));
         }
 
-        let cfg: ControlMessage = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-            .map(|(v, _)| v)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let cfg: ControlMessage =
+            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+                .map(|(v, _)| v)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         if let ControlMessage::Error { message } = &cfg {
             return Err(anyhow::anyhow!("Server Error: {}", message));
@@ -214,7 +220,9 @@ async fn connect_and_handshake_h3(
     let mut builder = h3::client::builder();
     builder.enable_datagram(true);
     builder.enable_extended_connect(true);
-    let (mut driver, mut send_request) = builder.build::<_, _, Bytes>(h3_conn).await
+    let (mut driver, mut send_request) = builder
+        .build::<_, _, Bytes>(h3_conn)
+        .await
         .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
 
     // Drive the H3 connection in the background for the lifetime of the session.
@@ -234,13 +242,17 @@ async fn connect_and_handshake_h3(
         .body(())
         .map_err(|e| anyhow::anyhow!("Failed to build H3 CONNECT request: {}", e))?;
 
-    let mut stream = send_request.send_request(req).await
+    let mut stream = send_request
+        .send_request(req)
+        .await
         .map_err(|e| anyhow::anyhow!("H3 send_request failed: {}", e))?;
 
     // NOTE: do NOT call stream.finish(). connect-ip keeps the request stream
     // open bidirectionally for the whole session (for capsules + control).
 
-    let resp = stream.recv_response().await
+    let resp = stream
+        .recv_response()
+        .await
         .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {}", e))?;
 
     if resp.status() != http::StatusCode::OK {

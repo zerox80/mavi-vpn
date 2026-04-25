@@ -1,8 +1,8 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
 use anyhow::Result;
 use bytes::Bytes;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use shared::{icmp, masque};
@@ -55,11 +55,9 @@ pub async fn run_tunnel(
                         tunnel_mtu
                     };
 
-                    if let Some(icmp_p) = icmp::generate_packet_too_big(
-                        &packet_for_icmp,
-                        reported_mtu,
-                        gw,
-                    ) {
+                    if let Some(icmp_p) =
+                        icmp::generate_packet_too_big(&packet_for_icmp, reported_mtu, gw)
+                    {
                         let _ = tx_tun_icmp.try_send(Bytes::from(icmp_p));
                     }
                 }

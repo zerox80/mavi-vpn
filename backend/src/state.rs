@@ -1,9 +1,9 @@
+use anyhow::{anyhow, Result};
 use dashmap::DashMap;
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use tokio::sync::mpsc;
-use anyhow::{Result, anyhow};
 use std::sync::Mutex;
+use tokio::sync::mpsc;
 
 /// A channel for sending raw IP packets to the specific task handling a client connection.
 pub type ClientTx = mpsc::Sender<bytes::Bytes>;
@@ -16,20 +16,20 @@ pub struct AppState {
     /// Mapping of Virtual IPv4 -> Packet Sender.
     /// Used by the TUN reader to route incoming internet traffic to the correct QUIC connection.
     pub peers: DashMap<Ipv4Addr, ClientTx>,
-    
+
     /// Mapping of Virtual IPv6 -> Packet Sender.
     pub peers_v6: DashMap<Ipv6Addr, ClientTx>,
 
     /// The IPv4 subnet managed by this server (e.g. 10.8.0.0/24).
     pub network: Ipv4Network,
-    
+
     /// The IPv6 subnet managed by this server (Unique Local Address scope, default fd00::/64).
     pub network_v6: Ipv6Network,
 
     /// Stack of available (unassigned) IPv4 addresses.
     /// Handled via a Mutex for atomic lease/release.
     free_ips: Mutex<Vec<Ipv4Addr>>,
-    
+
     /// Stack of available (unassigned) IPv6 addresses.
     free_ips_v6: Mutex<Vec<Ipv6Addr>>,
 
@@ -43,10 +43,14 @@ impl AppState {
     /// # Arguments
     /// - `cidr` - The IPv4 network specification (e.g., "10.8.0.0/24").
     pub fn new(cidr: &str) -> Result<Self> {
-        let network: Ipv4Network = cidr.parse().map_err(|_| anyhow!("Invalid CIDR format: {}", cidr))?;
+        let network: Ipv4Network = cidr
+            .parse()
+            .map_err(|_| anyhow!("Invalid CIDR format: {}", cidr))?;
         // Internal IPv6 network (ULA range)
-        let network_v6: Ipv6Network = "fd00::/64".parse().expect("Invalid hardcoded IPv6 CIDR 'fd00::/64'");
-        
+        let network_v6: Ipv6Network = "fd00::/64"
+            .parse()
+            .expect("Invalid hardcoded IPv6 CIDR 'fd00::/64'");
+
         // --- Populate IPv4 pool ---
         if network.prefix() > 30 {
             return Err(anyhow!("CIDR '{}' network is too small (/{} prefix leaves fewer than 2 usable addresses): use /30 or larger network (i.e. a smaller prefix number)", cidr, network.prefix()));
@@ -55,9 +59,11 @@ impl AppState {
             return Err(anyhow!("CIDR '{}' network is too large (/{} prefix): use /8 or smaller network (i.e. a larger prefix number) to avoid exhausting system memory on IP pool allocation", cidr, network.prefix()));
         }
         let mut free_ips = Vec::new();
-        let gateway = network.nth(1).ok_or_else(|| anyhow!("CIDR '{}' too small to assign a gateway address", cidr))?; // By convention, server is .1
+        let gateway = network
+            .nth(1)
+            .ok_or_else(|| anyhow!("CIDR '{}' too small to assign a gateway address", cidr))?; // By convention, server is .1
         let broadcast = network.broadcast();
-        
+
         for ip in network.iter() {
             // Exclude the network address, the gateway (.1), and the broadcast address (.255)
             if ip != network.network() && ip != gateway && ip != broadcast {
@@ -95,7 +101,10 @@ impl AppState {
         }
         drop(free);
 
-        let mut next = self.next_ipv6_host.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = self
+            .next_ipv6_host
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let candidate = u128::from(self.network_v6.network())
             .checked_add(u128::from(*next))
             .ok_or_else(|| anyhow!("VPN IPv6 pool exhausted"))?;
@@ -154,7 +163,10 @@ impl AppState {
 
     /// Returns the server's internal IPv6 address (the VPN Gateway).
     pub fn gateway_ip_v6(&self) -> Ipv6Addr {
-        self.network_v6.iter().nth(1).unwrap_or(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1))
+        self.network_v6
+            .iter()
+            .nth(1)
+            .unwrap_or(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1))
     }
 }
 
@@ -220,7 +232,10 @@ mod tests {
     #[test]
     fn gateway_ip_v6_is_second_addr() {
         let state = AppState::new("10.8.0.0/24").unwrap();
-        assert_eq!(state.gateway_ip_v6(), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+        assert_eq!(
+            state.gateway_ip_v6(),
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)
+        );
     }
 
     #[test]
@@ -342,10 +357,10 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_ip_assignment() {
         use std::sync::Arc;
-        
+
         let state = Arc::new(AppState::new("10.8.0.0/16").unwrap());
         let mut handles = vec![];
-        
+
         for _ in 0..100 {
             let state_clone = state.clone();
             handles.push(tokio::spawn(async move {
@@ -358,7 +373,7 @@ mod tests {
                 ips
             }));
         }
-        
+
         let mut all_assigned = std::collections::HashSet::new();
         for handle in handles {
             let ips = handle.await.unwrap();
@@ -366,7 +381,7 @@ mod tests {
                 assert!(all_assigned.insert(ip), "Duplicate IP assigned: {}", ip);
             }
         }
-        
+
         // 100 threads * 10 IPs = 1000 unique IPs
         assert_eq!(all_assigned.len(), 1000);
     }
@@ -400,7 +415,10 @@ mod tests {
     #[test]
     fn gateway_ip_v6_different_networks() {
         let state = AppState::new("192.168.1.0/24").unwrap();
-        assert_eq!(state.gateway_ip_v6(), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+        assert_eq!(
+            state.gateway_ip_v6(),
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)
+        );
     }
 
     #[test]

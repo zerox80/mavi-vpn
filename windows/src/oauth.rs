@@ -118,6 +118,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         kc_url.trim_end_matches('/'),
         realm
     );
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;

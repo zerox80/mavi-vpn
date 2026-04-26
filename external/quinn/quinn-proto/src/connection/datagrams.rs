@@ -6,8 +6,8 @@ use tracing::{debug, trace};
 
 use super::Connection;
 use crate::{
-    frame::{Datagram, FrameStruct},
     TransportError,
+    frame::{Datagram, FrameStruct},
 };
 
 /// API to control datagram traffic
@@ -15,7 +15,7 @@ pub struct Datagrams<'a> {
     pub(super) conn: &'a mut Connection,
 }
 
-impl<'a> Datagrams<'a> {
+impl Datagrams<'_> {
     /// Queue an unreliable, unordered datagram for immediate transmission
     ///
     /// If `drop` is true, previously queued datagrams which are still unsent may be discarded to
@@ -33,7 +33,7 @@ impl<'a> Datagrams<'a> {
             .max_size()
             .ok_or(SendDatagramError::UnsupportedByPeer)?;
         if data.len() > max {
-           return Err(SendDatagramError::TooLarge);
+            return Err(SendDatagramError::TooLarge);
         }
         if drop {
             while self.conn.datagrams.outgoing_total > self.conn.config.datagram_send_buffer_size {
@@ -153,6 +153,7 @@ impl DatagramState {
                     datagram.data.len(),
                     max_payload
                 );
+                self.outgoing_total -= datagram.data.len();
             }
             result
         });

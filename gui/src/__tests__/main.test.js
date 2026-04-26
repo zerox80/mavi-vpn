@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { escapeHtml, initials, bandwidthWalk, friendlyError, toConfig } from '../utils.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 describe('escapeHtml', () => {
   it('returns empty string unchanged', () => {
@@ -162,5 +167,12 @@ describe('toConfig', () => {
     expect(config.kc_realm).toBeNull();
     expect(config.kc_client_id).toBeNull();
     expect(config.ech_config).toBeNull();
+  });
+});
+
+describe('index.html', () => {
+  it('loads main.js as an ES module', () => {
+    const html = readFileSync(resolve(__dirname, '../index.html'), 'utf8');
+    expect(html).toContain('<script type="module" src="main.js"></script>');
   });
 });

@@ -1,6 +1,7 @@
-#![cfg(feature = "rustls")]
+#![cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
 use std::{
     convert::TryInto,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -30,7 +31,8 @@ fn connect_n_nodes_to_1_and_send_1mb_data() {
     let shared = Arc::new(Mutex::new(Shared { errors: vec![] }));
 
     let (cfg, listener_cert) = configure_listener();
-    let endpoint = quinn::Endpoint::server(cfg, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint =
+        quinn::Endpoint::server(cfg, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
     let listener_addr = endpoint.local_addr().unwrap();
 
     let expected_messages = 50;
@@ -100,8 +102,8 @@ async fn read_from_peer(mut stream: quinn::RecvStream) -> Result<(), quinn::Conn
             Ok(())
         }
         Err(e) => {
-            use quinn::ReadToEndError::*;
             use ReadError::*;
+            use quinn::ReadToEndError::*;
             match e {
                 TooLong | Read(ClosedStream) | Read(ZeroRttRejected) | Read(IllegalOrderedRead) => {
                     unreachable!()
@@ -154,7 +156,7 @@ fn gen_cert() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'static>) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
     (
         cert.cert.into(),
-        PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()),
+        PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
     )
 }
 
@@ -180,9 +182,8 @@ fn hash_correct(data: &[u8], crc: &Crc<u32>) -> bool {
     encoded_hash == actual_hash
 }
 
-#[allow(unsafe_code)]
 fn random_vec(size: usize) -> Vec<u8> {
     let mut ret = vec![0; size];
-    rand::thread_rng().fill_bytes(&mut ret[..]);
+    rand::rng().fill_bytes(&mut ret[..]);
     ret
 }

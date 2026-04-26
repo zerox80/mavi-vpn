@@ -9,7 +9,7 @@ mod wintun_mod;
 use crate::ipc::Config;
 use anyhow::{Context, Result};
 use bytes::{Buf, Bytes};
-use shared::{icmp, masque, resolve_tun_mtu, ControlMessage};
+use shared::{icmp, masque, ControlMessage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -227,7 +227,7 @@ async fn run_session(
     let run_pump = global_running.clone();
     let gateway_v6_for_ptb = gateway_v6;
     let is_h3_framing = config.http3_framing;
-    let tun_mtu_for_ptb = resolve_tun_mtu(config.vpn_mtu);
+    let tun_mtu_for_ptb = mtu;
     let tun_to_quic = std::thread::spawn(move || {
         let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
         loop {

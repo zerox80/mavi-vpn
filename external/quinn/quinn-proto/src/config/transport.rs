@@ -1,26 +1,15 @@
-use std::{
-    fmt,
-    net::{SocketAddrV4, SocketAddrV6},
-    num::TryFromIntError,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fmt, sync::Arc};
+#[cfg(feature = "qlog")]
+use std::{io, sync::Mutex, time::Instant};
 
-#[cfg(feature = "ring")]
-use rand::RngCore;
-#[cfg(feature = "rustls")]
-use rustls::client::WebPkiServerVerifier;
-#[cfg(feature = "rustls")]
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use thiserror::Error;
+#[cfg(feature = "qlog")]
+use qlog::streamer::QlogStreamer;
 
-#[cfg(feature = "rustls")]
-use crate::crypto::rustls::QuicServerConfig;
+#[cfg(feature = "qlog")]
+use crate::QlogStream;
 use crate::{
-    cid_generator::{ConnectionIdGenerator, HashedConnectionIdGenerator},
-    congestion,
-    crypto::{self, HandshakeTokenKey, HmacKey},
-    VarInt, VarIntBoundsExceeded, DEFAULT_SUPPORTED_VERSIONS, INITIAL_MTU, MAX_UDP_PAYLOAD,
+    Duration, INITIAL_MTU, MAX_UDP_PAYLOAD, VarInt, VarIntBoundsExceeded, congestion,
+    connection::qlog::QlogSink,
 };
 
 /// Parameters governing the core QUIC state machine
@@ -42,6 +31,7 @@ pub struct TransportConfig {
     pub(crate) stream_receive_window: VarInt,
     pub(crate) receive_window: VarInt,
     pub(crate) send_window: u64,
+    pub(crate) send_fairness: bool,
 
     pub(crate) packet_threshold: u32,
     pub(crate) time_threshold: f32,
@@ -49,6 +39,7 @@ pub struct TransportConfig {
     pub(crate) initial_mtu: u16,
     pub(crate) min_mtu: u16,
     pub(crate) mtu_discovery_config: Option<MtuDiscoveryConfig>,
+    pub(crate) pad_to_mtu: bool,
     pub(crate) ack_frequency_config: Option<AckFrequencyConfig>,
 
     pub(crate) persistent_congestion_threshold: u32,
@@ -63,6 +54,8 @@ pub struct TransportConfig {
     pub(crate) congestion_controller_factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
 
     pub(crate) enable_segmentation_offload: bool,
+
+    pub(crate) qlog_sink: QlogSink,
 }
 
 impl TransportConfig {
@@ -86,7 +79,7 @@ impl TransportConfig {
     /// Maximum duration of inactivity to accept before timing out the connection.
     ///
     /// The true idle timeout is the minimum of this and the peer's own max idle timeout. `None`
-    /// represents an infinite timeout.
+    /// represents an infinite timeout. Defaults to 30 seconds.
     ///
     /// **WARNING**: If a peer or its network path malfunctions or acts maliciously, an infinite
     /// idle timeout can result in permanently hung futures!
@@ -142,6 +135,21 @@ impl TransportConfig {
     /// every connection uses the entire window.
     pub fn send_window(&mut self, value: u64) -> &mut Self {
         self.send_window = value;
+        self
+    }
+
+    /// Whether to implement fair queuing for send streams having the same priority.
+    ///
+    /// When enabled, connections schedule data from outgoing streams having the same priority in a
+    /// round-robin fashion. When disabled, streams are scheduled in the order they are written to.
+    ///
+    /// Note that this only affects streams with the same priority. Higher priority streams always
+    /// take precedence over lower priority streams.
+    ///
+    /// Disabling fairness can reduce fragmentation and protocol overhead for workloads that use
+    /// many small streams.
+    pub fn send_fairness(&mut self, value: bool) -> &mut Self {
+        self.send_fairness = value;
         self
     }
 
@@ -208,12 +216,28 @@ impl TransportConfig {
         self
     }
 
+    /// Pad UDP datagrams carrying application data to current maximum UDP payload size
+    ///
+    /// Disabled by default. UDP datagrams containing loss probes are exempt from padding.
+    ///
+    /// Enabling this helps mitigate traffic analysis by network observers, but it increases
+    /// bandwidth usage. Without this mitigation precise plain text size of application datagrams as
+    /// well as the total size of stream write bursts can be inferred by observers under certain
+    /// conditions. This analysis requires either an uncongested connection or application datagrams
+    /// too large to be coalesced.
+    pub fn pad_to_mtu(&mut self, value: bool) -> &mut Self {
+        self.pad_to_mtu = value;
+        self
+    }
+
     /// Specifies the ACK frequency config (see [`AckFrequencyConfig`] for details)
     ///
     /// The provided configuration will be ignored if the peer does not support the acknowledgement
     /// frequency QUIC extension.
     ///
-    /// Defaults to `None`, which disables the ACK frequency feature.
+    /// Defaults to `None`, which disables controlling the peer's acknowledgement frequency. Even
+    /// if set to `None`, the local side still supports the acknowledgement frequency QUIC
+    /// extension and may use it in other ways.
     pub fn ack_frequency_config(&mut self, value: Option<AckFrequencyConfig>) -> &mut Self {
         self.ack_frequency_config = value;
         self
@@ -317,23 +341,32 @@ impl TransportConfig {
         self.enable_segmentation_offload = enabled;
         self
     }
+
+    /// qlog capture configuration to use for a particular connection
+    #[cfg(feature = "qlog")]
+    pub fn qlog_stream(&mut self, stream: Option<QlogStream>) -> &mut Self {
+        self.qlog_sink = stream.into();
+        self
+    }
 }
 
 impl Default for TransportConfig {
     fn default() -> Self {
         const EXPECTED_RTT: u32 = 100; // ms
         const MAX_STREAM_BANDWIDTH: u32 = 12500 * 1000; // bytes/s
-                                                        // Window size needed to avoid pipeline
-                                                        // stalls
+        // Window size needed to avoid pipeline
+        // stalls
         const STREAM_RWND: u32 = MAX_STREAM_BANDWIDTH / 1000 * EXPECTED_RTT;
 
         Self {
             max_concurrent_bidi_streams: 100u32.into(),
             max_concurrent_uni_streams: 100u32.into(),
-            max_idle_timeout: Some(VarInt(10_000)),
+            // 30 second default recommended by RFC 9308 § 3.2
+            max_idle_timeout: Some(VarInt(30_000)),
             stream_receive_window: STREAM_RWND.into(),
             receive_window: VarInt::MAX,
             send_window: (8 * STREAM_RWND).into(),
+            send_fairness: true,
 
             packet_threshold: 3,
             time_threshold: 9.0 / 8.0,
@@ -341,6 +374,7 @@ impl Default for TransportConfig {
             initial_mtu: INITIAL_MTU,
             min_mtu: INITIAL_MTU,
             mtu_discovery_config: Some(MtuDiscoveryConfig::default()),
+            pad_to_mtu: false,
             ack_frequency_config: None,
 
             persistent_congestion_threshold: 3,
@@ -355,6 +389,8 @@ impl Default for TransportConfig {
             congestion_controller_factory: Arc::new(congestion::CubicConfig::default()),
 
             enable_segmentation_offload: true,
+
+            qlog_sink: QlogSink::default(),
         }
     }
 }
@@ -368,12 +404,14 @@ impl fmt::Debug for TransportConfig {
             stream_receive_window,
             receive_window,
             send_window,
+            send_fairness,
             packet_threshold,
             time_threshold,
             initial_rtt,
             initial_mtu,
             min_mtu,
             mtu_discovery_config,
+            pad_to_mtu,
             ack_frequency_config,
             persistent_congestion_threshold,
             keep_alive_interval,
@@ -385,20 +423,24 @@ impl fmt::Debug for TransportConfig {
                 deterministic_packet_numbers: _,
             congestion_controller_factory: _,
             enable_segmentation_offload,
+            qlog_sink,
         } = self;
-        fmt.debug_struct("TransportConfig")
-            .field("max_concurrent_bidi_streams", max_concurrent_bidi_streams)
+        let mut s = fmt.debug_struct("TransportConfig");
+
+        s.field("max_concurrent_bidi_streams", max_concurrent_bidi_streams)
             .field("max_concurrent_uni_streams", max_concurrent_uni_streams)
             .field("max_idle_timeout", max_idle_timeout)
             .field("stream_receive_window", stream_receive_window)
             .field("receive_window", receive_window)
             .field("send_window", send_window)
+            .field("send_fairness", send_fairness)
             .field("packet_threshold", packet_threshold)
             .field("time_threshold", time_threshold)
             .field("initial_rtt", initial_rtt)
             .field("initial_mtu", initial_mtu)
             .field("min_mtu", min_mtu)
             .field("mtu_discovery_config", mtu_discovery_config)
+            .field("pad_to_mtu", pad_to_mtu)
             .field("ack_frequency_config", ack_frequency_config)
             .field(
                 "persistent_congestion_threshold",
@@ -409,9 +451,13 @@ impl fmt::Debug for TransportConfig {
             .field("allow_spin", allow_spin)
             .field("datagram_receive_buffer_size", datagram_receive_buffer_size)
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
-            .field("congestion_controller_factory", &"[ opaque ]")
-            .field("enable_segmentation_offload", enable_segmentation_offload)
-            .finish()
+            // congestion_controller_factory not debug
+            .field("enable_segmentation_offload", enable_segmentation_offload);
+        if cfg!(feature = "qlog") {
+            s.field("qlog_stream", &qlog_sink.is_enabled());
+        }
+
+        s.finish_non_exhaustive()
     }
 }
 
@@ -489,6 +535,94 @@ impl Default for AckFrequencyConfig {
             ack_eliciting_threshold: VarInt(1),
             max_ack_delay: None,
             reordering_threshold: VarInt(2),
+        }
+    }
+}
+
+/// Configuration for qlog trace logging
+#[cfg(feature = "qlog")]
+pub struct QlogConfig {
+    writer: Option<Box<dyn io::Write + Send + Sync>>,
+    title: Option<String>,
+    description: Option<String>,
+    start_time: Instant,
+}
+
+#[cfg(feature = "qlog")]
+impl QlogConfig {
+    /// Where to write a qlog `TraceSeq`
+    pub fn writer(&mut self, writer: Box<dyn io::Write + Send + Sync>) -> &mut Self {
+        self.writer = Some(writer);
+        self
+    }
+
+    /// Title to record in the qlog capture
+    pub fn title(&mut self, title: Option<String>) -> &mut Self {
+        self.title = title;
+        self
+    }
+
+    /// Description to record in the qlog capture
+    pub fn description(&mut self, description: Option<String>) -> &mut Self {
+        self.description = description;
+        self
+    }
+
+    /// Epoch qlog event times are recorded relative to
+    pub fn start_time(&mut self, start_time: Instant) -> &mut Self {
+        self.start_time = start_time;
+        self
+    }
+
+    /// Construct the [`QlogStream`] described by this configuration
+    pub fn into_stream(self) -> Option<QlogStream> {
+        use tracing::warn;
+
+        let writer = self.writer?;
+        let trace = qlog::TraceSeq::new(
+            qlog::VantagePoint {
+                name: None,
+                ty: qlog::VantagePointType::Unknown,
+                flow: None,
+            },
+            self.title.clone(),
+            self.description.clone(),
+            Some(qlog::Configuration {
+                time_offset: Some(0.0),
+                original_uris: None,
+            }),
+            None,
+        );
+
+        let mut streamer = QlogStreamer::new(
+            qlog::QLOG_VERSION.into(),
+            self.title,
+            self.description,
+            None,
+            self.start_time,
+            trace,
+            qlog::events::EventImportance::Core,
+            writer,
+        );
+
+        match streamer.start_log() {
+            Ok(()) => Some(QlogStream(Arc::new(Mutex::new(streamer)))),
+            Err(e) => {
+                warn!("could not initialize endpoint qlog streamer: {e}");
+                None
+            }
+        }
+    }
+}
+
+#[cfg(feature = "qlog")]
+impl Default for QlogConfig {
+    fn default() -> Self {
+        Self {
+            writer: None,
+            title: None,
+            description: None,
+            start_time: Instant::now(),
         }
     }
 }
@@ -609,437 +743,7 @@ impl Default for MtuDiscoveryConfig {
     }
 }
 
-/// Global configuration for the endpoint, affecting all connections
-///
-/// Default values should be suitable for most internet applications.
-#[derive(Clone)]
-pub struct EndpointConfig {
-    pub(crate) reset_key: Arc<dyn HmacKey>,
-    pub(crate) max_udp_payload_size: VarInt,
-    /// CID generator factory
-    ///
-    /// Create a cid generator for local cid in Endpoint struct
-    pub(crate) connection_id_generator_factory:
-        Arc<dyn Fn() -> Box<dyn ConnectionIdGenerator> + Send + Sync>,
-    pub(crate) supported_versions: Vec<u32>,
-    pub(crate) grease_quic_bit: bool,
-    /// Minimum interval between outgoing stateless reset packets
-    pub(crate) min_reset_interval: Duration,
-}
-
-impl EndpointConfig {
-    /// Create a default config with a particular `reset_key`
-    pub fn new(reset_key: Arc<dyn HmacKey>) -> Self {
-        let cid_factory =
-            || -> Box<dyn ConnectionIdGenerator> { Box::<HashedConnectionIdGenerator>::default() };
-        Self {
-            reset_key,
-            max_udp_payload_size: (1500u32 - 28).into(), // Ethernet MTU minus IP + UDP headers
-            connection_id_generator_factory: Arc::new(cid_factory),
-            supported_versions: DEFAULT_SUPPORTED_VERSIONS.to_vec(),
-            grease_quic_bit: true,
-            min_reset_interval: Duration::from_millis(20),
-        }
-    }
-
-    /// Supply a custom connection ID generator factory
-    ///
-    /// Called once by each `Endpoint` constructed from this configuration to obtain the CID
-    /// generator which will be used to generate the CIDs used for incoming packets on all
-    /// connections involving that  `Endpoint`. A custom CID generator allows applications to embed
-    /// information in local connection IDs, e.g. to support stateless packet-level load balancers.
-    ///
-    /// Defaults to [`HashedConnectionIdGenerator`].
-    pub fn cid_generator<F: Fn() -> Box<dyn ConnectionIdGenerator> + Send + Sync + 'static>(
-        &mut self,
-        factory: F,
-    ) -> &mut Self {
-        self.connection_id_generator_factory = Arc::new(factory);
-        self
-    }
-
-    /// Private key used to send authenticated connection resets to peers who were
-    /// communicating with a previous instance of this endpoint.
-    pub fn reset_key(&mut self, key: Arc<dyn HmacKey>) -> &mut Self {
-        self.reset_key = key;
-        self
-    }
-
-    /// Maximum UDP payload size accepted from peers (excluding UDP and IP overhead).
-    ///
-    /// Must be greater or equal than 1200.
-    ///
-    /// Defaults to 1472, which is the largest UDP payload that can be transmitted in the typical
-    /// 1500 byte Ethernet MTU. Deployments on links with larger MTUs (e.g. loopback or Ethernet
-    /// with jumbo frames) can raise this to improve performance at the cost of a linear increase in
-    /// datagram receive buffer size.
-    pub fn max_udp_payload_size(&mut self, value: u16) -> Result<&mut Self, ConfigError> {
-        if !(1200..=65_527).contains(&value) {
-            return Err(ConfigError::OutOfBounds);
-        }
-
-        self.max_udp_payload_size = value.into();
-        Ok(self)
-    }
-
-    /// Get the current value of `max_udp_payload_size`
-    ///
-    /// While most parameters don't need to be readable, this must be exposed to allow higher-level
-    /// layers, e.g. the `quinn` crate, to determine how large a receive buffer to allocate to
-    /// support an externally-defined `EndpointConfig`.
-    ///
-    /// While `get_` accessors are typically unidiomatic in Rust, we favor concision for setters,
-    /// which will be used far more heavily.
-    #[doc(hidden)]
-    pub fn get_max_udp_payload_size(&self) -> u64 {
-        self.max_udp_payload_size.into()
-    }
-
-    /// Override supported QUIC versions
-    pub fn supported_versions(&mut self, supported_versions: Vec<u32>) -> &mut Self {
-        self.supported_versions = supported_versions;
-        self
-    }
-
-    /// Whether to accept QUIC packets containing any value for the fixed bit
-    ///
-    /// Enabled by default. Helps protect against protocol ossification and makes traffic less
-    /// identifiable to observers. Disable if helping observers identify this traffic as QUIC is
-    /// desired.
-    pub fn grease_quic_bit(&mut self, value: bool) -> &mut Self {
-        self.grease_quic_bit = value;
-        self
-    }
-
-    /// Minimum interval between outgoing stateless reset packets
-    ///
-    /// Defaults to 20ms. Limits the impact of attacks which flood an endpoint with garbage packets,
-    /// e.g. [ISAKMP/IKE amplification]. Larger values provide a stronger defense, but may delay
-    /// detection of some error conditions by clients. Using a [`ConnectionIdGenerator`] with a low
-    /// rate of false positives in [`validate`](ConnectionIdGenerator::validate) reduces the risk
-    /// incurred by a small minimum reset interval.
-    ///
-    /// [ISAKMP/IKE
-    /// amplification]: https://bughunters.google.com/blog/5960150648750080/preventing-cross-service-udp-loops-in-quic#isakmp-ike-amplification-vs-quic
-    pub fn min_reset_interval(&mut self, value: Duration) -> &mut Self {
-        self.min_reset_interval = value;
-        self
-    }
-}
-
-impl fmt::Debug for EndpointConfig {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.debug_struct("EndpointConfig")
-            .field("reset_key", &"[ elided ]")
-            .field("max_udp_payload_size", &self.max_udp_payload_size)
-            .field("cid_generator_factory", &"[ elided ]")
-            .field("supported_versions", &self.supported_versions)
-            .field("grease_quic_bit", &self.grease_quic_bit)
-            .finish()
-    }
-}
-
-#[cfg(feature = "ring")]
-impl Default for EndpointConfig {
-    fn default() -> Self {
-        let mut reset_key = [0; 64];
-        rand::thread_rng().fill_bytes(&mut reset_key);
-
-        Self::new(Arc::new(ring::hmac::Key::new(
-            ring::hmac::HMAC_SHA256,
-            &reset_key,
-        )))
-    }
-}
-
-/// Parameters governing incoming connections
-///
-/// Default values should be suitable for most internet applications.
-#[derive(Clone)]
-pub struct ServerConfig {
-    /// Transport configuration to use for incoming connections
-    pub transport: Arc<TransportConfig>,
-
-    /// TLS configuration used for incoming connections.
-    ///
-    /// Must be set to use TLS 1.3 only.
-    pub crypto: Arc<dyn crypto::ServerConfig>,
-
-    /// Used to generate one-time AEAD keys to protect handshake tokens
-    pub(crate) token_key: Arc<dyn HandshakeTokenKey>,
-
-    /// Microseconds after a stateless retry token was issued for which it's considered valid.
-    pub(crate) retry_token_lifetime: Duration,
-
-    /// Whether to allow clients to migrate to new addresses
-    ///
-    /// Improves behavior for clients that move between different internet connections or suffer NAT
-    /// rebinding. Enabled by default.
-    pub(crate) migration: bool,
-
-    pub(crate) preferred_address_v4: Option<SocketAddrV4>,
-    pub(crate) preferred_address_v6: Option<SocketAddrV6>,
-
-    pub(crate) max_incoming: usize,
-    pub(crate) incoming_buffer_size: u64,
-    pub(crate) incoming_buffer_size_total: u64,
-}
-
-impl ServerConfig {
-    /// Create a default config with a particular handshake token key
-    pub fn new(
-        crypto: Arc<dyn crypto::ServerConfig>,
-        token_key: Arc<dyn HandshakeTokenKey>,
-    ) -> Self {
-        Self {
-            transport: Arc::new(TransportConfig::default()),
-            crypto,
-
-            token_key,
-            retry_token_lifetime: Duration::from_secs(15),
-
-            migration: true,
-
-            preferred_address_v4: None,
-            preferred_address_v6: None,
-
-            max_incoming: 1 << 16,
-            incoming_buffer_size: 10 << 20,
-            incoming_buffer_size_total: 100 << 20,
-        }
-    }
-
-    /// Set a custom [`TransportConfig`]
-    pub fn transport_config(&mut self, transport: Arc<TransportConfig>) -> &mut Self {
-        self.transport = transport;
-        self
-    }
-
-    /// Private key used to authenticate data included in handshake tokens.
-    pub fn token_key(&mut self, value: Arc<dyn HandshakeTokenKey>) -> &mut Self {
-        self.token_key = value;
-        self
-    }
-
-    /// Duration after a stateless retry token was issued for which it's considered valid.
-    pub fn retry_token_lifetime(&mut self, value: Duration) -> &mut Self {
-        self.retry_token_lifetime = value;
-        self
-    }
-
-    /// Whether to allow clients to migrate to new addresses
-    ///
-    /// Improves behavior for clients that move between different internet connections or suffer NAT
-    /// rebinding. Enabled by default.
-    pub fn migration(&mut self, value: bool) -> &mut Self {
-        self.migration = value;
-        self
-    }
-
-    /// The preferred IPv4 address that will be communicated to clients during handshaking.
-    /// If the client is able to reach this address, it will switch to it.
-    pub fn preferred_address_v4(&mut self, address: Option<SocketAddrV4>) -> &mut Self {
-        self.preferred_address_v4 = address;
-        self
-    }
-
-    /// The preferred IPv6 address that will be communicated to clients during handshaking.
-    /// If the client is able to reach this address, it will switch to it.
-    pub fn preferred_address_v6(&mut self, address: Option<SocketAddrV6>) -> &mut Self {
-        self.preferred_address_v6 = address;
-        self
-    }
-
-    /// Maximum number of [`Incoming`][crate::Incoming] to allow to exist at a time
-    ///
-    /// An [`Incoming`][crate::Incoming] comes into existence when an incoming connection attempt
-    /// is received and stops existing when the application either accepts it or otherwise disposes
-    /// of it. While this limit is reached, new incoming connection attempts are immediately
-    /// refused. Larger values have greater worst-case memory consumption, but accommodate greater
-    /// application latency in handling incoming connection attempts.
-    ///
-    /// The default value is set to 65536. With a typical Ethernet MTU of 1500 bytes, this limits
-    /// memory consumption from this to under 100 MiB--a generous amount that still prevents memory
-    /// exhaustion in most contexts.
-    pub fn max_incoming(&mut self, max_incoming: usize) -> &mut Self {
-        self.max_incoming = max_incoming;
-        self
-    }
-
-    /// Maximum number of received bytes to buffer for each [`Incoming`][crate::Incoming]
-    ///
-    /// An [`Incoming`][crate::Incoming] comes into existence when an incoming connection attempt
-    /// is received and stops existing when the application either accepts it or otherwise disposes
-    /// of it. This limit governs only packets received within that period, and does not include
-    /// the first packet. Packets received in excess of this limit are dropped, which may cause
-    /// 0-RTT or handshake data to have to be retransmitted.
-    ///
-    /// The default value is set to 10 MiB--an amount such that in most situations a client would
-    /// not transmit that much 0-RTT data faster than the server handles the corresponding
-    /// [`Incoming`][crate::Incoming].
-    pub fn incoming_buffer_size(&mut self, incoming_buffer_size: u64) -> &mut Self {
-        self.incoming_buffer_size = incoming_buffer_size;
-        self
-    }
-
-    /// Maximum number of received bytes to buffer for all [`Incoming`][crate::Incoming]
-    /// collectively
-    ///
-    /// An [`Incoming`][crate::Incoming] comes into existence when an incoming connection attempt
-    /// is received and stops existing when the application either accepts it or otherwise disposes
-    /// of it. This limit governs only packets received within that period, and does not include
-    /// the first packet. Packets received in excess of this limit are dropped, which may cause
-    /// 0-RTT or handshake data to have to be retransmitted.
-    ///
-    /// The default value is set to 100 MiB--a generous amount that still prevents memory
-    /// exhaustion in most contexts.
-    pub fn incoming_buffer_size_total(&mut self, incoming_buffer_size_total: u64) -> &mut Self {
-        self.incoming_buffer_size_total = incoming_buffer_size_total;
-        self
-    }
-}
-
-#[cfg(feature = "rustls")]
-impl ServerConfig {
-    /// Create a server config with the given certificate chain to be presented to clients
-    ///
-    /// Uses a randomized handshake token key.
-    pub fn with_single_cert(
-        cert_chain: Vec<CertificateDer<'static>>,
-        key: PrivateKeyDer<'static>,
-    ) -> Result<Self, rustls::Error> {
-        Ok(Self::with_crypto(Arc::new(QuicServerConfig::new(
-            cert_chain, key,
-        ))))
-    }
-}
-
-#[cfg(feature = "ring")]
-impl ServerConfig {
-    /// Create a server config with the given [`crypto::ServerConfig`]
-    ///
-    /// Uses a randomized handshake token key.
-    pub fn with_crypto(crypto: Arc<dyn crypto::ServerConfig>) -> Self {
-        let rng = &mut rand::thread_rng();
-        let mut master_key = [0u8; 64];
-        rng.fill_bytes(&mut master_key);
-        let master_key = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, &[]).extract(&master_key);
-
-        Self::new(crypto, Arc::new(master_key))
-    }
-}
-
-impl fmt::Debug for ServerConfig {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.debug_struct("ServerConfig<T>")
-            .field("transport", &self.transport)
-            .field("crypto", &"ServerConfig { elided }")
-            .field("token_key", &"[ elided ]")
-            .field("retry_token_lifetime", &self.retry_token_lifetime)
-            .field("migration", &self.migration)
-            .field("preferred_address_v4", &self.preferred_address_v4)
-            .field("preferred_address_v6", &self.preferred_address_v6)
-            .field("max_incoming", &self.max_incoming)
-            .field("incoming_buffer_size", &self.incoming_buffer_size)
-            .field(
-                "incoming_buffer_size_total",
-                &self.incoming_buffer_size_total,
-            )
-            .finish()
-    }
-}
-
-/// Configuration for outgoing connections
-///
-/// Default values should be suitable for most internet applications.
-#[derive(Clone)]
-#[non_exhaustive]
-pub struct ClientConfig {
-    /// Transport configuration to use
-    pub(crate) transport: Arc<TransportConfig>,
-
-    /// Cryptographic configuration to use
-    pub(crate) crypto: Arc<dyn crypto::ClientConfig>,
-
-    /// QUIC protocol version to use
-    pub(crate) version: u32,
-}
-
-impl ClientConfig {
-    /// Create a default config with a particular cryptographic config
-    pub fn new(crypto: Arc<dyn crypto::ClientConfig>) -> Self {
-        Self {
-            transport: Default::default(),
-            crypto,
-            version: 1,
-        }
-    }
-
-    /// Set a custom [`TransportConfig`]
-    pub fn transport_config(&mut self, transport: Arc<TransportConfig>) -> &mut Self {
-        self.transport = transport;
-        self
-    }
-
-    /// Set the QUIC version to use
-    pub fn version(&mut self, version: u32) -> &mut Self {
-        self.version = version;
-        self
-    }
-}
-
-#[cfg(feature = "rustls")]
-impl ClientConfig {
-    /// Create a client configuration that trusts the platform's native roots
-    #[cfg(feature = "platform-verifier")]
-    pub fn with_platform_verifier() -> Self {
-        Self::new(Arc::new(crypto::rustls::QuicClientConfig::new(Arc::new(
-            rustls_platform_verifier::Verifier::new(),
-        ))))
-    }
-
-    /// Create a client configuration that trusts specified trust anchors
-    pub fn with_root_certificates(
-        roots: Arc<rustls::RootCertStore>,
-    ) -> Result<Self, rustls::client::VerifierBuilderError> {
-        Ok(Self::new(Arc::new(crypto::rustls::QuicClientConfig::new(
-            WebPkiServerVerifier::builder(roots).build()?,
-        ))))
-    }
-}
-
-impl fmt::Debug for ClientConfig {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.debug_struct("ClientConfig<T>")
-            .field("transport", &self.transport)
-            .field("crypto", &"ClientConfig { elided }")
-            .field("version", &self.version)
-            .finish()
-    }
-}
-
-/// Errors in the configuration of an endpoint
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ConfigError {
-    /// Value exceeds supported bounds
-    #[error("value exceeds supported bounds")]
-    OutOfBounds,
-}
-
-impl From<TryFromIntError> for ConfigError {
-    fn from(_: TryFromIntError) -> Self {
-        Self::OutOfBounds
-    }
-}
-
-impl From<VarIntBoundsExceeded> for ConfigError {
-    fn from(_: VarIntBoundsExceeded) -> Self {
-        Self::OutOfBounds
-    }
-}
-
-/// Maximum duration of inactivity to accept before timing out the connection.
+/// Maximum duration of inactivity to accept before timing out the connection
 ///
 /// This wraps an underlying [`VarInt`], representing the duration in milliseconds. Values can be
 /// constructed by converting directly from `VarInt`, or using `TryFrom<Duration>`.

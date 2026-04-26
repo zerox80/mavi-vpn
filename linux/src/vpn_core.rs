@@ -265,6 +265,8 @@ async fn run_session(
     let alive_tun = session_alive.clone();
     let run_tun = global_running.clone();
     let is_h3_framing = config.http3_framing;
+    let tun_mtu_for_ptb = mtu;
+    let gateway_v6_for_ptb = gateway_v6;
     let tun_to_quic = tokio::spawn(async move {
         let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
         let mut scratch = vec![0u8; 65536];
@@ -289,12 +291,23 @@ async fn run_session(
                     };
                     if let Err(e) = conn_sender.send_datagram(payload) {
                         if matches!(e, quinn::SendDatagramError::TooLarge) {
-                            let current_mtu =
-                                conn_sender.max_datagram_size().unwrap_or(1200) as u16;
+                            let version = scratch[0] >> 4;
+                            let source_ip = if version == 4 {
+                                Some(std::net::IpAddr::V4(gateway))
+                            } else if version == 6 {
+                                gateway_v6_for_ptb.map(std::net::IpAddr::V6)
+                            } else {
+                                None
+                            };
+                            let reported_mtu = if version == 6 {
+                                tun_mtu_for_ptb.max(1280)
+                            } else {
+                                tun_mtu_for_ptb
+                            };
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(
                                 &scratch[..n],
-                                current_mtu,
-                                Some(std::net::IpAddr::V4(gateway)),
+                                reported_mtu,
+                                source_ip,
                             ) {
                                 let _ = tun_reader.write(&icmp_packet).await;
                             }
@@ -537,7 +550,22 @@ async fn connect_and_handshake(
         (cfg, None)
     };
 
+    validate_server_mtu(&config, tun_mtu)?;
+
     Ok((connection, config, h3_guard))
+}
+
+fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()> {
+    if let ControlMessage::Config { mtu, .. } = config {
+        if *mtu != local_tun_mtu {
+            anyhow::bail!(
+                "MTU mismatch: local/client VPN MTU is {}, but server pushed {}. Configure both sides to the same VPN_MTU.",
+                local_tun_mtu,
+                mtu
+            );
+        }
+    }
+    Ok(())
 }
 
 /// MASQUE connect-ip (RFC 9484) handshake.

@@ -315,7 +315,8 @@ class MaviVpnService : VpnService() {
                              }
 
                              builder.setSession("MaviVPN")
-                             val tunMtu = if (prefs.savedVpnMtu in 1280..1360) prefs.savedVpnMtu else 1280
+                             val serverMtu = config.optInt("mtu", 1280)
+                             val tunMtu = if (serverMtu in 1280..1360) serverMtu else 1280
                              builder.setMtu(tunMtu)
 
                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

@@ -209,7 +209,22 @@ pub async fn connect_and_handshake(
         (cfg, None)
     };
 
+    validate_server_mtu(&config, tun_mtu)?;
+
     Ok((connection, config, h3_guard))
+}
+
+fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> anyhow::Result<()> {
+    if let ControlMessage::Config { mtu, .. } = config {
+        if *mtu != local_tun_mtu {
+            anyhow::bail!(
+                "MTU mismatch: local/client VPN MTU is {}, but server pushed {}. Configure both sides to the same VPN_MTU.",
+                local_tun_mtu,
+                mtu
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn connect_and_handshake_h3(
@@ -366,5 +381,31 @@ mod tests {
     #[test]
     fn endpoint_host_ipv6_no_brackets() {
         assert_eq!(endpoint_host("::1"), "::1");
+    }
+
+    fn config_with_mtu(mtu: u16) -> ControlMessage {
+        ControlMessage::Config {
+            assigned_ip: "10.8.0.2".parse().unwrap(),
+            netmask: "255.255.255.0".parse().unwrap(),
+            gateway: "10.8.0.1".parse().unwrap(),
+            dns_server: "1.1.1.1".parse().unwrap(),
+            mtu,
+            assigned_ipv6: None,
+            netmask_v6: None,
+            gateway_v6: None,
+            dns_server_v6: None,
+            whitelist_domains: None,
+        }
+    }
+
+    #[test]
+    fn validate_server_mtu_accepts_match() {
+        assert!(validate_server_mtu(&config_with_mtu(1280), 1280).is_ok());
+    }
+
+    #[test]
+    fn validate_server_mtu_rejects_mismatch() {
+        let err = validate_server_mtu(&config_with_mtu(1360), 1280).unwrap_err();
+        assert!(err.to_string().contains("MTU mismatch"));
     }
 }

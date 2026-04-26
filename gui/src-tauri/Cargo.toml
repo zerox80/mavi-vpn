@@ -17,13 +17,14 @@ tauri-plugin-shell = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
+rustls = { workspace = true }
 bincode = { package = "bincode-next", version = "3.0.0-rc.2", features = ["serde"] }
 anyhow = "1.0"
 rand = "0.10"
 sha2 = "0.11"
 base64 = "0.22"
 url = "2"
-reqwest = { version = "0.13", features = ["json", "rustls", "form"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls-no-provider", "form"], default-features = false }
 webbrowser = "1.0"
 
 [dev-dependencies]

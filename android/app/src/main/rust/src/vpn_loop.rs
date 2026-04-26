@@ -162,7 +162,7 @@ pub async fn run_vpn_loop(
             };
 
             // Send to QUIC
-            if let Err(e) = conn_upload.send_datagram(payload) {
+            if let Err(e) = conn_upload.send_datagram_wait(payload).await {
                 match e {
                     quinn::SendDatagramError::ConnectionLost(_) => {
                         error!("QUIC Connection lost during send");

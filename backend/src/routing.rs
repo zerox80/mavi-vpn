@@ -6,6 +6,14 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, warn};
 
+async fn send_or_backpressure(tx: &tokio::sync::mpsc::Sender<Bytes>, packet: Bytes) -> bool {
+    match tx.try_send(packet) {
+        Ok(()) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(packet)) => tx.send(packet).await.is_ok(),
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
 pub fn spawn_tun_writer(
     mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>,
     mut rx_tun: tokio::sync::mpsc::Receiver<Bytes>,
@@ -37,7 +45,6 @@ pub fn spawn_tun_reader(
             tokio::sync::mpsc::Sender<bytes::Bytes>,
         > = std::collections::HashMap::new();
 
-        let mut last_drop_warn = std::time::Instant::now();
         let mut drop_count = 0u64;
 
         // Periodic tick used only to flush trailing drop_count warnings when the
@@ -77,33 +84,14 @@ pub fn spawn_tun_reader(
                                     let mut remove = false;
 
                                     // Fast-path: Only 1 hash traversal!
-                                    if let Some(tx_client) = local_peers_v4.get(&dest_ip) {
-                                        if let Err(e) = tx_client.try_send(framed) {
-                                            if let tokio::sync::mpsc::error::TrySendError::Closed(_) = e {
-                                                remove = true;
-                                            } else {
-                                                drop_count += 1;
-                                                if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
-                                                    warn!("Dropped {} packets: client channel(s) full", drop_count);
-                                                    drop_count = 0;
-                                                    last_drop_warn = std::time::Instant::now();
-                                                }
-                                            }
+                                    if let Some(tx_client) = local_peers_v4.get(&dest_ip).cloned() {
+                                        if !send_or_backpressure(&tx_client, framed).await {
+                                            remove = true;
                                         }
                                     } else {
                                         let tx_client_opt = state_reader.peers.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
                                         if let Some(tx_client) = tx_client_opt {
-                                            if let Err(e) = tx_client.try_send(framed) {
-                                                if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
-                                                    drop_count += 1;
-                                                    if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
-                                                        warn!("Dropped {} packets: client channel(s) full", drop_count);
-                                                        drop_count = 0;
-                                                        last_drop_warn = std::time::Instant::now();
-                                                    }
-                                                    local_peers_v4.insert(dest_ip, tx_client);
-                                                }
-                                            } else {
+                                            if send_or_backpressure(&tx_client, framed).await {
                                                 local_peers_v4.insert(dest_ip, tx_client);
                                             }
                                         }
@@ -119,33 +107,14 @@ pub fn spawn_tun_reader(
 
                                     let mut remove = false;
 
-                                    if let Some(tx_client) = local_peers_v6.get(&dest_ip) {
-                                        if let Err(e) = tx_client.try_send(framed) {
-                                            if let tokio::sync::mpsc::error::TrySendError::Closed(_) = e {
-                                                remove = true;
-                                            } else {
-                                                drop_count += 1;
-                                                if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
-                                                    warn!("Dropped {} packets: client channel(s) full", drop_count);
-                                                    drop_count = 0;
-                                                    last_drop_warn = std::time::Instant::now();
-                                                }
-                                            }
+                                    if let Some(tx_client) = local_peers_v6.get(&dest_ip).cloned() {
+                                        if !send_or_backpressure(&tx_client, framed).await {
+                                            remove = true;
                                         }
                                     } else {
                                         let tx_client_opt = state_reader.peers_v6.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
                                         if let Some(tx_client) = tx_client_opt {
-                                            if let Err(e) = tx_client.try_send(framed) {
-                                                if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
-                                                    drop_count += 1;
-                                                    if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
-                                                        warn!("Dropped {} packets: client channel(s) full", drop_count);
-                                                        drop_count = 0;
-                                                        last_drop_warn = std::time::Instant::now();
-                                                    }
-                                                    local_peers_v6.insert(dest_ip, tx_client);
-                                                }
-                                            } else {
+                                            if send_or_backpressure(&tx_client, framed).await {
                                                 local_peers_v6.insert(dest_ip, tx_client);
                                             }
                                         }
@@ -168,7 +137,6 @@ pub fn spawn_tun_reader(
                     if drop_count > 0 {
                         warn!("Dropped {} packets: client channel(s) full (trailing drops)", drop_count);
                         drop_count = 0;
-                        last_drop_warn = std::time::Instant::now();
                     }
                 }
             }

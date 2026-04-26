@@ -24,7 +24,7 @@ time = "=0.3.36"
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 rustls-pemfile = "2.0"
 ipnetwork = "0.21"
-etherparse = "0.19"
+etherparse = "0.20"
 dashmap = "6.1"
 thiserror = "2.0"
 h3 = "0.0.8"

@@ -20,10 +20,11 @@ import kotlinx.coroutines.runBlocking
 class MaviVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var thread: Thread? = null
+    @Volatile private var thread: Thread? = null
     private var connectivityManager: ConnectivityManager? = null
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var vpnSessionHandle: Long = 0
+    @Volatile private var vpnSessionGeneration: Long = 0
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val vpnLock = Any()
@@ -35,6 +36,14 @@ class MaviVpnService : VpnService() {
         /** Observable connection state for UI */
         val isConnected = MutableStateFlow(false)
     }
+
+    private data class SessionCleanup(
+        val handle: Long,
+        val workerThread: Thread?,
+        val callback: ConnectivityManager.NetworkCallback?,
+        val vpnInterface: ParcelFileDescriptor?,
+        val generation: Long,
+    )
 
     override fun onCreate() {
         super.onCreate()
@@ -122,47 +131,32 @@ class MaviVpnService : VpnService() {
     }
 
     private fun startVpn(ip: String, port: String, token: String, certPin: String, splitMode: String, splitPackages: String) {
-        if (thread != null) {
-            isRunning = false
-            isConnected.value = false
-            synchronized(vpnLock) {
-                if (vpnSessionHandle != 0L) {
-                    NativeLib.stop(vpnSessionHandle)
-                }
-            }
-            try { vpnInterface?.close() } catch(_: Exception){}
-            vpnInterface = null
-            try { thread?.join(2000) } catch(_: Exception){}
-            thread = null
-        }
-
-        synchronized(vpnLock) {
-            try {
-                if (connectivityManager != null && networkCallback != null) {
-                    connectivityManager?.unregisterNetworkCallback(networkCallback!!)
-                }
-            } catch (e: Exception) {
-                Log.w("MaviVPN", "Failed to unregister previous callback: ${e.message}")
-            }
-            networkCallback = null
-        }
+        val cleanup = invalidateCurrentSession()
+        stopCurrentSession(cleanup)
+        val sessionGeneration = cleanup.generation
 
         try {
             connectivityManager = getSystemService(ConnectivityManager::class.java)
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     Log.d("MaviVPN", "Network available: $network")
-                    synchronized(vpnLock) {
-                        if (vpnSessionHandle != 0L) {
-                            NativeLib.networkChanged(vpnSessionHandle)
+                    val handle = synchronized(vpnLock) {
+                        if (vpnSessionHandle != 0L && vpnSessionGeneration == sessionGeneration) {
+                            vpnSessionHandle
+                        } else {
+                            0L
                         }
                     }
+                    if (handle != 0L) {
+                        NativeLib.networkChanged(handle)
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    Log.d("MaviVPN", "Network lost: $network")
                 }
             }
-            val req = NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
-            connectivityManager?.registerNetworkCallback(req, networkCallback!!)
+            connectivityManager?.registerDefaultNetworkCallback(networkCallback!!)
         } catch (e: Exception) {
             Log.e("MaviVPN", "Failed to register network callback", e)
         }
@@ -178,13 +172,18 @@ class MaviVpnService : VpnService() {
             Log.d("MaviVPN", "Starting VPN Thread")
             var currentToken = token
             var forcedRefreshCount = 0
+            val workerGeneration = sessionGeneration
+
+            fun isCurrentSessionActive(): Boolean {
+                return isRunning && vpnSessionGeneration == workerGeneration
+            }
             
-            while (isRunning) {
+            while (isCurrentSessionActive()) {
                 try {
                     var retryCount = 0
                     val crMode = prefs.savedCensorshipResistant
                         
-                    while (isRunning) {
+                    while (isCurrentSessionActive()) {
                         if (prefs.savedUseKeycloak && !OAuthHelper.isAccessTokenUsable(currentToken, skewSeconds = 300)) {
                             Log.i("MaviVPN", "Keycloak token expires soon. Attempting refresh in background.")
                             val refreshed = runBlocking {
@@ -211,6 +210,10 @@ class MaviVpnService : VpnService() {
                                     break
                                 }
                             }
+                        }
+
+                        if (!isCurrentSessionActive()) {
+                            break
                         }
 
                         Log.d("MaviVPN", "Attempting connection to $ip:$port (Attempt ${++retryCount})")
@@ -259,8 +262,8 @@ class MaviVpnService : VpnService() {
                         }
                         break
                     }
-                    
-                    if (!isRunning) continue 
+
+                    if (!isCurrentSessionActive()) continue 
                     val handle = vpnSessionHandle
 
                     try {
@@ -315,7 +318,8 @@ class MaviVpnService : VpnService() {
                              }
 
                              builder.setSession("MaviVPN")
-                             val tunMtu = if (prefs.savedVpnMtu in 1280..1360) prefs.savedVpnMtu else 1280
+                             val serverMtu = config.optInt("mtu", 1280)
+                             val tunMtu = if (serverMtu in 1280..1360) serverMtu else 1280
                              builder.setMtu(tunMtu)
 
                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -359,57 +363,27 @@ class MaviVpnService : VpnService() {
                         }
                     }
                 } catch (e: Exception) {
-                     Log.e("MaviVPN", "Critical error in VPN thread: ${e.message}")
-                     try { Thread.sleep(500) } catch(_: Exception){}
-                }
-                
-                if (Thread.currentThread() != thread) {
+                         Log.e("MaviVPN", "Critical error in VPN thread: ${e.message}")
+                         try { Thread.sleep(500) } catch(_: Exception){}
+                    }
+                    
+                if (!isCurrentSessionActive()) {
                     break
                 }
-                
+
                 if (isRunning) {
                     try { Thread.sleep(500) } catch(_: Exception){}
                 }
             }
-            if (Thread.currentThread() == thread) {
+            if (vpnSessionGeneration == workerGeneration && isRunning) {
                 stopSelf()
             }
         }.also { it.start() }
     }
 
     private fun stopVpn() {
-        isRunning = false
-        isConnected.value = false
-        
-        synchronized(vpnLock) {
-             val handle = vpnSessionHandle
-             if (handle != 0L) {
-                  NativeLib.stop(handle)
-             }
-        }
-        
-        try {
-            if (connectivityManager != null && networkCallback != null) {
-                connectivityManager?.unregisterNetworkCallback(networkCallback!!)
-            }
-        } catch(e: Exception) {
-            Log.w("MaviVPN", "Error unregistering callback: ${e.message}")
-        }
-        connectivityManager = null
-        networkCallback = null
-        
-        try {
-            vpnInterface?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        vpnInterface = null
-        if (thread != null) {
-            try {
-                thread?.join(3000)
-            } catch(_: Exception){}
-            thread = null
-        }
+        val cleanup = invalidateCurrentSession()
+        stopCurrentSession(cleanup)
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -421,6 +395,53 @@ class MaviVpnService : VpnService() {
         releaseWakeLock()
         
         stopSelf()
+    }
+
+    private fun invalidateCurrentSession(): SessionCleanup {
+        synchronized(vpnLock) {
+            vpnSessionGeneration += 1
+            isRunning = false
+            isConnected.value = false
+            val cleanup = SessionCleanup(
+                handle = vpnSessionHandle,
+                workerThread = thread,
+                callback = networkCallback,
+                vpnInterface = vpnInterface,
+                generation = vpnSessionGeneration,
+            )
+            vpnSessionHandle = 0L
+            thread = null
+            networkCallback = null
+            vpnInterface = null
+            return cleanup
+        }
+    }
+
+    private fun stopCurrentSession(cleanup: SessionCleanup) {
+        if (cleanup.handle != 0L) {
+            NativeLib.stop(cleanup.handle)
+        }
+
+        try {
+            if (connectivityManager != null && cleanup.callback != null) {
+                connectivityManager?.unregisterNetworkCallback(cleanup.callback)
+            }
+        } catch (e: Exception) {
+            Log.w("MaviVPN", "Failed to unregister network callback: ${e.message}")
+        }
+
+        try {
+            cleanup.vpnInterface?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        try {
+            if (cleanup.workerThread != null && cleanup.workerThread != Thread.currentThread()) {
+                cleanup.workerThread.join(3000)
+            }
+        } catch (_: Exception) {
+        }
     }
 
     private fun buildEndpoint(host: String, port: String): String {

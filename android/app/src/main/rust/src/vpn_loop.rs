@@ -297,6 +297,9 @@ pub async fn run_vpn_loop(
     let tx_feedback = tx_tun.clone();
     let stats_upload = stats.clone();
 
+    let mut shutdown_rx_upload = shutdown_rx;
+    let shutdown_rx_download = shutdown_rx_upload.resubscribe();
+
     let mut tasks = tokio::task::JoinSet::new();
 
     tasks.spawn(async move {
@@ -315,7 +318,7 @@ pub async fn run_vpn_loop(
 
             let mut guard = tokio::select! {
                 res = tun_upload.readable() => match res { Ok(g) => g, Err(_) => break 'outer },
-                _ = shutdown_rx.recv() => break 'outer,
+                _ = shutdown_rx_upload.recv() => break 'outer,
             };
 
             let read_result = guard.try_io(|inner| {
@@ -429,7 +432,7 @@ pub async fn run_vpn_loop(
 
                 let send_result = tokio::select! {
                     res = conn_upload.send_datagram_wait(payload) => res,
-                    _ = shutdown_rx.recv() => {
+                    _ = shutdown_rx_upload.recv() => {
                         stop_upload.store(true, Ordering::SeqCst);
                         break 'outer;
                     }
@@ -502,7 +505,7 @@ pub async fn run_vpn_loop(
         let mut batch = Vec::with_capacity(64);
         let mut pending_stats = DownloadPendingStats::default();
         let mut last_stats_flush = Instant::now();
-        let mut shutdown_rx_download = shutdown_rx.resubscribe();
+        let mut shutdown_rx_download = shutdown_rx_download;
         loop {
             if stop_download.load(Ordering::Relaxed) {
                 break;

@@ -115,7 +115,8 @@ pub async fn connect_and_handshake(
     transport_config.min_mtu(quic_mtu);
 
     // BBR Congestion Control (Critical for mobile/WiFi networks)
-    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    transport_config
+        .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
     // Enable GSO (Segmentation Offload) on Android for maximum performance.
     transport_config.enable_segmentation_offload(true);
@@ -126,7 +127,7 @@ pub async fn connect_and_handshake(
     // while BBR paces the packets out over the physical Wi-Fi/LTE link.
     transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB
     transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB
-    
+
     // Also match the Flow Control windows with the Backend to allow high throughput
     transport_config.receive_window(quinn::VarInt::from(8u32 * 1024 * 1024));
     transport_config.send_window(8 * 1024 * 1024);

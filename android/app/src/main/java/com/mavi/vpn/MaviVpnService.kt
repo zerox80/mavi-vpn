@@ -8,7 +8,6 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
-import android.util.Log
 import com.mavi.vpn.data.PrefsManager
 import com.mavi.vpn.native_lib.NativeLib
 import com.mavi.vpn.service.NotificationHelper
@@ -61,6 +60,7 @@ class MaviVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         prefs = PrefsManager(this)
+        Log.configure(this)
         notificationHelper = NotificationHelper(this)
     }
 
@@ -428,8 +428,7 @@ class MaviVpnService : VpnService() {
                              }
                         }
                     } catch (e: Exception) {
-                        Log.e("MaviVPN", "Error during VPN session: ${e.message}")
-                        e.printStackTrace()
+                        Log.e("MaviVPN", "Error during VPN session: ${e.message}", e)
                     } finally {
                         releaseWakeLock()
                         synchronized(vpnLock) {
@@ -530,7 +529,7 @@ class MaviVpnService : VpnService() {
         try {
             cleanup.vpnInterface?.close()
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.w("MaviVPN", "Failed to close VPN interface: ${e.message}", e)
         }
 
         try {

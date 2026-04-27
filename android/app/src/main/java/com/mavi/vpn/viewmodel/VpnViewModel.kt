@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.mavi.vpn.Log
 import com.mavi.vpn.MaviVpnService
 import com.mavi.vpn.OAuthHelper
 import com.mavi.vpn.data.PrefsManager
@@ -46,6 +47,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     val isConnected = MaviVpnService.isConnected
 
     init {
+        Log.configure(application)
         // We only clear out token entirely if the token is completely
         // unusable and refresh fails, but for the viewModel startup,
         // we can just leave it. If it fails to refresh during connection,
@@ -86,13 +88,20 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         http3Framing.value = h3Mode
         vpnMtu.value = vpnMtuValue
         enableLogging.value = enableLoggingValue
-        
+
         prefs.savedSplitMode = mode
         prefs.savedSplitPackages = packages
         prefs.savedCensorshipResistant = crMode
         prefs.savedHttp3Framing = h3Mode
         prefs.savedVpnMtu = vpnMtuValue
         prefs.savedEnableLogging = enableLoggingValue
+        Log.setEnabled(enableLoggingValue)
+    }
+
+    fun setEnableLogging(enableLoggingValue: Boolean) {
+        enableLogging.value = enableLoggingValue
+        prefs.savedEnableLogging = enableLoggingValue
+        Log.setEnabled(enableLoggingValue)
     }
 
     private fun observeServiceTokenUpdates() {

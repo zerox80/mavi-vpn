@@ -33,6 +33,27 @@ fn android_runtime() -> Result<Arc<tokio::runtime::Runtime>, String> {
         .clone()
 }
 
+fn initialize_android_globals() {
+    static LOGGER_INIT: Once = Once::new();
+    LOGGER_INIT.call_once(|| {
+        android_logger::init_once(
+            Config::default()
+                .with_tag("MaviVPN")
+                .with_max_level(log::LevelFilter::Trace),
+        );
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+fn set_logging_enabled(enable_logging: bool) {
+    initialize_android_globals();
+    if enable_logging {
+        log::set_max_level(log::LevelFilter::Trace);
+    } else {
+        log::set_max_level(log::LevelFilter::Off);
+    }
+}
+
 fn last_init_error() -> &'static Mutex<String> {
     static LAST_INIT_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
     LAST_INIT_ERROR.get_or_init(|| Mutex::new(String::new()))
@@ -91,21 +112,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
 
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            static LOGGER_INIT: Once = Once::new();
-            LOGGER_INIT.call_once(|| {
-                android_logger::init_once(
-                    Config::default()
-                        .with_tag("MaviVPN")
-                        .with_max_level(log::LevelFilter::Trace),
-                );
-                let _ = rustls::crypto::ring::default_provider().install_default();
-            });
-
-            if enable_logging as u8 != 0 {
-                log::set_max_level(log::LevelFilter::Trace);
-            } else {
-                log::set_max_level(log::LevelFilter::Off);
-            }
+            set_logging_enabled(enable_logging as u8 != 0);
 
             info!("JNI init called. CR Mode: {}", censorship_resistant);
 
@@ -286,6 +293,18 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
             INIT_RETRYABLE_FAILURE
         }
     }
+}
+
+#[allow(improper_ctypes_definitions)]
+#[no_mangle]
+pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_setLoggingEnabled<'local>(
+    mut _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    enable_logging: jni::sys::jboolean,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        set_logging_enabled(enable_logging as u8 != 0);
+    }));
 }
 
 #[allow(improper_ctypes_definitions)]

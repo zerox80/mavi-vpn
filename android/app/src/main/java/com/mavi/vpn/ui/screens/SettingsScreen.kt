@@ -249,7 +249,10 @@ fun SettingsScreen(
             }
             Switch(
                 checked = enableLogging,
-                onCheckedChange = { enableLogging = it },
+                onCheckedChange = {
+                    enableLogging = it
+                    viewModel.setEnableLogging(it)
+                },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
                     checkedTrackColor = Color(0xFF007AFF),
@@ -258,9 +261,9 @@ fun SettingsScreen(
                 )
             )
         }
-        
+
         Spacer(modifier = Modifier.height(16.dp))
-        
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -275,7 +278,17 @@ fun SettingsScreen(
                             val logDir = File(context.cacheDir, "logs")
                             if (!logDir.exists()) logDir.mkdirs()
                             val logFile = File(logDir, "mavivpn_log.txt")
-                            val process = Runtime.getRuntime().exec("logcat -d -v threadtime")
+                            val process = Runtime.getRuntime().exec(
+                                arrayOf(
+                                    "logcat",
+                                    "-d",
+                                    "-v",
+                                    "threadtime",
+                                    "-s",
+                                    "MaviVPN:*",
+                                    "OAuthHelper:*",
+                                )
+                            )
                             process.inputStream.use { input ->
                                 FileOutputStream(logFile).use { output ->
                                     input.copyTo(output)
@@ -307,7 +320,7 @@ fun SettingsScreen(
             }
             Icon(Icons.Default.Share, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(24.dp))
         }
-        
+
         Spacer(modifier = Modifier.height(24.dp))
         
         Text(text = "Split Tunneling", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(bottom = 12.dp))

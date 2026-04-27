@@ -351,7 +351,8 @@ pub async fn run_vpn_loop(
                     Ok(Ok(None)) => break 'outer,
                     Ok(Err(e)) => {
                         if let Some(raw) = e.raw_os_error() {
-                            if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK || raw == libc::EINTR {
+                            if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK || raw == libc::EINTR
+                            {
                                 if raw == libc::EINTR {
                                     continue;
                                 }

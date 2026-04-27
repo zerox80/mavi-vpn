@@ -3,7 +3,6 @@ package com.mavi.vpn
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
-import android.util.Log
 import androidx.browser.customtabs.CustomTabsIntent
 import okhttp3.*
 import org.json.JSONObject

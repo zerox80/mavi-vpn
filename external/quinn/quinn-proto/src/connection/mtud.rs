@@ -84,9 +84,13 @@ impl MtuDiscovery {
         self.current_mtu = self.current_mtu.min(peer_max_udp_payload_size);
 
         if let Some(state) = self.state.as_mut() {
-            // MTUD is only active after the connection has been fully established, so it is
-            // guaranteed we will receive the peer's transport parameters before we start probing
-            debug_assert!(matches!(state.phase, Phase::Initial));
+            // Black hole detection can trigger before the connection is fully established when the
+            // initial MTU is above the minimum MTU. Probing must still wait until transport
+            // parameters have been received.
+            debug_assert!(
+                !matches!(state.phase, Phase::Searching(_)),
+                "Transport parameters received after MTU probing started"
+            );
             state.peer_max_udp_payload_size = peer_max_udp_payload_size;
         }
     }
@@ -451,9 +455,9 @@ impl BlackHoleDetector {
         };
         // If a loss burst contains a packet smaller than the minimum MTU or a more recently
         // transmitted packet, it is not suspicious.
-        if burst.smallest_packet_size < self.min_mtu
+        if burst.smallest_packet_size <= self.min_mtu
             || (burst.latest_non_probe < self.largest_post_loss_packet
-                && burst.smallest_packet_size < self.acked_mtu)
+                && burst.smallest_packet_size <= self.acked_mtu)
         {
             return;
         }
@@ -747,10 +751,14 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic]
-    fn mtu_discovery_with_peer_max_udp_payload_size_after_search_panics() {
+    #[should_panic(expected = "Transport parameters received after MTU probing started")]
+    fn mtu_discovery_with_peer_max_udp_payload_size_during_search_panics() {
         let mut mtud = default_mtud();
-        drive_to_completion(&mut mtud, Instant::now(), 1500);
+        assert!(mtud.poll_transmit(Instant::now(), 0).is_some());
+        assert!(matches!(
+            mtud.state.as_ref().unwrap().phase,
+            Phase::Searching(_)
+        ));
         mtud.on_peer_max_udp_payload_size_received(1300);
     }
 
@@ -902,6 +910,27 @@ mod tests {
         assert!(!bhd.black_hole_detected());
         bhd.on_non_probe_lost(BLACK_HOLE_THRESHOLD as u64 * 2, 1400);
         assert!(bhd.black_hole_detected());
+    }
+
+    #[test]
+    fn loss_at_min_mtu_is_not_suspicious() {
+        let mut bhd = BlackHoleDetector::new(1200);
+        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
+            bhd.on_non_probe_lost(i as u64 * 2, 1200);
+        }
+
+        assert!(!bhd.black_hole_detected());
+    }
+
+    #[test]
+    fn loss_at_acked_mtu_is_not_suspicious() {
+        let mut bhd = BlackHoleDetector::new(1200);
+        bhd.on_non_probe_acked((BLACK_HOLE_THRESHOLD + 1) as u64 * 2, 1400);
+        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
+            bhd.on_non_probe_lost(i as u64 * 2, 1400);
+        }
+
+        assert!(!bhd.black_hole_detected());
     }
 
     // Loss of packets followed in transmission order by confirmation of a larger packet should not

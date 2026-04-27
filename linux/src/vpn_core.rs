@@ -289,7 +289,7 @@ async fn run_session(
                         pool.extend_from_slice(&scratch[..n]);
                         pool.split().freeze()
                     };
-                    if let Err(e) = conn_sender.send_datagram_wait(payload).await {
+                    if let Err(e) = conn_sender.send_datagram(payload) {
                         if matches!(e, quinn::SendDatagramError::TooLarge) {
                             let version = scratch[0] >> 4;
                             let source_ip = if version == 4 {

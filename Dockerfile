@@ -10,7 +10,6 @@ RUN sed -i '/members = \[/,/\]/c\members = ["backend", "shared"]' Cargo.toml
 
 COPY shared/Cargo.toml ./shared/Cargo.toml
 COPY backend/Cargo.toml ./backend/Cargo.toml
-COPY external ./external
 # Install git for Cargo to fetch git dependencies
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 

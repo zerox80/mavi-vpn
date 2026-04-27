@@ -112,6 +112,8 @@ pub async fn connect_and_handshake(
     transport_config.mtu_discovery_config(None);
     transport_config.initial_mtu(quic_mtu);
     transport_config.min_mtu(quic_mtu);
+    transport_config
+        .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
     // Enable GSO (Segmentation Offload) for higher throughput.
     // With GSO, Quinn batches multiple QUIC packets into one sendmsg() call,

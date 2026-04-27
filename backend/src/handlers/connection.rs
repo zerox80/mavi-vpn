@@ -16,8 +16,6 @@ use crate::handlers::h3::handle_h3_connection;
 use crate::handlers::tunnel::run_tunnel;
 use crate::handlers::utils::{emulate_http3, negotiated_alpn, negotiated_sni, IpGuard};
 
-const H3_DETECTION_GRACE: Duration = Duration::from_millis(50);
-
 enum InitialStreams {
     Raw {
         send_stream: quinn::SendStream,
@@ -31,6 +29,18 @@ enum InitialStreams {
 
 async fn detect_initial_streams(connection: &quinn::Connection) -> Result<InitialStreams> {
     match negotiated_alpn(connection).as_deref() {
+        // ALPN is the authoritative protocol signal. If the peer negotiated h3,
+        // waiting for a unidirectional HTTP/3 control stream is correct; falling
+        // back to raw mode after an arbitrary grace period races real H3 clients
+        // on slow or jittery networks and makes their H3 bytes look like a raw
+        // bincode auth message.
+        Some(protocol) if protocol == b"h3" => {
+            let pre_uni = connection.accept_uni().await?;
+            Ok(InitialStreams::H3 {
+                pre_bi: None,
+                pre_uni,
+            })
+        }
         Some(protocol) if protocol == b"mavivpn" => {
             let (send_stream, recv_stream) = connection.accept_bi().await?;
             Ok(InitialStreams::Raw {
@@ -38,33 +48,15 @@ async fn detect_initial_streams(connection: &quinn::Connection) -> Result<Initia
                 recv_stream,
             })
         }
+        // Legacy fallback for peers without an ALPN value: accept the first bidi
+        // stream as the raw control channel. Modern clients negotiate either
+        // `mavivpn` or `h3`, so this avoids timing heuristics for supported paths.
         _ => {
-            tokio::select! {
-                biased;
-                uni_res = connection.accept_uni() => {
-                    Ok(InitialStreams::H3 {
-                        pre_bi: None,
-                        pre_uni: uni_res?,
-                    })
-                }
-                bi_res = connection.accept_bi() => {
-                    let pre_bi = bi_res?;
-                    match tokio::time::timeout(H3_DETECTION_GRACE, connection.accept_uni()).await {
-                        Ok(Ok(pre_uni)) => Ok(InitialStreams::H3 {
-                            pre_bi: Some(pre_bi),
-                            pre_uni,
-                        }),
-                        Ok(Err(err)) => Err(err.into()),
-                        Err(_) => {
-                            let (send_stream, recv_stream) = pre_bi;
-                            Ok(InitialStreams::Raw {
-                                send_stream,
-                                recv_stream,
-                            })
-                        }
-                    }
-                }
-            }
+            let (send_stream, recv_stream) = connection.accept_bi().await?;
+            Ok(InitialStreams::Raw {
+                send_stream,
+                recv_stream,
+            })
         }
     }
 }

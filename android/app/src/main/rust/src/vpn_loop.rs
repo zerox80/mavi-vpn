@@ -292,8 +292,11 @@ pub async fn run_vpn_loop(
     let mut tasks = tokio::task::JoinSet::new();
 
     tasks.spawn(async move {
+        const PREFIX_LEN: usize = masque::DATAGRAM_PREFIX.len();
+        const MAX_UPLOAD_BATCH: usize = 64;
         let mut buf =
-            bytes::BytesMut::with_capacity(MAX_TUN_PACKET_SIZE + masque::DATAGRAM_PREFIX.len());
+            bytes::BytesMut::with_capacity((MAX_TUN_PACKET_SIZE + PREFIX_LEN) * MAX_UPLOAD_BATCH);
+        let mut batch: Vec<bytes::Bytes> = Vec::with_capacity(MAX_UPLOAD_BATCH);
         let mut pending_stats = UploadPendingStats::default();
         let mut last_stats_flush = Instant::now();
         loop {
@@ -306,46 +309,77 @@ pub async fn run_vpn_loop(
                 _ = shutdown_rx.recv() => break,
             };
 
-            let framed = match guard.try_io(|inner| {
-                const PREFIX_LEN: usize = masque::DATAGRAM_PREFIX.len();
-                if buf.capacity() < MAX_TUN_PACKET_SIZE + PREFIX_LEN {
-                    buf.reserve(MAX_TUN_PACKET_SIZE + PREFIX_LEN);
+            // Batch-read: drain up to MAX_UPLOAD_BATCH packets from TUN in a
+            // single try_io() call. This avoids one readable().await event-loop
+            // round-trip per packet, which on Android costs ~10-50µs each due
+            // to epoll overhead and poor timer resolution.
+            let read_result = guard.try_io(|inner| {
+                batch.clear();
+                let fd = inner.as_raw_fd();
+                loop {
+                    if buf.capacity() < MAX_TUN_PACKET_SIZE + PREFIX_LEN {
+                        buf.reserve((MAX_TUN_PACKET_SIZE + PREFIX_LEN) * MAX_UPLOAD_BATCH);
+                    }
+
+                    // Reserve H3 DATAGRAM_PREFIX headroom in-place. H3 mode ships
+                    // `framed` as-is; non-H3 mode slices past the prefix in O(1).
+                    buf.extend_from_slice(&masque::DATAGRAM_PREFIX);
+
+                    let chunk = buf.chunk_mut();
+                    let max_len = MAX_TUN_PACKET_SIZE.min(chunk.len());
+
+                    let n = unsafe {
+                        libc::read(
+                            fd,
+                            chunk.as_mut_ptr() as *mut libc::c_void,
+                            max_len,
+                        )
+                    };
+
+                    if n < 0 {
+                        let err = std::io::Error::last_os_error();
+                        // Undo the prefix we just wrote
+                        buf.truncate(buf.len() - PREFIX_LEN);
+                        if let Some(raw) = err.raw_os_error() {
+                            if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK || raw == libc::EINTR
+                            {
+                                break; // no more packets right now
+                            }
+                        }
+                        if batch.is_empty() {
+                            return Err(err);
+                        }
+                        break;
+                    }
+                    let n = n as usize;
+                    if n == 0 {
+                        buf.truncate(buf.len() - PREFIX_LEN);
+                        if batch.is_empty() {
+                            return Ok(false); // EOF
+                        }
+                        break;
+                    }
+
+                    unsafe {
+                        buf.advance_mut(n);
+                    }
+                    let framed = buf.split_to(n + PREFIX_LEN).freeze();
+                    batch.push(framed);
+
+                    if batch.len() >= MAX_UPLOAD_BATCH {
+                        break;
+                    }
                 }
 
-                // Reserve H3 DATAGRAM_PREFIX headroom in-place. H3 mode ships `framed` as-is;
-                // non-H3 mode slices past the prefix in O(1).
-                buf.extend_from_slice(&masque::DATAGRAM_PREFIX);
-
-                let chunk = buf.chunk_mut();
-                let max_len = MAX_TUN_PACKET_SIZE.min(chunk.len());
-
-                let n = unsafe {
-                    libc::read(
-                        inner.as_raw_fd(),
-                        chunk.as_mut_ptr() as *mut libc::c_void,
-                        max_len,
-                    )
-                };
-
-                if n < 0 {
-                    let err = std::io::Error::last_os_error();
-                    buf.truncate(buf.len() - PREFIX_LEN);
-                    return Err(err);
+                if batch.is_empty() {
+                    Err(std::io::Error::from_raw_os_error(libc::EAGAIN))
+                } else {
+                    Ok(true) // true = have packets
                 }
-                let n = n as usize;
-                if n == 0 {
-                    buf.truncate(buf.len() - PREFIX_LEN);
-                    return Ok(None);
-                }
+            });
 
-                unsafe {
-                    buf.advance_mut(n);
-                }
-                let framed = buf.split_to(n + PREFIX_LEN).freeze();
-                Ok(Some(framed))
-            }) {
-                Ok(Ok(Some(p))) => p,
-                Ok(Ok(None)) => break,
+            match read_result {
+                Ok(Ok(false)) => break, // EOF
                 Ok(Err(e)) => {
                     if let Some(raw) = e.raw_os_error() {
                         if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK || raw == libc::EINTR {
@@ -358,68 +392,72 @@ pub async fn run_vpn_loop(
                     }
                     continue;
                 }
-                Err(_) => continue, // WouldBlock, let tokio select re-await
-            };
+                Err(_) => continue, // WouldBlock from try_io, re-await
+                Ok(Ok(true)) => {}  // have packets to send
+            }
 
-            // `framed` is [Quarter Stream ID = 0][Context ID = 0][IP packet] per RFC 9484 §5.
-            // `packet` is the raw IP payload (O(1) refcount slice, no copy).
-            let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
-            let packet_len = packet.len();
-            pending_stats.tun_to_quic_bytes += packet_len as u64;
-            pending_stats.tun_to_quic_packets += 1;
+            // Send all batched packets as QUIC datagrams.
+            for framed in batch.drain(..) {
+                // `framed` is [Quarter Stream ID = 0][Context ID = 0][IP packet] per RFC 9484 §5.
+                // `packet` is the raw IP payload (O(1) refcount slice, no copy).
+                let packet = framed.slice(PREFIX_LEN..);
+                let packet_len = packet.len();
+                pending_stats.tun_to_quic_bytes += packet_len as u64;
+                pending_stats.tun_to_quic_packets += 1;
 
-            let payload = if http3_framing {
-                framed
-            } else {
-                packet.clone()
-            };
+                let payload = if http3_framing {
+                    framed
+                } else {
+                    packet.clone()
+                };
 
-            // VPN traffic prefers freshness under congestion. `send_datagram` lets Quinn
-            // evict stale queued datagrams instead of blocking the TUN reader.
-            let send_result = conn_upload.send_datagram(payload);
+                // VPN traffic prefers freshness under congestion. `send_datagram` lets Quinn
+                // evict stale queued datagrams instead of blocking the TUN reader.
+                let send_result = conn_upload.send_datagram(payload);
 
-            if let Err(e) = send_result {
-                match e {
-                    quinn::SendDatagramError::ConnectionLost(_) => {
-                        error!("QUIC Connection lost during send");
-                        stop_upload.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                    quinn::SendDatagramError::TooLarge => {
-                        pending_stats.quic_too_large += 1;
-                        let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
-                        warn!(
-                            "MTU Limit hit! Packet: {} bytes, Limit: {} bytes",
-                            packet_len, current_limit
-                        );
-
-                        if packet.is_empty() {
-                            continue;
+                if let Err(e) = send_result {
+                    match e {
+                        quinn::SendDatagramError::ConnectionLost(_) => {
+                            error!("QUIC Connection lost during send");
+                            stop_upload.store(true, Ordering::SeqCst);
+                            break;
                         }
+                        quinn::SendDatagramError::TooLarge => {
+                            pending_stats.quic_too_large += 1;
+                            let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
+                            warn!(
+                                "MTU Limit hit! Packet: {} bytes, Limit: {} bytes",
+                                packet_len, current_limit
+                            );
 
-                        let version = (packet[0] >> 4) & 0xF;
-                        let gw = if version == 4 {
-                            Some(std::net::IpAddr::V4(gateway_v4))
-                        } else if version == 6 {
-                            gateway_v6_opt.map(std::net::IpAddr::V6)
-                        } else {
-                            None
-                        };
-                        let reported_mtu = if version == 6 {
-                            tunnel_mtu.max(1280)
-                        } else {
-                            tunnel_mtu
-                        };
+                            if packet.is_empty() {
+                                continue;
+                            }
 
-                        if let Some(icmp_packet) =
-                            shared::icmp::generate_packet_too_big(&packet, reported_mtu, gw)
-                        {
-                            let _ = tx_feedback.try_send(icmp_packet);
+                            let version = (packet[0] >> 4) & 0xF;
+                            let gw = if version == 4 {
+                                Some(std::net::IpAddr::V4(gateway_v4))
+                            } else if version == 6 {
+                                gateway_v6_opt.map(std::net::IpAddr::V6)
+                            } else {
+                                None
+                            };
+                            let reported_mtu = if version == 6 {
+                                tunnel_mtu.max(1280)
+                            } else {
+                                tunnel_mtu
+                            };
+
+                            if let Some(icmp_packet) =
+                                shared::icmp::generate_packet_too_big(&packet, reported_mtu, gw)
+                            {
+                                let _ = tx_feedback.try_send(icmp_packet);
+                            }
                         }
-                    }
-                    _ => {
-                        pending_stats.quic_send_errors += 1;
-                        error!("Unexpected SendDatagramError: {:?}", e);
+                        _ => {
+                            pending_stats.quic_send_errors += 1;
+                            error!("Unexpected SendDatagramError: {:?}", e);
+                        }
                     }
                 }
             }

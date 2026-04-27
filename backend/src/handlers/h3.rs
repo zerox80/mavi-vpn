@@ -18,6 +18,25 @@ use crate::handlers::utils::{prefix_len_from_mask, IpGuard};
 use crate::keycloak::KeycloakValidator;
 use crate::state::AppState;
 
+async fn send_h3_camouflage_response(
+    req_stream: &mut h3::server::RequestStream<bytes::Bytes>,
+) -> Result<()> {
+    let response = Response::builder()
+        .status(http::StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("server", "nginx")
+        .body(())
+        .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+    let _ = req_stream.send_response(response).await;
+    let _ = req_stream
+        .send_data(Bytes::from_static(
+            b"<!DOCTYPE html><html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1></body></html>",
+        ))
+        .await;
+    let _ = req_stream.finish().await;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_h3_connection(
     connection: quinn::Connection,
@@ -74,18 +93,22 @@ pub async fn handle_h3_connection(
             req.method(),
             req.uri()
         );
-        let response = Response::builder()
-            .status(http::StatusCode::NOT_FOUND)
-            .header("content-type", "text/html; charset=utf-8")
-            .body(())
-            .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
-        let _ = req_stream.send_response(response).await;
-        let _ = req_stream
-            .send_data(Bytes::from_static(
-                b"<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>",
-            ))
-            .await;
-        let _ = req_stream.finish().await;
+        if config.censorship_resistant {
+            send_h3_camouflage_response(&mut req_stream).await?;
+        } else {
+            let response = Response::builder()
+                .status(http::StatusCode::NOT_FOUND)
+                .header("content-type", "text/html; charset=utf-8")
+                .body(())
+                .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+            let _ = req_stream.send_response(response).await;
+            let _ = req_stream
+                .send_data(Bytes::from_static(
+                    b"<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>",
+                ))
+                .await;
+            let _ = req_stream.finish().await;
+        }
         return Ok(());
     }
 
@@ -104,13 +127,17 @@ pub async fn handle_h3_connection(
         Err(e) => {
             let error_msg = format!("Unauthorized: {}", e);
             warn!("H3 Unauthorized from {}: {}", remote_addr, e);
-            let response = Response::builder()
-                .status(http::StatusCode::UNAUTHORIZED)
-                .body(())
-                .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
-            let _ = req_stream.send_response(response).await;
-            let _ = req_stream.send_data(Bytes::from("Unauthorized")).await;
-            let _ = req_stream.finish().await;
+            if config.censorship_resistant {
+                send_h3_camouflage_response(&mut req_stream).await?;
+            } else {
+                let response = Response::builder()
+                    .status(http::StatusCode::UNAUTHORIZED)
+                    .body(())
+                    .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+                let _ = req_stream.send_response(response).await;
+                let _ = req_stream.send_data(Bytes::from("Unauthorized")).await;
+                let _ = req_stream.finish().await;
+            }
             return Err(anyhow::anyhow!("H3 Error: {}", error_msg));
         }
     };

@@ -35,7 +35,7 @@ pub async fn run_tunnel(
                 (packet.clone(), packet)
             };
 
-            if let Err(e) = conn_send.send_datagram_wait(datagram_to_send).await {
+            if let Err(e) = conn_send.send_datagram(datagram_to_send) {
                 if matches!(e, quinn::SendDatagramError::TooLarge) {
                     if packet_for_icmp.is_empty() {
                         continue;

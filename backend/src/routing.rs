@@ -28,11 +28,12 @@ fn record_s2c_channel_drop<D: Display>(
     dest_ip: D,
 ) {
     *drop_count += 1;
-    if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+    if drop_count.is_multiple_of(1000)
+        && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5)
+    {
         warn!(
             "[SERVER TUN READER] dropped S2C packets: client channel full dest={} drops={}",
-            dest_ip,
-            *drop_count
+            dest_ip, *drop_count
         );
         *drop_count = 0;
         *last_drop_warn = std::time::Instant::now();

@@ -25,6 +25,12 @@ fn android_runtime() -> Result<Arc<tokio::runtime::Runtime>, String> {
             tokio::runtime::Builder::new_multi_thread()
                 .thread_name("mavivpn-android")
                 .worker_threads(ANDROID_TOKIO_WORKER_THREADS)
+                .on_thread_start(|| {
+                    #[cfg(target_os = "android")]
+                    unsafe {
+                        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, -4);
+                    }
+                })
                 .enable_all()
                 .build()
                 .map(Arc::new)

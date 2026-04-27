@@ -62,6 +62,14 @@ const STATS_FLUSH_PACKET_THRESHOLD: u64 = 2048;
 const STATS_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(target_os = "android")]
 const MAX_TUN_PACKET_SIZE: usize = 2048;
+#[cfg(target_os = "android")]
+const UPLOAD_BATCH_SIZE: usize = 64;
+
+#[cfg(target_os = "android")]
+struct UploadPacket {
+    packet: bytes::Bytes,  // raw inner IP packet, no MASQUE prefix
+    payload: bytes::Bytes, // QUIC payload, H3-framed only if http3_framing=true
+}
 
 #[cfg(target_os = "android")]
 #[derive(Clone, Copy)]
@@ -296,23 +304,26 @@ pub async fn run_vpn_loop(
             bytes::BytesMut::with_capacity(MAX_TUN_PACKET_SIZE + masque::DATAGRAM_PREFIX.len());
         let mut pending_stats = UploadPendingStats::default();
         let mut last_stats_flush = Instant::now();
+        let mut upload_batch: Vec<UploadPacket> = Vec::with_capacity(UPLOAD_BATCH_SIZE);
+
         'outer: loop {
             if stop_upload.load(Ordering::Relaxed) {
                 break;
             }
+
+            upload_batch.clear();
 
             let mut guard = tokio::select! {
                 res = tun_upload.readable() => match res { Ok(g) => g, Err(_) => break 'outer },
                 _ = shutdown_rx.recv() => break 'outer,
             };
 
-            loop {
-                let framed = match guard.try_io(|inner| {
-                    const PREFIX_LEN: usize = masque::DATAGRAM_PREFIX.len();
+            let read_result = guard.try_io(|inner| {
+                const PREFIX_LEN: usize = masque::DATAGRAM_PREFIX.len();
+                for _ in 0..UPLOAD_BATCH_SIZE {
                     if http3_framing {
                         if buf.capacity() < MAX_TUN_PACKET_SIZE + PREFIX_LEN {
-                            let needed = MAX_TUN_PACKET_SIZE + PREFIX_LEN;
-                            buf.reserve(needed.max(64 * 1024));
+                            buf.reserve((MAX_TUN_PACKET_SIZE + PREFIX_LEN).max(64 * 1024));
                         }
                         buf.extend_from_slice(&masque::DATAGRAM_PREFIX);
 
@@ -330,18 +341,28 @@ pub async fn run_vpn_loop(
                         if n < 0 {
                             let err = std::io::Error::last_os_error();
                             buf.truncate(buf.len() - PREFIX_LEN);
+                            if err.kind() == std::io::ErrorKind::WouldBlock {
+                                break;
+                            }
+                            if err.raw_os_error() == Some(libc::EINTR) {
+                                continue;
+                            }
                             return Err(err);
                         }
-                        let n = n as usize;
                         if n == 0 {
                             buf.truncate(buf.len() - PREFIX_LEN);
-                            return Ok(None);
+                            break;
                         }
-
+                        let n = n as usize;
                         unsafe {
                             buf.advance_mut(n);
                         }
-                        Ok(Some(buf.split_to(n + PREFIX_LEN).freeze()))
+                        let framed = buf.split_to(n + PREFIX_LEN).freeze();
+                        let packet = framed.slice(PREFIX_LEN..);
+                        upload_batch.push(UploadPacket {
+                            packet,
+                            payload: framed,
+                        });
                     } else {
                         if buf.capacity() < MAX_TUN_PACKET_SIZE {
                             buf.reserve(MAX_TUN_PACKET_SIZE.max(64 * 1024));
@@ -359,53 +380,53 @@ pub async fn run_vpn_loop(
                         };
 
                         if n < 0 {
-                            return Err(std::io::Error::last_os_error());
+                            let err = std::io::Error::last_os_error();
+                            if err.kind() == std::io::ErrorKind::WouldBlock {
+                                break;
+                            }
+                            if err.raw_os_error() == Some(libc::EINTR) {
+                                continue;
+                            }
+                            return Err(err);
+                        }
+                        if n == 0 {
+                            break;
                         }
                         let n = n as usize;
-                        if n == 0 {
-                            return Ok(None);
-                        }
-
                         unsafe {
                             buf.advance_mut(n);
                         }
-                        Ok(Some(buf.split_to(n).freeze()))
+                        let framed = buf.split_to(n).freeze();
+                        upload_batch.push(UploadPacket {
+                            packet: framed.clone(),
+                            payload: framed,
+                        });
                     }
-                }) {
-                    Ok(Ok(Some(p))) => p,
-                    Ok(Ok(None)) => break 'outer,
-                    Ok(Err(e)) => {
-                        if let Some(raw) = e.raw_os_error() {
-                            if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK || raw == libc::EINTR
-                            {
-                                if raw == libc::EINTR {
-                                    continue;
-                                }
-                                break;
-                            }
-                        }
-                        if e.kind() != std::io::ErrorKind::WouldBlock {
-                            error!("TUN Read Error: {}", e);
-                            break 'outer;
-                        }
-                        break;
+                }
+                Ok(())
+            });
+
+            match read_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if e.kind() != std::io::ErrorKind::WouldBlock {
+                        error!("TUN Read Error: {}", e);
+                        break 'outer;
                     }
-                    Err(_) => break, // WouldBlock, let tokio select re-await
-                };
+                }
+                Err(_) => {} // WouldBlock readiness
+            }
 
-                let (packet, payload) = if http3_framing {
-                    (framed.slice(masque::DATAGRAM_PREFIX.len()..), framed)
-                } else {
-                    (framed.clone(), framed)
-                };
+            drop(guard);
 
+            for item in upload_batch.drain(..) {
+                let packet = item.packet;
+                let payload = item.payload;
                 let packet_len = packet.len();
+
                 pending_stats.tun_to_quic_bytes += packet_len as u64;
                 pending_stats.tun_to_quic_packets += 1;
 
-                // Use `send_datagram_wait` to apply backpressure to the TUN interface.
-                // Without this, the TUN loop reads gigabits of data, fills Quinn's send buffer instantly,
-                // and Quinn silently drops older datagrams, causing massive packet loss for TCP connections inside the VPN.
                 let send_result = tokio::select! {
                     res = conn_upload.send_datagram_wait(payload) => res,
                     _ = shutdown_rx.recv() => {
@@ -481,123 +502,128 @@ pub async fn run_vpn_loop(
         let mut batch = Vec::with_capacity(64);
         let mut pending_stats = DownloadPendingStats::default();
         let mut last_stats_flush = Instant::now();
+        let mut shutdown_rx_download = shutdown_rx.resubscribe();
         loop {
             if stop_download.load(Ordering::Relaxed) {
                 break;
             }
 
-            match conn_download.read_datagram().await {
-                Ok(first_packet) => {
-                    batch.clear();
-                    let mut batch_bytes: usize = 0;
+            let first_packet = tokio::select! {
+                res = conn_download.read_datagram() => match res {
+                    Ok(p) => p,
+                    Err(_) => {
+                        stop_download.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                },
+                _ = shutdown_rx_download.recv() => break,
+            };
+
+            batch.clear();
+            let mut batch_bytes: usize = 0;
+            if http3_framing {
+                if let Some(inner) = masque::unwrap_datagram(&first_packet) {
+                    let prefix = first_packet.len() - inner.len();
+                    let pkt = first_packet.slice(prefix..);
+                    batch_bytes += pkt.len();
+                    batch.push(pkt);
+                }
+            } else {
+                batch_bytes += first_packet.len();
+                batch.push(first_packet);
+            }
+
+            for _ in 0..63 {
+                if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
                     if http3_framing {
-                        if let Some(inner) = masque::unwrap_datagram(&first_packet) {
-                            let prefix = first_packet.len() - inner.len();
-                            let pkt = first_packet.slice(prefix..);
-                            batch_bytes += pkt.len();
-                            batch.push(pkt);
+                        if let Some(inner) = masque::unwrap_datagram(&pkt) {
+                            let prefix = pkt.len() - inner.len();
+                            let inner_pkt = pkt.slice(prefix..);
+                            batch_bytes += inner_pkt.len();
+                            batch.push(inner_pkt);
                         }
                     } else {
-                        batch_bytes += first_packet.len();
-                        batch.push(first_packet);
+                        batch_bytes += pkt.len();
+                        batch.push(pkt);
                     }
-
-                    for _ in 0..63 {
-                        if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
-                            if http3_framing {
-                                if let Some(inner) = masque::unwrap_datagram(&pkt) {
-                                    let prefix = pkt.len() - inner.len();
-                                    let inner_pkt = pkt.slice(prefix..);
-                                    batch_bytes += inner_pkt.len();
-                                    batch.push(inner_pkt);
-                                }
-                            } else {
-                                batch_bytes += pkt.len();
-                                batch.push(pkt);
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-
-                    pending_stats.quic_to_tun_bytes += batch_bytes as u64;
-                    pending_stats.quic_to_tun_packets += batch.len() as u64;
-
-                    let mut batch_idx = 0;
-                    while batch_idx < batch.len() {
-                        let mut guard = match tun_download.writable().await {
-                            Ok(g) => g,
-                            Err(_) => break,
-                        };
-
-                        let res = guard.try_io(|inner| {
-                            while batch_idx < batch.len() {
-                                let packet = &batch[batch_idx];
-                                let n = unsafe {
-                                    libc::write(
-                                        inner.as_raw_fd(),
-                                        packet.as_ptr() as *const libc::c_void,
-                                        packet.len(),
-                                    )
-                                };
-                                if n < 0 {
-                                    let err = std::io::Error::last_os_error();
-                                    if let Some(raw) = err.raw_os_error() {
-                                        if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK {
-                                            pending_stats.tun_write_errors += 1;
-                                            return Err(err);
-                                        }
-                                        if raw == libc::ENOBUFS || raw == libc::EINTR {
-                                            // Network internal buffer full or interrupted, just drop the packet immediately
-                                            pending_stats.tun_write_drops += 1;
-                                            batch_idx += 1;
-                                            continue;
-                                        }
-                                    }
-                                    if err.kind() == std::io::ErrorKind::WouldBlock {
-                                        pending_stats.tun_write_errors += 1;
-                                        return Err(err);
-                                    }
-                                    pending_stats.tun_write_errors += 1;
-                                    return Err(err);
-                                }
-                                pending_stats.tun_write_bytes += n as u64;
-                                pending_stats.tun_write_packets += 1;
-                                batch_idx += 1;
-                            }
-                            Ok(())
-                        });
-
-                        match res {
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) => {
-                                if e.kind() == std::io::ErrorKind::WouldBlock {
-                                    continue; // Handled by outer while loop re-awaiting
-                                }
-                                error!("TUN Write Error: {}", e);
-                                if let Some(raw) = e.raw_os_error() {
-                                    if raw == libc::EBADF {
-                                        // Fatal descriptor error
-                                        stop_download.store(true, Ordering::SeqCst);
-                                    }
-                                }
-                                break; // this drops the rest of the batch, preserving the loop
-                            }
-                            Err(_) => continue, // WouldBlock: wait for writable again
-                        }
-                    }
-
-                    if pending_stats.should_flush(last_stats_flush) {
-                        pending_stats.flush(&stats_download);
-                        last_stats_flush = Instant::now();
-                    }
-                }
-                Err(_) => {
-                    stop_download.store(true, Ordering::SeqCst);
+                } else {
                     break;
                 }
             }
+
+            pending_stats.quic_to_tun_bytes += batch_bytes as u64;
+            pending_stats.quic_to_tun_packets += batch.len() as u64;
+
+            let mut batch_idx = 0;
+            while batch_idx < batch.len() {
+                let mut guard = match tun_download.writable().await {
+                    Ok(g) => g,
+                    Err(_) => break,
+                };
+
+                let res = guard.try_io(|inner| {
+                    while batch_idx < batch.len() {
+                        let packet = &batch[batch_idx];
+                        let n = unsafe {
+                            libc::write(
+                                inner.as_raw_fd(),
+                                packet.as_ptr() as *const libc::c_void,
+                                packet.len(),
+                            )
+                        };
+                        if n < 0 {
+                            let err = std::io::Error::last_os_error();
+                            if let Some(raw) = err.raw_os_error() {
+                                if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK {
+                                    pending_stats.tun_write_errors += 1;
+                                    return Err(err);
+                                }
+                                if raw == libc::ENOBUFS || raw == libc::EINTR {
+                                    // Network internal buffer full or interrupted, just drop the packet immediately
+                                    pending_stats.tun_write_drops += 1;
+                                    batch_idx += 1;
+                                    continue;
+                                }
+                            }
+                            if err.kind() == std::io::ErrorKind::WouldBlock {
+                                pending_stats.tun_write_errors += 1;
+                                return Err(err);
+                            }
+                            pending_stats.tun_write_errors += 1;
+                            return Err(err);
+                        }
+                        pending_stats.tun_write_bytes += n as u64;
+                        pending_stats.tun_write_packets += 1;
+                        batch_idx += 1;
+                    }
+                    Ok(())
+                });
+
+                match res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        if e.kind() == std::io::ErrorKind::WouldBlock {
+                            continue; // Handled by outer while loop re-awaiting
+                        }
+                        error!("TUN Write Error: {}", e);
+                        if let Some(raw) = e.raw_os_error() {
+                            if raw == libc::EBADF {
+                                // Fatal descriptor error
+                                stop_download.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        break; // this drops the rest of the batch, preserving the loop
+                    }
+                    Err(_) => continue, // WouldBlock: wait for writable again
+                }
+            }
+
+            if pending_stats.should_flush(last_stats_flush) {
+                pending_stats.flush(&stats_download);
+                last_stats_flush = Instant::now();
+            }
         }
+
         pending_stats.flush(&stats_download);
         info!("Download task exited.");
         VpnLoopTask::Download

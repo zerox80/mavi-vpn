@@ -1,5 +1,9 @@
 package com.mavi.vpn.ui.screens
 
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.util.LruCache
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -14,7 +18,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -23,9 +29,13 @@ import com.mavi.vpn.data.InstalledApp
 import com.mavi.vpn.ui.components.drawableToBitmap
 import com.mavi.vpn.ui.components.toImageBitmap
 import com.mavi.vpn.viewmodel.VpnViewModel
-import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+
+private val appIconCache = LruCache<String, ImageBitmap>(256)
+private val appIconLoadLimiter = Semaphore(4)
 
 @Composable
 fun SettingsScreen(
@@ -55,10 +65,14 @@ fun SettingsScreen(
         return value
     }
     
-    val selectedPackages = remember { 
-        mutableStateListOf<String>().apply { 
-            addAll(initialSelection.split(",").map { it.trim() }.filter { it.isNotEmpty() })
-        } 
+    val selectedPackages = remember {
+        mutableStateMapOf<String, Boolean>().apply {
+            initialSelection
+                .split(",")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .forEach { this[it] = true }
+        }
     }
     
     var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
@@ -67,21 +81,23 @@ fun SettingsScreen(
     LaunchedEffect(Unit) {
         val appList = withContext(Dispatchers.IO) {
              val pm = context.packageManager
-             val packages = pm.getInstalledPackages(0)
-             packages.mapNotNull { pkg ->
-                 val appInfo = pkg.applicationInfo ?: return@mapNotNull null
-                 val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
-                 val isUpdatedSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-                 val launchIntent = pm.getLaunchIntentForPackage(pkg.packageName)
-                 
-                 if (launchIntent != null && (!isSystem || isUpdatedSystem)) {
-                     val iconDrawable = appInfo.loadIcon(pm)
-                     val imageBitmap = drawableToBitmap(iconDrawable)?.toImageBitmap()
-                     
+             val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+             val seenPackages = HashSet<String>()
+
+             pm.queryIntentActivities(launcherIntent, 0).mapNotNull { resolveInfo ->
+                 val appInfo = resolveInfo.activityInfo?.applicationInfo ?: return@mapNotNull null
+                 val packageName = appInfo.packageName
+                 if (!seenPackages.add(packageName)) {
+                     return@mapNotNull null
+                 }
+
+                 val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                 val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+
+                 if (!isSystem || isUpdatedSystem) {
                      InstalledApp(
                          name = appInfo.loadLabel(pm).toString(),
-                         packageName = pkg.packageName,
-                         icon = imageBitmap
+                         packageName = packageName
                      )
                  } else {
                      null
@@ -102,7 +118,7 @@ fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
         ) {
-            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) }) {
+            IconButton(onClick = { onBack(mode, selectedPackages.keys.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
             Text(
@@ -246,22 +262,18 @@ fun SettingsScreen(
             }
         } else {
             LazyColumn(modifier = Modifier.weight(1f)) {
-                items(apps) { app ->
-                    val isSelected = selectedPackages.contains(app.packageName)
+                items(apps, key = { it.packageName }) { app ->
+                    val isSelected = selectedPackages.containsKey(app.packageName)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
-                                if (isSelected) selectedPackages.remove(app.packageName) else selectedPackages.add(app.packageName)
+                                if (isSelected) selectedPackages.remove(app.packageName) else selectedPackages[app.packageName] = true
                             }
                             .padding(vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (app.icon != null) {
-                            androidx.compose.foundation.Image(bitmap = app.icon, contentDescription = null, modifier = Modifier.size(40.dp))
-                        } else {
-                            Box(modifier = Modifier.size(40.dp).background(Color.DarkGray, RoundedCornerShape(20.dp)))
-                        }
+                        InstalledAppIcon(packageName = app.packageName)
                         
                         Spacer(modifier = Modifier.width(16.dp))
                         
@@ -273,7 +285,7 @@ fun SettingsScreen(
                         Checkbox(
                             checked = isSelected,
                             onCheckedChange = { checked ->
-                                if (checked) selectedPackages.add(app.packageName) else selectedPackages.remove(app.packageName)
+                                if (checked) selectedPackages[app.packageName] = true else selectedPackages.remove(app.packageName)
                             },
                             colors = CheckboxDefaults.colors(checkedColor = Color(0xFF007AFF), uncheckedColor = Color.Gray, checkmarkColor = Color.White)
                         )
@@ -286,11 +298,41 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(16.dp))
         
         Button(
-            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) },
+            onClick = { onBack(mode, selectedPackages.keys.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) },
             modifier = Modifier.fillMaxWidth().height(50.dp),
             shape = RoundedCornerShape(12.dp)
         ) {
             Text("Save & Back", fontSize = 16.sp)
         }
+    }
+}
+
+@Composable
+private fun InstalledAppIcon(packageName: String) {
+    val context = LocalContext.current.applicationContext
+    val iconSizePx = with(LocalDensity.current) { 40.dp.roundToPx() }
+    val cacheKey = "$packageName:$iconSizePx"
+    var icon by remember(cacheKey) { mutableStateOf<ImageBitmap?>(appIconCache.get(cacheKey)) }
+
+    LaunchedEffect(cacheKey) {
+        if (icon != null) {
+            return@LaunchedEffect
+        }
+        icon = withContext(Dispatchers.IO) {
+            appIconLoadLimiter.withPermit {
+                runCatching {
+                    val drawable = context.packageManager.getApplicationIcon(packageName)
+                    drawableToBitmap(drawable, iconSizePx)?.toImageBitmap()?.also {
+                        appIconCache.put(cacheKey, it)
+                    }
+                }.getOrNull()
+            }
+        }
+    }
+
+    if (icon != null) {
+        androidx.compose.foundation.Image(bitmap = icon!!, contentDescription = null, modifier = Modifier.size(40.dp))
+    } else {
+        Box(modifier = Modifier.size(40.dp).background(Color.DarkGray, RoundedCornerShape(20.dp)))
     }
 }

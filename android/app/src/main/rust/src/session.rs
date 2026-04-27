@@ -6,7 +6,7 @@ use tokio::sync::broadcast;
 use crate::connection::H3SessionGuard;
 
 pub struct VpnSession {
-    pub runtime: tokio::runtime::Runtime,
+    pub runtime: Arc<tokio::runtime::Runtime>,
     pub connection: quinn::Connection,
     pub config: ControlMessage,
     pub http3_framing: bool,
@@ -20,7 +20,7 @@ pub struct VpnSession {
 
 impl VpnSession {
     pub fn new(
-        runtime: tokio::runtime::Runtime,
+        runtime: Arc<tokio::runtime::Runtime>,
         connection: quinn::Connection,
         config: ControlMessage,
         http3_framing: bool,

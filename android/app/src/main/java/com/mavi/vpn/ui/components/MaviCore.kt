@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -24,12 +25,18 @@ fun MaviCore(
 ) {
     // We drive time via withFrameMillis to simulate requestAnimationFrame tracking actual time
     var timeSeconds by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(state) {
+        if (state != MaviCoreState.CONNECTING) {
+            timeSeconds = if (state == MaviCoreState.ON) 1f else 0f
+            return@LaunchedEffect
+        }
+
         val startTime = withFrameMillis { it }
         while (true) {
             withFrameMillis { frameTime ->
                 timeSeconds = (frameTime - startTime) / 1000f
             }
+            delay(33)
         }
     }
 
@@ -38,7 +45,7 @@ fun MaviCore(
     val rotSpeed = if (state == MaviCoreState.CONNECTING) 60f else 18f
     val rot = (timeSeconds * rotSpeed) % 360f
 
-    val rings = listOf(0.42f, 0.56f, 0.72f, 0.88f)
+    val rings = remember { listOf(0.42f, 0.56f, 0.72f, 0.88f) }
     val isOff = state == MaviCoreState.OFF
 
     val ringColor = if (isOff) {
@@ -158,7 +165,7 @@ fun MaviCore(
                 val dotX = cx + (cos(a) * orbitR).toFloat()
                 val dotY = cy + (sin(a) * orbitR).toFloat()
                 val dotR = if (i == 0) 4f.dp.toPx() else 2f.dp.toPx()
-                val opacity = if (i == 0) 1f else 0.4f + 0.3f * sin(timeSeconds * 2f + i).toFloat()
+                val opacity = if (i == 0) 1f else 0.4f + 0.3f * sin(timeSeconds * 2f + i)
                 
                 drawCircle(
                     color = accent.copy(alpha = opacity),

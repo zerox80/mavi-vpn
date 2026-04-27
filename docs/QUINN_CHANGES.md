@@ -17,8 +17,8 @@ This project resolves Quinn through the `zerox80/quinn` fork and applies transpo
 
 ## Fork State
 
-- `quinn`, `quinn-proto`, and `quinn-udp` are patched to `https://github.com/zerox80/quinn`, branch `mavi-vpn-transport-fixes`.
-- `h3`, `h3-quinn`, and `h3-datagram` are patched to `https://github.com/zerox80/h3`, branch `mavi-vpn-quinn-0.12`.
+- `quinn`, `quinn-proto`, and `quinn-udp` are patched to `https://github.com/zerox80/quinn`, branch `main`.
+- `h3`, `h3-quinn`, and `h3-datagram` are patched to `https://github.com/zerox80/h3`, branch `main`.
 - The h3 fork updates `h3-quinn` to accept Quinn 0.12, preventing a fallback to the crates.io Quinn 0.11 line.
 - `Cargo.lock` pins these fork revisions for reproducible builds.
 - `external/quinn` was removed from this repository to avoid keeping an unused second Quinn source tree beside the fork patches.

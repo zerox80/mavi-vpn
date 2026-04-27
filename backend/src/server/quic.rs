@@ -83,8 +83,8 @@ fn setup_transport_config(transport_config: &mut TransportConfig, quic_payload_m
         .expect("60s fits in a QUIC IdleTimeout");
     transport_config.max_idle_timeout(Some(idle_timeout));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
-    transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024));
-    transport_config.datagram_send_buffer_size(8 * 1024 * 1024);
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024);
     transport_config.receive_window(quinn::VarInt::from(8u32 * 1024 * 1024));
     transport_config.stream_receive_window(quinn::VarInt::from(2u32 * 1024 * 1024));
     transport_config.send_window(8 * 1024 * 1024);

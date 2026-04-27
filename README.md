@@ -21,7 +21,7 @@
 ---
 > ⚠️ Mavi VPN is early beta software and has not been independently audited. Do not rely on it for high-risk security use cases yet.
 
-Mavi VPN tunnels all network traffic over **QUIC** (via the [`quinn`](https://github.com/zerox80/quinn) crate fork) to deliver secure, reliable, low-latency connectivity — even on unstable mobile networks. It supports **Windows**, **Linux**, and **Android** with native clients and an optional cross-platform **Tauri GUI**.
+Mavi VPN tunnels all network traffic over **QUIC** (via the [`quinn`](https://github.com/zerox80/quinn) crate fork on `main`) to deliver secure, reliable, low-latency connectivity — even on unstable mobile networks. It supports **Windows**, **Linux**, and **Android** with native clients and an optional cross-platform **Tauri GUI**.
 
 ## Key Features
 

@@ -381,10 +381,9 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_networkChanged<'l
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
-        let conn = session.connection.clone();
-        session.runtime.spawn(async move {
-            let _ = conn.send_datagram(bytes::Bytes::from_static(&[0]));
-        });
+        let _ = session
+            .connection
+            .send_datagram(bytes::Bytes::from_static(&[0]));
     }));
 }
 

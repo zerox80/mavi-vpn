@@ -21,7 +21,7 @@
 ---
 > ⚠️ Mavi VPN is early beta software and has not been independently audited. Do not rely on it for high-risk security use cases yet.
 
-Mavi VPN tunnels all network traffic over **QUIC** (via the [`quinn`](external/quinn) crate) to deliver secure, reliable, low-latency connectivity — even on unstable mobile networks. It supports **Windows**, **Linux**, and **Android** with native clients and an optional cross-platform **Tauri GUI**.
+Mavi VPN tunnels all network traffic over **QUIC** (via the [`quinn`](https://github.com/zerox80/quinn) crate fork) to deliver secure, reliable, low-latency connectivity — even on unstable mobile networks. It supports **Windows**, **Linux**, and **Android** with native clients and an optional cross-platform **Tauri GUI**.
 
 ## Key Features
 
@@ -128,7 +128,6 @@ mavi-vpn/
 │       ├── masque.rs         # MASQUE connect-ip: capsules, varints, datagram framing
 │       └── hex.rs            # Hex encode/decode utilities
 │
-├── external/quinn/     # Upstream quinn clone
 ├── quic-tester/        # DPI probe simulator — verifies censorship resistance
 ├── docs/               # INSTALLATION.md, NGINX_PROXY.md, whitepaper.tex
 ├── Dockerfile          # Multi-stage build (rust:1.94 → debian:trixie-slim)

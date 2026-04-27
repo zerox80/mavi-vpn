@@ -14,7 +14,12 @@ import android.util.Log
 import com.mavi.vpn.data.PrefsManager
 import com.mavi.vpn.native_lib.NativeLib
 import com.mavi.vpn.service.NotificationHelper
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 class MaviVpnService : VpnService() {
@@ -25,9 +30,11 @@ class MaviVpnService : VpnService() {
     @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var vpnSessionHandle: Long = 0
     @Volatile private var vpnSessionGeneration: Long = 0
+    @Volatile private var connectRequestGeneration: Long = 0
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val vpnLock = Any()
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     
     private lateinit var prefs: PrefsManager
     private lateinit var notificationHelper: NotificationHelper
@@ -91,43 +98,74 @@ class MaviVpnService : VpnService() {
                 splitPackages = prefs.savedSplitPackages
             }
 
-            if (prefs.savedUseKeycloak && !OAuthHelper.isAccessTokenUsable(token)) {
-                // Try one refresh unconditionally before giving up completely on startup
-                val refreshed = runBlocking { 
-                    OAuthHelper.refreshToken(prefs.savedRefreshToken, prefs.savedKcUrl, prefs.savedKcRealm, prefs.savedKcClientId) 
-                }
-                
-                when (refreshed) {
-                    is RefreshResult.Success -> {
-                        prefs.savedToken = refreshed.tokens.accessToken
-                        prefs.savedRefreshToken = refreshed.tokens.refreshToken
-                    }
-                    is RefreshResult.NetworkError -> {
-                        Log.w("MaviVPN", "Stored Keycloak token expired, but network is offline. Will let VPN reconnect loop try later.")
-                        // We do NOT clear the tokens, we let the VPN start and handle it when network is up!
-                    }
-                    is RefreshResult.Error -> {
-                        Log.i("MaviVPN", "Keycloak refresh rejected (Session explicitly expired/revoked). Clearing session.")
-                        prefs.savedToken = ""
-                        prefs.savedRefreshToken = ""
-                        return START_NOT_STICKY
-                    }
-                }
+            queueVpnStart(ip, port, token, pin, splitMode, splitPackages)
+            return START_STICKY
+        }
+
+        return START_NOT_STICKY
+    }
+
+    private fun queueVpnStart(ip: String, port: String, token: String, certPin: String, splitMode: String, splitPackages: String) {
+        val requestGeneration = synchronized(vpnLock) {
+            connectRequestGeneration += 1
+            connectRequestGeneration
+        }
+
+        serviceScope.launch {
+            val currentToken = resolveStartupToken(token)
+            if (!isLatestConnectRequest(requestGeneration)) {
+                Log.i("MaviVPN", "Ignoring stale VPN start request.")
+                return@launch
             }
 
-            // Always re-read the token from prefs in case we just refreshed it,
-            // or if it was valid to begin with.
-            val currentToken = prefs.savedToken
-
-            if (ip.isNotEmpty() && currentToken.isNotEmpty()) {
-                startVpn(ip, port, currentToken, pin, splitMode, splitPackages)
-                return START_STICKY
+            if (currentToken == null) {
+                stopSelf()
+            } else if (ip.isNotEmpty() && currentToken.isNotEmpty()) {
+                startVpn(ip, port, currentToken, certPin, splitMode, splitPackages)
             } else {
                 Log.e("MaviVPN", "Cannot restart: Credentials missing.")
+                stopSelf()
             }
         }
-        
-        return START_NOT_STICKY
+    }
+
+    private fun isLatestConnectRequest(requestGeneration: Long): Boolean {
+        return synchronized(vpnLock) {
+            connectRequestGeneration == requestGeneration
+        }
+    }
+
+    private suspend fun resolveStartupToken(token: String): String? {
+        if (!prefs.savedUseKeycloak || OAuthHelper.isAccessTokenUsable(token)) {
+            return prefs.savedToken
+        }
+
+        // Try one refresh before startup without blocking the Service main thread.
+        val refreshed = OAuthHelper.refreshToken(
+            prefs.savedRefreshToken,
+            prefs.savedKcUrl,
+            prefs.savedKcRealm,
+            prefs.savedKcClientId
+        )
+
+        return when (refreshed) {
+            is RefreshResult.Success -> {
+                prefs.savedToken = refreshed.tokens.accessToken
+                prefs.savedRefreshToken = refreshed.tokens.refreshToken
+                refreshed.tokens.accessToken
+            }
+            is RefreshResult.NetworkError -> {
+                Log.w("MaviVPN", "Stored Keycloak token expired, but network is offline. Will let VPN reconnect loop try later.")
+                // Do not clear tokens; the reconnect loop can refresh once network returns.
+                prefs.savedToken
+            }
+            is RefreshResult.Error -> {
+                Log.i("MaviVPN", "Keycloak refresh rejected (session expired/revoked). Clearing session.")
+                prefs.savedToken = ""
+                prefs.savedRefreshToken = ""
+                null
+            }
+        }
     }
 
     private fun startVpn(ip: String, port: String, token: String, certPin: String, splitMode: String, splitPackages: String) {
@@ -399,6 +437,7 @@ class MaviVpnService : VpnService() {
 
     private fun invalidateCurrentSession(): SessionCleanup {
         synchronized(vpnLock) {
+            connectRequestGeneration += 1
             vpnSessionGeneration += 1
             isRunning = false
             isConnected.value = false
@@ -460,8 +499,11 @@ class MaviVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        val cleanup = invalidateCurrentSession()
+        stopCurrentSession(cleanup)
+        serviceScope.cancel()
         releaseWakeLock()
+        super.onDestroy()
     }
 
     private fun acquireWakeLock() {
@@ -502,12 +544,12 @@ class MaviVpnService : VpnService() {
                 (acc shl 8) or octet.toLong()
             }
             // Use Long.bitCount to avoid truncating the upper 32 bits with toInt().
-            val prefix = java.lang.Long.bitCount(mask).toInt()
+            val prefix = java.lang.Long.bitCount(mask)
             val expected = if (prefix == 0) 0L else (0xFFFFFFFFL shl (32 - prefix)) and 0xFFFFFFFFL
             if (mask != expected) return 24
             prefix
         } catch (e: Exception) {
-            24 
+            24
         }
     }
 }

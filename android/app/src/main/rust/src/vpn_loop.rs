@@ -203,8 +203,13 @@ pub async fn run_vpn_loop(
                 packet.clone()
             };
 
-            // Send to QUIC
-            if let Err(e) = conn_upload.send_datagram(payload) {
+            // Backpressure instead of dropping older queued VPN packets under congestion.
+            let send_result = tokio::select! {
+                res = conn_upload.send_datagram_wait(payload) => res,
+                _ = shutdown_rx.recv() => break,
+            };
+
+            if let Err(e) = send_result {
                 match e {
                     quinn::SendDatagramError::ConnectionLost(_) => {
                         error!("QUIC Connection lost during send");

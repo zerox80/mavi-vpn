@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -75,13 +76,9 @@ fun SettingsScreen(
                  val launchIntent = pm.getLaunchIntentForPackage(pkg.packageName)
                  
                  if (launchIntent != null && (!isSystem || isUpdatedSystem)) {
-                     val iconDrawable = appInfo.loadIcon(pm)
-                     val imageBitmap = drawableToBitmap(iconDrawable)?.toImageBitmap()
-                     
                      InstalledApp(
                          name = appInfo.loadLabel(pm).toString(),
-                         packageName = pkg.packageName,
-                         icon = imageBitmap
+                         packageName = pkg.packageName
                      )
                  } else {
                      null
@@ -246,7 +243,7 @@ fun SettingsScreen(
             }
         } else {
             LazyColumn(modifier = Modifier.weight(1f)) {
-                items(apps) { app ->
+                items(apps, key = { it.packageName }) { app ->
                     val isSelected = selectedPackages.contains(app.packageName)
                     Row(
                         modifier = Modifier
@@ -257,11 +254,7 @@ fun SettingsScreen(
                             .padding(vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (app.icon != null) {
-                            androidx.compose.foundation.Image(bitmap = app.icon, contentDescription = null, modifier = Modifier.size(40.dp))
-                        } else {
-                            Box(modifier = Modifier.size(40.dp).background(Color.DarkGray, RoundedCornerShape(20.dp)))
-                        }
+                        InstalledAppIcon(packageName = app.packageName)
                         
                         Spacer(modifier = Modifier.width(16.dp))
                         
@@ -292,5 +285,26 @@ fun SettingsScreen(
         ) {
             Text("Save & Back", fontSize = 16.sp)
         }
+    }
+}
+
+@Composable
+private fun InstalledAppIcon(packageName: String) {
+    val context = LocalContext.current.applicationContext
+    var icon by remember(packageName) { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(packageName) {
+        icon = withContext(Dispatchers.IO) {
+            runCatching {
+                val drawable = context.packageManager.getApplicationIcon(packageName)
+                drawableToBitmap(drawable)?.toImageBitmap()
+            }.getOrNull()
+        }
+    }
+
+    if (icon != null) {
+        androidx.compose.foundation.Image(bitmap = icon!!, contentDescription = null, modifier = Modifier.size(40.dp))
+    } else {
+        Box(modifier = Modifier.size(40.dp).background(Color.DarkGray, RoundedCornerShape(20.dp)))
     }
 }

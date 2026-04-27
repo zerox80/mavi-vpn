@@ -24,7 +24,12 @@ fun MaviCore(
 ) {
     // We drive time via withFrameMillis to simulate requestAnimationFrame tracking actual time
     var timeSeconds by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(state) {
+        if (state == MaviCoreState.OFF) {
+            timeSeconds = 0f
+            return@LaunchedEffect
+        }
+
         val startTime = withFrameMillis { it }
         while (true) {
             withFrameMillis { frameTime ->

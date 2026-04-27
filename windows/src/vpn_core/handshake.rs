@@ -221,8 +221,24 @@ pub async fn connect_and_handshake(
         (cfg, None)
     };
 
+    validate_server_mtu(&config, tun_mtu)?;
+
     Ok((connection, config, h3_guard))
 }
+
+fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()> {
+    if let ControlMessage::Config { mtu, .. } = config {
+        if *mtu != local_tun_mtu {
+            anyhow::bail!(
+                "MTU mismatch: local/client VPN MTU is {}, but server pushed {}. Configure both sides to the same VPN_MTU.",
+                local_tun_mtu,
+                mtu
+            );
+        }
+    }
+    Ok(())
+}
+
 /// MASQUE connect-ip (RFC 9484) handshake.
 ///
 /// Sends `CONNECT` with `:protocol=connect-ip` over HTTP/3, then parses the

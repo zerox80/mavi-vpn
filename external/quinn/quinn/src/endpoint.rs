@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    fmt,
     future::Future,
     io,
     io::IoSliceMut,
@@ -9,12 +10,12 @@ use std::{
     str,
     sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
-    time::Instant,
 };
 
-#[cfg(feature = "ring")]
+#[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))]
 use crate::runtime::default_runtime;
 use crate::{
+    Instant,
     runtime::{AsyncUdpSocket, Runtime},
     udp_transmit,
 };
@@ -25,13 +26,15 @@ use proto::{
     EndpointEvent, ServerConfig,
 };
 use rustc_hash::FxHashMap;
-use tokio::sync::{futures::Notified, mpsc, Notify};
+#[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring"),))]
+use socket2::{Domain, Protocol, Socket, Type};
+use tokio::sync::{Notify, futures::Notified, mpsc};
 use tracing::{Instrument, Span};
-use udp::{RecvMeta, BATCH_SIZE};
+use udp::{BATCH_SIZE, RecvMeta};
 
 use crate::{
-    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter, ConnectionEvent,
-    EndpointConfig, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND,
+    ConnectionEvent, EndpointConfig, IO_LOOP_BOUND, RECV_TIME_BOUND, VarInt,
+    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter,
 };
 
 /// A QUIC endpoint.
@@ -54,21 +57,39 @@ impl Endpoint {
     /// address like `0.0.0.0:0` or `[::]:0`, which allow communication with any reachable IPv4 or
     /// IPv6 address respectively from an OS-assigned port.
     ///
-    /// Platform defaults for dual-stack sockets vary. For example, any socket bound to a wildcard
-    /// IPv6 address on Windows will not by default be able to communicate with IPv4
-    /// addresses. Portable applications should bind an address that matches the family they wish to
-    /// communicate within.
-    #[cfg(feature = "ring")]
+    /// If an IPv6 address is provided, attempts to make the socket dual-stack so as to allow
+    /// communication with both IPv4 and IPv6 addresses. As such, calling `Endpoint::client` with
+    /// the address `[::]:0` is a reasonable default to maximize the ability to connect to other
+    /// address. For example:
+    ///
+    /// ```
+    /// quinn::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into());
+    /// ```
+    ///
+    /// Some environments may not allow creation of dual-stack sockets, in which case an IPv6
+    /// client will only be able to connect to IPv6 servers. An IPv4 client is never dual-stack.
+    #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))] // `EndpointConfig::default()` is only available with these
     pub fn client(addr: SocketAddr) -> io::Result<Self> {
-        let socket = std::net::UdpSocket::bind(addr)?;
-        let runtime = default_runtime()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no async runtime found"))?;
+        let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+        if addr.is_ipv6() {
+            if let Err(e) = socket.set_only_v6(false) {
+                tracing::debug!(%e, "unable to make socket dual-stack");
+            }
+        }
+        socket.bind(&addr.into())?;
+        let runtime =
+            default_runtime().ok_or_else(|| io::Error::other("no async runtime found"))?;
         Self::new_with_abstract_socket(
             EndpointConfig::default(),
             None,
-            runtime.wrap_udp_socket(socket)?,
+            runtime.wrap_udp_socket(socket.into())?,
             runtime,
         )
+    }
+
+    /// Returns relevant stats from this Endpoint
+    pub fn stats(&self) -> EndpointStats {
+        self.inner.state.lock().unwrap().stats
     }
 
     /// Helper to construct an endpoint for use with both incoming and outgoing connections
@@ -77,11 +98,11 @@ impl Endpoint {
     /// IPv6 address on Windows will not by default be able to communicate with IPv4
     /// addresses. Portable applications should bind an address that matches the family they wish to
     /// communicate within.
-    #[cfg(feature = "ring")]
+    #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))] // `EndpointConfig::default()` is only available with these
     pub fn server(config: ServerConfig, addr: SocketAddr) -> io::Result<Self> {
         let socket = std::net::UdpSocket::bind(addr)?;
-        let runtime = default_runtime()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no async runtime found"))?;
+        let runtime =
+            default_runtime().ok_or_else(|| io::Error::other("no async runtime found"))?;
         Self::new_with_abstract_socket(
             EndpointConfig::default(),
             Some(config),
@@ -91,6 +112,7 @@ impl Endpoint {
     }
 
     /// Construct an endpoint with arbitrary configuration and socket
+    #[cfg(not(wasm_browser))]
     pub fn new(
         config: EndpointConfig,
         server_config: Option<ServerConfig>,
@@ -204,6 +226,7 @@ impl Endpoint {
             .connect(self.runtime.now(), config, addr, server_name)?;
 
         let socket = endpoint.socket.clone();
+        endpoint.stats.outgoing_handshakes += 1;
         Ok(endpoint
             .recv_state
             .connections
@@ -213,6 +236,7 @@ impl Endpoint {
     /// Switch to a new UDP socket
     ///
     /// See [`Endpoint::rebind_abstract()`] for details.
+    #[cfg(not(wasm_browser))]
     pub fn rebind(&self, socket: std::net::UdpSocket) -> io::Result<()> {
         self.rebind_abstract(self.runtime.wrap_udp_socket(socket)?)
     }
@@ -233,6 +257,10 @@ impl Endpoint {
         for sender in inner.recv_state.connections.senders.values() {
             // Ignoring errors from dropped connections
             let _ = sender.send(ConnectionEvent::Rebind(inner.socket.clone()));
+        }
+        if let Some(driver) = inner.driver.take() {
+            // Ensure the driver can register for wake-ups from the new socket
+            driver.wake();
         }
 
         Ok(())
@@ -304,6 +332,20 @@ impl Endpoint {
     }
 }
 
+/// Statistics on [Endpoint] activity
+#[non_exhaustive]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct EndpointStats {
+    /// Cummulative number of Quic handshakes accepted by this [Endpoint]
+    pub accepted_handshakes: u64,
+    /// Cummulative number of Quic handshakees sent from this [Endpoint]
+    pub outgoing_handshakes: u64,
+    /// Cummulative number of Quic handshakes refused on this [Endpoint]
+    pub refused_handshakes: u64,
+    /// Cummulative number of Quic handshakes ignored on this [Endpoint]
+    pub ignored_handshakes: u64,
+}
+
 /// A future that drives IO on an endpoint
 ///
 /// This task functions as the switch point between the UDP socket object and the
@@ -321,8 +363,7 @@ pub(crate) struct EndpointDriver(pub(crate) EndpointRef);
 impl Future for EndpointDriver {
     type Output = Result<(), io::Error>;
 
-    #[allow(unused_mut)] // MSRV
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let mut endpoint = self.0.state.lock().unwrap();
         if endpoint.driver.is_none() {
             endpoint.driver = Some(cx.waker().clone());
@@ -383,6 +424,7 @@ impl EndpointInner {
             .accept(incoming, now, &mut response_buffer, server_config)
         {
             Ok((handle, conn)) => {
+                state.stats.accepted_handshakes += 1;
                 let socket = state.socket.clone();
                 let runtime = state.runtime.clone();
                 Ok(state
@@ -401,6 +443,7 @@ impl EndpointInner {
 
     pub(crate) fn refuse(&self, incoming: proto::Incoming) {
         let mut state = self.state.lock().unwrap();
+        state.stats.refused_handshakes += 1;
         let mut response_buffer = Vec::new();
         let transmit = state.inner.refuse(incoming, &mut response_buffer);
         respond(transmit, &response_buffer, &*state.socket);
@@ -415,7 +458,9 @@ impl EndpointInner {
     }
 
     pub(crate) fn ignore(&self, incoming: proto::Incoming) {
-        self.state.lock().unwrap().inner.ignore(incoming);
+        let mut state = self.state.lock().unwrap();
+        state.stats.ignored_handshakes += 1;
+        state.inner.ignore(incoming);
     }
 }
 
@@ -434,6 +479,7 @@ pub(crate) struct State {
     ref_count: usize,
     driver_lost: bool,
     runtime: Arc<dyn Runtime>,
+    stats: EndpointStats,
 }
 
 #[derive(Debug)]
@@ -498,6 +544,14 @@ impl State {
         }
 
         true
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        for incoming in self.recv_state.incoming.drain(..) {
+            self.inner.ignore(incoming);
+        }
     }
 }
 
@@ -585,7 +639,7 @@ pin_project! {
     }
 }
 
-impl<'a> Future for Accept<'a> {
+impl Future for Accept<'_> {
     type Output = Option<Incoming>;
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
@@ -643,6 +697,7 @@ impl EndpointRef {
                 driver_lost: false,
                 recv_state,
                 runtime,
+                stats: EndpointStats::default(),
             }),
         }))
     }
@@ -679,7 +734,6 @@ impl std::ops::Deref for EndpointRef {
 }
 
 /// State directly involved in handling incoming packets
-#[derive(Debug)]
 struct RecvState {
     incoming: VecDeque<proto::Incoming>,
     connections: ConnectionSet,
@@ -798,6 +852,17 @@ impl RecvState {
                 });
             }
         }
+    }
+}
+
+impl fmt::Debug for RecvState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("RecvState")
+            .field("incoming", &self.incoming)
+            .field("connections", &self.connections)
+            // recv_buf too large
+            .field("recv_limiter", &self.recv_limiter)
+            .finish_non_exhaustive()
     }
 }
 

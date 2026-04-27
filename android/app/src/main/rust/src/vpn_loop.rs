@@ -14,6 +14,8 @@ use log::{info, warn};
 use shared::masque;
 #[cfg(target_os = "android")]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_os = "android")]
+use std::time::Instant;
 
 #[cfg(target_os = "android")]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -52,6 +54,21 @@ impl AndroidTunnelStats {
             icmp_feedback_packets: AtomicU64::new(0),
         }
     }
+}
+
+#[cfg(target_os = "android")]
+fn take_delta(current: u64, last: &mut u64) -> u64 {
+    let delta = current.saturating_sub(*last);
+    *last = current;
+    delta
+}
+
+#[cfg(target_os = "android")]
+fn mbit_per_second(bytes: u64, elapsed_secs: f64) -> f64 {
+    if elapsed_secs <= 0.0 {
+        return 0.0;
+    }
+    bytes as f64 * 8.0 / elapsed_secs / 1_000_000.0
 }
 
 #[cfg(not(target_os = "android"))]
@@ -425,37 +442,97 @@ pub async fn run_vpn_loop(
     let stats_log = stats.clone();
     let stats_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_tun_to_quic_bytes = 0u64;
         let mut last_quic_to_tun_bytes = 0u64;
         let mut last_tun_write_bytes = 0u64;
         let mut last_udp_tx_bytes = 0u64;
         let mut last_udp_rx_bytes = 0u64;
+        let mut last_tun_to_quic_packets = 0u64;
+        let mut last_quic_send_errors = 0u64;
+        let mut last_quic_too_large = 0u64;
+        let mut last_quic_to_tun_packets = 0u64;
+        let mut last_tun_write_packets = 0u64;
+        let mut last_tun_write_drops = 0u64;
+        let mut last_tun_write_errors = 0u64;
+        let mut last_icmp_feedback_packets = 0u64;
+        let mut last_lost_packets = 0u64;
+        let mut last_lost_bytes = 0u64;
+        interval.tick().await;
+        let mut last_tick = Instant::now();
         loop {
             interval.tick().await;
             if stop_stats.load(Ordering::Relaxed) {
                 break;
             }
+            let now = Instant::now();
+            let elapsed_secs = now.duration_since(last_tick).as_secs_f64();
+            last_tick = now;
+
             let stats = conn_stats.stats();
             let tun_to_quic_bytes = stats_log.tun_to_quic_bytes.load(Ordering::Relaxed);
             let quic_to_tun_bytes = stats_log.quic_to_tun_bytes.load(Ordering::Relaxed);
             let tun_write_bytes = stats_log.tun_write_bytes.load(Ordering::Relaxed);
             let udp_tx_bytes = stats.udp_tx.bytes;
             let udp_rx_bytes = stats.udp_rx.bytes;
-            let tun_to_quic_mbit =
-                (tun_to_quic_bytes - last_tun_to_quic_bytes) as f64 * 8.0 / 5_000_000.0;
-            let quic_to_tun_mbit =
-                (quic_to_tun_bytes - last_quic_to_tun_bytes) as f64 * 8.0 / 5_000_000.0;
-            let tun_write_mbit =
-                (tun_write_bytes - last_tun_write_bytes) as f64 * 8.0 / 5_000_000.0;
-            let udp_tx_mbit = (udp_tx_bytes - last_udp_tx_bytes) as f64 * 8.0 / 5_000_000.0;
-            let udp_rx_mbit = (udp_rx_bytes - last_udp_rx_bytes) as f64 * 8.0 / 5_000_000.0;
-            last_tun_to_quic_bytes = tun_to_quic_bytes;
-            last_quic_to_tun_bytes = quic_to_tun_bytes;
-            last_tun_write_bytes = tun_write_bytes;
-            last_udp_tx_bytes = udp_tx_bytes;
-            last_udp_rx_bytes = udp_rx_bytes;
+            let tun_to_quic_packets = stats_log.tun_to_quic_packets.load(Ordering::Relaxed);
+            let quic_send_errors = stats_log.quic_send_errors.load(Ordering::Relaxed);
+            let quic_too_large = stats_log.quic_too_large.load(Ordering::Relaxed);
+            let quic_to_tun_packets = stats_log.quic_to_tun_packets.load(Ordering::Relaxed);
+            let tun_write_packets = stats_log.tun_write_packets.load(Ordering::Relaxed);
+            let tun_write_drops = stats_log.tun_write_drops.load(Ordering::Relaxed);
+            let tun_write_errors = stats_log.tun_write_errors.load(Ordering::Relaxed);
+            let icmp_feedback_packets = stats_log.icmp_feedback_packets.load(Ordering::Relaxed);
+
+            let tun_to_quic_bytes_delta =
+                take_delta(tun_to_quic_bytes, &mut last_tun_to_quic_bytes);
+            let quic_to_tun_bytes_delta =
+                take_delta(quic_to_tun_bytes, &mut last_quic_to_tun_bytes);
+            let tun_write_bytes_delta = take_delta(tun_write_bytes, &mut last_tun_write_bytes);
+            let udp_tx_bytes_delta = take_delta(udp_tx_bytes, &mut last_udp_tx_bytes);
+            let udp_rx_bytes_delta = take_delta(udp_rx_bytes, &mut last_udp_rx_bytes);
+            let tun_to_quic_packets_delta =
+                take_delta(tun_to_quic_packets, &mut last_tun_to_quic_packets);
+            let quic_send_errors_delta = take_delta(quic_send_errors, &mut last_quic_send_errors);
+            let quic_too_large_delta = take_delta(quic_too_large, &mut last_quic_too_large);
+            let quic_to_tun_packets_delta =
+                take_delta(quic_to_tun_packets, &mut last_quic_to_tun_packets);
+            let tun_write_packets_delta =
+                take_delta(tun_write_packets, &mut last_tun_write_packets);
+            let tun_write_drops_delta = take_delta(tun_write_drops, &mut last_tun_write_drops);
+            let tun_write_errors_delta = take_delta(tun_write_errors, &mut last_tun_write_errors);
+            let icmp_feedback_packets_delta =
+                take_delta(icmp_feedback_packets, &mut last_icmp_feedback_packets);
+            let lost_packets_delta = take_delta(stats.path.lost_packets, &mut last_lost_packets);
+            let lost_bytes_delta = take_delta(stats.path.lost_bytes, &mut last_lost_bytes);
+
+            let tun_to_quic_mbit = mbit_per_second(tun_to_quic_bytes_delta, elapsed_secs);
+            let quic_to_tun_mbit = mbit_per_second(quic_to_tun_bytes_delta, elapsed_secs);
+            let tun_write_mbit = mbit_per_second(tun_write_bytes_delta, elapsed_secs);
+            let udp_tx_mbit = mbit_per_second(udp_tx_bytes_delta, elapsed_secs);
+            let udp_rx_mbit = mbit_per_second(udp_rx_bytes_delta, elapsed_secs);
+            let tun_pending_packets = quic_to_tun_packets
+                .saturating_sub(tun_write_packets.saturating_add(tun_write_drops));
+            let max_dgram = conn_stats.max_datagram_size().unwrap_or(0);
+            let dgram_space = conn_stats.datagram_send_buffer_space();
+            let diag = if tun_write_drops_delta > 0 || tun_write_errors_delta > 0 {
+                "android_tun_backpressure"
+            } else if lost_packets_delta > 0 || lost_bytes_delta > 0 {
+                "quic_path_loss"
+            } else if quic_send_errors_delta > 0 || quic_too_large_delta > 0 {
+                "quic_send_issue"
+            } else if dgram_space == 0 {
+                "quic_send_buffer_full"
+            } else if tun_write_mbit + 5.0 < quic_to_tun_mbit {
+                "tun_write_lag"
+            } else {
+                "ok"
+            };
+
             info!(
-                "[ANDROID TUNNEL STATS] tun2quic={:.1}mbit quic2tun={:.1}mbit tun_write={:.1}mbit quic_udp_tx={:.1}mbit quic_udp_rx={:.1}mbit rtt={}ms cwnd={} lost_pkts={} lost_bytes={} max_dgram={} dgram_space={} tun2quic_pkts={} quic_send_err={} quic_too_large={} quic2tun_pkts={} tun_write_pkts={} tun_write_drops={} tun_write_err={} icmp_pkts={}",
+                "[ANDROID TUNNEL STATS] window={:.2}s diag={} app_up={:.1}mbit app_down={:.1}mbit tun_write={:.1}mbit udp_tx={:.1}mbit udp_rx={:.1}mbit rtt={}ms cwnd={} max_dgram={} dgram_space={} loss_pkts_delta={} loss_bytes_delta={} loss_pkts_total={} loss_bytes_total={} pkts_up_delta={} pkts_down_delta={} tun_write_pkts_delta={} tun_pending_pkts={} tun_drops_delta={} tun_drops_total={} tun_err_delta={} tun_err_total={} quic_send_err_delta={} quic_send_err_total={} quic_too_large_delta={} quic_too_large_total={} icmp_delta={} icmp_total={}",
+                elapsed_secs,
+                diag,
                 tun_to_quic_mbit,
                 quic_to_tun_mbit,
                 tun_write_mbit,
@@ -463,18 +540,26 @@ pub async fn run_vpn_loop(
                 udp_rx_mbit,
                 stats.path.rtt.as_millis(),
                 stats.path.cwnd,
+                max_dgram,
+                dgram_space,
+                lost_packets_delta,
+                lost_bytes_delta,
                 stats.path.lost_packets,
                 stats.path.lost_bytes,
-                conn_stats.max_datagram_size().unwrap_or(0),
-                conn_stats.datagram_send_buffer_space(),
-                stats_log.tun_to_quic_packets.load(Ordering::Relaxed),
-                stats_log.quic_send_errors.load(Ordering::Relaxed),
-                stats_log.quic_too_large.load(Ordering::Relaxed),
-                stats_log.quic_to_tun_packets.load(Ordering::Relaxed),
-                stats_log.tun_write_packets.load(Ordering::Relaxed),
-                stats_log.tun_write_drops.load(Ordering::Relaxed),
-                stats_log.tun_write_errors.load(Ordering::Relaxed),
-                stats_log.icmp_feedback_packets.load(Ordering::Relaxed),
+                tun_to_quic_packets_delta,
+                quic_to_tun_packets_delta,
+                tun_write_packets_delta,
+                tun_pending_packets,
+                tun_write_drops_delta,
+                tun_write_drops,
+                tun_write_errors_delta,
+                tun_write_errors,
+                quic_send_errors_delta,
+                quic_send_errors,
+                quic_too_large_delta,
+                quic_too_large,
+                icmp_feedback_packets_delta,
+                icmp_feedback_packets,
             );
         }
     });

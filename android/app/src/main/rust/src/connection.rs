@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::crypto::{decode_hex, PinnedServerVerifier};
 
-/// Holds the h3 `SendRequest` + driver task for the lifetime of the VPN session.
+/// Holds the h3 CONNECT-IP request state for the lifetime of the VPN session.
 ///
 /// `h3::client::SendRequest::drop` decrements an internal sender count; when the last
 /// handle goes away it calls `handle_connection_error_on_stream(H3_NO_ERROR,
@@ -19,8 +19,13 @@ use crate::crypto::{decode_hex, PinnedServerVerifier};
 /// Keeping this guard alongside the quinn::Connection prevents that early shutdown
 /// so the VPN datagram plane can keep using the same connection after the H3 auth
 /// request completes.
+///
+/// The CONNECT-IP request stream itself must also remain open for the lifetime of
+/// the session. Dropping it after reading MAVI_CONFIG can end the logical MASQUE
+/// tunnel while QUIC datagrams are still being used.
 pub struct H3SessionGuard {
     _send_request: h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
+    _stream: h3::client::RequestStream<h3_quinn::BidiStream<bytes::Bytes>, bytes::Bytes>,
     drive_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -169,10 +174,10 @@ pub async fn connect_and_handshake(
 
     // Handshake
     //
-    // `h3_guard` (when present) keeps the h3 SendRequest + driver task alive
-    // for the whole VPN session. The caller must hold it until the session ends;
-    // dropping it earlier would send CONNECTION_CLOSE(H3_NO_ERROR) and kill the
-    // VPN datagram plane.
+    // `h3_guard` (when present) keeps the h3 SendRequest, CONNECT-IP request
+    // stream and driver task alive for the whole VPN session. The caller must
+    // hold it until the session ends; dropping it earlier can close the HTTP/3
+    // control plane while QUIC datagrams are still being used.
     let (config, h3_guard) = if http3_framing {
         let (cfg, guard) = connect_and_handshake_h3(connection.clone(), token).await?;
         (cfg, Some(guard))
@@ -335,6 +340,7 @@ async fn connect_and_handshake_h3(
         config,
         H3SessionGuard {
             _send_request: send_request,
+            _stream: stream,
             drive_handle,
         },
     ))

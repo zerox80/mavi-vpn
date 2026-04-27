@@ -1,15 +1,13 @@
 package com.mavi.vpn
 
+import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
-import android.content.Context
 import android.util.Log
 import com.mavi.vpn.data.PrefsManager
 import com.mavi.vpn.native_lib.NativeLib
@@ -34,12 +32,15 @@ class MaviVpnService : VpnService() {
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val vpnLock = Any()
+    private val wakeLockLock = Any()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     
     private lateinit var prefs: PrefsManager
     private lateinit var notificationHelper: NotificationHelper
 
     companion object {
+        private const val CONNECT_WAKE_LOCK_TIMEOUT_MS = 60_000L
+
         /** Observable connection state for UI */
         val isConnected = MutableStateFlow(false)
     }
@@ -201,7 +202,7 @@ class MaviVpnService : VpnService() {
 
         val notification = notificationHelper.createNotification("Mavi VPN", "Connecting to $ip...")
         
-        acquireWakeLock()
+        acquireWakeLock(CONNECT_WAKE_LOCK_TIMEOUT_MS)
 
         isRunning = true
         startForeground(1, notification)
@@ -224,6 +225,7 @@ class MaviVpnService : VpnService() {
                     while (isCurrentSessionActive()) {
                         if (prefs.savedUseKeycloak && !OAuthHelper.isAccessTokenUsable(currentToken, skewSeconds = 300)) {
                             Log.i("MaviVPN", "Keycloak token expires soon. Attempting refresh in background.")
+                            acquireWakeLock(CONNECT_WAKE_LOCK_TIMEOUT_MS)
                             val refreshed = runBlocking {
                                 OAuthHelper.refreshToken(prefs.savedRefreshToken, prefs.savedKcUrl, prefs.savedKcRealm, prefs.savedKcClientId)
                             }
@@ -237,6 +239,7 @@ class MaviVpnService : VpnService() {
                                 }
                                 is RefreshResult.NetworkError -> {
                                     Log.w("MaviVPN", "Refresh skipped due to network (${refreshed.error}). Waiting before retry.")
+                                    releaseWakeLock()
                                     Thread.sleep(3000)
                                     continue // Try again! We don't drop the connection
                                 }
@@ -245,6 +248,7 @@ class MaviVpnService : VpnService() {
                                     prefs.savedToken = ""
                                     prefs.savedRefreshToken = ""
                                     isRunning = false
+                                    releaseWakeLock()
                                     break
                                 }
                             }
@@ -255,6 +259,7 @@ class MaviVpnService : VpnService() {
                         }
 
                         Log.d("MaviVPN", "Attempting connection to $ip:$port (Attempt ${++retryCount})")
+                        acquireWakeLock(CONNECT_WAKE_LOCK_TIMEOUT_MS)
                         
                         if (retryCount > 1) {
                             notificationHelper.updateNotification(1, "Mavi VPN", "Retrying connection to $ip (Attempt $retryCount)...")
@@ -285,10 +290,12 @@ class MaviVpnService : VpnService() {
                                     "Mavi VPN",
                                     if (initError.isNotBlank()) initError else "Connection aborted. Check your configuration."
                                 )
+                                releaseWakeLock()
                                 break
                             }
 
                             Log.e("MaviVPN", "Handshake failed. ${if (initError.isNotBlank()) initError else "Retrying in 2 seconds..."}")
+                            releaseWakeLock()
                             repeat(4) { if (isRunning) Thread.sleep(500) }
                             continue
                         }
@@ -373,6 +380,7 @@ class MaviVpnService : VpnService() {
                                  val fd = localInterface.fd
                                  Log.d("MaviVPN", "Interface established. Starting Loop.")
                                  isConnected.value = true
+                                 releaseWakeLock()
                                  NativeLib.startLoop(handle, fd)
                                  Log.d("MaviVPN", "Native VPN loop exited")
                                  isConnected.value = false
@@ -391,6 +399,7 @@ class MaviVpnService : VpnService() {
                         Log.e("MaviVPN", "Error during VPN session: ${e.message}")
                         e.printStackTrace()
                     } finally {
+                        releaseWakeLock()
                         synchronized(vpnLock) {
                              if (vpnSessionHandle == handle) {
                                   NativeLib.free(handle)
@@ -506,16 +515,24 @@ class MaviVpnService : VpnService() {
         super.onDestroy()
     }
 
-    private fun acquireWakeLock() {
-        releaseWakeLock()
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MaviVPN::ServiceWakeLock").apply {
-            setReferenceCounted(false)
-            acquire()
+    private fun acquireWakeLock(timeoutMs: Long) {
+        synchronized(wakeLockLock) {
+            releaseWakeLockLocked()
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MaviVPN::ConnectWakeLock").apply {
+                setReferenceCounted(false)
+                acquire(timeoutMs)
+            }
         }
     }
 
     private fun releaseWakeLock() {
+        synchronized(wakeLockLock) {
+            releaseWakeLockLocked()
+        }
+    }
+
+    private fun releaseWakeLockLocked() {
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()

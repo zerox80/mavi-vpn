@@ -1,4 +1,5 @@
 use bytes::{Buf, Bytes};
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
@@ -137,34 +138,38 @@ pub async fn connect_and_handshake(
     )?;
     endpoint.set_default_client_config(client_config);
 
+    let mut attempts = FuturesUnordered::new();
     let mut last_error = None;
-    let mut connection = None;
     for addr in addrs {
         info!("Connecting to {} (SNI: {})", addr, server_name);
         match endpoint.connect(addr, &server_name) {
-            Ok(connecting) => match connecting.await {
-                Ok(conn) => {
-                    connection = Some(conn);
-                    break;
-                }
-                Err(err) => {
-                    info!("QUIC handshake to {} failed: {}", addr, err);
-                    last_error = Some(anyhow::Error::from(err));
-                }
-            },
+            Ok(connecting) => {
+                attempts.push(async move { (addr, connecting.await) });
+            }
             Err(err) => {
                 info!("endpoint.connect() failed for {}: {}", addr, err);
                 last_error = Some(anyhow::Error::from(err));
             }
         }
     }
-    let connection = match connection {
-        Some(conn) => conn,
-        None => {
-            return Err(last_error
-                .unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str)))
+
+    let mut connection = None;
+    while let Some((addr, result)) = attempts.next().await {
+        match result {
+            Ok(conn) => {
+                connection = Some(conn);
+                break;
+            }
+            Err(err) => {
+                info!("QUIC handshake to {} failed: {}", addr, err);
+                last_error = Some(anyhow::Error::from(err));
+            }
         }
-    };
+    }
+
+    let connection = connection.ok_or_else(|| {
+        last_error.unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str))
+    })?;
     info!("Connection established");
 
     // Handshake

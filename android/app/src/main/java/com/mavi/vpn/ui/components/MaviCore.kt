@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -35,6 +36,7 @@ fun MaviCore(
             withFrameMillis { frameTime ->
                 timeSeconds = (frameTime - startTime) / 1000f
             }
+            delay(33)
         }
     }
 
@@ -163,7 +165,7 @@ fun MaviCore(
                 val dotX = cx + (cos(a) * orbitR).toFloat()
                 val dotY = cy + (sin(a) * orbitR).toFloat()
                 val dotR = if (i == 0) 4f.dp.toPx() else 2f.dp.toPx()
-                val opacity = if (i == 0) 1f else 0.4f + 0.3f * sin(timeSeconds * 2f + i).toFloat()
+                val opacity = if (i == 0) 1f else 0.4f + 0.3f * sin(timeSeconds * 2f + i)
                 
                 drawCircle(
                     color = accent.copy(alpha = opacity),

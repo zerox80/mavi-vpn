@@ -15,7 +15,7 @@ use shared::masque;
 #[cfg(target_os = "android")]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(target_os = "android")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "android")]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -52,6 +52,136 @@ impl AndroidTunnelStats {
             tun_write_drops: AtomicU64::new(0),
             tun_write_errors: AtomicU64::new(0),
             icmp_feedback_packets: AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+const STATS_FLUSH_PACKET_THRESHOLD: u64 = 256;
+#[cfg(target_os = "android")]
+const STATS_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+
+#[cfg(target_os = "android")]
+#[derive(Default)]
+struct UploadPendingStats {
+    tun_to_quic_bytes: u64,
+    tun_to_quic_packets: u64,
+    quic_send_errors: u64,
+    quic_too_large: u64,
+}
+
+#[cfg(target_os = "android")]
+impl UploadPendingStats {
+    fn has_pending(&self) -> bool {
+        self.tun_to_quic_bytes != 0
+            || self.tun_to_quic_packets != 0
+            || self.quic_send_errors != 0
+            || self.quic_too_large != 0
+    }
+
+    fn should_flush(&self, last_flush: Instant) -> bool {
+        self.has_pending()
+            && (self.tun_to_quic_packets >= STATS_FLUSH_PACKET_THRESHOLD
+                || self.quic_send_errors != 0
+                || self.quic_too_large != 0
+                || last_flush.elapsed() >= STATS_FLUSH_INTERVAL)
+    }
+
+    fn flush(&mut self, stats: &AndroidTunnelStats) {
+        if self.tun_to_quic_bytes != 0 {
+            stats
+                .tun_to_quic_bytes
+                .fetch_add(self.tun_to_quic_bytes, Ordering::Relaxed);
+            self.tun_to_quic_bytes = 0;
+        }
+        if self.tun_to_quic_packets != 0 {
+            stats
+                .tun_to_quic_packets
+                .fetch_add(self.tun_to_quic_packets, Ordering::Relaxed);
+            self.tun_to_quic_packets = 0;
+        }
+        if self.quic_send_errors != 0 {
+            stats
+                .quic_send_errors
+                .fetch_add(self.quic_send_errors, Ordering::Relaxed);
+            self.quic_send_errors = 0;
+        }
+        if self.quic_too_large != 0 {
+            stats
+                .quic_too_large
+                .fetch_add(self.quic_too_large, Ordering::Relaxed);
+            self.quic_too_large = 0;
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+#[derive(Default)]
+struct DownloadPendingStats {
+    quic_to_tun_bytes: u64,
+    quic_to_tun_packets: u64,
+    tun_write_bytes: u64,
+    tun_write_packets: u64,
+    tun_write_drops: u64,
+    tun_write_errors: u64,
+}
+
+#[cfg(target_os = "android")]
+impl DownloadPendingStats {
+    fn has_pending(&self) -> bool {
+        self.quic_to_tun_bytes != 0
+            || self.quic_to_tun_packets != 0
+            || self.tun_write_bytes != 0
+            || self.tun_write_packets != 0
+            || self.tun_write_drops != 0
+            || self.tun_write_errors != 0
+    }
+
+    fn should_flush(&self, last_flush: Instant) -> bool {
+        self.has_pending()
+            && (self.quic_to_tun_packets >= STATS_FLUSH_PACKET_THRESHOLD
+                || self.tun_write_packets >= STATS_FLUSH_PACKET_THRESHOLD
+                || self.tun_write_drops != 0
+                || self.tun_write_errors != 0
+                || last_flush.elapsed() >= STATS_FLUSH_INTERVAL)
+    }
+
+    fn flush(&mut self, stats: &AndroidTunnelStats) {
+        if self.quic_to_tun_bytes != 0 {
+            stats
+                .quic_to_tun_bytes
+                .fetch_add(self.quic_to_tun_bytes, Ordering::Relaxed);
+            self.quic_to_tun_bytes = 0;
+        }
+        if self.quic_to_tun_packets != 0 {
+            stats
+                .quic_to_tun_packets
+                .fetch_add(self.quic_to_tun_packets, Ordering::Relaxed);
+            self.quic_to_tun_packets = 0;
+        }
+        if self.tun_write_bytes != 0 {
+            stats
+                .tun_write_bytes
+                .fetch_add(self.tun_write_bytes, Ordering::Relaxed);
+            self.tun_write_bytes = 0;
+        }
+        if self.tun_write_packets != 0 {
+            stats
+                .tun_write_packets
+                .fetch_add(self.tun_write_packets, Ordering::Relaxed);
+            self.tun_write_packets = 0;
+        }
+        if self.tun_write_drops != 0 {
+            stats
+                .tun_write_drops
+                .fetch_add(self.tun_write_drops, Ordering::Relaxed);
+            self.tun_write_drops = 0;
+        }
+        if self.tun_write_errors != 0 {
+            stats
+                .tun_write_errors
+                .fetch_add(self.tun_write_errors, Ordering::Relaxed);
+            self.tun_write_errors = 0;
         }
     }
 }
@@ -138,6 +268,8 @@ pub async fn run_vpn_loop(
 
     let upload_task = tokio::spawn(async move {
         let mut buf = bytes::BytesMut::with_capacity(65536);
+        let mut pending_stats = UploadPendingStats::default();
+        let mut last_stats_flush = Instant::now();
         loop {
             if stop_upload.load(Ordering::Relaxed) {
                 break;
@@ -207,12 +339,8 @@ pub async fn run_vpn_loop(
             // `packet` is the raw IP payload (O(1) refcount slice, no copy).
             let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
             let packet_len = packet.len();
-            stats_upload
-                .tun_to_quic_bytes
-                .fetch_add(packet_len as u64, Ordering::Relaxed);
-            stats_upload
-                .tun_to_quic_packets
-                .fetch_add(1, Ordering::Relaxed);
+            pending_stats.tun_to_quic_bytes += packet_len as u64;
+            pending_stats.tun_to_quic_packets += 1;
 
             let payload = if http3_framing {
                 framed
@@ -220,11 +348,9 @@ pub async fn run_vpn_loop(
                 packet.clone()
             };
 
-            // Backpressure instead of dropping older queued VPN packets under congestion.
-            let send_result = tokio::select! {
-                res = conn_upload.send_datagram_wait(payload) => res,
-                _ = shutdown_rx.recv() => break,
-            };
+            // VPN traffic prefers freshness under congestion. `send_datagram` lets Quinn
+            // evict stale queued datagrams instead of blocking the TUN reader.
+            let send_result = conn_upload.send_datagram(payload);
 
             if let Err(e) = send_result {
                 match e {
@@ -234,7 +360,7 @@ pub async fn run_vpn_loop(
                         break;
                     }
                     quinn::SendDatagramError::TooLarge => {
-                        stats_upload.quic_too_large.fetch_add(1, Ordering::Relaxed);
+                        pending_stats.quic_too_large += 1;
                         let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
                         warn!(
                             "MTU Limit hit! Packet: {} bytes, Limit: {} bytes",
@@ -266,14 +392,18 @@ pub async fn run_vpn_loop(
                         }
                     }
                     _ => {
-                        stats_upload
-                            .quic_send_errors
-                            .fetch_add(1, Ordering::Relaxed);
+                        pending_stats.quic_send_errors += 1;
                         error!("Unexpected SendDatagramError: {:?}", e);
                     }
                 }
             }
+
+            if pending_stats.should_flush(last_stats_flush) {
+                pending_stats.flush(&stats_upload);
+                last_stats_flush = Instant::now();
+            }
         }
+        pending_stats.flush(&stats_upload);
         info!("Upload task exited.");
     });
 
@@ -284,6 +414,9 @@ pub async fn run_vpn_loop(
     let stats_download = stats.clone();
 
     let download_task = tokio::spawn(async move {
+        let mut batch = Vec::with_capacity(64);
+        let mut pending_stats = DownloadPendingStats::default();
+        let mut last_stats_flush = Instant::now();
         loop {
             if stop_download.load(Ordering::Relaxed) {
                 break;
@@ -291,7 +424,7 @@ pub async fn run_vpn_loop(
 
             match conn_download.read_datagram().await {
                 Ok(first_packet) => {
-                    let mut batch = Vec::with_capacity(64);
+                    batch.clear();
                     if http3_framing {
                         if let Some(inner) = masque::unwrap_datagram(&first_packet) {
                             let prefix = first_packet.len() - inner.len();
@@ -317,12 +450,8 @@ pub async fn run_vpn_loop(
                     }
 
                     let batch_bytes: usize = batch.iter().map(|pkt| pkt.len()).sum();
-                    stats_download
-                        .quic_to_tun_bytes
-                        .fetch_add(batch_bytes as u64, Ordering::Relaxed);
-                    stats_download
-                        .quic_to_tun_packets
-                        .fetch_add(batch.len() as u64, Ordering::Relaxed);
+                    pending_stats.quic_to_tun_bytes += batch_bytes as u64;
+                    pending_stats.quic_to_tun_packets += batch.len() as u64;
 
                     let mut batch_idx = 0;
                     while batch_idx < batch.len() {
@@ -345,37 +474,25 @@ pub async fn run_vpn_loop(
                                     let err = std::io::Error::last_os_error();
                                     if let Some(raw) = err.raw_os_error() {
                                         if raw == libc::EAGAIN || raw == libc::EWOULDBLOCK {
-                                            stats_download
-                                                .tun_write_errors
-                                                .fetch_add(1, Ordering::Relaxed);
+                                            pending_stats.tun_write_errors += 1;
                                             return Err(err);
                                         }
                                         if raw == libc::ENOBUFS || raw == libc::EINTR {
                                             // Network internal buffer full or interrupted, just drop the packet immediately
-                                            stats_download
-                                                .tun_write_drops
-                                                .fetch_add(1, Ordering::Relaxed);
+                                            pending_stats.tun_write_drops += 1;
                                             batch_idx += 1;
                                             continue;
                                         }
                                     }
                                     if err.kind() == std::io::ErrorKind::WouldBlock {
-                                        stats_download
-                                            .tun_write_errors
-                                            .fetch_add(1, Ordering::Relaxed);
+                                        pending_stats.tun_write_errors += 1;
                                         return Err(err);
                                     }
-                                    stats_download
-                                        .tun_write_errors
-                                        .fetch_add(1, Ordering::Relaxed);
+                                    pending_stats.tun_write_errors += 1;
                                     return Err(err);
                                 }
-                                stats_download
-                                    .tun_write_bytes
-                                    .fetch_add(n as u64, Ordering::Relaxed);
-                                stats_download
-                                    .tun_write_packets
-                                    .fetch_add(1, Ordering::Relaxed);
+                                pending_stats.tun_write_bytes += n as u64;
+                                pending_stats.tun_write_packets += 1;
                                 batch_idx += 1;
                             }
                             Ok(())
@@ -399,6 +516,11 @@ pub async fn run_vpn_loop(
                             Err(_) => continue, // WouldBlock: wait for writable again
                         }
                     }
+
+                    if pending_stats.should_flush(last_stats_flush) {
+                        pending_stats.flush(&stats_download);
+                        last_stats_flush = Instant::now();
+                    }
                 }
                 Err(_) => {
                     stop_download.store(true, Ordering::SeqCst);
@@ -406,6 +528,7 @@ pub async fn run_vpn_loop(
                 }
             }
         }
+        pending_stats.flush(&stats_download);
         info!("Download task exited.");
     });
 

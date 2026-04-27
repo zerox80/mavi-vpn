@@ -1,6 +1,6 @@
 # Quinn Changes
 
-This project vendors Quinn under `external/quinn` and applies local fixes that are important for VPN-style QUIC datagram traffic.
+This project resolves Quinn through the `zerox80/quinn` fork and applies transport fixes that are important for VPN-style QUIC datagram traffic. The root `Cargo.toml` also patches the h3 crates to the `zerox80/h3` fork so `h3-quinn` uses Quinn 0.12 instead of pulling a second Quinn 0.11 dependency from crates.io.
 
 ## 2026-04-27
 
@@ -17,6 +17,8 @@ This project vendors Quinn under `external/quinn` and applies local fixes that a
 
 ## Fork State
 
-- `external/quinn` is currently vendored as normal files in the `mavi-vpn` repository, not as a nested Git clone or submodule.
-- The GitHub fork `https://github.com/zerox80/quinn` exists and can be used for a later migration if we want Quinn versioning independent from `mavi-vpn`.
-- `h3`, `h3-quinn`, and `h3-datagram` are pinned to hyperium/h3 commit `704b37a2e82cf4c8de379ec779dbc2a23bfcb9a1` in the root `Cargo.toml`; no h3 fork change was made here.
+- `quinn`, `quinn-proto`, and `quinn-udp` are patched to `https://github.com/zerox80/quinn`, branch `mavi-vpn-transport-fixes`.
+- `h3`, `h3-quinn`, and `h3-datagram` are patched to `https://github.com/zerox80/h3`, branch `mavi-vpn-quinn-0.12`.
+- The h3 fork updates `h3-quinn` to accept Quinn 0.12, preventing a fallback to the crates.io Quinn 0.11 line.
+- `Cargo.lock` pins these fork revisions for reproducible builds.
+- `external/quinn` remains in the repository, but it is no longer the active Cargo source while the root fork patches are present.

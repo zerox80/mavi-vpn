@@ -242,7 +242,7 @@ pub async fn run_vpn_loop(
     fd: jint,
     stop_flag: Arc<AtomicBool>,
     config: ControlMessage,
-    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     http3_framing: bool,
 ) {
     let raw_fd = fd as RawFd;
@@ -297,8 +297,9 @@ pub async fn run_vpn_loop(
     let tx_feedback = tx_tun.clone();
     let stats_upload = stats.clone();
 
-    let mut shutdown_rx_upload = shutdown_rx;
-    let shutdown_rx_download = shutdown_rx_upload.resubscribe();
+    let mut shutdown_rx_upload = shutdown_rx.resubscribe();
+    let shutdown_rx_download = shutdown_rx.resubscribe();
+    drop(shutdown_rx);
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -345,7 +346,11 @@ pub async fn run_vpn_loop(
                             let err = std::io::Error::last_os_error();
                             buf.truncate(buf.len() - PREFIX_LEN);
                             if err.kind() == std::io::ErrorKind::WouldBlock {
-                                break;
+                                if upload_batch.is_empty() {
+                                    return Err(err);
+                                } else {
+                                    break;
+                                }
                             }
                             if err.raw_os_error() == Some(libc::EINTR) {
                                 continue;
@@ -385,7 +390,11 @@ pub async fn run_vpn_loop(
                         if n < 0 {
                             let err = std::io::Error::last_os_error();
                             if err.kind() == std::io::ErrorKind::WouldBlock {
-                                break;
+                                if upload_batch.is_empty() {
+                                    return Err(err);
+                                } else {
+                                    break;
+                                }
                             }
                             if err.raw_os_error() == Some(libc::EINTR) {
                                 continue;

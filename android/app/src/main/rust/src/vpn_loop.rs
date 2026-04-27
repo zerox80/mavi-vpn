@@ -318,7 +318,7 @@ pub async fn run_vpn_loop(
                 let fd = inner.as_raw_fd();
                 loop {
                     if buf.capacity() < MAX_TUN_PACKET_SIZE + PREFIX_LEN {
-                        buf.reserve((MAX_TUN_PACKET_SIZE + PREFIX_LEN) * MAX_UPLOAD_BATCH);
+                        buf.reserve(MAX_TUN_PACKET_SIZE + PREFIX_LEN);
                     }
 
                     // Reserve H3 DATAGRAM_PREFIX headroom in-place. H3 mode ships

@@ -70,6 +70,10 @@ class PrefsManager(context: Context) {
         get() = prefs.getInt("saved_vpn_mtu", 0)
         set(value) = prefs.edit().putInt("saved_vpn_mtu", value).apply()
 
+    var savedEnableLogging: Boolean
+        get() = prefs.getBoolean("saved_enable_logging", false)
+        set(value) = prefs.edit().putBoolean("saved_enable_logging", value).apply()
+
     var tempSplitMode: String
         get() = prefs.getString("temp_split_mode", "exclude") ?: "exclude"
         set(value) = prefs.edit().putString("temp_split_mode", value).apply()

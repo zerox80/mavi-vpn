@@ -87,19 +87,30 @@ object OAuthHelper {
             return false
         }
 
+        val exp = accessTokenExpiryEpochSeconds(token) ?: run {
+            Log.w("OAuthHelper", "JWT missing usable exp claim")
+            return false
+        }
+
+        val now = System.currentTimeMillis() / 1000L
+        return now + skewSeconds < exp
+    }
+
+    fun accessTokenExpiryEpochSeconds(token: String): Long? {
+        if (token.isBlank()) {
+            return null
+        }
+
         return try {
-            val payload = parseJwtPayload(token) ?: return false
+            val payload = parseJwtPayload(token) ?: return null
             val exp = payload.optLong("exp", -1L)
             if (exp <= 0L) {
-                Log.w("OAuthHelper", "JWT missing usable exp claim")
-                return false
+                return null
             }
-
-            val now = System.currentTimeMillis() / 1000L
-            now + skewSeconds < exp
+            exp
         } catch (e: Exception) {
             Log.e("OAuthHelper", "Failed to inspect access token expiry: ${e.message}")
-            false
+            null
         }
     }
 
@@ -172,18 +183,20 @@ object OAuthHelper {
             .build()
 
         try {
-            val response = httpClient.newCall(request).execute()
-            val body = response.body?.string() ?: return@withContext null
-            if (response.isSuccessful) {
-                val json = JSONObject(body)
-                if (!json.has("access_token") || !json.has("refresh_token")) {
-                    Log.e("OAuthHelper", "Token response missing 'access_token' or 'refresh_token' field")
-                    return@withContext null
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body.string()
+                if (body.isBlank()) return@withContext null
+                if (response.isSuccessful) {
+                    val json = JSONObject(body)
+                    if (!json.has("access_token") || !json.has("refresh_token")) {
+                        Log.e("OAuthHelper", "Token response missing 'access_token' or 'refresh_token' field")
+                        return@withContext null
+                    }
+                    return@withContext OAuthTokens(json.getString("access_token"), json.getString("refresh_token"))
                 }
-                return@withContext OAuthTokens(json.getString("access_token"), json.getString("refresh_token"))
+                Log.e("OAuthHelper", "Token exchange failed with HTTP ${response.code}: $body")
+                null
             }
-            Log.e("OAuthHelper", "Token exchange failed with HTTP ${response.code}: $body")
-            null
         } catch (e: Exception) {
             Log.e("OAuthHelper", "Token exchange exception: ${e.message}")
             null
@@ -207,21 +220,23 @@ object OAuthHelper {
             .build()
 
         try {
-            val response = httpClient.newCall(request).execute()
-            val body = response.body?.string() ?: return@withContext RefreshResult.NetworkError("Empty response body")
-            if (response.isSuccessful) {
-                val json = JSONObject(body)
-                if (!json.has("access_token") || !json.has("refresh_token")) {
-                    Log.e("OAuthHelper", "Refresh response missing tokens")
-                    return@withContext RefreshResult.Error("Invalid JSON from Keycloak")
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body.string()
+                if (body.isBlank()) return@withContext RefreshResult.NetworkError("Empty response body")
+                if (response.isSuccessful) {
+                    val json = JSONObject(body)
+                    if (!json.has("access_token") || !json.has("refresh_token")) {
+                        Log.e("OAuthHelper", "Refresh response missing tokens")
+                        return@withContext RefreshResult.Error("Invalid JSON from Keycloak")
+                    }
+                    return@withContext RefreshResult.Success(OAuthTokens(json.getString("access_token"), json.getString("refresh_token")))
                 }
-                return@withContext RefreshResult.Success(OAuthTokens(json.getString("access_token"), json.getString("refresh_token")))
+                if (response.code >= 500) {
+                     return@withContext RefreshResult.NetworkError("Server Error (HTTP ${response.code})")
+                }
+                Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}: $body")
+                return@withContext RefreshResult.Error("Refresh rejected by server (HTTP ${response.code})")
             }
-            if (response.code >= 500) {
-                 return@withContext RefreshResult.NetworkError("Server Error (HTTP ${response.code})")
-            }
-            Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}: $body")
-            return@withContext RefreshResult.Error("Refresh rejected by server (HTTP ${response.code})")
         } catch (e: java.io.IOException) {
             Log.w("OAuthHelper", "Refresh token IO exception (Offline?): ${e.message}")
             return@withContext RefreshResult.NetworkError(e.message ?: "Offline or network timeout")

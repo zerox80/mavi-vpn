@@ -7,7 +7,7 @@ object NativeLib {
         System.loadLibrary("mavivpn")
     }
 
-    external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String, censorshipResistant: Boolean, http3Framing: Boolean, echConfig: String, vpnMtu: Int): Long
+    external fun init(service: MaviVpnService, token: String, endpoint: String, certPin: String, censorshipResistant: Boolean, http3Framing: Boolean, echConfig: String, vpnMtu: Int, enableLogging: Boolean): Long
     external fun getLastInitError(): String
     external fun getConfig(handle: Long): String
     external fun startLoop(handle: Long, fd: Int)

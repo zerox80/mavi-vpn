@@ -37,9 +37,9 @@ pub fn create_udp_socket() -> Result<std::net::UdpSocket> {
         0,
         0,
     )))?;
-    // Set larger socket buffers for high-throughput stability on Windows (4MB for GSO bursts)
-    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
-    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
+    // Set larger socket buffers for high-throughput stability on Windows (8MB for GSO bursts)
+    let _ = socket2_sock.set_send_buffer_size(8 * 1024 * 1024);
+    let _ = socket2_sock.set_recv_buffer_size(8 * 1024 * 1024);
 
     Ok(socket2_sock.into())
 }

@@ -251,7 +251,8 @@ Full enterprise SSO with Keycloak:
 | Inner TUN MTU | **1280** | IPv6 minimum — universally supported, avoids fragmentation |
 | QUIC Payload | **1360** | Fits within 1460-MTU networks (e.g. Vodafone) without fragmentation |
 | Congestion Control | **BBR** | Bandwidth-based, not loss-based — optimal for mobile/high-latency |
-| UDP Socket Buffers | **4 MB** | Prevents kernel drops during GSO bursts |
+| UDP Socket Buffers | **8 MB** | Prevents kernel drops during Speedtest bursts and handles high-latency mobile networks |
+| Client GSO | **On** | Keeps Quinn UDP segmentation batching enabled to reduce send syscall overhead |
 | Allocator | **mimalloc** | Reduces memory allocation latency on the server |
 | Release Profile | `lto=true, codegen-units=1, strip=true` | Maximally optimized binary |
 

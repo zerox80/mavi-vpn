@@ -110,8 +110,13 @@ fn create_udp_socket() -> Result<std::net::UdpSocket> {
         0,
     )))?;
 
-    // Large socket buffers for high-throughput stability (try 4MB, fall back gracefully)
-    for size in [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024] {
+    // Large socket buffers for high-throughput stability (try 8MB, fall back gracefully)
+    for size in [
+        8 * 1024 * 1024,
+        4 * 1024 * 1024,
+        2 * 1024 * 1024,
+        1024 * 1024,
+    ] {
         if socket.set_recv_buffer_size(size).is_ok() {
             let _ = socket.set_send_buffer_size(size); // Also set the send buffer
             break;
@@ -289,7 +294,7 @@ async fn run_session(
                         pool.extend_from_slice(&scratch[..n]);
                         pool.split().freeze()
                     };
-                    if let Err(e) = conn_sender.send_datagram(payload) {
+                    if let Err(e) = conn_sender.send_datagram_wait(payload).await {
                         if matches!(e, quinn::SendDatagramError::TooLarge) {
                             let version = scratch[0] >> 4;
                             let source_ip = if version == 4 {
@@ -485,6 +490,10 @@ async fn connect_and_handshake(
     transport_config.enable_segmentation_offload(true);
     transport_config
         .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+
+    // Flow control windows (scaled to 8MB to match Android fixes and prevent kbit-level throttling)
+    transport_config.receive_window(quinn::VarInt::from(8u32 * 1024 * 1024));
+    transport_config.send_window(8 * 1024 * 1024);
 
     // Datagram queue tuning (match Windows/Android: 2MB each direction)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024));

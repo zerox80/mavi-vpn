@@ -4,7 +4,7 @@ use jni::sys::{jint, jlong};
 use jni::{AttachGuard, Env, EnvUnowned, JValue};
 use log::{error, info};
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use crate::connection::connect_and_handshake;
 use crate::session::VpnSession;
@@ -14,6 +14,24 @@ const INIT_RETRYABLE_FAILURE: jlong = 0;
 const INIT_FATAL_AUTH: jlong = -1;
 const INIT_FATAL_CERT: jlong = -2;
 const INIT_FATAL_CONFIG: jlong = -3;
+const ANDROID_TOKIO_WORKER_THREADS: usize = 2;
+
+fn android_runtime() -> Result<Arc<tokio::runtime::Runtime>, String> {
+    static ANDROID_RUNTIME: OnceLock<Result<Arc<tokio::runtime::Runtime>, String>> =
+        OnceLock::new();
+
+    ANDROID_RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_name("mavivpn-android")
+                .worker_threads(ANDROID_TOKIO_WORKER_THREADS)
+                .enable_all()
+                .build()
+                .map(Arc::new)
+                .map_err(|e| format!("Failed to create runtime: {}", e))
+        })
+        .clone()
+}
 
 fn last_init_error() -> &'static Mutex<String> {
     static LAST_INIT_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
@@ -65,6 +83,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     http3_framing: jni::sys::jboolean,
     ech_config: JString<'local>,
     vpn_mtu: jint,
+    enable_logging: jni::sys::jboolean,
 ) -> jlong {
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let env = guard.borrow_env_mut();
@@ -77,10 +96,16 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
                 android_logger::init_once(
                     Config::default()
                         .with_tag("MaviVPN")
-                        .with_max_level(log::LevelFilter::Info),
+                        .with_max_level(log::LevelFilter::Trace),
                 );
                 let _ = rustls::crypto::ring::default_provider().install_default();
             });
+
+            if enable_logging as u8 != 0 {
+                log::set_max_level(log::LevelFilter::Trace);
+            } else {
+                log::set_max_level(log::LevelFilter::Off);
+            }
 
             info!("JNI init called. CR Mode: {}", censorship_resistant);
 
@@ -156,8 +181,8 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
                 set_last_init_error(&message);
                 return INIT_RETRYABLE_FAILURE;
             }
-            let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
-            let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
+            let _ = socket2_sock.set_recv_buffer_size(8 * 1024 * 1024);
+            let _ = socket2_sock.set_send_buffer_size(8 * 1024 * 1024);
 
             #[cfg(target_os = "android")]
             unsafe {
@@ -210,13 +235,9 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
 
             let _ = socket.set_nonblocking(true);
 
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-            {
+            let rt = match android_runtime() {
                 Ok(rt) => rt,
-                Err(e) => {
-                    let message = format!("Failed to create runtime: {}", e);
+                Err(message) => {
                     error!("{}", message);
                     set_last_init_error(&message);
                     return INIT_RETRYABLE_FAILURE;

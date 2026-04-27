@@ -58,7 +58,7 @@ pub async fn run_tunnel(
                 .server_to_client_packets
                 .fetch_add(1, Ordering::Relaxed);
 
-            if let Err(e) = conn_send.send_datagram(datagram_to_send) {
+            if let Err(e) = conn_send.send_datagram_wait(datagram_to_send).await {
                 send_stats
                     .server_to_client_send_errors
                     .fetch_add(1, Ordering::Relaxed);

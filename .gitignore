@@ -56,3 +56,7 @@ gui/src-tauri/build_error.txt
 /backend/letsencrypt/
 .agents/workflows/gemini.md
 android/gradlew
+android/app/src/main/jniLibs/arm64-v8a/libmavivpn.so
+android/app/src/main/jniLibs/armeabi-v7a/libmavivpn.so
+android/app/src/main/jniLibs/x86/libmavivpn.so
+android/app/src/main/jniLibs/x86_64/libmavivpn.so

@@ -250,6 +250,21 @@ async fn run_session(
                         pool.extend_from_slice(packet_bytes);
                         pool.split().freeze()
                     };
+                    while conn_quic.datagram_send_buffer_space() < payload.len() {
+                        if !run_pump.load(Ordering::Relaxed)
+                            || !alive_pump.load(Ordering::Relaxed)
+                            || conn_quic.close_reason().is_some()
+                        {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    if !run_pump.load(Ordering::Relaxed)
+                        || !alive_pump.load(Ordering::Relaxed)
+                        || conn_quic.close_reason().is_some()
+                    {
+                        break;
+                    }
                     if let Err(e) = conn_quic.send_datagram(payload) {
                         if matches!(e, quinn::SendDatagramError::TooLarge) {
                             if packet.bytes().is_empty() {

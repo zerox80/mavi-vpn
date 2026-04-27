@@ -141,6 +141,10 @@ pub async fn connect_and_handshake(
     transport_config
         .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
+    // Flow control windows (scaled to 8MB to match Android fixes and prevent kbit-level throttling)
+    transport_config.receive_window(quinn::VarInt::from(8u32 * 1024 * 1024));
+    transport_config.send_window(8 * 1024 * 1024);
+
     // Datagram queue tuning for high-speed GSO traffic (Avoiding 'dropping stale datagram' errors)
     transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
     transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // Increased from 256KB

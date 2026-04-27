@@ -64,8 +64,8 @@ class MainActivity : ComponentActivity() {
                     } else {
                         SettingsScreen(
                             viewModel = viewModel,
-                            onBack = { mode, pkgs, crMode, h3Mode, vpnMtu -> 
-                                viewModel.saveSettings(mode, pkgs, crMode, h3Mode, vpnMtu)
+                            onBack = { mode, pkgs, crMode, h3Mode, vpnMtu, enableLogging -> 
+                                viewModel.saveSettings(mode, pkgs, crMode, h3Mode, vpnMtu, enableLogging)
                                 currentScreen = "home"
                             }
                         )

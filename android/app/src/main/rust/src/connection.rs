@@ -1,4 +1,5 @@
 use bytes::{Buf, Bytes};
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
@@ -112,17 +113,23 @@ pub async fn connect_and_handshake(
     transport_config.mtu_discovery_config(None);
     transport_config.initial_mtu(quic_mtu);
     transport_config.min_mtu(quic_mtu);
-    transport_config
-        .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
-    // Enable GSO (Segmentation Offload) for higher throughput.
-    // With GSO, Quinn batches multiple QUIC packets into one sendmsg() call,
-    // bypassing Android's poor timer resolution which otherwise limits pacing.
+    // BBR Congestion Control (Critical for mobile/WiFi networks)
+    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+
+    // Enable GSO (Segmentation Offload) on Android for maximum performance.
     transport_config.enable_segmentation_offload(true);
 
-    // Datagram buffer tuning (matching v0.4 settings for GSO traffic)
-    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
-    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
+    // Datagram buffer tuning
+    // We increased these to 8MB. A huge software buffer allows Quinn to absorb
+    // massive bursts from Android's TUN interface (e.g. during a Speedtest)
+    // while BBR paces the packets out over the physical Wi-Fi/LTE link.
+    transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB
+    transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB
+    
+    // Also match the Flow Control windows with the Backend to allow high throughput
+    transport_config.receive_window(quinn::VarInt::from(8u32 * 1024 * 1024));
+    transport_config.send_window(8 * 1024 * 1024);
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
@@ -137,34 +144,38 @@ pub async fn connect_and_handshake(
     )?;
     endpoint.set_default_client_config(client_config);
 
+    let mut attempts = FuturesUnordered::new();
     let mut last_error = None;
-    let mut connection = None;
     for addr in addrs {
         info!("Connecting to {} (SNI: {})", addr, server_name);
         match endpoint.connect(addr, &server_name) {
-            Ok(connecting) => match connecting.await {
-                Ok(conn) => {
-                    connection = Some(conn);
-                    break;
-                }
-                Err(err) => {
-                    info!("QUIC handshake to {} failed: {}", addr, err);
-                    last_error = Some(anyhow::Error::from(err));
-                }
-            },
+            Ok(connecting) => {
+                attempts.push(async move { (addr, connecting.await) });
+            }
             Err(err) => {
                 info!("endpoint.connect() failed for {}: {}", addr, err);
                 last_error = Some(anyhow::Error::from(err));
             }
         }
     }
-    let connection = match connection {
-        Some(conn) => conn,
-        None => {
-            return Err(last_error
-                .unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str)))
+
+    let mut connection = None;
+    while let Some((addr, result)) = attempts.next().await {
+        match result {
+            Ok(conn) => {
+                connection = Some(conn);
+                break;
+            }
+            Err(err) => {
+                info!("QUIC handshake to {} failed: {}", addr, err);
+                last_error = Some(anyhow::Error::from(err));
+            }
         }
-    };
+    }
+
+    let connection = connection.ok_or_else(|| {
+        last_error.unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str))
+    })?;
     info!("Connection established");
 
     // Handshake

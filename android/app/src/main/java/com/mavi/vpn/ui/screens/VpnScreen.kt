@@ -31,7 +31,6 @@ import com.mavi.vpn.OAuthHelper
 import com.mavi.vpn.ui.components.MaviCore
 import com.mavi.vpn.ui.components.MaviCoreState
 import com.mavi.vpn.ui.theme.MaviTheme
-import kotlinx.coroutines.delay
 
 @Composable
 fun VpnScreen(
@@ -42,29 +41,6 @@ fun VpnScreen(
 ) {
     val context = LocalContext.current
     val isConnected by viewModel.isConnected.collectAsState()
-    
-    val authToken by viewModel.authToken.collectAsState()
-    val useKeycloak by viewModel.useKeycloak.collectAsState()
-
-    // Keycloak token refresh loop logic
-    LaunchedEffect(useKeycloak, authToken, isConnected) {
-        if (!useKeycloak || authToken.isEmpty()) return@LaunchedEffect
-
-        while (true) {
-            val prefs = com.mavi.vpn.data.PrefsManager(viewModel.getApplication())
-            val freshToken = prefs.savedToken
-            if (freshToken.isNotEmpty() && freshToken != authToken) {
-                viewModel.authToken.value = freshToken
-            }
-            if (freshToken.isNotEmpty() && !OAuthHelper.isAccessTokenUsable(freshToken, skewSeconds = 0)) {
-                if (isConnected) onDisconnect()
-                viewModel.clearAuthToken()
-                viewModel.updateErrorMessage("Keycloak access token expired. Please login again.")
-                break
-            }
-            delay(5_000)
-        }
-    }
 
     var currentTab by remember { mutableStateOf("home") }
     val T = MaviTheme.colors

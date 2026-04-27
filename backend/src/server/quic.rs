@@ -42,8 +42,8 @@ pub fn create_quic_endpoint(
 
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
     let socket2_sock = socket2::Socket::from(socket);
-    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
-    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
+    let _ = socket2_sock.set_recv_buffer_size(8 * 1024 * 1024);
+    let _ = socket2_sock.set_send_buffer_size(8 * 1024 * 1024);
 
     #[cfg(target_os = "linux")]
     {
@@ -83,11 +83,11 @@ fn setup_transport_config(transport_config: &mut TransportConfig, quic_payload_m
         .expect("60s fits in a QUIC IdleTimeout");
     transport_config.max_idle_timeout(Some(idle_timeout));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
-    transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024));
-    transport_config.datagram_send_buffer_size(4 * 1024 * 1024);
-    transport_config.receive_window(quinn::VarInt::from(4u32 * 1024 * 1024));
-    transport_config.stream_receive_window(quinn::VarInt::from(1024u32 * 1024));
-    transport_config.send_window(4 * 1024 * 1024);
+    transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024));
+    transport_config.datagram_send_buffer_size(8 * 1024 * 1024);
+    transport_config.receive_window(quinn::VarInt::from(8u32 * 1024 * 1024));
+    transport_config.stream_receive_window(quinn::VarInt::from(2u32 * 1024 * 1024));
+    transport_config.send_window(8 * 1024 * 1024);
     transport_config
         .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     transport_config.mtu_discovery_config(None);

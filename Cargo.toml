@@ -12,7 +12,7 @@ members = [
 [workspace.dependencies]
 shared = { path = "shared" }
 tokio = { version = "1.0", features = ["full"] }
-quinn = { version = "=0.11.9", default-features = false, features = ["rustls", "runtime-tokio", "ring"] }
+quinn = { version = "=0.12.0", default-features = false, features = ["rustls", "runtime-tokio", "ring"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 anyhow = "1.0"
 bytes = "1.0"
@@ -33,14 +33,14 @@ tempfile = "3"
 proptest = "1"
 
 [patch.crates-io]
-quinn = { path = "external/quinn/quinn" }
-quinn-proto = { path = "external/quinn/quinn-proto" }
-quinn-udp = { path = "external/quinn/quinn-udp" }
-# Local h3 / h3-quinn copies were removed. We use upstream hyperium/h3 master branch
-# since it now contains RFC 9484 (connect-ip) Protocol::CONNECT_IP support.
-h3 = { git = "https://github.com/hyperium/h3", rev = "704b37a2e82cf4c8de379ec779dbc2a23bfcb9a1" }
-h3-quinn = { git = "https://github.com/hyperium/h3", rev = "704b37a2e82cf4c8de379ec779dbc2a23bfcb9a1" }
-h3-datagram = { git = "https://github.com/hyperium/h3", rev = "704b37a2e82cf4c8de379ec779dbc2a23bfcb9a1" }
+quinn = { git = "https://github.com/zerox80/quinn", branch = "mavi-vpn-transport-fixes" }
+quinn-proto = { git = "https://github.com/zerox80/quinn", branch = "mavi-vpn-transport-fixes" }
+quinn-udp = { git = "https://github.com/zerox80/quinn", branch = "mavi-vpn-transport-fixes" }
+# Use our h3 fork so h3-quinn resolves to Quinn 0.12. This prevents a second
+# crates.io Quinn 0.11 dependency from being pulled in alongside the fork.
+h3 = { git = "https://github.com/zerox80/h3", branch = "mavi-vpn-quinn-0.12" }
+h3-quinn = { git = "https://github.com/zerox80/h3", branch = "mavi-vpn-quinn-0.12" }
+h3-datagram = { git = "https://github.com/zerox80/h3", branch = "mavi-vpn-quinn-0.12" }
 time = { git = "https://github.com/time-rs/time", tag = "v0.3.36" }
 
 [profile.release]

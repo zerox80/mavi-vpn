@@ -121,12 +121,9 @@ pub async fn connect_and_handshake(
     // Enable GSO (Segmentation Offload) on Android for maximum performance.
     transport_config.enable_segmentation_offload(true);
 
-    // Datagram buffer tuning
-    // We increased these to 8MB. A huge software buffer allows Quinn to absorb
-    // massive bursts from Android's TUN interface (e.g. during a Speedtest)
-    // while BBR paces the packets out over the physical Wi-Fi/LTE link.
-    transport_config.datagram_receive_buffer_size(Some(8 * 1024 * 1024)); // 8MB
-    transport_config.datagram_send_buffer_size(8 * 1024 * 1024); // 8MB
+    // Datagram buffer tuning: keep Android aligned with Windows/Linux and backend.
+    transport_config.datagram_receive_buffer_size(Some(2 * 1024 * 1024)); // 2MB
+    transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
 
     // Also match the Flow Control windows with the Backend to allow high throughput
     transport_config.receive_window(quinn::VarInt::from(8u32 * 1024 * 1024));

@@ -134,7 +134,7 @@ pub async fn connect_and_handshake(
     ));
     client_config.transport_config(Arc::new(transport_config));
 
-    let mut endpoint = quinn::Endpoint::new(
+    let endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),
         None,
         socket,

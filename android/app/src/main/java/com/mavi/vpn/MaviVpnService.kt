@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.os.Process
 import com.mavi.vpn.data.PrefsManager
 import com.mavi.vpn.native_lib.NativeLib
 import com.mavi.vpn.service.NotificationHelper
@@ -215,6 +216,7 @@ class MaviVpnService : VpnService() {
         startForeground(1, notification)
 
         thread = Thread {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
             Log.d("MaviVPN", "Starting VPN Thread")
             var currentToken = token
             var forcedRefreshCount = 0

@@ -57,7 +57,7 @@ impl AndroidTunnelStats {
 }
 
 #[cfg(target_os = "android")]
-const STATS_FLUSH_PACKET_THRESHOLD: u64 = 256;
+const STATS_FLUSH_PACKET_THRESHOLD: u64 = 2048;
 #[cfg(target_os = "android")]
 const STATS_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(target_os = "android")]
@@ -309,43 +309,68 @@ pub async fn run_vpn_loop(
             loop {
                 let framed = match guard.try_io(|inner| {
                     const PREFIX_LEN: usize = masque::DATAGRAM_PREFIX.len();
-                    if buf.capacity() < MAX_TUN_PACKET_SIZE + PREFIX_LEN {
-                        // Amortize allocations by reserving a larger chunk (e.g., 64KB)
-                        let needed = MAX_TUN_PACKET_SIZE + PREFIX_LEN;
-                        buf.reserve(needed.max(64 * 1024));
+                    if http3_framing {
+                        if buf.capacity() < MAX_TUN_PACKET_SIZE + PREFIX_LEN {
+                            let needed = MAX_TUN_PACKET_SIZE + PREFIX_LEN;
+                            buf.reserve(needed.max(64 * 1024));
+                        }
+                        buf.extend_from_slice(&masque::DATAGRAM_PREFIX);
+
+                        let chunk = buf.chunk_mut();
+                        let max_len = MAX_TUN_PACKET_SIZE.min(chunk.len());
+
+                        let n = unsafe {
+                            libc::read(
+                                inner.as_raw_fd(),
+                                chunk.as_mut_ptr() as *mut libc::c_void,
+                                max_len,
+                            )
+                        };
+
+                        if n < 0 {
+                            let err = std::io::Error::last_os_error();
+                            buf.truncate(buf.len() - PREFIX_LEN);
+                            return Err(err);
+                        }
+                        let n = n as usize;
+                        if n == 0 {
+                            buf.truncate(buf.len() - PREFIX_LEN);
+                            return Ok(None);
+                        }
+
+                        unsafe {
+                            buf.advance_mut(n);
+                        }
+                        Ok(Some(buf.split_to(n + PREFIX_LEN).freeze()))
+                    } else {
+                        if buf.capacity() < MAX_TUN_PACKET_SIZE {
+                            buf.reserve(MAX_TUN_PACKET_SIZE.max(64 * 1024));
+                        }
+
+                        let chunk = buf.chunk_mut();
+                        let max_len = MAX_TUN_PACKET_SIZE.min(chunk.len());
+
+                        let n = unsafe {
+                            libc::read(
+                                inner.as_raw_fd(),
+                                chunk.as_mut_ptr() as *mut libc::c_void,
+                                max_len,
+                            )
+                        };
+
+                        if n < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        let n = n as usize;
+                        if n == 0 {
+                            return Ok(None);
+                        }
+
+                        unsafe {
+                            buf.advance_mut(n);
+                        }
+                        Ok(Some(buf.split_to(n).freeze()))
                     }
-
-                    // Reserve H3 DATAGRAM_PREFIX headroom in-place. H3 mode ships `framed` as-is;
-                    // non-H3 mode slices past the prefix in O(1).
-                    buf.extend_from_slice(&masque::DATAGRAM_PREFIX);
-
-                    let chunk = buf.chunk_mut();
-                    let max_len = MAX_TUN_PACKET_SIZE.min(chunk.len());
-
-                    let n = unsafe {
-                        libc::read(
-                            inner.as_raw_fd(),
-                            chunk.as_mut_ptr() as *mut libc::c_void,
-                            max_len,
-                        )
-                    };
-
-                    if n < 0 {
-                        let err = std::io::Error::last_os_error();
-                        buf.truncate(buf.len() - PREFIX_LEN);
-                        return Err(err);
-                    }
-                    let n = n as usize;
-                    if n == 0 {
-                        buf.truncate(buf.len() - PREFIX_LEN);
-                        return Ok(None);
-                    }
-
-                    unsafe {
-                        buf.advance_mut(n);
-                    }
-                    let framed = buf.split_to(n + PREFIX_LEN).freeze();
-                    Ok(Some(framed))
                 }) {
                     Ok(Ok(Some(p))) => p,
                     Ok(Ok(None)) => break 'outer,
@@ -368,18 +393,15 @@ pub async fn run_vpn_loop(
                     Err(_) => break, // WouldBlock, let tokio select re-await
                 };
 
-                // `framed` is [Quarter Stream ID = 0][Context ID = 0][IP packet] per RFC 9484 §5.
-                // `packet` is the raw IP payload (O(1) refcount slice, no copy).
-                let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
+                let (packet, payload) = if http3_framing {
+                    (framed.slice(masque::DATAGRAM_PREFIX.len()..), framed)
+                } else {
+                    (framed.clone(), framed)
+                };
+
                 let packet_len = packet.len();
                 pending_stats.tun_to_quic_bytes += packet_len as u64;
                 pending_stats.tun_to_quic_packets += 1;
-
-                let payload = if http3_framing {
-                    framed
-                } else {
-                    packet.clone()
-                };
 
                 // Use `send_datagram_wait` to apply backpressure to the TUN interface.
                 // Without this, the TUN loop reads gigabits of data, fills Quinn's send buffer instantly,
@@ -467,12 +489,16 @@ pub async fn run_vpn_loop(
             match conn_download.read_datagram().await {
                 Ok(first_packet) => {
                     batch.clear();
+                    let mut batch_bytes: usize = 0;
                     if http3_framing {
                         if let Some(inner) = masque::unwrap_datagram(&first_packet) {
                             let prefix = first_packet.len() - inner.len();
-                            batch.push(first_packet.slice(prefix..));
+                            let pkt = first_packet.slice(prefix..);
+                            batch_bytes += pkt.len();
+                            batch.push(pkt);
                         }
                     } else {
+                        batch_bytes += first_packet.len();
                         batch.push(first_packet);
                     }
 
@@ -481,9 +507,12 @@ pub async fn run_vpn_loop(
                             if http3_framing {
                                 if let Some(inner) = masque::unwrap_datagram(&pkt) {
                                     let prefix = pkt.len() - inner.len();
-                                    batch.push(pkt.slice(prefix..));
+                                    let inner_pkt = pkt.slice(prefix..);
+                                    batch_bytes += inner_pkt.len();
+                                    batch.push(inner_pkt);
                                 }
                             } else {
+                                batch_bytes += pkt.len();
                                 batch.push(pkt);
                             }
                         } else {
@@ -491,7 +520,6 @@ pub async fn run_vpn_loop(
                         }
                     }
 
-                    let batch_bytes: usize = batch.iter().map(|pkt| pkt.len()).sum();
                     pending_stats.quic_to_tun_bytes += batch_bytes as u64;
                     pending_stats.quic_to_tun_packets += batch.len() as u64;
 

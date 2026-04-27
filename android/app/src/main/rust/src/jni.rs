@@ -14,7 +14,7 @@ const INIT_RETRYABLE_FAILURE: jlong = 0;
 const INIT_FATAL_AUTH: jlong = -1;
 const INIT_FATAL_CERT: jlong = -2;
 const INIT_FATAL_CONFIG: jlong = -3;
-const ANDROID_TOKIO_WORKER_THREADS: usize = 2;
+const ANDROID_TOKIO_WORKER_THREADS: usize = 4;
 
 fn android_runtime() -> Result<Arc<tokio::runtime::Runtime>, String> {
     static ANDROID_RUNTIME: OnceLock<Result<Arc<tokio::runtime::Runtime>, String>> =

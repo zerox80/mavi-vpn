@@ -1,4 +1,4 @@
-use crate::{Instant, MAX_UDP_PAYLOAD, MtuDiscoveryConfig, packet::SpaceId};
+use crate::{INITIAL_MTU, Instant, MAX_UDP_PAYLOAD, MtuDiscoveryConfig, packet::SpaceId};
 use std::cmp;
 use tracing::trace;
 
@@ -80,6 +80,7 @@ impl MtuDiscovery {
     /// Notifies the [`MtuDiscovery`] that the peer's `max_udp_payload_size` transport parameter has
     /// been received
     pub(crate) fn on_peer_max_udp_payload_size_received(&mut self, peer_max_udp_payload_size: u16) {
+        let peer_max_udp_payload_size = peer_max_udp_payload_size.max(INITIAL_MTU);
         self.current_mtu = self.current_mtu.min(peer_max_udp_payload_size);
 
         if let Some(state) = self.state.as_mut() {
@@ -324,7 +325,7 @@ impl SearchState {
         if last_probe_succeeded {
             self.lower_bound = self.last_probed_mtu;
         } else {
-            self.upper_bound = self.last_probed_mtu - 1;
+            self.upper_bound = self.last_probed_mtu.saturating_sub(1);
         }
 
         let next_mtu = (self.lower_bound as i32 + self.upper_bound as i32) / 2;
@@ -718,6 +719,19 @@ mod tests {
     }
 
     #[test]
+    fn mtu_discovery_clamps_peer_max_udp_payload_size_to_quic_minimum() {
+        let mut mtud = MtuDiscovery::new(1_500, 1_200, None, MtuDiscoveryConfig::default());
+
+        mtud.on_peer_max_udp_payload_size_received(1_000);
+
+        assert_eq!(mtud.current_mtu, 1_200);
+        assert_eq!(
+            mtud.state.as_ref().unwrap().peer_max_udp_payload_size,
+            1_200
+        );
+    }
+
+    #[test]
     fn mtu_discovery_with_previous_peer_max_udp_payload_size_clamps_upper_bound() {
         let mut mtud = MtuDiscovery::new(1500, 1_200, Some(1400), MtuDiscoveryConfig::default());
 
@@ -836,6 +850,24 @@ mod tests {
         let state = SearchState::new(1500, u16::MAX, &config);
         assert_eq!(state.lower_bound, 1500);
         assert_eq!(state.upper_bound, 1500);
+    }
+
+    #[test]
+    fn search_state_lost_zero_mtu_probe_does_not_underflow() {
+        let mut config = MtuDiscoveryConfig::default();
+        config.upper_bound(1200);
+
+        let mut state = SearchState {
+            lower_bound: 0,
+            upper_bound: 1200,
+            minimum_change: config.minimum_change,
+            last_probed_mtu: 0,
+            in_flight_probe: None,
+            lost_probe_count: 0,
+        };
+
+        assert_eq!(state.next_mtu_to_probe(false), None);
+        assert_eq!(state.upper_bound, 0);
     }
 
     #[test]

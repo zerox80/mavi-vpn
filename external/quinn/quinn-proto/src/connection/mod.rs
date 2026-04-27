@@ -1529,7 +1529,7 @@ impl Connection {
         // Must be called before crypto/pto_count are clobbered
         self.detect_lost_packets(now, space, true);
 
-        if self.peer_completed_address_validation() {
+        if ack_eliciting_acked && self.peer_completed_address_validation() {
             self.pto_count = 0;
         }
 

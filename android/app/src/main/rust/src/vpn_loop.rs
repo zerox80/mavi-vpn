@@ -60,6 +60,29 @@ impl AndroidTunnelStats {
 const STATS_FLUSH_PACKET_THRESHOLD: u64 = 256;
 #[cfg(target_os = "android")]
 const STATS_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(target_os = "android")]
+const MAX_TUN_PACKET_SIZE: usize = 2048;
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Copy)]
+enum VpnLoopTask {
+    Upload,
+    Download,
+    Icmp,
+    Stats,
+}
+
+#[cfg(target_os = "android")]
+impl VpnLoopTask {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Upload => "Upload",
+            Self::Download => "Download",
+            Self::Icmp => "ICMP",
+            Self::Stats => "Stats",
+        }
+    }
+}
 
 #[cfg(target_os = "android")]
 #[derive(Default)]
@@ -266,8 +289,11 @@ pub async fn run_vpn_loop(
     let tx_feedback = tx_tun.clone();
     let stats_upload = stats.clone();
 
-    let upload_task = tokio::spawn(async move {
-        let mut buf = bytes::BytesMut::with_capacity(65536);
+    let mut tasks = tokio::task::JoinSet::new();
+
+    tasks.spawn(async move {
+        let mut buf =
+            bytes::BytesMut::with_capacity(MAX_TUN_PACKET_SIZE + masque::DATAGRAM_PREFIX.len());
         let mut pending_stats = UploadPendingStats::default();
         let mut last_stats_flush = Instant::now();
         loop {
@@ -282,16 +308,16 @@ pub async fn run_vpn_loop(
 
             let framed = match guard.try_io(|inner| {
                 const PREFIX_LEN: usize = masque::DATAGRAM_PREFIX.len();
-                if buf.capacity() < 2048 + PREFIX_LEN {
-                    buf.reserve(2048 + PREFIX_LEN);
+                if buf.capacity() < MAX_TUN_PACKET_SIZE + PREFIX_LEN {
+                    buf.reserve(MAX_TUN_PACKET_SIZE + PREFIX_LEN);
                 }
 
-                // Reserve H3 DATAGRAM_PREFIX headroom in-place. H3 mode ships `framed` as-is
-                // (zero per-packet alloc); non-H3 mode slices past the prefix in O(1).
+                // Reserve H3 DATAGRAM_PREFIX headroom in-place. H3 mode ships `framed` as-is;
+                // non-H3 mode slices past the prefix in O(1).
                 buf.extend_from_slice(&masque::DATAGRAM_PREFIX);
 
                 let chunk = buf.chunk_mut();
-                let max_len = 2048.min(chunk.len());
+                let max_len = MAX_TUN_PACKET_SIZE.min(chunk.len());
 
                 let n = unsafe {
                     libc::read(
@@ -405,6 +431,7 @@ pub async fn run_vpn_loop(
         }
         pending_stats.flush(&stats_upload);
         info!("Upload task exited.");
+        VpnLoopTask::Upload
     });
 
     // --- TASK 2: QUIC -> TUN (Incoming / Download) ---
@@ -413,7 +440,7 @@ pub async fn run_vpn_loop(
     let conn_download = connection_arc.clone();
     let stats_download = stats.clone();
 
-    let download_task = tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut batch = Vec::with_capacity(64);
         let mut pending_stats = DownloadPendingStats::default();
         let mut last_stats_flush = Instant::now();
@@ -530,13 +557,14 @@ pub async fn run_vpn_loop(
         }
         pending_stats.flush(&stats_download);
         info!("Download task exited.");
+        VpnLoopTask::Download
     });
 
     // --- TASK 3: ICMP Feedback -> TUN ---
     let stop_icmp = stop_flag.clone();
     let tun_icmp = tun_async_fd.clone();
     let stats_icmp = stats.clone();
-    let icmp_task = tokio::spawn(async move {
+    tasks.spawn(async move {
         while let Some(icmp_pkt) = rx_tun.recv().await {
             if stop_icmp.load(Ordering::Relaxed) {
                 break;
@@ -557,13 +585,14 @@ pub async fn run_vpn_loop(
                 });
             }
         }
+        VpnLoopTask::Icmp
     });
 
     // --- TASK 4: QUIC STATS LOGGING ---
     let stop_stats = stop_flag.clone();
     let conn_stats = connection_arc.clone();
     let stats_log = stats.clone();
-    let stats_task = tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_tun_to_quic_bytes = 0u64;
@@ -685,19 +714,38 @@ pub async fn run_vpn_loop(
                 icmp_feedback_packets,
             );
         }
+        VpnLoopTask::Stats
     });
 
-    // Wait for any task to terminate
-    let res = tokio::select! {
-        r = upload_task => { error!("Upload task terminated: {:?}", r); "Upload" },
-        r = download_task => { error!("Download task terminated: {:?}", r); "Download" },
-        r = icmp_task => { error!("ICMP task terminated: {:?}", r); "ICMP" },
-        r = stats_task => { error!("Stats task terminated: {:?}", r); "Stats" },
+    // The original sender is only needed to create the upload feedback sender.
+    // Dropping it lets the ICMP task finish naturally when upload exits.
+    drop(tx_tun);
+
+    // Wait for any task to terminate.
+    let res = match tasks.join_next().await {
+        Some(Ok(task)) => {
+            error!("{} task terminated", task.as_str());
+            task.as_str()
+        }
+        Some(Err(err)) => {
+            error!("VPN loop task terminated with join error: {:?}", err);
+            "JoinError"
+        }
+        None => "NoTask",
     };
 
     warn!("VPN Loop Hub shutting down. Trigger: {} task exit", res);
     stop_flag.store(true, Ordering::SeqCst);
     let _ = connection_arc.close(0u32.into(), b"loop_exit");
+
+    tasks.abort_all();
+    while let Some(result) = tasks.join_next().await {
+        if let Err(err) = result {
+            if !err.is_cancelled() {
+                error!("VPN loop task failed during shutdown: {:?}", err);
+            }
+        }
+    }
 
     info!("VPN Loop tasks terminated.");
 }

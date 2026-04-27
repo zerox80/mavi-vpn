@@ -1,5 +1,7 @@
 package com.mavi.vpn.ui.screens
 
+import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.util.LruCache
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -28,9 +30,12 @@ import com.mavi.vpn.ui.components.drawableToBitmap
 import com.mavi.vpn.ui.components.toImageBitmap
 import com.mavi.vpn.viewmodel.VpnViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
-private val appIconCache = LruCache<String, ImageBitmap>(128)
+private val appIconCache = LruCache<String, ImageBitmap>(256)
+private val appIconLoadLimiter = Semaphore(4)
 
 @Composable
 fun SettingsScreen(
@@ -76,17 +81,23 @@ fun SettingsScreen(
     LaunchedEffect(Unit) {
         val appList = withContext(Dispatchers.IO) {
              val pm = context.packageManager
-             val packages = pm.getInstalledPackages(0)
-             packages.mapNotNull { pkg ->
-                 val appInfo = pkg.applicationInfo ?: return@mapNotNull null
-                 val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
-                 val isUpdatedSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-                 val launchIntent = pm.getLaunchIntentForPackage(pkg.packageName)
-                 
-                 if (launchIntent != null && (!isSystem || isUpdatedSystem)) {
+             val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+             val seenPackages = HashSet<String>()
+
+             pm.queryIntentActivities(launcherIntent, 0).mapNotNull { resolveInfo ->
+                 val appInfo = resolveInfo.activityInfo?.applicationInfo ?: return@mapNotNull null
+                 val packageName = appInfo.packageName
+                 if (!seenPackages.add(packageName)) {
+                     return@mapNotNull null
+                 }
+
+                 val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                 val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+
+                 if (!isSystem || isUpdatedSystem) {
                      InstalledApp(
                          name = appInfo.loadLabel(pm).toString(),
-                         packageName = pkg.packageName
+                         packageName = packageName
                      )
                  } else {
                      null
@@ -308,12 +319,14 @@ private fun InstalledAppIcon(packageName: String) {
             return@LaunchedEffect
         }
         icon = withContext(Dispatchers.IO) {
-            runCatching {
-                val drawable = context.packageManager.getApplicationIcon(packageName)
-                drawableToBitmap(drawable, iconSizePx)?.toImageBitmap()?.also {
-                    appIconCache.put(cacheKey, it)
-                }
-            }.getOrNull()
+            appIconLoadLimiter.withPermit {
+                runCatching {
+                    val drawable = context.packageManager.getApplicationIcon(packageName)
+                    drawableToBitmap(drawable, iconSizePx)?.toImageBitmap()?.also {
+                        appIconCache.put(cacheKey, it)
+                    }
+                }.getOrNull()
+            }
         }
     }
 

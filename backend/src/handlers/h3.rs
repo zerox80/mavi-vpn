@@ -18,9 +18,12 @@ use crate::handlers::utils::{prefix_len_from_mask, IpGuard};
 use crate::keycloak::KeycloakValidator;
 use crate::state::AppState;
 
-async fn send_h3_camouflage_response(
-    req_stream: &mut h3::server::RequestStream<bytes::Bytes>,
-) -> Result<()> {
+async fn send_h3_camouflage_response<S>(
+    req_stream: &mut h3::server::RequestStream<S, bytes::Bytes>,
+) -> Result<()>
+where
+    S: h3::quic::BidiStream<bytes::Bytes>,
+{
     let response = Response::builder()
         .status(http::StatusCode::OK)
         .header("content-type", "text/html; charset=utf-8")

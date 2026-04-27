@@ -24,6 +24,7 @@ class MaviVpnService : VpnService() {
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var vpnSessionHandle: Long = 0
+    @Volatile private var vpnSessionGeneration: Long = 0
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val vpnLock = Any()
@@ -122,12 +123,19 @@ class MaviVpnService : VpnService() {
     }
 
     private fun startVpn(ip: String, port: String, token: String, certPin: String, splitMode: String, splitPackages: String) {
+        val sessionGeneration = synchronized(vpnLock) {
+            vpnSessionGeneration += 1
+            vpnSessionGeneration
+        }
+
         if (thread != null) {
             isRunning = false
             isConnected.value = false
             synchronized(vpnLock) {
-                if (vpnSessionHandle != 0L) {
-                    NativeLib.stop(vpnSessionHandle)
+                val handle = vpnSessionHandle
+                vpnSessionHandle = 0L
+                if (handle != 0L) {
+                    NativeLib.stop(handle)
                 }
             }
             try { vpnInterface?.close() } catch(_: Exception){}
@@ -153,16 +161,17 @@ class MaviVpnService : VpnService() {
                 override fun onAvailable(network: Network) {
                     Log.d("MaviVPN", "Network available: $network")
                     synchronized(vpnLock) {
-                        if (vpnSessionHandle != 0L) {
+                        if (vpnSessionHandle != 0L && vpnSessionGeneration == sessionGeneration) {
                             NativeLib.networkChanged(vpnSessionHandle)
                         }
                     }
                 }
+
+                override fun onLost(network: Network) {
+                    Log.d("MaviVPN", "Network lost: $network")
+                }
             }
-            val req = NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
-            connectivityManager?.registerNetworkCallback(req, networkCallback!!)
+            connectivityManager?.registerDefaultNetworkCallback(networkCallback!!)
         } catch (e: Exception) {
             Log.e("MaviVPN", "Failed to register network callback", e)
         }
@@ -384,6 +393,8 @@ class MaviVpnService : VpnService() {
         
         synchronized(vpnLock) {
              val handle = vpnSessionHandle
+             vpnSessionHandle = 0L
+             vpnSessionGeneration += 1
              if (handle != 0L) {
                   NativeLib.stop(handle)
              }

@@ -383,10 +383,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_networkChanged<'l
         let session = unsafe { &*(handle as *const VpnSession) };
         let conn = session.connection.clone();
         session.runtime.spawn(async move {
-            for _ in 0..5 {
-                let _ = conn.send_datagram(bytes::Bytes::from_static(&[0]));
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            }
+            let _ = conn.send_datagram(bytes::Bytes::from_static(&[0]));
         });
     }));
 }

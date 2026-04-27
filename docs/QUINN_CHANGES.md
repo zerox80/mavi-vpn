@@ -9,6 +9,11 @@ This project vendors Quinn under `external/quinn` and applies local fixes that a
 - `quinn-proto/src/connection/mtud.rs`: use saturating arithmetic when a failed MTU probe lowers the search upper bound.
 - `quinn-proto/src/connection/mtud.rs`: clamp peer `max_udp_payload_size` handling to QUIC's 1200-byte minimum as a defensive invariant.
 - `quinn-proto/src/connection/mod.rs`: reset the PTO backoff only when an ACK newly acknowledges an ack-eliciting packet, not merely any newly tracked packet.
+- `quinn-proto/src/connection/mod.rs`: avoid `Instant` and duration overflow panics while detecting packet loss and persistent congestion.
+- `quinn-proto/src/connection/mtud.rs`: treat loss at exactly the minimum/previously-acked MTU as non-suspicious so black-hole detection does not overreact.
+- `quinn-proto/src/connection/mtud.rs`: allow peer MTU parameters after early black-hole recovery while still asserting that active probing has not started.
+- `quinn-proto/src/connection/datagrams.rs`: report when oversized queued DATAGRAMs are dropped after an MTU reduction.
+- `quinn-proto/src/connection/mod.rs`: emit `DatagramsUnblocked` when dropping oversized queued DATAGRAMs frees send-buffer space.
 
 ## Fork State
 

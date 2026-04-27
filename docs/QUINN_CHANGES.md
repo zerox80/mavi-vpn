@@ -1,6 +1,6 @@
 # Quinn Changes
 
-This project resolves Quinn through the `zerox80/quinn` fork and applies transport fixes that are important for VPN-style QUIC datagram traffic. The root `Cargo.toml` also patches the h3 crates to the `zerox80/h3` fork so `h3-quinn` uses Quinn 0.12 instead of pulling a second Quinn 0.11 dependency from crates.io.
+This project resolves Quinn through the `zerox80/quinn` fork and `h3` through the `zerox80/h3` fork, both tracked on `main`. The root `Cargo.toml` applies those patches so `h3-quinn` uses Quinn 0.12 instead of pulling a second Quinn 0.11 dependency from crates.io.
 
 ## 2026-04-27
 

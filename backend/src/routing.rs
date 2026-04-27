@@ -2,8 +2,10 @@ use crate::state::AppState;
 use bytes::Bytes;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
 use shared::masque::DATAGRAM_PREFIX;
+use std::fmt::Display;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc::error::TrySendError;
 use tracing::{error, warn};
 
 pub fn spawn_tun_writer(
@@ -18,6 +20,23 @@ pub fn spawn_tun_writer(
             }
         }
     });
+}
+
+fn record_s2c_channel_drop<D: Display>(
+    drop_count: &mut u64,
+    last_drop_warn: &mut std::time::Instant,
+    dest_ip: D,
+) {
+    *drop_count += 1;
+    if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
+        warn!(
+            "[SERVER TUN READER] dropped S2C packets: client channel full dest={} drops={}",
+            dest_ip,
+            *drop_count
+        );
+        *drop_count = 0;
+        *last_drop_warn = std::time::Instant::now();
+    }
 }
 
 pub fn spawn_tun_reader(
@@ -78,39 +97,36 @@ pub fn spawn_tun_reader(
 
                                     // Fast-path: Only 1 hash traversal!
                                     if let Some(tx_client) = local_peers_v4.get(&dest_ip) {
-                                        if let Err(e) = tx_client.try_send(framed) {
-                                            if let tokio::sync::mpsc::error::TrySendError::Closed(_) = e {
+                                        match tx_client.try_send(framed) {
+                                            Ok(()) => {}
+                                            Err(TrySendError::Closed(_)) => {
                                                 remove = true;
-                                            } else {
-                                                drop_count += 1;
-                                                if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
-                                                    warn!("Dropped {} packets: client channel(s) full", drop_count);
-                                                    drop_count = 0;
-                                                    last_drop_warn = std::time::Instant::now();
-                                                }
+                                            }
+                                            Err(TrySendError::Full(_)) => {
+                                                record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
                                             }
                                         }
                                     } else {
                                         let tx_client_opt = state_reader.peers.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
                                         if let Some(tx_client) = tx_client_opt {
-                                            if let Err(e) = tx_client.try_send(framed) {
-                                                if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
-                                                    drop_count += 1;
-                                                    if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
-                                                        warn!("Dropped {} packets: client channel(s) full", drop_count);
-                                                        drop_count = 0;
-                                                        last_drop_warn = std::time::Instant::now();
-                                                    }
+                                            match tx_client.try_send(framed) {
+                                                Ok(()) => {
                                                     local_peers_v4.insert(dest_ip, tx_client);
                                                 }
-                                            } else {
-                                                local_peers_v4.insert(dest_ip, tx_client);
+                                                Err(TrySendError::Full(_)) => {
+                                                    record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
+                                                    local_peers_v4.insert(dest_ip, tx_client);
+                                                }
+                                                Err(TrySendError::Closed(_)) => {
+                                                    state_reader.peers.remove(&dest_ip);
+                                                }
                                             }
                                         }
                                     }
 
                                     if remove {
                                         local_peers_v4.remove(&dest_ip);
+                                        state_reader.peers.remove(&dest_ip);
                                     }
                                 }
                             } else if version == 6 {
@@ -120,39 +136,36 @@ pub fn spawn_tun_reader(
                                     let mut remove = false;
 
                                     if let Some(tx_client) = local_peers_v6.get(&dest_ip) {
-                                        if let Err(e) = tx_client.try_send(framed) {
-                                            if let tokio::sync::mpsc::error::TrySendError::Closed(_) = e {
+                                        match tx_client.try_send(framed) {
+                                            Ok(()) => {}
+                                            Err(TrySendError::Closed(_)) => {
                                                 remove = true;
-                                            } else {
-                                                drop_count += 1;
-                                                if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
-                                                    warn!("Dropped {} packets: client channel(s) full", drop_count);
-                                                    drop_count = 0;
-                                                    last_drop_warn = std::time::Instant::now();
-                                                }
+                                            }
+                                            Err(TrySendError::Full(_)) => {
+                                                record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
                                             }
                                         }
                                     } else {
                                         let tx_client_opt = state_reader.peers_v6.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
                                         if let Some(tx_client) = tx_client_opt {
-                                            if let Err(e) = tx_client.try_send(framed) {
-                                                if let tokio::sync::mpsc::error::TrySendError::Full(_) = e {
-                                                    drop_count += 1;
-                                                    if drop_count.is_multiple_of(1000) && last_drop_warn.elapsed() >= std::time::Duration::from_secs(5) {
-                                                        warn!("Dropped {} packets: client channel(s) full", drop_count);
-                                                        drop_count = 0;
-                                                        last_drop_warn = std::time::Instant::now();
-                                                    }
+                                            match tx_client.try_send(framed) {
+                                                Ok(()) => {
                                                     local_peers_v6.insert(dest_ip, tx_client);
                                                 }
-                                            } else {
-                                                local_peers_v6.insert(dest_ip, tx_client);
+                                                Err(TrySendError::Full(_)) => {
+                                                    record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
+                                                    local_peers_v6.insert(dest_ip, tx_client);
+                                                }
+                                                Err(TrySendError::Closed(_)) => {
+                                                    state_reader.peers_v6.remove(&dest_ip);
+                                                }
                                             }
                                         }
                                     }
 
                                     if remove {
                                         local_peers_v6.remove(&dest_ip);
+                                        state_reader.peers_v6.remove(&dest_ip);
                                     }
                                 }
                             }
@@ -166,7 +179,10 @@ pub fn spawn_tun_reader(
                 _ = flush_tick.tick() => {
                     // Flush any trailing drop counts that didn't hit the 1000-packet threshold.
                     if drop_count > 0 {
-                        warn!("Dropped {} packets: client channel(s) full (trailing drops)", drop_count);
+                        warn!(
+                            "[SERVER TUN READER] dropped S2C packets: client channel full trailing_drops={}",
+                            drop_count
+                        );
                         drop_count = 0;
                         last_drop_warn = std::time::Instant::now();
                     }

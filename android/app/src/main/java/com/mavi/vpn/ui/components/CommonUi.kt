@@ -12,6 +12,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 @Composable
 fun MaviTextField(
@@ -40,13 +42,25 @@ fun MaviTextField(
     )
 }
 
-fun drawableToBitmap(drawable: Drawable): Bitmap? {
+fun drawableToBitmap(drawable: Drawable, maxSizePx: Int = 48): Bitmap? {
     return try {
+        val boundedMaxSize = maxSizePx.coerceAtLeast(1)
+        val sourceWidth = if (drawable.intrinsicWidth > 0) drawable.intrinsicWidth else boundedMaxSize
+        val sourceHeight = if (drawable.intrinsicHeight > 0) drawable.intrinsicHeight else boundedMaxSize
+        val scale = min(
+            boundedMaxSize.toFloat() / sourceWidth.toFloat(),
+            boundedMaxSize.toFloat() / sourceHeight.toFloat()
+        ).coerceAtMost(1f)
+        val width = (sourceWidth * scale).roundToInt().coerceAtLeast(1)
+        val height = (sourceHeight * scale).roundToInt().coerceAtLeast(1)
+
         if (drawable is BitmapDrawable) {
-            return drawable.bitmap
+            val bitmap = drawable.bitmap
+            if (bitmap.width <= boundedMaxSize && bitmap.height <= boundedMaxSize) {
+                return bitmap
+            }
+            return Bitmap.createScaledBitmap(bitmap, width, height, true)
         }
-        val width = if (drawable.intrinsicWidth > 0) drawable.intrinsicWidth else 48
-        val height = if (drawable.intrinsicHeight > 0) drawable.intrinsicHeight else 48
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         drawable.setBounds(0, 0, canvas.width, canvas.height)

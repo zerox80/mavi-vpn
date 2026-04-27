@@ -26,8 +26,8 @@ fun MaviCore(
     // We drive time via withFrameMillis to simulate requestAnimationFrame tracking actual time
     var timeSeconds by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(state) {
-        if (state == MaviCoreState.OFF) {
-            timeSeconds = 0f
+        if (state != MaviCoreState.CONNECTING) {
+            timeSeconds = if (state == MaviCoreState.ON) 1f else 0f
             return@LaunchedEffect
         }
 
@@ -45,7 +45,7 @@ fun MaviCore(
     val rotSpeed = if (state == MaviCoreState.CONNECTING) 60f else 18f
     val rot = (timeSeconds * rotSpeed) % 360f
 
-    val rings = listOf(0.42f, 0.56f, 0.72f, 0.88f)
+    val rings = remember { listOf(0.42f, 0.56f, 0.72f, 0.88f) }
     val isOff = state == MaviCoreState.OFF
 
     val ringColor = if (isOff) {

@@ -87,19 +87,30 @@ object OAuthHelper {
             return false
         }
 
+        val exp = accessTokenExpiryEpochSeconds(token) ?: run {
+            Log.w("OAuthHelper", "JWT missing usable exp claim")
+            return false
+        }
+
+        val now = System.currentTimeMillis() / 1000L
+        return now + skewSeconds < exp
+    }
+
+    fun accessTokenExpiryEpochSeconds(token: String): Long? {
+        if (token.isBlank()) {
+            return null
+        }
+
         return try {
-            val payload = parseJwtPayload(token) ?: return false
+            val payload = parseJwtPayload(token) ?: return null
             val exp = payload.optLong("exp", -1L)
             if (exp <= 0L) {
-                Log.w("OAuthHelper", "JWT missing usable exp claim")
-                return false
+                return null
             }
-
-            val now = System.currentTimeMillis() / 1000L
-            now + skewSeconds < exp
+            exp
         } catch (e: Exception) {
             Log.e("OAuthHelper", "Failed to inspect access token expiry: ${e.message}")
-            false
+            null
         }
     }
 

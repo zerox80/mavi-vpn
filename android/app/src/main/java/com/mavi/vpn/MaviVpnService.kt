@@ -16,9 +16,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 
 class MaviVpnService : VpnService() {
 
@@ -40,9 +42,12 @@ class MaviVpnService : VpnService() {
 
     companion object {
         private const val CONNECT_WAKE_LOCK_TIMEOUT_MS = 60_000L
+        private const val INITIAL_RETRY_DELAY_MS = 2_000L
+        private const val MAX_RETRY_DELAY_MS = 30_000L
 
         /** Observable connection state for UI */
         val isConnected = MutableStateFlow(false)
+        val keycloakTokenUpdates = MutableSharedFlow<String>(extraBufferCapacity = 1)
     }
 
     private data class SessionCleanup(
@@ -63,7 +68,9 @@ class MaviVpnService : VpnService() {
         val action = intent?.action
 
         if (action == "STOP") {
-            stopVpn()
+            serviceScope.launch {
+                stopVpn()
+            }
             return START_NOT_STICKY
         }
         
@@ -153,6 +160,7 @@ class MaviVpnService : VpnService() {
             is RefreshResult.Success -> {
                 prefs.savedToken = refreshed.tokens.accessToken
                 prefs.savedRefreshToken = refreshed.tokens.refreshToken
+                keycloakTokenUpdates.tryEmit(refreshed.tokens.accessToken)
                 refreshed.tokens.accessToken
             }
             is RefreshResult.NetworkError -> {
@@ -164,15 +172,19 @@ class MaviVpnService : VpnService() {
                 Log.i("MaviVPN", "Keycloak refresh rejected (session expired/revoked). Clearing session.")
                 prefs.savedToken = ""
                 prefs.savedRefreshToken = ""
+                keycloakTokenUpdates.tryEmit("")
                 null
             }
         }
     }
 
-    private fun startVpn(ip: String, port: String, token: String, certPin: String, splitMode: String, splitPackages: String) {
+    private suspend fun startVpn(ip: String, port: String, token: String, certPin: String, splitMode: String, splitPackages: String) {
         val cleanup = invalidateCurrentSession()
         stopCurrentSession(cleanup)
         val sessionGeneration = cleanup.generation
+        if (!isCurrentSessionGeneration(sessionGeneration)) {
+            return
+        }
 
         try {
             connectivityManager = getSystemService(ConnectivityManager::class.java)
@@ -220,6 +232,7 @@ class MaviVpnService : VpnService() {
             while (isCurrentSessionActive()) {
                 try {
                     var retryCount = 0
+                    var retryDelayMs = INITIAL_RETRY_DELAY_MS
                     val crMode = prefs.savedCensorshipResistant
                         
                     while (isCurrentSessionActive()) {
@@ -235,6 +248,7 @@ class MaviVpnService : VpnService() {
                                     currentToken = refreshed.tokens.accessToken
                                     prefs.savedToken = refreshed.tokens.accessToken
                                     prefs.savedRefreshToken = refreshed.tokens.refreshToken
+                                    keycloakTokenUpdates.tryEmit(refreshed.tokens.accessToken)
                                     Log.i("MaviVPN", "Successfully refreshed Keycloak token.")
                                 }
                                 is RefreshResult.NetworkError -> {
@@ -247,6 +261,7 @@ class MaviVpnService : VpnService() {
                                     Log.e("MaviVPN", "Refresh failed: ${refreshed.message}. Keycloak session expired. Stopping reconnect loop.")
                                     prefs.savedToken = ""
                                     prefs.savedRefreshToken = ""
+                                    keycloakTokenUpdates.tryEmit("")
                                     isRunning = false
                                     releaseWakeLock()
                                     break
@@ -281,6 +296,7 @@ class MaviVpnService : VpnService() {
                                     } else {
                                         prefs.savedToken = ""
                                         prefs.savedRefreshToken = ""
+                                        keycloakTokenUpdates.tryEmit("")
                                     }
                                 }
                                 isConnected.value = false
@@ -294,13 +310,15 @@ class MaviVpnService : VpnService() {
                                 break
                             }
 
-                            Log.e("MaviVPN", "Handshake failed. ${if (initError.isNotBlank()) initError else "Retrying in 2 seconds..."}")
+                            Log.e("MaviVPN", "Handshake failed. ${if (initError.isNotBlank()) initError else "Retrying in ${retryDelayMs / 1000} seconds..."}")
                             releaseWakeLock()
-                            repeat(4) { if (isRunning) Thread.sleep(500) }
+                            sleepWhileActive(retryDelayMs) { isCurrentSessionActive() }
+                            retryDelayMs = (retryDelayMs * 2).coerceAtMost(MAX_RETRY_DELAY_MS)
                             continue
                         }
                         
                         retryCount = 0
+                        retryDelayMs = INITIAL_RETRY_DELAY_MS
                         forcedRefreshCount = 0
                         synchronized(vpnLock) {
                             vpnSessionHandle = handle
@@ -428,9 +446,12 @@ class MaviVpnService : VpnService() {
         }.also { it.start() }
     }
 
-    private fun stopVpn() {
+    private suspend fun stopVpn() {
         val cleanup = invalidateCurrentSession()
         stopCurrentSession(cleanup)
+        if (!isCurrentSessionGeneration(cleanup.generation)) {
+            return
+        }
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -465,7 +486,19 @@ class MaviVpnService : VpnService() {
         }
     }
 
-    private fun stopCurrentSession(cleanup: SessionCleanup) {
+    private fun isCurrentSessionGeneration(generation: Long): Boolean {
+        return synchronized(vpnLock) {
+            vpnSessionGeneration == generation
+        }
+    }
+
+    private suspend fun stopCurrentSession(cleanup: SessionCleanup) {
+        withContext(Dispatchers.IO) {
+            stopCurrentSessionBlocking(cleanup, joinTimeoutMs = 3_000)
+        }
+    }
+
+    private fun stopCurrentSessionBlocking(cleanup: SessionCleanup, joinTimeoutMs: Long) {
         if (cleanup.handle != 0L) {
             NativeLib.stop(cleanup.handle)
         }
@@ -485,8 +518,8 @@ class MaviVpnService : VpnService() {
         }
 
         try {
-            if (cleanup.workerThread != null && cleanup.workerThread != Thread.currentThread()) {
-                cleanup.workerThread.join(3000)
+            if (joinTimeoutMs > 0 && cleanup.workerThread != null && cleanup.workerThread != Thread.currentThread()) {
+                cleanup.workerThread.join(joinTimeoutMs)
             }
         } catch (_: Exception) {
         }
@@ -509,7 +542,7 @@ class MaviVpnService : VpnService() {
 
     override fun onDestroy() {
         val cleanup = invalidateCurrentSession()
-        stopCurrentSession(cleanup)
+        stopCurrentSessionBlocking(cleanup, joinTimeoutMs = 0)
         serviceScope.cancel()
         releaseWakeLock()
         super.onDestroy()
@@ -569,5 +602,18 @@ class MaviVpnService : VpnService() {
             24
         }
     }
-}
 
+    private fun sleepWhileActive(totalMs: Long, isActive: () -> Boolean) {
+        var remainingMs = totalMs
+        while (remainingMs > 0 && isActive()) {
+            val chunkMs = remainingMs.coerceAtMost(500L)
+            try {
+                Thread.sleep(chunkMs)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+            remainingMs -= chunkMs
+        }
+    }
+}

@@ -9,7 +9,7 @@ use bytes::BufMut;
 #[cfg(target_os = "android")]
 use futures_util::future::FutureExt;
 #[cfg(target_os = "android")]
-use log::{info, warn};
+use log::{debug, info, warn};
 #[cfg(target_os = "android")]
 use shared::masque;
 #[cfg(target_os = "android")]
@@ -652,7 +652,7 @@ pub async fn run_vpn_loop(
                 "ok"
             };
 
-            info!(
+            debug!(
                 "[ANDROID TUNNEL STATS] window={:.2}s diag={} app_up={:.1}mbit app_down={:.1}mbit tun_write={:.1}mbit udp_tx={:.1}mbit udp_rx={:.1}mbit rtt={}ms cwnd={} max_dgram={} dgram_space={} loss_pkts_delta={} loss_bytes_delta={} loss_pkts_total={} loss_bytes_total={} pkts_up_delta={} pkts_down_delta={} tun_write_pkts_delta={} tun_pending_pkts={} tun_drops_delta={} tun_drops_total={} tun_err_delta={} tun_err_total={} quic_send_err_delta={} quic_send_err_total={} quic_too_large_delta={} quic_too_large_total={} icmp_delta={} icmp_total={}",
                 elapsed_secs,
                 diag,

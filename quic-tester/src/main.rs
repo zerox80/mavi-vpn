@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server_addr: SocketAddr = "194.242.56.169:10443".parse()?;
 
     // 1. Create QUIC Endpoint
-    let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+    let endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
 
     // 2. Allow all certificates (Skip Verification)
     let mut crypto = rustls::ClientConfig::builder()

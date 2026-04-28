@@ -396,7 +396,7 @@ async fn prompt_new_config() -> Result<Config> {
         None
     } else {
         match vpn_mtu_input.parse::<u16>() {
-            Ok(v) if v >= 1280 && v <= 1360 => Some(v),
+            Ok(v) if (1280..=1360).contains(&v) => Some(v),
             _ => {
                 eprintln!("Warnung: Ungültiger MTU-Wert – Standard (1280) wird verwendet");
                 None

@@ -36,6 +36,7 @@ const KEEPALIVE_SECS: u64 = 10;
 const IDLE_TIMEOUT_SECS: u64 = 60;
 
 /// QUIC connection setup with custom certificate pinning.
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_and_handshake(
     socket: std::net::UdpSocket,
     token: String,

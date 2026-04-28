@@ -5,10 +5,11 @@ use h3_quinn::Connection as H3QuinnConnection;
 use sha2::{Digest, Sha256};
 use shared::{
     masque::{self, CAPSULE_MAVI_CONFIG},
-    resolve_tun_mtu, ControlMessage, QUIC_OVERHEAD_BYTES,
+    resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
 };
+use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 
@@ -92,8 +93,16 @@ pub async fn connect_and_handshake(
     };
 
     // Resolve endpoint and connect
-    let addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
+    let resolve_started = Instant::now();
+    let mut addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
+    order_resolved_addrs(&mut addrs, &endpoint_str);
     let addr = *addrs.first().context("Failed to resolve endpoint")?;
+    info!(
+        "Resolved {} to {} address(es) in {} ms",
+        endpoint_str,
+        addrs.len(),
+        resolve_started.elapsed().as_millis()
+    );
     // When ECH is active we send the config's `public_name` as the outer SNI
     // instead of the real server hostname. Cert-pin auth is unaffected.
     let server_name: String = match ech_state.as_ref() {
@@ -107,19 +116,23 @@ pub async fn connect_and_handshake(
         anyhow::bail!("Endpoint host missing");
     }
 
-    // Outer QUIC payload MTU is derived from the operator-configured inner TUN
-    // MTU (`VPN_MTU`, default 1280). The 80-byte overhead reserves room for
-    // QUIC short-header framing + AEAD tag + connection-ID bytes. Server and
-    // client MUST be configured with the same `VPN_MTU`, otherwise the larger
-    // side will send UDP payloads the smaller side considers out-of-spec.
-    let tun_mtu = resolve_tun_mtu(vpn_mtu);
-    let quic_mtu = tun_mtu + QUIC_OVERHEAD_BYTES;
+    // When the client has no operator-configured MTU, reserve enough QUIC
+    // payload budget for any server-pushed MTU in the supported range. The
+    // server config remains authoritative for the actual Windows adapter MTU.
+    let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
+    let transport_tun_mtu = if matches!(mtu_source, TunMtuSource::Default) {
+        MAX_TUN_MTU
+    } else {
+        local_tun_mtu
+    };
+    let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
     let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20u16 } else { 40u16 }, 8u16);
     info!(
-        "Address family: {}. Setting QUIC MTU: {} (TUN MTU: {}, Target Wire: {})",
+        "Address family: {}. Setting QUIC MTU: {} (TUN MTU budget: {}, source: {:?}, Target Wire: {})",
         if addr.is_ipv4() { "IPv4" } else { "IPv6" },
         quic_mtu,
-        tun_mtu,
+        transport_tun_mtu,
+        mtu_source,
         quic_mtu + ip_overhead + udp_overhead,
     );
 
@@ -160,6 +173,7 @@ pub async fn connect_and_handshake(
     let mut last_error = None;
     let mut connection = None;
     for addr in addrs {
+        let handshake_started = Instant::now();
         info!(
             "Connecting to {} (resolved: {}, SNI: {})",
             endpoint_str, addr, server_name
@@ -167,11 +181,21 @@ pub async fn connect_and_handshake(
         match endpoint.connect(addr, &server_name) {
             Ok(connecting) => match connecting.await {
                 Ok(conn) => {
+                    info!(
+                        "QUIC handshake to {} completed in {} ms",
+                        addr,
+                        handshake_started.elapsed().as_millis()
+                    );
                     connection = Some(conn);
                     break;
                 }
                 Err(err) => {
-                    warn!("QUIC handshake to {} failed: {}", addr, err);
+                    warn!(
+                        "QUIC handshake to {} failed after {} ms: {}",
+                        addr,
+                        handshake_started.elapsed().as_millis(),
+                        err
+                    );
                     last_error = Some(anyhow::Error::from(err));
                 }
             },
@@ -194,10 +218,16 @@ pub async fn connect_and_handshake(
     );
 
     let (config, h3_guard) = if http3_framing {
+        let config_started = Instant::now();
         let (cfg, guard) = connect_and_handshake_h3(connection.clone(), token).await?;
+        info!(
+            "Received H3 server config in {} ms",
+            config_started.elapsed().as_millis()
+        );
         (cfg, Some(guard))
     } else {
         // Perform application-level handshake
+        let config_started = Instant::now();
         let (mut send, mut recv) = connection.open_bi().await?;
         let auth_msg = ControlMessage::Auth { token };
         let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
@@ -218,21 +248,58 @@ pub async fn connect_and_handshake(
         recv.read_exact(&mut buf).await?;
         let cfg: ControlMessage =
             bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
+        info!(
+            "Received raw server config in {} ms",
+            config_started.elapsed().as_millis()
+        );
         (cfg, None)
     };
 
-    validate_server_mtu(&config, tun_mtu)?;
+    validate_server_mtu(&config, local_tun_mtu, mtu_source)?;
 
     Ok((connection, config, h3_guard))
 }
 
-fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()> {
+pub(crate) fn endpoint_host_is_explicit_ipv6(endpoint: &str) -> bool {
+    let (host, _) = split_endpoint(endpoint);
+    host.parse::<Ipv6Addr>().is_ok()
+}
+
+pub(crate) fn order_resolved_addrs(addrs: &mut [SocketAddr], endpoint: &str) {
+    if endpoint_host_is_explicit_ipv6(endpoint) {
+        return;
+    }
+
+    addrs.sort_by_key(|addr| if addr.is_ipv4() { 0 } else { 1 });
+}
+
+fn validate_server_mtu(
+    config: &ControlMessage,
+    local_tun_mtu: u16,
+    mtu_source: TunMtuSource,
+) -> Result<()> {
     if let ControlMessage::Config { mtu, .. } = config {
-        if *mtu != local_tun_mtu {
+        if !(shared::MIN_TUN_MTU..=MAX_TUN_MTU).contains(mtu) {
+            anyhow::bail!(
+                "Server pushed unsupported VPN MTU {}. Supported range is {}-{}.",
+                mtu,
+                shared::MIN_TUN_MTU,
+                MAX_TUN_MTU
+            );
+        }
+
+        if mtu_source != TunMtuSource::Default && *mtu != local_tun_mtu {
             anyhow::bail!(
                 "MTU mismatch: local/client VPN MTU is {}, but server pushed {}. Configure both sides to the same VPN_MTU.",
                 local_tun_mtu,
                 mtu
+            );
+        }
+
+        if mtu_source == TunMtuSource::Default && *mtu != local_tun_mtu {
+            info!(
+                "Using server-pushed VPN MTU {} because client MTU is unset (default would be {})",
+                mtu, local_tun_mtu
             );
         }
     }
@@ -422,5 +489,87 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.supported.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn config_with_mtu(mtu: u16) -> ControlMessage {
+        ControlMessage::Config {
+            assigned_ip: Ipv4Addr::new(10, 8, 0, 2),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Ipv4Addr::new(10, 8, 0, 1),
+            dns_server: Ipv4Addr::new(1, 1, 1, 1),
+            mtu,
+            assigned_ipv6: None,
+            netmask_v6: None,
+            gateway_v6: None,
+            dns_server_v6: None,
+            whitelist_domains: None,
+        }
+    }
+
+    #[test]
+    fn non_ipv6_endpoint_prefers_ipv4_addresses() {
+        let mut addrs: Vec<SocketAddr> = vec![
+            "[2001:db8::1]:443".parse().unwrap(),
+            "203.0.113.10:443".parse().unwrap(),
+            "[2001:db8::2]:443".parse().unwrap(),
+            "203.0.113.11:443".parse().unwrap(),
+        ];
+
+        order_resolved_addrs(&mut addrs, "vpn.example.com:443");
+
+        assert!(addrs[0].is_ipv4());
+        assert!(addrs[1].is_ipv4());
+        assert!(addrs[2].is_ipv6());
+        assert!(addrs[3].is_ipv6());
+    }
+
+    #[test]
+    fn explicit_ipv6_endpoint_keeps_resolution_order() {
+        let original: Vec<SocketAddr> = vec![
+            "[2001:db8::1]:443".parse().unwrap(),
+            "203.0.113.10:443".parse().unwrap(),
+        ];
+        let mut addrs = original.clone();
+
+        order_resolved_addrs(&mut addrs, "[2001:db8::1]:443");
+
+        assert_eq!(addrs, original);
+    }
+
+    #[test]
+    fn detects_explicit_ipv6_host() {
+        assert!(endpoint_host_is_explicit_ipv6("[2001:db8::1]:443"));
+        assert!(endpoint_host_is_explicit_ipv6("2001:db8::1"));
+        assert!(!endpoint_host_is_explicit_ipv6("vpn.example.com:443"));
+        assert!(!endpoint_host_is_explicit_ipv6("203.0.113.10:443"));
+    }
+
+    #[test]
+    fn server_mtu_is_accepted_when_client_uses_default() {
+        let cfg = config_with_mtu(1340);
+
+        assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Default).is_ok());
+    }
+
+    #[test]
+    fn explicit_client_mtu_must_match_server_mtu() {
+        let cfg = config_with_mtu(1340);
+
+        assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Config).is_err());
+        assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Env).is_err());
+        assert!(validate_server_mtu(&cfg, 1340, TunMtuSource::Config).is_ok());
+    }
+
+    #[test]
+    fn server_mtu_must_be_supported() {
+        let cfg = config_with_mtu(1500);
+
+        assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Default).is_err());
     }
 }

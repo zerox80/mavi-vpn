@@ -11,8 +11,8 @@ use anyhow::{Context, Result};
 use bytes::{Buf, Bytes};
 use shared::{icmp, masque, ControlMessage};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use wintun::Adapter;
 
@@ -28,7 +28,13 @@ const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
 
 /// Entry point for the VPN runner. Manages the reconnection loop and WinTUN lifecycle.
-pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
+pub async fn run_vpn(
+    config: Config,
+    running: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
+    last_error: Arc<StdMutex<Option<String>>>,
+) -> Result<()> {
+    connected.store(false, Ordering::SeqCst);
     // 1. Prepare environment
     let cert_pin_bytes =
         decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
@@ -46,8 +52,17 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
         // Always clear stale routes before a new session so a previous
         // (possibly crashed) session does not leave orphaned routing entries.
         cleanup_routes(None);
+        connected.store(false, Ordering::SeqCst);
 
-        let outcome = run_session(&config, &cert_pin_bytes, &adapter, &running).await;
+        let outcome = run_session(
+            &config,
+            &cert_pin_bytes,
+            &adapter,
+            &running,
+            &connected,
+            &last_error,
+        )
+        .await;
 
         if !running.load(Ordering::Relaxed) {
             break;
@@ -61,10 +76,16 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
             ),
             Err(e) => {
                 let err_str = e.to_string();
-                if err_str.contains("AUTH_FAILED") || err_str.contains("Server rejected connection")
+                if let Ok(mut last) = last_error.lock() {
+                    *last = Some(err_str.clone());
+                }
+                if err_str.contains("AUTH_FAILED")
+                    || err_str.contains("Server rejected connection")
+                    || err_str.contains("MTU mismatch")
+                    || err_str.contains("was not applied to adapter")
                 {
                     warn!(
-                        "Authentication permanently denied: {}. Stopping VPN loop.",
+                        "Permanent VPN setup failure: {}. Stopping VPN loop.",
                         err_str
                     );
                     running.store(false, Ordering::Relaxed);
@@ -83,6 +104,7 @@ pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
     }
 
     // 4. Cleanup – routes first, then DNS/NRPT
+    connected.store(false, Ordering::SeqCst);
     cleanup_routes(None);
     remove_nrpt_dns_rule();
     info!("VPN Service Stopped.");
@@ -98,6 +120,8 @@ async fn run_session(
     cert_pin_bytes: &[u8],
     adapter: &Arc<Adapter>,
     global_running: &Arc<AtomicBool>,
+    connected: &Arc<AtomicBool>,
+    last_error: &Arc<StdMutex<Option<String>>>,
 ) -> Result<SessionEnd> {
     let socket = create_udp_socket()?;
 
@@ -112,6 +136,7 @@ async fn run_session(
         .as_deref()
         .and_then(crate::ech_client::decode_hex);
 
+    let connect_started = Instant::now();
     let (connection, server_config, _h3_guard) = connect_and_handshake(
         socket,
         config.token.clone(),
@@ -123,6 +148,10 @@ async fn run_session(
         config.vpn_mtu,
     )
     .await?;
+    info!(
+        "Windows session handshake/config completed in {} ms",
+        connect_started.elapsed().as_millis()
+    );
 
     // 2. Extract Network Configuration
     let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
@@ -171,6 +200,7 @@ async fn run_session(
             .unwrap_or_else(|| v6.to_string()),
     };
 
+    let adapter_config_started = Instant::now();
     let route_cleanup = SessionRouteGuard::new(set_adapter_network_config(
         adapter,
         assigned_ip,
@@ -184,6 +214,10 @@ async fn run_session(
         gateway_v6,
         dns_v6,
     )?);
+    info!(
+        "Windows adapter/network config completed in {} ms",
+        adapter_config_started.elapsed().as_millis()
+    );
 
     // 4. Start WinTUN Session
     let session = Arc::new(
@@ -191,6 +225,10 @@ async fn run_session(
             .start_session(wintun::MAX_RING_CAPACITY)
             .context("Failed to start WinTUN session")?,
     );
+    connected.store(true, Ordering::SeqCst);
+    if let Ok(mut last) = last_error.lock() {
+        *last = None;
+    }
     let session_alive = Arc::new(AtomicBool::new(true));
 
     // 5. Data Hubs
@@ -385,6 +423,7 @@ async fn run_session(
 
     quic_to_tun.abort();
     let _ = tun_to_quic.join();
+    connected.store(false, Ordering::SeqCst);
     drop(route_cleanup);
 
     if global_running.load(Ordering::Relaxed) {

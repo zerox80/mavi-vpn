@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::Instant;
 use tracing::{info, warn};
 use wintun::Adapter;
 
@@ -92,83 +92,77 @@ fn run_powershell_cmd(display: &str, script: &str) -> bool {
     }
 }
 
-fn adapter_alias_by_index(adapter_index: u32) -> Option<String> {
+fn wait_for_adapter_alias(adapter_index: u32, requested_name: &str) -> Result<String> {
     let script = format!(
-        "$adapter = Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object InterfaceIndex -eq {adapter_index} | Select-Object -First 1; if ($adapter) {{ $adapter.Name }}"
+        "$ErrorActionPreference = 'Stop'; \
+        for ($i = 0; $i -lt 300; $i++) {{ \
+            $adapter = Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object InterfaceIndex -eq {adapter_index} | Select-Object -First 1; \
+            if ($adapter) {{ \
+                if ($adapter.Status -eq 'Disabled') {{ $adapter | Enable-NetAdapter -Confirm:$false -ErrorAction Stop | Out-Null }}; \
+                Write-Output $adapter.Name; exit 0 \
+            }}; \
+            Start-Sleep -Milliseconds 100 \
+        }}; \
+        exit 1"
     );
 
+    let started = Instant::now();
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &script])
-        .output()
-        .ok()?;
+        .output()?;
 
     if !out.status.success() {
-        return None;
+        anyhow::bail!(
+            "Adapter '{}' (if={}) did not appear in Windows networking within 30 seconds.",
+            requested_name,
+            adapter_index
+        );
     }
 
     let alias = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if alias.is_empty() {
-        None
-    } else {
-        Some(alias)
-    }
-}
-
-fn wait_for_adapter_alias(adapter_index: u32, requested_name: &str) -> Result<String> {
-    for attempt in 1..=30 {
-        if let Some(alias) = adapter_alias_by_index(adapter_index) {
-            if alias == requested_name {
-                info!(
-                    "WinTUN adapter '{}' is now visible in Windows (if={})",
-                    alias, adapter_index
-                );
-            } else {
-                info!(
-                    "WinTUN adapter requested as '{}' is visible in Windows as '{}' (if={})",
-                    requested_name, alias, adapter_index
-                );
-            }
-            return Ok(alias);
-        }
-
-        info!(
-            "Waiting for adapter interface index {} to become available (attempt {}/30)...",
-            adapter_index, attempt
+        anyhow::bail!(
+            "Adapter '{}' (if={}) appeared without a usable Windows alias.",
+            requested_name,
+            adapter_index
         );
-        std::thread::sleep(Duration::from_millis(1000));
     }
 
-    anyhow::bail!(
-        "Adapter '{}' (if={}) did not appear in Windows networking within 30 seconds.",
-        requested_name,
-        adapter_index
-    )
+    if alias == requested_name {
+        info!(
+            "WinTUN adapter '{}' is visible/enabled in Windows (if={}, waited {} ms)",
+            alias,
+            adapter_index,
+            started.elapsed().as_millis()
+        );
+    } else {
+        info!(
+            "WinTUN adapter requested as '{}' is visible in Windows as '{}' (if={}, waited {} ms)",
+            requested_name,
+            alias,
+            adapter_index,
+            started.elapsed().as_millis()
+        );
+    }
+    Ok(alias)
 }
 
 fn wait_for_ipv4_address(adapter_index: u32, ip: Ipv4Addr) -> bool {
     let ip_str = ip.to_string();
     let script = format!(
-        "$addr = Get-NetIPAddress -InterfaceIndex {adapter_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object IPAddress -eq '{ip_str}' | Select-Object -First 1; if ($addr) {{ 'ok' }}"
+        "for ($i = 0; $i -lt 50; $i++) {{ \
+            $addr = Get-NetIPAddress -InterfaceIndex {adapter_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object IPAddress -eq '{ip_str}' | Select-Object -First 1; \
+            if ($addr) {{ Write-Output 'ok'; exit 0 }}; \
+            Start-Sleep -Milliseconds 100 \
+        }}; \
+        exit 1"
     );
 
-    for _ in 0..10 {
-        let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .output();
-
-        if let Ok(out) = out {
-            if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout);
-                if text.contains("ok") {
-                    return true;
-                }
-            }
-        }
-
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    false
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .map(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ok"))
+        .unwrap_or(false)
 }
 
 pub fn split_endpoint(endpoint: &str) -> (&str, Option<&str>) {
@@ -219,17 +213,10 @@ pub fn set_adapter_network_config(
     );
 
     // 1. Ensure adapter is administratively up once it is visible in the OS.
-    let enable_script = format!(
-        "$adapter = Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object InterfaceIndex -eq {adapter_index} | Select-Object -First 1; if (-not $adapter) {{ throw 'Adapter not found' }}; if ($adapter.Status -eq 'Disabled') {{ $adapter | Enable-NetAdapter -Confirm:$false -ErrorAction Stop | Out-Null }}"
-    );
-    let _ = run_powershell_cmd(
-        &format!("Enable-NetAdapter ifIndex={}", adapter_index),
-        &enable_script,
-    );
-
     // 2. Set IPv4 address — positional syntax is the most reliable across Windows versions.
     //    "netsh interface ipv4 set address <name> static <ip> <mask>"
     //    Do NOT set gateway here — we add split routes manually.
+    let address_started = Instant::now();
     if !run_cmd(
         "netsh",
         &[
@@ -258,13 +245,13 @@ pub fn set_adapter_network_config(
         );
     }
 
-    // Wait for Windows to register the on-link route for the new IP.
-    info!("Waiting for IP to register on adapter...");
-    std::thread::sleep(Duration::from_millis(500));
-
     // Verify the IP was actually set
     if wait_for_ipv4_address(adapter_index, ip) {
-        info!("IP {} confirmed on adapter", ip);
+        info!(
+            "IP {} confirmed on adapter in {} ms",
+            ip,
+            address_started.elapsed().as_millis()
+        );
     } else {
         anyhow::bail!(
             "IPv4 address {} was not applied to adapter '{}' (if={}). Aborting session setup.",
@@ -350,6 +337,7 @@ pub fn set_adapter_network_config(
 
     // 6. Host exception FIRST — must run before split routes so that
     //    Get-NetRoute still sees the real physical default route.
+    let route_started = Instant::now();
     let endpoint_route = add_host_route_exception_fixed(endpoint);
 
     // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 — override default route without deleting it.
@@ -417,7 +405,11 @@ pub fn set_adapter_network_config(
     if let Ok(out) = route_check {
         let text = String::from_utf8_lossy(&out.stdout);
         if text.contains(&gw_str) {
-            info!("Split routes confirmed (gateway {})", gw_str);
+            info!(
+                "Split routes confirmed (gateway {}, {} ms)",
+                gw_str,
+                route_started.elapsed().as_millis()
+            );
         } else {
             warn!("Split routes NOT visible! Check 'route print' output");
         }
@@ -569,125 +561,41 @@ fn set_nrpt_dns_rule(dns_v4: Ipv4Addr, dns_v6: Option<Ipv6Addr>) {
         Some(v6) => format!("'{}','{}'", dns_v4, v6),
         None => format!("'{}'", dns_v4),
     };
+    let started = Instant::now();
 
-    // 1. Add NRPT rule for the root namespace "." to capture all queries
-    let nrpt_cmd = format!("Add-DnsClientNrptRule -Namespace '.' -NameServers {} -Comment '{}' -ErrorAction SilentlyContinue", dns_servers, NRPT_COMMENT);
-    let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &nrpt_cmd])
-        .output();
+    let script = format!(
+        "Add-DnsClientNrptRule -Namespace '.' -NameServers {} -Comment '{}' -ErrorAction SilentlyContinue; \
+        New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Force -ErrorAction SilentlyContinue | Out-Null; \
+        New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name DisableSmartNameResolution -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null; \
+        New-Item -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters' -Force -ErrorAction SilentlyContinue | Out-Null; \
+        New-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters' -Name DisableParallelAandAAAA -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null; \
+        Get-NetAdapter -Name 'MaviVPN*' -ErrorAction SilentlyContinue | Set-NetIPInterface -InterfaceMetric 1 -ErrorAction SilentlyContinue; \
+        Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' }} | ForEach-Object {{ Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue }}; \
+        Clear-DnsClientCache -ErrorAction SilentlyContinue; \
+        Register-DnsClient -ErrorAction SilentlyContinue; \
+        Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue",
+        dns_servers, NRPT_COMMENT
+    );
+    let _ = run_powershell_cmd("Configure DNS leak prevention", &script);
 
-    // 2. Disable Smart Multi-Homed Name Resolution (SMHNR)
-    // Windows sends DNS queries over ALL adapters simultaneously for speed.
-    // This is the #1 cause of DNS leaks - it bypasses NRPT and sends queries
-    // to physical adapter DNS servers (like Google 8.8.8.8 or ISP DNS).
-    let _ = std::process::Command::new("reg")
-        .args([
-            "add",
-            r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient",
-            "/v",
-            "DisableSmartNameResolution",
-            "/t",
-            "REG_DWORD",
-            "/d",
-            "1",
-            "/f",
-        ])
-        .output();
-    // Also disable via the newer Group Policy path
-    let _ = std::process::Command::new("reg")
-        .args([
-            "add",
-            r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters",
-            "/v",
-            "DisableParallelAandAAAA",
-            "/t",
-            "REG_DWORD",
-            "/d",
-            "1",
-            "/f",
-        ])
-        .output();
-
-    // 3. Set VPN adapter to highest priority
-    let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-NetAdapter -Name 'MaviVPN*' | Set-NetIPInterface -InterfaceMetric 1",
-        ])
-        .output();
-
-    // 4. Suppress DNS registration on physical adapters to prevent them from being used
-    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
-        "Get-NetAdapter | Where-Object { $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue }"
-    ]).output();
-
-    // 5. Flush DNS cache and re-register to pick up the new NRPT rules
-    let _ = std::process::Command::new("ipconfig")
-        .args(["/flushdns"])
-        .output();
-    let _ = std::process::Command::new("ipconfig")
-        .args(["/registerdns"])
-        .output();
-
-    // 6. Restart DNS Client service to ensure NRPT + SMHNR changes take effect
-    let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue",
-        ])
-        .output();
-
-    info!("DNS leak prevention configured: NRPT + SMHNR disabled");
+    info!(
+        "DNS leak prevention configured: NRPT + SMHNR disabled ({} ms)",
+        started.elapsed().as_millis()
+    );
 }
 
 /// Cleans up NRPT rules and restores DNS settings on exit.
 pub fn remove_nrpt_dns_rule() {
-    // 1. Remove NRPT rules
-    let cmd = format!("Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue", NRPT_COMMENT);
-    let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &cmd])
-        .output();
-
-    // 2. Re-enable Smart Multi-Homed Name Resolution
-    let _ = std::process::Command::new("reg")
-        .args([
-            "delete",
-            r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient",
-            "/v",
-            "DisableSmartNameResolution",
-            "/f",
-        ])
-        .output();
-    let _ = std::process::Command::new("reg")
-        .args([
-            "delete",
-            r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters",
-            "/v",
-            "DisableParallelAandAAAA",
-            "/f",
-        ])
-        .output();
-
-    // 3. Restore DNS registration on physical adapters
-    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command",
-        "Get-NetAdapter | Where-Object { $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue }"
-    ]).output();
-
-    // 4. Flush DNS cache
-    let _ = std::process::Command::new("ipconfig")
-        .args(["/flushdns"])
-        .output();
-
-    // 5. Restart DNS Client service to restore normal behavior
-    let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue",
-        ])
-        .output();
+    let cmd = format!(
+        "Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Comment -eq '{}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
+        Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name DisableSmartNameResolution -ErrorAction SilentlyContinue; \
+        Remove-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters' -Name DisableParallelAandAAAA -ErrorAction SilentlyContinue; \
+        Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' }} | ForEach-Object {{ Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue }}; \
+        Clear-DnsClientCache -ErrorAction SilentlyContinue; \
+        Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue",
+        NRPT_COMMENT
+    );
+    let _ = run_powershell_cmd("Remove DNS leak prevention", &cmd);
 
     info!("DNS leak prevention removed, normal DNS restored");
 }

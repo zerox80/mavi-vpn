@@ -233,7 +233,7 @@ mod linux_app {
         let ipc_result =
             rt.block_on(async { daemon::send_request(shared::ipc::IpcRequest::Status).await });
 
-        if let Ok(shared::ipc::IpcResponse::Status { running, endpoint }) = ipc_result {
+        if let Ok(shared::ipc::IpcResponse::Status { running, endpoint, .. }) = ipc_result {
             if running {
                 println!("\x1b[1;32mVPN Status: CONNECTED\x1b[0m");
                 if let Some(ep) = endpoint {

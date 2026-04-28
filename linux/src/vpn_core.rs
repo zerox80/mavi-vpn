@@ -35,7 +35,9 @@ const RECONNECT_MAX_SECS: u64 = 30;
 const TUN_DEVICE_NAME: &str = "mavi0";
 
 /// Entry point for the VPN runner. Manages the reconnection loop and TUN lifecycle.
-pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
+pub async fn run_vpn(mut config: Config, running: Arc<AtomicBool>) -> Result<()> {
+    config.normalize_transport();
+
     let cert_pin_bytes =
         decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
 
@@ -165,7 +167,7 @@ async fn run_session(
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
         config.censorship_resistant,
-        config.http3_framing,
+        config.effective_http3_framing(),
         ech_bytes,
         config.vpn_mtu,
     )
@@ -264,7 +266,7 @@ async fn run_session(
     let conn_sender = connection.clone();
     let alive_tun = session_alive.clone();
     let run_tun = global_running.clone();
-    let is_h3_framing = config.http3_framing;
+    let is_h3_framing = config.effective_http3_framing();
     let tun_mtu_for_ptb = mtu;
     let gateway_v6_for_ptb = gateway_v6;
     let tun_to_quic = tokio::spawn(async move {
@@ -332,7 +334,7 @@ async fn run_session(
     let tun_writer = async_tun.clone();
     let alive_quic = session_alive.clone();
     let run_quic = global_running.clone();
-    let is_h3_framing_dl = config.http3_framing;
+    let is_h3_framing_dl = config.effective_http3_framing();
     let quic_to_tun = tokio::spawn(async move {
         loop {
             if !run_quic.load(Ordering::Relaxed) || !alive_quic.load(Ordering::Relaxed) {
@@ -400,6 +402,7 @@ async fn connect_and_handshake(
     ech_config_list: Option<Vec<u8>>,
     vpn_mtu: Option<u16>,
 ) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
+    let effective_http3_framing = http3_framing || censorship_resistant;
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
     // Decide up-front whether we will offer ECH GREASE and which SNI to send on
@@ -440,7 +443,7 @@ async fn connect_and_handshake(
         .with_no_client_auth();
 
     // HTTP/3 transport requires h3. Raw mode keeps mavivpn as the preferred ALPN.
-    client_crypto.alpn_protocols = if http3_framing || censorship_resistant {
+    client_crypto.alpn_protocols = if effective_http3_framing {
         vec![b"h3".to_vec()]
     } else {
         vec![b"mavivpn".to_vec(), b"h3".to_vec()]
@@ -528,7 +531,7 @@ async fn connect_and_handshake(
         .context("QUIC handshake failed")?;
 
     // Application-level handshake
-    let (config, h3_guard) = if http3_framing {
+    let (config, h3_guard) = if effective_http3_framing {
         let (cfg, guard) = connect_and_handshake_h3(connection.clone(), token).await?;
         (cfg, Some(guard))
     } else {

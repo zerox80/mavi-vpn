@@ -198,21 +198,18 @@ async fn wait_for_connected() -> Result<()> {
                 last_error,
                 ..
             }) => {
-                println!(
+                anyhow::bail!(
                     "VPN failed to connect: {}",
                     last_error.as_deref().unwrap_or("unknown error")
                 );
-                return Ok(());
             }
             Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
             Err(e) => {
-                println!("Failed to read status after start: {}", e);
-                return Ok(());
+                anyhow::bail!("Failed to read status after start: {}", e);
             }
         }
     }
-    println!("VPN is still starting. Run status to check progress.");
-    Ok(())
+    anyhow::bail!("VPN is still starting. Run status to check progress.")
 }
 
 // Config loading and prompting functions

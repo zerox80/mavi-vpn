@@ -58,6 +58,20 @@ pub struct Config {
     pub vpn_mtu: Option<u16>,
 }
 
+impl Config {
+    /// CR mode must look like HTTP/3 on the wire and therefore always uses
+    /// CONNECT-IP/H3 framing internally as well.
+    pub fn effective_http3_framing(&self) -> bool {
+        self.http3_framing || self.censorship_resistant
+    }
+
+    pub fn normalize_transport(&mut self) -> bool {
+        let old_http3_framing = self.http3_framing;
+        self.http3_framing = self.effective_http3_framing();
+        self.http3_framing != old_http3_framing
+    }
+}
+
 /// Commands sent from the client UI to the background service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IpcRequest {
@@ -99,6 +113,22 @@ pub enum IpcResponse {
 mod tests {
     use super::*;
 
+    fn test_config(censorship_resistant: bool, http3_framing: bool) -> Config {
+        Config {
+            endpoint: "vpn.example.com:4433".to_string(),
+            token: "tok".to_string(),
+            cert_pin: "deadbeef".to_string(),
+            censorship_resistant,
+            http3_framing,
+            kc_auth: None,
+            kc_url: None,
+            kc_realm: None,
+            kc_client_id: None,
+            ech_config: None,
+            vpn_mtu: None,
+        }
+    }
+
     fn roundtrip_request(req: &IpcRequest) -> IpcRequest {
         let encoded = bincode::serde::encode_to_vec(req, bincode::config::standard()).unwrap();
         let (decoded, _): (IpcRequest, _) =
@@ -114,13 +144,32 @@ mod tests {
     }
 
     #[test]
+    fn effective_http3_framing_matches_transport_invariant() {
+        assert!(!test_config(false, false).effective_http3_framing());
+        assert!(test_config(false, true).effective_http3_framing());
+        assert!(test_config(true, false).effective_http3_framing());
+        assert!(test_config(true, true).effective_http3_framing());
+    }
+
+    #[test]
+    fn normalize_transport_forces_cr_to_h3() {
+        let mut config = test_config(true, false);
+        assert!(config.normalize_transport());
+        assert!(config.http3_framing);
+
+        let mut raw_config = test_config(false, false);
+        assert!(!raw_config.normalize_transport());
+        assert!(!raw_config.http3_framing);
+    }
+
+    #[test]
     fn ipc_request_start_roundtrip() {
         let config = Config {
             endpoint: "vpn.example.com:4433".to_string(),
             token: "secret-token".to_string(),
             cert_pin: "abcdef1234567890".to_string(),
             censorship_resistant: true,
-            http3_framing: false,
+            http3_framing: true,
             kc_auth: Some(true),
             kc_url: Some("https://auth.example.com".to_string()),
             kc_realm: Some("mavi-vpn".to_string()),
@@ -135,7 +184,7 @@ mod tests {
                 assert_eq!(c.endpoint, "vpn.example.com:4433");
                 assert_eq!(c.token, "secret-token");
                 assert!(c.censorship_resistant);
-                assert!(!c.http3_framing);
+                assert!(c.http3_framing);
                 assert_eq!(c.kc_auth, Some(true));
             }
             other => panic!("Expected Start, got {:?}", other),
@@ -210,7 +259,7 @@ mod tests {
             token: "tok".to_string(),
             cert_pin: "deadbeef".to_string(),
             censorship_resistant: true,
-            http3_framing: false,
+            http3_framing: true,
             kc_auth: None,
             kc_url: None,
             kc_realm: None,

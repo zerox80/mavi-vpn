@@ -334,7 +334,9 @@ mod linux_app {
     fn load_config(path: &PathBuf) -> Option<Config> {
         if path.exists() {
             let content = std::fs::read_to_string(path).ok()?;
-            serde_json::from_str(&content).ok()
+            let mut config: Config = serde_json::from_str(&content).ok()?;
+            config.normalize_transport();
+            Some(config)
         } else {
             None
         }
@@ -344,7 +346,9 @@ mod linux_app {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(config)?;
+        let mut config = config.clone();
+        config.normalize_transport();
+        let content = serde_json::to_string_pretty(&config)?;
         std::fs::write(path, content)?;
         #[cfg(target_os = "linux")]
         {
@@ -471,10 +475,15 @@ mod linux_app {
         let cr_input = read_line()?.to_lowercase();
         let censorship_resistant = cr_input == "y" || cr_input == "yes";
 
-        print!("HTTP/3 Framing (RFC 9297)? [y/N]: ");
-        stdout.flush()?;
-        let h3_input = read_line()?.to_lowercase();
-        let http3_framing = h3_input == "y" || h3_input == "yes";
+        let http3_framing = if censorship_resistant {
+            println!("HTTP/3 Framing is required for CR mode and was enabled automatically.");
+            true
+        } else {
+            print!("HTTP/3 Framing (RFC 9297)? [y/N]: ");
+            stdout.flush()?;
+            let h3_input = read_line()?.to_lowercase();
+            h3_input == "y" || h3_input == "yes"
+        };
 
         // Optional hex-encoded ECHConfigList. Prefer $VPN_ECH_CONFIG, fall back to
         // an interactive prompt when CR mode is on.

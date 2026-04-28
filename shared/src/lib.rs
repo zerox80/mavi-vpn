@@ -29,6 +29,13 @@ pub const MIN_TUN_MTU: u16 = 1280;
 /// Maximum allowed inner TUN MTU (inclusive).
 pub const MAX_TUN_MTU: u16 = 1360;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunMtuSource {
+    Config,
+    Env,
+    Default,
+}
+
 /// Resolve the inner TUN MTU from an explicit config value, the `VPN_MTU`
 /// environment variable, or the compiled-in default (1280). The explicit
 /// `vpn_mtu` parameter takes highest priority; it must be within the
@@ -38,10 +45,14 @@ pub const MAX_TUN_MTU: u16 = 1360;
 /// QUIC Payload MTU is always derived as `tun_mtu + QUIC_OVERHEAD_BYTES`
 /// (i.e. +80) and must never be set independently.
 pub fn resolve_tun_mtu(vpn_mtu: Option<u16>) -> u16 {
+    resolve_tun_mtu_with_source(vpn_mtu).0
+}
+
+pub fn resolve_tun_mtu_with_source(vpn_mtu: Option<u16>) -> (u16, TunMtuSource) {
     // 1. Explicit config field (highest priority)
     if let Some(v) = vpn_mtu {
         if (MIN_TUN_MTU..=MAX_TUN_MTU).contains(&v) {
-            return v;
+            return (v, TunMtuSource::Config);
         }
         // Fall through to env / default on out-of-range values
     }
@@ -50,13 +61,13 @@ pub fn resolve_tun_mtu(vpn_mtu: Option<u16>) -> u16 {
     if let Ok(s) = std::env::var("VPN_MTU") {
         if let Ok(v) = s.trim().parse::<u16>() {
             if (MIN_TUN_MTU..=MAX_TUN_MTU).contains(&v) {
-                return v;
+                return (v, TunMtuSource::Env);
             }
         }
     }
 
     // 3. Compiled-in default
-    DEFAULT_TUN_MTU
+    (DEFAULT_TUN_MTU, TunMtuSource::Default)
 }
 
 /// Control-plane messages exchanged over the QUIC bidirectional stream during
@@ -329,15 +340,24 @@ mod tests {
         // None + no env → default
         std::env::remove_var("VPN_MTU");
         assert_eq!(resolve_tun_mtu(None), DEFAULT_TUN_MTU);
+        assert_eq!(
+            resolve_tun_mtu_with_source(None),
+            (DEFAULT_TUN_MTU, TunMtuSource::Default)
+        );
 
         // Explicit out-of-range + no env → default (falls through)
         assert_eq!(resolve_tun_mtu(Some(500)), DEFAULT_TUN_MTU);
         assert_eq!(resolve_tun_mtu(Some(2000)), DEFAULT_TUN_MTU);
         assert_eq!(resolve_tun_mtu(Some(0)), DEFAULT_TUN_MTU);
+        assert_eq!(
+            resolve_tun_mtu_with_source(Some(1340)),
+            (1340, TunMtuSource::Config)
+        );
 
         // Env var fallback
         std::env::set_var("VPN_MTU", "1300");
         assert_eq!(resolve_tun_mtu(None), 1300);
+        assert_eq!(resolve_tun_mtu_with_source(None), (1300, TunMtuSource::Env));
 
         // Explicit takes priority over env
         assert_eq!(resolve_tun_mtu(Some(1340)), 1340);

@@ -169,10 +169,19 @@ async fn handle_ipc_client(
 async fn dispatch_request(req: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> IpcResponse {
     let mut guard = state.lock().await;
     match req {
-        IpcRequest::Status => IpcResponse::Status {
-            running: guard.vpn_running.load(Ordering::SeqCst),
-            endpoint: guard.active_config.as_ref().map(|c| c.endpoint.clone()),
-        },
+        IpcRequest::Status => {
+            let running = guard.vpn_running.load(Ordering::SeqCst);
+            IpcResponse::Status {
+                running,
+                endpoint: guard.active_config.as_ref().map(|c| c.endpoint.clone()),
+                state: if running {
+                    ipc::VpnState::Connected
+                } else {
+                    ipc::VpnState::Stopped
+                },
+                last_error: None,
+            }
+        }
         IpcRequest::Stop => {
             info!("Handling Stop request");
             guard.vpn_running.store(false, Ordering::SeqCst);

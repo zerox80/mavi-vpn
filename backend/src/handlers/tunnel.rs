@@ -16,6 +16,7 @@ struct TunnelStats {
     server_to_client_packets: AtomicU64,
     server_to_client_send_errors: AtomicU64,
     server_to_client_too_large: AtomicU64,
+    server_to_client_queue_len: AtomicU64,
     client_to_server_bytes: AtomicU64,
     client_to_server_packets: AtomicU64,
     client_to_server_tun_drops: AtomicU64,
@@ -40,6 +41,10 @@ pub async fn run_tunnel(
 
     let tun_to_quic = tokio::spawn(async move {
         while let Some(framed) = rx_client.recv().await {
+            send_stats
+                .server_to_client_queue_len
+                .store(rx_client.len() as u64, Ordering::Relaxed);
+
             let (datagram_to_send, packet_for_icmp) = if is_h3 {
                 // In H3 (connect-ip) mode, send the framed datagram directly.
                 // The packet payload for ICMP generation is without the masque prefix.
@@ -119,7 +124,7 @@ pub async fn run_tunnel(
             last_udp_rx_bytes = quic.udp_rx.bytes;
 
             info!(
-                "[SERVER TUNNEL STATS] s2c_app={:.1}mbit c2s_app={:.1}mbit quic_udp_tx={:.1}mbit quic_udp_rx={:.1}mbit rtt={}ms cwnd={} lost_pkts={} lost_bytes={} max_dgram={} dgram_space={} s2c_pkts={} s2c_send_err={} s2c_too_large={} c2s_pkts={} c2s_tun_drops={}",
+                "[SERVER TUNNEL STATS] s2c_app={:.1}mbit c2s_app={:.1}mbit quic_udp_tx={:.1}mbit quic_udp_rx={:.1}mbit rtt={}ms cwnd={} lost_pkts={} lost_bytes={} max_dgram={} dgram_space={} s2c_pkts={} s2c_queue_len={} s2c_send_err={} s2c_too_large={} c2s_pkts={} c2s_tun_drops={}",
                 server_to_client_mbps,
                 client_to_server_mbps,
                 udp_tx_mbps,
@@ -131,6 +136,7 @@ pub async fn run_tunnel(
                 stats_conn.max_datagram_size().unwrap_or(0),
                 stats_conn.datagram_send_buffer_space(),
                 stats.server_to_client_packets.load(Ordering::Relaxed),
+                stats.server_to_client_queue_len.load(Ordering::Relaxed),
                 stats.server_to_client_send_errors.load(Ordering::Relaxed),
                 stats.server_to_client_too_large.load(Ordering::Relaxed),
                 stats.client_to_server_packets.load(Ordering::Relaxed),

@@ -6,7 +6,59 @@ use std::fmt::Display;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::error::TrySendError;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
+
+#[derive(Default)]
+struct TunReaderStats {
+    read_packets: u64,
+    read_bytes: u64,
+    routed_packets: u64,
+    routed_bytes: u64,
+    no_peer_v4: u64,
+    no_peer_v6: u64,
+    invalid_ip: u64,
+    channel_full: u64,
+    channel_closed: u64,
+}
+
+impl TunReaderStats {
+    fn log_interval(&self, previous: &mut Self) {
+        let read_packets = self.read_packets - previous.read_packets;
+        let read_bytes = self.read_bytes - previous.read_bytes;
+        let routed_packets = self.routed_packets - previous.routed_packets;
+        let routed_bytes = self.routed_bytes - previous.routed_bytes;
+        let no_peer_v4 = self.no_peer_v4 - previous.no_peer_v4;
+        let no_peer_v6 = self.no_peer_v6 - previous.no_peer_v6;
+        let invalid_ip = self.invalid_ip - previous.invalid_ip;
+        let channel_full = self.channel_full - previous.channel_full;
+        let channel_closed = self.channel_closed - previous.channel_closed;
+
+        info!(
+            "[SERVER TUN READER STATS] tun_read={:.1}mbit routed={:.1}mbit tun_read_pkts={} routed_pkts={} no_peer_v4={} no_peer_v6={} invalid_ip={} channel_full={} channel_closed={}",
+            read_bytes as f64 * 8.0 / 5_000_000.0,
+            routed_bytes as f64 * 8.0 / 5_000_000.0,
+            read_packets,
+            routed_packets,
+            no_peer_v4,
+            no_peer_v6,
+            invalid_ip,
+            channel_full,
+            channel_closed,
+        );
+
+        *previous = Self {
+            read_packets: self.read_packets,
+            read_bytes: self.read_bytes,
+            routed_packets: self.routed_packets,
+            routed_bytes: self.routed_bytes,
+            no_peer_v4: self.no_peer_v4,
+            no_peer_v6: self.no_peer_v6,
+            invalid_ip: self.invalid_ip,
+            channel_full: self.channel_full,
+            channel_closed: self.channel_closed,
+        };
+    }
+}
 
 pub fn spawn_tun_writer(
     mut tun_writer: tokio::io::WriteHalf<tun::AsyncDevice>,
@@ -59,6 +111,8 @@ pub fn spawn_tun_reader(
 
         let mut last_drop_warn = std::time::Instant::now();
         let mut drop_count = 0u64;
+        let mut stats = TunReaderStats::default();
+        let mut last_logged_stats = TunReaderStats::default();
 
         // Periodic tick used only to flush trailing drop_count warnings when the
         // TUN goes idle. Done via a single long-lived interval instead of a
@@ -82,28 +136,40 @@ pub fn spawn_tun_reader(
                     match res {
                         Ok(0) => break,
                         Ok(n) => {
+                            stats.read_packets += 1;
+                            stats.read_bytes += n as u64;
+
                             pool.extend_from_slice(&DATAGRAM_PREFIX);
                             pool.extend_from_slice(&scratch[..n]);
                             let framed = pool.split().freeze();
                             let packet = framed.slice(DATAGRAM_PREFIX.len()..);
 
-                            if packet.is_empty() { continue; }
+                            if packet.is_empty() {
+                                stats.invalid_ip += 1;
+                                continue;
+                            }
 
                             let version = packet[0] >> 4;
                             if version == 4 {
                                 if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&packet) {
                                     let dest_ip = ipv4_header.destination_addr();
+                                    let packet_len = packet.len() as u64;
 
                                     let mut remove = false;
 
                                     // Fast-path: Only 1 hash traversal!
                                     if let Some(tx_client) = local_peers_v4.get(&dest_ip) {
                                         match tx_client.try_send(framed) {
-                                            Ok(()) => {}
+                                            Ok(()) => {
+                                                stats.routed_packets += 1;
+                                                stats.routed_bytes += packet_len;
+                                            }
                                             Err(TrySendError::Closed(_)) => {
+                                                stats.channel_closed += 1;
                                                 remove = true;
                                             }
                                             Err(TrySendError::Full(_)) => {
+                                                stats.channel_full += 1;
                                                 record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
                                             }
                                         }
@@ -112,16 +178,22 @@ pub fn spawn_tun_reader(
                                         if let Some(tx_client) = tx_client_opt {
                                             match tx_client.try_send(framed) {
                                                 Ok(()) => {
+                                                    stats.routed_packets += 1;
+                                                    stats.routed_bytes += packet_len;
                                                     local_peers_v4.insert(dest_ip, tx_client);
                                                 }
                                                 Err(TrySendError::Full(_)) => {
+                                                    stats.channel_full += 1;
                                                     record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
                                                     local_peers_v4.insert(dest_ip, tx_client);
                                                 }
                                                 Err(TrySendError::Closed(_)) => {
+                                                    stats.channel_closed += 1;
                                                     state_reader.peers.remove(&dest_ip);
                                                 }
                                             }
+                                        } else {
+                                            stats.no_peer_v4 += 1;
                                         }
                                     }
 
@@ -129,20 +201,28 @@ pub fn spawn_tun_reader(
                                         local_peers_v4.remove(&dest_ip);
                                         state_reader.peers.remove(&dest_ip);
                                     }
+                                } else {
+                                    stats.invalid_ip += 1;
                                 }
                             } else if version == 6 {
                                 if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&packet) {
                                     let dest_ip = ipv6_header.destination_addr();
+                                    let packet_len = packet.len() as u64;
 
                                     let mut remove = false;
 
                                     if let Some(tx_client) = local_peers_v6.get(&dest_ip) {
                                         match tx_client.try_send(framed) {
-                                            Ok(()) => {}
+                                            Ok(()) => {
+                                                stats.routed_packets += 1;
+                                                stats.routed_bytes += packet_len;
+                                            }
                                             Err(TrySendError::Closed(_)) => {
+                                                stats.channel_closed += 1;
                                                 remove = true;
                                             }
                                             Err(TrySendError::Full(_)) => {
+                                                stats.channel_full += 1;
                                                 record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
                                             }
                                         }
@@ -151,16 +231,22 @@ pub fn spawn_tun_reader(
                                         if let Some(tx_client) = tx_client_opt {
                                             match tx_client.try_send(framed) {
                                                 Ok(()) => {
+                                                    stats.routed_packets += 1;
+                                                    stats.routed_bytes += packet_len;
                                                     local_peers_v6.insert(dest_ip, tx_client);
                                                 }
                                                 Err(TrySendError::Full(_)) => {
+                                                    stats.channel_full += 1;
                                                     record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
                                                     local_peers_v6.insert(dest_ip, tx_client);
                                                 }
                                                 Err(TrySendError::Closed(_)) => {
+                                                    stats.channel_closed += 1;
                                                     state_reader.peers_v6.remove(&dest_ip);
                                                 }
                                             }
+                                        } else {
+                                            stats.no_peer_v6 += 1;
                                         }
                                     }
 
@@ -168,7 +254,11 @@ pub fn spawn_tun_reader(
                                         local_peers_v6.remove(&dest_ip);
                                         state_reader.peers_v6.remove(&dest_ip);
                                     }
+                                } else {
+                                    stats.invalid_ip += 1;
                                 }
+                            } else {
+                                stats.invalid_ip += 1;
                             }
                         }
                         Err(e) => {
@@ -178,6 +268,8 @@ pub fn spawn_tun_reader(
                     }
                 }
                 _ = flush_tick.tick() => {
+                    stats.log_interval(&mut last_logged_stats);
+
                     // Flush any trailing drop counts that didn't hit the 1000-packet threshold.
                     if drop_count > 0 {
                         warn!(

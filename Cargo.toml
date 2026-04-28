@@ -33,9 +33,9 @@ tempfile = "3"
 proptest = "1"
 
 [patch.crates-io]
-quinn = { git = "https://github.com/zerox80/quinn", branch = "mavi-vpn-bug-fixes" }
-quinn-proto = { git = "https://github.com/zerox80/quinn", branch = "mavi-vpn-bug-fixes" }
-quinn-udp = { git = "https://github.com/zerox80/quinn", branch = "mavi-vpn-bug-fixes" }
+quinn = { git = "https://github.com/zerox80/quinn", branch = "main" }
+quinn-proto = { git = "https://github.com/zerox80/quinn", branch = "main" }
+quinn-udp = { git = "https://github.com/zerox80/quinn", branch = "main" }
 # Use our h3 fork so h3-quinn resolves to Quinn 0.12. This prevents a second
 # crates.io Quinn 0.11 dependency from being pulled in alongside the fork.
 h3 = { git = "https://github.com/zerox80/h3", branch = "main" }

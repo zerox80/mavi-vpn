@@ -35,6 +35,7 @@ impl Drop for H3SessionGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_and_handshake(
     socket: std::net::UdpSocket,
     token: String,

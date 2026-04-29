@@ -129,7 +129,7 @@ cd gui && cargo tauri build
 
 ### Usage
 
-**GUI:** Launch "Mavi VPN" from the Start Menu or Desktop shortcut. Configure endpoint, certificate PIN, and optionally Keycloak in Settings. Click Connect.
+**GUI:** Launch "Mavi VPN" from the Start Menu or Desktop shortcut. Add or edit a saved connection, then configure endpoint, certificate PIN, PSK or Keycloak, and optional VPN MTU in that connection editor. Select the connection and click Connect.
 
 **CLI:**
 ```powershell

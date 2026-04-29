@@ -150,15 +150,16 @@ Diese Konfiguration verwenden? [J/n]:
 
 Die GUI verbindet sich automatisch mit dem laufenden Service.
 
-1. **Starten** – `mavi-vpn-gui.exe` doppelklicken
-2. **Settings öffnen** – Klick auf „Settings" (beim ersten Start automatisch offen)
+1. **Starten** - `mavi-vpn-gui.exe` doppelklicken
+2. **Verbindung anlegen** - Klick auf `+ ADD CONNECTION`
 3. **Konfigurieren:**
    - Server Endpoint eintragen
-   - Auth Token oder Keycloak aktivieren
+   - Pre-shared Key eintragen oder Keycloak aktivieren
    - Certificate PIN eingeben
-   - „Save Settings" klicken
-4. **Verbinden** – „Connect" Button klicken
-5. **System Tray** – Die GUI minimiert in den System Tray; Rechtsklick für Connect/Disconnect/Quit
+   - optional ECH, CR/H3 und VPN MTU setzen
+   - Verbindung speichern
+4. **Verbinden** - gespeicherte Verbindung auswaehlen und `CONNECT` klicken
+5. **System Tray** - Die GUI minimiert in den System Tray; Rechtsklick fuer Connect/Disconnect/Quit
 
 ---
 
@@ -175,13 +176,13 @@ Client ID: mavi-client
 → Browser öffnet sich → Login → Token wird automatisch übernommen
 ```
 
-**GUI:** Keycloak-Option im Settings-Panel aktivieren, dann auf „Connect" – der Browser öffnet sich automatisch.
+**GUI:** Keycloak-Option im Connection Editor der gespeicherten Verbindung aktivieren, dann auf `CONNECT` klicken. Der Browser oeffnet sich automatisch.
 
 ---
 
 ## Konfiguration
 
-Die CLI speichert `config.json` neben der Executable. Die GUI speichert unter `%APPDATA%\com.mavi.vpn\config.json`.
+Die CLI speichert `config.json` unter `%APPDATA%\MaviVPN`. Die GUI speichert die bearbeitbaren Verbindungen in ihrer Tauri-App-Konfiguration; `config.json` ist dort nur noch ein interner Runtime-Snapshot fuer den Verbindungsstart.
 
 **Beispiel:**
 ```json

@@ -31,17 +31,18 @@ export function friendlyError(e) {
   return s;
 }
 
-export function toConfig(conn, token) {
+export function toConfig(conn) {
+  const kcAuth = !!conn.kc_auth;
   return {
     endpoint: conn.endpoint,
-    token,
+    token: kcAuth ? '' : (conn.token ?? ''),
     cert_pin: conn.cert_pin,
     censorship_resistant: !!conn.censorship_resistant,
     http3_framing: !!conn.http3_framing,
-    kc_auth: conn.kc_auth ?? null,
-    kc_url: conn.kc_url ?? null,
-    kc_realm: conn.kc_realm ?? null,
-    kc_client_id: conn.kc_client_id ?? null,
+    kc_auth: kcAuth || null,
+    kc_url: kcAuth ? (conn.kc_url ?? null) : null,
+    kc_realm: kcAuth ? (conn.kc_realm ?? null) : null,
+    kc_client_id: kcAuth ? (conn.kc_client_id ?? null) : null,
     ech_config: conn.ech_config ?? null,
     vpn_mtu: conn.vpn_mtu ?? null,
   };

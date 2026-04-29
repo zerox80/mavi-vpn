@@ -17,12 +17,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mavi.vpn.ui.components.MaviTextField
@@ -43,24 +41,21 @@ fun VpnScreen(
     val context = LocalContext.current
     val isConnected by viewModel.isConnected.collectAsState()
     
-    val authToken by viewModel.authToken.collectAsState()
     val useKeycloak by viewModel.useKeycloak.collectAsState()
 
-    // Keycloak token refresh loop logic
-    LaunchedEffect(useKeycloak, authToken, isConnected) {
-        if (!useKeycloak || authToken.isEmpty()) return@LaunchedEffect
+    // Mirror token changes persisted by MaviVpnService without owning refresh/logout decisions.
+    LaunchedEffect(useKeycloak) {
+        if (!useKeycloak) return@LaunchedEffect
 
+        val prefs = com.mavi.vpn.data.PrefsManager(viewModel.getApplication())
         while (true) {
-            val prefs = com.mavi.vpn.data.PrefsManager(viewModel.getApplication())
             val freshToken = prefs.savedToken
-            if (freshToken.isNotEmpty() && freshToken != authToken) {
+            if (freshToken != viewModel.authToken.value) {
                 viewModel.authToken.value = freshToken
             }
-            if (freshToken.isNotEmpty() && !OAuthHelper.isAccessTokenUsable(freshToken, skewSeconds = 0)) {
-                if (isConnected) onDisconnect()
-                viewModel.clearAuthToken()
+
+            if (prefs.savedKeycloakSessionInvalid) {
                 viewModel.updateErrorMessage("Keycloak access token expired. Please login again.")
-                break
             }
             delay(5_000)
         }
@@ -163,6 +158,7 @@ fun HomeView(
     val certPin by viewModel.certPin.collectAsState()
     val useKeycloak by viewModel.useKeycloak.collectAsState()
     val kcUrl by viewModel.kcUrl.collectAsState()
+    val hasKeycloakRefreshToken = viewModel.hasSavedKeycloakRefreshToken()
 
     val state = if (isConnected) MaviCoreState.ON else MaviCoreState.OFF
     val labelColor = if (isConnected) T.ok else T.mute
@@ -245,12 +241,9 @@ fun HomeView(
                         viewModel.updateErrorMessage("Please enter a server endpoint in Config.")
                         onGoToConfig()
                     } else if (useKeycloak) {
-                        if (kcUrl.isEmpty() || authToken.isEmpty()) {
+                        val hasKeycloakSession = authToken.isNotEmpty() || hasKeycloakRefreshToken
+                        if (kcUrl.isEmpty() || !hasKeycloakSession) {
                             viewModel.updateErrorMessage("Please login with Keycloak first in Config.")
-                            onGoToConfig()
-                        } else if (!OAuthHelper.isAccessTokenUsable(authToken)) {
-                            viewModel.clearAuthToken()
-                            viewModel.updateErrorMessage("Keycloak login expired. Please login again.")
                             onGoToConfig()
                         } else {
                             viewModel.saveKeycloakDetails()
@@ -340,7 +333,10 @@ fun ConfigView(
     val kcClientId by viewModel.kcClientId.collectAsState()
     
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val hasKeycloakRefreshToken = viewModel.hasSavedKeycloakRefreshToken()
+    val keycloakSessionInvalid = viewModel.isSavedKeycloakSessionInvalid()
     val hasKeycloakToken = useKeycloak && authToken.isNotEmpty()
+    val hasKeycloakSession = hasKeycloakToken || hasKeycloakRefreshToken
     val keycloakTokenUsableLocally = hasKeycloakToken && OAuthHelper.isAccessTokenUsable(authToken, skewSeconds = 0)
 
     Column(
@@ -500,13 +496,17 @@ fun ConfigView(
                         Text("Login with Keycloak", color = Color.White)
                     }
 
-                    if (hasKeycloakToken) {
+                    if (hasKeycloakSession || keycloakSessionInvalid) {
                         val statusText = when {
+                            keycloakSessionInvalid -> "Session expired - login required"
                             keycloakTokenUsableLocally -> "Authenticated locally"
-                            else -> "Token expired locally"
+                            hasKeycloakRefreshToken -> "Access token will refresh"
+                            else -> "Login required"
                         }
                         val statusColor = when {
+                            keycloakSessionInvalid -> T.warn
                             keycloakTokenUsableLocally -> T.ok
+                            hasKeycloakRefreshToken -> T.ok
                             else -> T.warn
                         }
 

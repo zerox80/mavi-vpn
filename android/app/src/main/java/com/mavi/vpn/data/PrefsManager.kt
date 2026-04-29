@@ -22,6 +22,10 @@ class PrefsManager(context: Context) {
         get() = prefs.getString("saved_refresh_token", "") ?: ""
         set(value) = prefs.edit().putString("saved_refresh_token", value).apply()
 
+    var savedKeycloakSessionInvalid: Boolean
+        get() = prefs.getBoolean("saved_keycloak_session_invalid", false)
+        set(value) = prefs.edit().putBoolean("saved_keycloak_session_invalid", value).apply()
+
     var savedPin: String
         get() = prefs.getString("saved_pin", "") ?: ""
         set(value) = prefs.edit().putString("saved_pin", value).apply()

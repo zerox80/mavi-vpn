@@ -31,6 +31,18 @@ export function friendlyError(e) {
   return s;
 }
 
+export function heroFromVpnStatus(status = {}, currentHero = 'off', disconnecting = false) {
+  const serviceAvailable = !!status.service_available;
+  const running = !!status.running;
+  const vpnState = status.state || (running ? 'Connected' : 'Stopped');
+
+  if (!serviceAvailable || vpnState === 'Failed' || vpnState === 'Stopped') return 'off';
+  if (disconnecting || vpnState === 'Stopping') return 'disconnecting';
+  if (running || vpnState === 'Connected') return 'on';
+  if (vpnState === 'Starting') return 'connecting';
+  return currentHero === 'disconnecting' ? 'disconnecting' : 'off';
+}
+
 export function toConfig(conn) {
   const kcAuth = !!conn.kc_auth;
   return {

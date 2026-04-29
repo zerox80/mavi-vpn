@@ -35,6 +35,10 @@ impl Drop for H3SessionGuard {
     }
 }
 
+pub(crate) fn effective_http3_framing(censorship_resistant: bool, http3_framing: bool) -> bool {
+    http3_framing || censorship_resistant
+}
+
 pub async fn connect_and_handshake(
     socket: std::net::UdpSocket,
     token: String,
@@ -46,6 +50,7 @@ pub async fn connect_and_handshake(
     vpn_mtu: Option<u16>,
 ) -> anyhow::Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
     info!("Connect and Handshake started. Pin: {}", cert_pin);
+    let effective_http3_framing = effective_http3_framing(censorship_resistant, http3_framing);
 
     // Verifier Setup
     let verifier = if let Some(bytes) = decode_hex(&cert_pin) {
@@ -65,7 +70,7 @@ pub async fn connect_and_handshake(
     .with_no_client_auth();
 
     // HTTP/3 transport requires h3. Raw mode keeps mavivpn as the preferred ALPN.
-    if http3_framing || censorship_resistant {
+    if effective_http3_framing {
         client_crypto.alpn_protocols = vec![b"h3".to_vec()];
         info!("HTTP/3 transport enabled. ALPN: h3");
     } else {
@@ -178,7 +183,7 @@ pub async fn connect_and_handshake(
     // stream and driver task alive for the whole VPN session. The caller must
     // hold it until the session ends; dropping it earlier can close the HTTP/3
     // control plane while QUIC datagrams are still being used.
-    let (config, h3_guard) = if http3_framing {
+    let (config, h3_guard) = if effective_http3_framing {
         let (cfg, guard) = connect_and_handshake_h3(connection.clone(), token).await?;
         (cfg, Some(guard))
     } else {
@@ -389,6 +394,14 @@ mod tests {
     #[test]
     fn endpoint_host_ipv6_no_brackets() {
         assert_eq!(endpoint_host("::1"), "::1");
+    }
+
+    #[test]
+    fn effective_http3_framing_matches_transport_invariant() {
+        assert!(!effective_http3_framing(false, false));
+        assert!(effective_http3_framing(false, true));
+        assert!(effective_http3_framing(true, false));
+        assert!(effective_http3_framing(true, true));
     }
 
     fn config_with_mtu(mtu: u16) -> ControlMessage {

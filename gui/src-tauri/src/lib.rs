@@ -5,7 +5,7 @@
 
 mod oauth;
 
-use shared::ipc::{Config, IpcRequest, IpcResponse, LOCAL_IPC_ADDR};
+use shared::ipc::{Config, IpcRequest, IpcResponse, VpnState, LOCAL_IPC_ADDR};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -77,6 +77,8 @@ struct VpnStatus {
     running: bool,
     endpoint: Option<String>,
     service_available: bool,
+    state: VpnState,
+    last_error: Option<String>,
 }
 
 #[tauri::command]
@@ -122,10 +124,17 @@ async fn vpn_disconnect() -> Result<String, String> {
 #[tauri::command]
 async fn vpn_status() -> Result<VpnStatus, String> {
     match send_ipc_request(&IpcRequest::Status).await {
-        Ok(IpcResponse::Status { running, endpoint }) => Ok(VpnStatus {
+        Ok(IpcResponse::Status {
+            running,
+            endpoint,
+            state,
+            last_error,
+        }) => Ok(VpnStatus {
             running,
             endpoint,
             service_available: true,
+            state,
+            last_error,
         }),
         Ok(IpcResponse::Error(e)) => Err(e),
         Ok(_) => Err("Unexpected response".into()),
@@ -133,6 +142,8 @@ async fn vpn_status() -> Result<VpnStatus, String> {
             running: false,
             endpoint: None,
             service_available: false,
+            state: VpnState::Stopped,
+            last_error: None,
         }),
     }
 }
@@ -324,15 +335,24 @@ fn start_status_poller(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             let status = match send_ipc_request(&IpcRequest::Status).await {
-                Ok(IpcResponse::Status { running, endpoint }) => VpnStatus {
+                Ok(IpcResponse::Status {
+                    running,
+                    endpoint,
+                    state,
+                    last_error,
+                }) => VpnStatus {
                     running,
                     endpoint,
                     service_available: true,
+                    state,
+                    last_error,
                 },
                 _ => VpnStatus {
                     running: false,
                     endpoint: None,
                     service_available: false,
+                    state: VpnState::Stopped,
+                    last_error: None,
                 },
             };
             let _ = app.emit("vpn-status-update", &status);
@@ -462,6 +482,8 @@ mod tests {
             running: true,
             endpoint: Some("vpn.example.com:443".into()),
             service_available: true,
+            state: VpnState::Connected,
+            last_error: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("true"));

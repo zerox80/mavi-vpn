@@ -28,7 +28,9 @@ const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
 
 /// Entry point for the VPN runner. Manages the reconnection loop and WinTUN lifecycle.
-pub async fn run_vpn(config: Config, running: Arc<AtomicBool>) -> Result<()> {
+pub async fn run_vpn(mut config: Config, running: Arc<AtomicBool>) -> Result<()> {
+    config.normalize_transport();
+
     // 1. Prepare environment
     let cert_pin_bytes =
         decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
@@ -118,7 +120,7 @@ async fn run_session(
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
         config.censorship_resistant,
-        config.http3_framing,
+        config.effective_http3_framing(),
         ech_bytes,
         config.vpn_mtu,
     )
@@ -226,7 +228,7 @@ async fn run_session(
     let alive_pump = session_alive.clone();
     let run_pump = global_running.clone();
     let gateway_v6_for_ptb = gateway_v6;
-    let is_h3_framing = config.http3_framing;
+    let is_h3_framing = config.effective_http3_framing();
     let tun_mtu_for_ptb = mtu;
     let tun_to_quic = std::thread::spawn(move || {
         let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
@@ -312,7 +314,7 @@ async fn run_session(
     let alive_quic_in = session_alive.clone();
     let run_quic_in = global_running.clone();
     let conn_quic = connection.clone();
-    let is_h3_framing_dl = config.http3_framing;
+    let is_h3_framing_dl = config.effective_http3_framing();
     let quic_to_tun = tokio::spawn(async move {
         let mut pending_datagram: Option<Bytes> = None;
         let mut yield_count = 0u8;

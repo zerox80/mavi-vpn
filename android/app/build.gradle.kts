@@ -70,4 +70,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.browser:browser:1.10.0")
     implementation("com.squareup.okhttp3:okhttp:5.3.2") // For token exchange
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

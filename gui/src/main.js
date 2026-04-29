@@ -32,6 +32,8 @@ const state = {
   serviceAvailable: false,
   running: false,
   activeEndpoint: null,
+  vpnState: 'Stopped',
+  lastError: null,
   // Session wall clock
   sessionStart: null,
   // Saved UI prefs
@@ -448,6 +450,8 @@ function applyStatus(status) {
   state.serviceAvailable = !!status.service_available;
   state.running = !!status.running;
   state.activeEndpoint = status.endpoint || null;
+  state.vpnState = status.state || (state.running ? 'Connected' : 'Stopped');
+  state.lastError = status.last_error || null;
 
   const btn = $('connect-btn');
 
@@ -460,13 +464,21 @@ function applyStatus(status) {
     return;
   }
 
-  if (state.running) {
+  if (state.vpnState === 'Failed') {
+    setHero('off');
+    state.sessionStart = null;
+    btn.disabled = !activeConn();
+    btn.title = activeConn() ? '' : 'Select or add a saved connection first';
+    if (state.lastError) showToast(friendlyError(state.lastError), 'error');
+  } else if (state.running || state.vpnState === 'Connected') {
     // First transition into 'on' → stamp sessionStart
     if (state.hero !== 'on') state.sessionStart = Date.now();
     setHero('on');
     btn.disabled = false;
     btn.title = '';
     hideToast('hint');
+  } else if (state.vpnState === 'Starting') {
+    setHero('connecting');
   } else if (state.hero !== 'connecting') {
     setHero('off');
     state.sessionStart = null;

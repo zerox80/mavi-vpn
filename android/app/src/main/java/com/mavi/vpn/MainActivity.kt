@@ -107,10 +107,7 @@ class MainActivity : ComponentActivity() {
                         viewModel.kcClientId.value
                     )
                     if (tokens != null) {
-                        viewModel.authToken.value = tokens.accessToken
-                        val prefs = com.mavi.vpn.data.PrefsManager(this@MainActivity)
-                        prefs.savedRefreshToken = tokens.refreshToken
-                        viewModel.saveServerDetails()
+                        viewModel.saveOAuthTokens(tokens)
                         recreate()
                     }
                 }

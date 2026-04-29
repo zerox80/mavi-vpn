@@ -31,17 +31,30 @@ export function friendlyError(e) {
   return s;
 }
 
-export function toConfig(conn, token) {
+export function heroFromVpnStatus(status = {}, currentHero = 'off', disconnecting = false) {
+  const serviceAvailable = !!status.service_available;
+  const running = !!status.running;
+  const vpnState = status.state || (running ? 'Connected' : 'Stopped');
+
+  if (!serviceAvailable || vpnState === 'Failed' || vpnState === 'Stopped') return 'off';
+  if (disconnecting || vpnState === 'Stopping') return 'disconnecting';
+  if (running || vpnState === 'Connected') return 'on';
+  if (vpnState === 'Starting') return 'connecting';
+  return currentHero === 'disconnecting' ? 'disconnecting' : 'off';
+}
+
+export function toConfig(conn) {
+  const kcAuth = !!conn.kc_auth;
   return {
     endpoint: conn.endpoint,
-    token,
+    token: kcAuth ? '' : (conn.token ?? ''),
     cert_pin: conn.cert_pin,
     censorship_resistant: !!conn.censorship_resistant,
     http3_framing: !!conn.http3_framing,
-    kc_auth: conn.kc_auth ?? null,
-    kc_url: conn.kc_url ?? null,
-    kc_realm: conn.kc_realm ?? null,
-    kc_client_id: conn.kc_client_id ?? null,
+    kc_auth: kcAuth || null,
+    kc_url: kcAuth ? (conn.kc_url ?? null) : null,
+    kc_realm: kcAuth ? (conn.kc_realm ?? null) : null,
+    kc_client_id: kcAuth ? (conn.kc_client_id ?? null) : null,
     ech_config: conn.ech_config ?? null,
     vpn_mtu: conn.vpn_mtu ?? null,
   };

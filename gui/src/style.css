@@ -347,15 +347,7 @@ input::placeholder { color: var(--mute); opacity: 1; }
 .net-panel .row { display: flex; justify-content: space-between; gap: 10px; }
 .net-panel .row span:last-child { color: var(--ink); }
 
-/* SETTINGS tab */
-.settings-panel {
-  padding: 16px;
-  overflow-y: auto;
-  flex: 1;
-  min-height: 0;
-}
-.settings-panel::-webkit-scrollbar { width: 8px; }
-.settings-panel::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+/* Forms */
 .field { margin-bottom: 12px; }
 .field label {
   display: block;
@@ -367,7 +359,8 @@ input::placeholder { color: var(--mute); opacity: 1; }
   margin-bottom: 5px;
 }
 .field input[type="text"],
-.field input[type="password"] {
+.field input[type="password"],
+.field input[type="number"] {
   width: 100%;
   height: 32px;
   padding: 0 10px;
@@ -380,7 +373,8 @@ input::placeholder { color: var(--mute); opacity: 1; }
   transition: border-color 0.15s;
 }
 .field input[type="text"]:focus,
-.field input[type="password"]:focus { border-color: var(--accent); }
+.field input[type="password"]:focus,
+.field input[type="number"]:focus { border-color: var(--accent); }
 
 .checkbox-field {
   display: flex; align-items: center; gap: 8px;
@@ -399,27 +393,6 @@ input::placeholder { color: var(--mute); opacity: 1; }
   color: var(--ink);
   text-transform: none;
 }
-.settings-panel hr {
-  border: none;
-  border-top: 1px solid var(--line);
-  margin: 14px 0;
-}
-
-.btn-save {
-  width: 100%;
-  height: 36px;
-  margin-top: 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--ink);
-  background: var(--elevated);
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0.3px;
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
-}
-.btn-save:hover { border-color: var(--accent); color: var(--accent); }
-
 /* =============================================================================
    Right pane: hero
    ========================================================================== */

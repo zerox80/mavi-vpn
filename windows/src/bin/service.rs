@@ -42,6 +42,7 @@ const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 struct VpnServiceState {
     vpn_running: Arc<AtomicBool>,
     vpn_connected: Arc<AtomicBool>,
+    vpn_stopping: Arc<AtomicBool>,
     last_error: Arc<StdMutex<Option<String>>>,
     vpn_task: Option<tokio::task::JoinHandle<()>>,
     active_config: Option<ipc::Config>,
@@ -232,6 +233,7 @@ async fn run_service_loop(
     let state = Arc::new(Mutex::new(VpnServiceState {
         vpn_running: Arc::new(AtomicBool::new(false)),
         vpn_connected: Arc::new(AtomicBool::new(false)),
+        vpn_stopping: Arc::new(AtomicBool::new(false)),
         last_error: Arc::new(StdMutex::new(None)),
         vpn_task: None,
         active_config: None,
@@ -272,9 +274,13 @@ async fn run_service_loop(
             info!("Stop signal flag is true, terminating service loop.");
             let mut guard = state.lock().await;
             guard.vpn_running.store(false, Ordering::SeqCst);
+            guard.vpn_connected.store(false, Ordering::SeqCst);
             if let Some(t) = guard.vpn_task.take() {
+                guard.vpn_stopping.store(true, Ordering::SeqCst);
                 drop(guard);
                 let _ = t.await;
+            } else {
+                guard.vpn_stopping.store(false, Ordering::SeqCst);
             }
             break;
         }
@@ -374,10 +380,10 @@ async fn dispatch_request(
     match req {
         ipc::IpcRequest::Status => {
             let connected = guard.vpn_connected.load(Ordering::SeqCst);
-            let starting = guard.vpn_running.load(Ordering::SeqCst)
-                || guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished());
+            let stopping = guard.vpn_stopping.load(Ordering::SeqCst);
+            let starting = guard.vpn_running.load(Ordering::SeqCst) && !connected;
             let last_error = guard.last_error.lock().ok().and_then(|e| e.clone());
-            let state = classify_status(connected, starting, last_error.as_deref());
+            let state = classify_status(connected, stopping, starting, last_error.as_deref());
 
             ipc::IpcResponse::Status {
                 running: connected,
@@ -388,8 +394,10 @@ async fn dispatch_request(
         }
         ipc::IpcRequest::Stop => {
             info!("Handling Stop request from client");
+            let task_running = guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished());
             guard.vpn_running.store(false, Ordering::SeqCst);
             guard.vpn_connected.store(false, Ordering::SeqCst);
+            guard.vpn_stopping.store(task_running, Ordering::SeqCst);
             if let Ok(mut last_error) = guard.last_error.lock() {
                 *last_error = None;
             }
@@ -398,19 +406,23 @@ async fn dispatch_request(
         }
         ipc::IpcRequest::Start(config) => {
             info!("Handling Start request for endpoint: {}", config.endpoint);
-            let still_running = guard.vpn_running.load(Ordering::SeqCst)
-                || guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished());
-            if still_running {
+            if guard.vpn_stopping.load(Ordering::SeqCst) {
+                ipc::IpcResponse::Error("VPN is stopping; retry shortly".to_string())
+            } else if guard.vpn_running.load(Ordering::SeqCst)
+                || guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished())
+            {
                 ipc::IpcResponse::Error("VPN is already running".to_string())
             } else {
                 guard.active_config = Some(config.clone());
                 guard.vpn_running.store(true, Ordering::SeqCst);
                 guard.vpn_connected.store(false, Ordering::SeqCst);
+                guard.vpn_stopping.store(false, Ordering::SeqCst);
                 if let Ok(mut last_error) = guard.last_error.lock() {
                     *last_error = None;
                 }
                 let flag = guard.vpn_running.clone();
                 let connected = guard.vpn_connected.clone();
+                let stopping = guard.vpn_stopping.clone();
                 let last_error = guard.last_error.clone();
 
                 guard.vpn_task = Some(tokio::spawn(async move {
@@ -424,12 +436,18 @@ async fn dispatch_request(
                     {
                         let msg = e.to_string();
                         error!("VPN task failed: {}", msg);
-                        if let Ok(mut last) = last_error.lock() {
-                            *last = Some(msg);
+                        if flag.load(Ordering::SeqCst) {
+                            if let Ok(mut last) = last_error.lock() {
+                                *last = Some(msg);
+                            }
+                        } else if let Ok(mut last) = last_error.lock() {
+                            // Stop-requested failures are part of teardown, not user-visible connection errors.
+                            *last = None;
                         }
                     }
                     flag.store(false, Ordering::SeqCst);
                     connected.store(false, Ordering::SeqCst);
+                    stopping.store(false, Ordering::SeqCst);
                 }));
                 ipc::IpcResponse::Ok
             }
@@ -437,18 +455,24 @@ async fn dispatch_request(
     }
 }
 
-fn classify_status(connected: bool, starting: bool, last_error: Option<&str>) -> ipc::VpnState {
+fn classify_status(
+    connected: bool,
+    stopping: bool,
+    starting: bool,
+    last_error: Option<&str>,
+) -> ipc::VpnState {
     if connected {
         ipc::VpnState::Connected
     } else if last_error.is_some() {
         ipc::VpnState::Failed
+    } else if stopping {
+        ipc::VpnState::Stopping
     } else if starting {
         ipc::VpnState::Starting
     } else {
         ipc::VpnState::Stopped
     }
 }
-
 fn harden_ipc_token_permissions(token_path: &Path) {
     let mut args = vec![
         token_path.to_string_lossy().to_string(),
@@ -505,22 +529,111 @@ mod tests {
     #[test]
     fn classify_status_prefers_connected() {
         assert_eq!(
-            classify_status(true, true, Some("previous error")),
+            classify_status(true, true, true, Some("previous error")),
             ipc::VpnState::Connected
         );
     }
 
     #[test]
-    fn classify_status_reports_failed_before_starting() {
+    fn classify_status_reports_failed_before_stopping_or_starting() {
         assert_eq!(
-            classify_status(false, true, Some("MTU mismatch")),
+            classify_status(false, true, true, Some("MTU mismatch")),
             ipc::VpnState::Failed
         );
     }
 
     #[test]
-    fn classify_status_reports_starting_and_stopped() {
-        assert_eq!(classify_status(false, true, None), ipc::VpnState::Starting);
-        assert_eq!(classify_status(false, false, None), ipc::VpnState::Stopped);
+    fn classify_status_reports_stopping_starting_and_stopped() {
+        assert_eq!(
+            classify_status(false, true, true, None),
+            ipc::VpnState::Stopping
+        );
+        assert_eq!(
+            classify_status(false, false, true, None),
+            ipc::VpnState::Starting
+        );
+        assert_eq!(
+            classify_status(false, false, false, None),
+            ipc::VpnState::Stopped
+        );
+    }
+
+    fn test_config() -> ipc::Config {
+        ipc::Config {
+            endpoint: "vpn.example.com:4433".to_string(),
+            token: "token".to_string(),
+            cert_pin: "deadbeef".to_string(),
+            censorship_resistant: false,
+            http3_framing: false,
+            kc_auth: None,
+            kc_url: None,
+            kc_realm: None,
+            kc_client_id: None,
+            ech_config: None,
+            vpn_mtu: None,
+        }
+    }
+
+    fn test_state() -> Arc<Mutex<VpnServiceState>> {
+        Arc::new(Mutex::new(VpnServiceState {
+            vpn_running: Arc::new(AtomicBool::new(false)),
+            vpn_connected: Arc::new(AtomicBool::new(false)),
+            vpn_stopping: Arc::new(AtomicBool::new(false)),
+            last_error: Arc::new(StdMutex::new(None)),
+            vpn_task: None,
+            active_config: None,
+        }))
+    }
+
+    #[tokio::test]
+    async fn stop_request_marks_active_task_as_stopping() {
+        let state = test_state();
+        let sleeper = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        {
+            let mut guard = state.lock().await;
+            guard.vpn_running.store(true, Ordering::SeqCst);
+            guard.vpn_connected.store(true, Ordering::SeqCst);
+            guard.active_config = Some(test_config());
+            if let Ok(mut last) = guard.last_error.lock() {
+                *last = Some("old error".to_string());
+            }
+            guard.vpn_task = Some(sleeper);
+        }
+
+        assert!(matches!(
+            dispatch_request(ipc::IpcRequest::Stop, &state).await,
+            ipc::IpcResponse::Ok
+        ));
+
+        let task = {
+            let mut guard = state.lock().await;
+            assert!(!guard.vpn_running.load(Ordering::SeqCst));
+            assert!(!guard.vpn_connected.load(Ordering::SeqCst));
+            assert!(guard.vpn_stopping.load(Ordering::SeqCst));
+            assert!(guard.active_config.is_none());
+            assert!(guard.last_error.lock().unwrap().is_none());
+            guard.vpn_task.take()
+        };
+        if let Some(task) = task {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn start_request_is_rejected_while_stopping() {
+        let state = test_state();
+        {
+            let guard = state.lock().await;
+            guard.vpn_stopping.store(true, Ordering::SeqCst);
+        }
+
+        match dispatch_request(ipc::IpcRequest::Start(test_config()), &state).await {
+            ipc::IpcResponse::Error(msg) => {
+                assert_eq!(msg, "VPN is stopping; retry shortly");
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
     }
 }

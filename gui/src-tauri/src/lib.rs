@@ -181,7 +181,8 @@ async fn load_config(app: AppHandle) -> Result<Option<Config>, String> {
 }
 
 // =============================================================================
-// UI Preferences (frontend-only state, not shared with daemon)
+// GUI preferences and saved connections. The active connection is serialized
+// into config.json only as a runtime snapshot when starting the tunnel.
 // =============================================================================
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
@@ -189,6 +190,8 @@ struct SavedConn {
     id: String,
     label: String,
     endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
     cert_pin: String,
     #[serde(default)]
     ech_config: Option<String>,
@@ -228,6 +231,8 @@ struct Prefs {
     connections: Vec<SavedConn>,
     #[serde(default)]
     active_id: Option<String>,
+    #[serde(default)]
+    legacy_config_migrated: bool,
 }
 
 impl Default for Prefs {
@@ -237,6 +242,7 @@ impl Default for Prefs {
             accent: default_accent(),
             connections: vec![],
             active_id: None,
+            legacy_config_migrated: false,
         }
     }
 }
@@ -268,6 +274,7 @@ async fn load_prefs(app: AppHandle) -> Result<Prefs, String> {
             accent: default_accent(),
             connections: vec![],
             active_id: None,
+            legacy_config_migrated: false,
         });
     }
     let content = std::fs::read_to_string(prefs_path).map_err(|e| e.to_string())?;
@@ -408,6 +415,7 @@ mod tests {
         assert_eq!(prefs.accent, "#2B44FF");
         assert!(prefs.connections.is_empty());
         assert!(prefs.active_id.is_none());
+        assert!(!prefs.legacy_config_migrated);
     }
 
     #[test]
@@ -419,6 +427,7 @@ mod tests {
                 id: "abc123".into(),
                 label: "My Server".into(),
                 endpoint: "vpn.example.com:443".into(),
+                token: Some("psk".into()),
                 cert_pin: "deadbeef".into(),
                 ech_config: None,
                 http3_framing: true,
@@ -430,13 +439,16 @@ mod tests {
                 vpn_mtu: None,
             }],
             active_id: Some("abc123".into()),
+            legacy_config_migrated: true,
         };
         let json = serde_json::to_string(&prefs).unwrap();
         let deserialized: Prefs = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.theme, "dark");
         assert_eq!(deserialized.connections.len(), 1);
         assert_eq!(deserialized.connections[0].label, "My Server");
+        assert_eq!(deserialized.connections[0].token.as_deref(), Some("psk"));
         assert!(deserialized.connections[0].http3_framing);
+        assert!(deserialized.legacy_config_migrated);
     }
 
     #[test]
@@ -448,6 +460,7 @@ mod tests {
                 id: "abc123".into(),
                 label: "My Server".into(),
                 endpoint: "vpn.example.com:443".into(),
+                token: None,
                 cert_pin: "deadbeef".into(),
                 ech_config: None,
                 http3_framing: false,
@@ -459,6 +472,7 @@ mod tests {
                 vpn_mtu: None,
             }],
             active_id: None,
+            legacy_config_migrated: false,
         };
 
         assert!(prefs.normalize_transport());
@@ -470,10 +484,23 @@ mod tests {
         let json = r#"{"id":"x","label":"test","endpoint":"ep","cert_pin":"pin"}"#;
         let conn: SavedConn = serde_json::from_str(json).unwrap();
         assert!(conn.ech_config.is_none());
+        assert!(conn.token.is_none());
         assert!(!conn.http3_framing);
         assert!(!conn.censorship_resistant);
         assert!(conn.kc_auth.is_none());
         assert!(conn.vpn_mtu.is_none());
+    }
+
+    #[test]
+    fn prefs_missing_legacy_marker_defaults_false() {
+        let json = r##"{
+            "theme":"light",
+            "accent":"#2B44FF",
+            "connections":[],
+            "active_id":null
+        }"##;
+        let prefs: Prefs = serde_json::from_str(json).unwrap();
+        assert!(!prefs.legacy_config_migrated);
     }
 
     #[test]

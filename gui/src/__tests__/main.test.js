@@ -2,7 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { escapeHtml, initials, bandwidthWalk, friendlyError, toConfig } from '../utils.js';
+import {
+  escapeHtml,
+  initials,
+  bandwidthWalk,
+  friendlyError,
+  heroFromVpnStatus,
+  toConfig,
+} from '../utils.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -124,11 +131,13 @@ describe('toConfig', () => {
   it('builds config from connection and token', () => {
     const conn = {
       endpoint: 'vpn.example.com:443',
+      token: 'my-token',
       cert_pin: 'abcdef',
       censorship_resistant: true,
       http3_framing: false,
+      vpn_mtu: 1340,
     };
-    const config = toConfig(conn, 'my-token');
+    const config = toConfig(conn);
     expect(config.endpoint).toBe('vpn.example.com:443');
     expect(config.token).toBe('my-token');
     expect(config.cert_pin).toBe('abcdef');
@@ -136,18 +145,21 @@ describe('toConfig', () => {
     expect(config.http3_framing).toBe(false);
     expect(config.kc_auth).toBeNull();
     expect(config.ech_config).toBeNull();
+    expect(config.vpn_mtu).toBe(1340);
   });
 
-  it('includes keycloak fields when present', () => {
+  it('includes keycloak fields and leaves runtime token empty', () => {
     const conn = {
       endpoint: 'vpn.example.com:443',
+      token: 'stale-jwt-should-not-be-used-as-psk',
       cert_pin: 'pin',
       kc_auth: true,
       kc_url: 'https://auth.example.com',
       kc_realm: 'my-realm',
       kc_client_id: 'my-client',
     };
-    const config = toConfig(conn, 'tok');
+    const config = toConfig(conn);
+    expect(config.token).toBe('');
     expect(config.kc_auth).toBe(true);
     expect(config.kc_url).toBe('https://auth.example.com');
     expect(config.kc_realm).toBe('my-realm');
@@ -156,9 +168,9 @@ describe('toConfig', () => {
 
   it('defaults missing fields to null for empty connection', () => {
     const conn = {};
-    const config = toConfig(conn, 'tok');
+    const config = toConfig(conn);
     expect(config.endpoint).toBeUndefined();
-    expect(config.token).toBe('tok');
+    expect(config.token).toBe('');
     expect(config.cert_pin).toBeUndefined();
     expect(config.censorship_resistant).toBe(false);
     expect(config.http3_framing).toBe(false);
@@ -170,9 +182,48 @@ describe('toConfig', () => {
   });
 });
 
+describe('heroFromVpnStatus', () => {
+  it('maps stopped to off even when the current hero is connecting', () => {
+    expect(heroFromVpnStatus(
+      { service_available: true, running: false, state: 'Stopped' },
+      'connecting',
+      false,
+    )).toBe('off');
+  });
+
+  it('maps stopping to disconnecting instead of connecting', () => {
+    expect(heroFromVpnStatus(
+      { service_available: true, running: false, state: 'Stopping' },
+      'on',
+      true,
+    )).toBe('disconnecting');
+  });
+
+  it('keeps a local disconnect flow out of the yellow connecting state', () => {
+    expect(heroFromVpnStatus(
+      { service_available: true, running: false, state: 'Starting' },
+      'disconnecting',
+      true,
+    )).toBe('disconnecting');
+  });
+});
+
 describe('index.html', () => {
   it('loads main.js as an ES module', () => {
     const html = readFileSync(resolve(__dirname, '../index.html'), 'utf8');
     expect(html).toContain('<script type="module" src="main.js"></script>');
+  });
+
+  it('does not expose the old settings tab or save credentials button', () => {
+    const html = readFileSync(resolve(__dirname, '../index.html'), 'utf8');
+    expect(html).not.toContain('data-tab="settings"');
+    expect(html).not.toContain('data-panel="settings"');
+    expect(html).not.toContain('id="save-btn"');
+  });
+
+  it('keeps the pre-shared key in the connection editor', () => {
+    const html = readFileSync(resolve(__dirname, '../index.html'), 'utf8');
+    expect(html).toContain('id="m-token-field"');
+    expect(html).toContain('id="m_token"');
   });
 });

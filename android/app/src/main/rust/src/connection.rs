@@ -39,6 +39,7 @@ pub(crate) fn effective_http3_framing(censorship_resistant: bool, http3_framing:
     http3_framing || censorship_resistant
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_and_handshake(
     socket: std::net::UdpSocket,
     token: String,

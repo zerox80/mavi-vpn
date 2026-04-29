@@ -56,6 +56,7 @@ async fn interactive_mode() -> Result<()> {
         Ok(IpcResponse::Status {
             running: true,
             endpoint,
+            ..
         }) => {
             println!(
                 "VPN is currently RUNNING (Endpoint: {}).",
@@ -142,17 +143,31 @@ async fn send_request_internal(req: IpcRequest) -> Result<IpcResponse> {
 }
 
 async fn send_request(req: IpcRequest) -> Result<()> {
+    let is_start = matches!(req, IpcRequest::Start(_));
     match send_request_internal(req).await {
         Ok(IpcResponse::Ok) => {
-            println!("Action executed successfully.");
+            if is_start {
+                wait_for_connected().await?;
+            } else {
+                println!("Action executed successfully.");
+            }
         }
         Ok(IpcResponse::Error(msg)) => {
             println!("Service returned an error: {}", msg);
         }
-        Ok(IpcResponse::Status { running, endpoint }) => {
+        Ok(IpcResponse::Status {
+            running,
+            endpoint,
+            state,
+            last_error,
+        }) => {
             println!("Status: {}", if running { "RUNNING" } else { "STOPPED" });
+            println!("State: {:?}", state);
             if let Some(ep) = endpoint {
                 println!("Endpoint: {}", ep);
+            }
+            if let Some(err) = last_error {
+                println!("Last error: {}", err);
             }
         }
         Err(e) => {
@@ -160,6 +175,41 @@ async fn send_request(req: IpcRequest) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn wait_for_connected() -> Result<()> {
+    println!("Start accepted. Waiting for tunnel readiness...");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        match send_request_internal(IpcRequest::Status).await {
+            Ok(IpcResponse::Status {
+                running: true,
+                endpoint,
+                ..
+            }) => {
+                println!("VPN is now CONNECTED.");
+                if let Some(ep) = endpoint {
+                    println!("Endpoint: {}", ep);
+                }
+                return Ok(());
+            }
+            Ok(IpcResponse::Status {
+                state: ipc::VpnState::Failed,
+                last_error,
+                ..
+            }) => {
+                anyhow::bail!(
+                    "VPN failed to connect: {}",
+                    last_error.as_deref().unwrap_or("unknown error")
+                );
+            }
+            Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+            Err(e) => {
+                anyhow::bail!("Failed to read status after start: {}", e);
+            }
+        }
+    }
+    anyhow::bail!("VPN is still starting. Run status to check progress.")
 }
 
 // Config loading and prompting functions
@@ -355,7 +405,7 @@ async fn prompt_new_config() -> Result<Config> {
         None
     } else {
         match vpn_mtu_input.parse::<u16>() {
-            Ok(v) if v >= 1280 && v <= 1360 => Some(v),
+            Ok(v) if (1280..=1360).contains(&v) => Some(v),
             _ => {
                 eprintln!("Warnung: Ungültiger MTU-Wert – Standard (1280) wird verwendet");
                 None

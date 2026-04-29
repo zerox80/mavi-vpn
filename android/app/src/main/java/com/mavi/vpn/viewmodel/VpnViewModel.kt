@@ -2,9 +2,8 @@ package com.mavi.vpn.viewmodel
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import com.mavi.vpn.MaviVpnService
-import com.mavi.vpn.OAuthHelper
+import com.mavi.vpn.OAuthTokens
 import com.mavi.vpn.data.PrefsManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -54,6 +53,22 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         authToken.value = ""
         prefs.savedToken = ""
         prefs.savedRefreshToken = ""
+        prefs.savedKeycloakSessionInvalid = false
+    }
+
+    fun saveOAuthTokens(tokens: OAuthTokens) {
+        authToken.value = tokens.accessToken
+        prefs.savedToken = tokens.accessToken
+        prefs.savedRefreshToken = tokens.refreshToken
+        prefs.savedKeycloakSessionInvalid = false
+    }
+
+    fun hasSavedKeycloakRefreshToken(): Boolean {
+        return prefs.savedRefreshToken.isNotBlank()
+    }
+
+    fun isSavedKeycloakSessionInvalid(): Boolean {
+        return prefs.savedKeycloakSessionInvalid
     }
 
     fun saveServerDetails() {

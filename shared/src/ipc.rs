@@ -83,6 +83,16 @@ pub enum IpcRequest {
     Status,
 }
 
+/// More precise lifecycle state for clients that need to distinguish setup
+/// from a fully usable tunnel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum VpnState {
+    Stopped,
+    Starting,
+    Connected,
+    Failed,
+}
+
 /// A wrapper around `IpcRequest` that includes the authentication token.
 /// This ensures only authorized local users can command the background service.
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,6 +116,11 @@ pub enum IpcResponse {
         running: bool,
         /// The endpoint currently connected to (if any).
         endpoint: Option<String>,
+        /// Precise lifecycle state. `running` remains true only once the tunnel
+        /// is fully connected for compatibility with older UI logic.
+        state: VpnState,
+        /// Last connection/setup error, if the service reached a failed state.
+        last_error: Option<String>,
     },
 }
 
@@ -222,12 +237,21 @@ mod tests {
         let resp = IpcResponse::Status {
             running: true,
             endpoint: Some("vpn.example.com:4433".to_string()),
+            state: VpnState::Connected,
+            last_error: None,
         };
         let decoded = roundtrip_response(&resp);
         match decoded {
-            IpcResponse::Status { running, endpoint } => {
+            IpcResponse::Status {
+                running,
+                endpoint,
+                state,
+                last_error,
+            } => {
                 assert!(running);
                 assert_eq!(endpoint.as_deref(), Some("vpn.example.com:4433"));
+                assert_eq!(state, VpnState::Connected);
+                assert!(last_error.is_none());
             }
             other => panic!("Expected Status, got {:?}", other),
         }
@@ -312,12 +336,46 @@ mod tests {
         let resp = IpcResponse::Status {
             running: false,
             endpoint: None,
+            state: VpnState::Stopped,
+            last_error: None,
         };
         let decoded = roundtrip_response(&resp);
         match decoded {
-            IpcResponse::Status { running, endpoint } => {
+            IpcResponse::Status {
+                running,
+                endpoint,
+                state,
+                last_error,
+            } => {
                 assert!(!running);
                 assert!(endpoint.is_none());
+                assert_eq!(state, VpnState::Stopped);
+                assert!(last_error.is_none());
+            }
+            other => panic!("Expected Status, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipc_response_status_failed_roundtrip() {
+        let resp = IpcResponse::Status {
+            running: false,
+            endpoint: Some("vpn.example.com:4433".to_string()),
+            state: VpnState::Failed,
+            last_error: Some("MTU mismatch".to_string()),
+        };
+        let decoded = roundtrip_response(&resp);
+        match decoded {
+            IpcResponse::Status {
+                running,
+                endpoint,
+                state,
+                last_error,
+            } => {
+                assert!(!running);
+                assert_eq!(endpoint.as_deref(), Some("vpn.example.com:4433"));
+                assert_eq!(state, VpnState::Failed);
+                assert_eq!(last_error.as_deref(), Some("MTU mismatch"));
             }
             other => panic!("Expected Status, got {:?}", other),
         }

@@ -91,6 +91,7 @@ pub enum VpnState {
     Starting,
     Connected,
     Failed,
+    Stopping,
 }
 
 /// A wrapper around `IpcRequest` that includes the authentication token.
@@ -350,6 +351,31 @@ mod tests {
                 assert!(!running);
                 assert!(endpoint.is_none());
                 assert_eq!(state, VpnState::Stopped);
+                assert!(last_error.is_none());
+            }
+            other => panic!("Expected Status, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipc_response_status_stopping_roundtrip() {
+        let resp = IpcResponse::Status {
+            running: false,
+            endpoint: Some("vpn.example.com:4433".to_string()),
+            state: VpnState::Stopping,
+            last_error: None,
+        };
+        let decoded = roundtrip_response(&resp);
+        match decoded {
+            IpcResponse::Status {
+                running,
+                endpoint,
+                state,
+                last_error,
+            } => {
+                assert!(!running);
+                assert_eq!(endpoint.as_deref(), Some("vpn.example.com:4433"));
+                assert_eq!(state, VpnState::Stopping);
                 assert!(last_error.is_none());
             }
             other => panic!("Expected Status, got {:?}", other),

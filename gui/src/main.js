@@ -3,7 +3,7 @@
 // Tauri backend. Saved connections are the user-editable source of truth;
 // config.json is only a runtime snapshot and legacy migration source.
 
-import { escapeHtml, initials, bandwidthWalk, friendlyError, toConfig } from './utils.js';
+import { escapeHtml, initials, bandwidthWalk, friendlyError, heroFromVpnStatus, toConfig } from './utils.js';
 
 // ============================================================================
 // Tauri API bootstrap — the API is injected by withGlobalTauri, but can lag
@@ -26,8 +26,9 @@ const listen = (event, handler) => {
 // ============================================================================
 
 const state = {
-  // UI state machine: 'off' | 'connecting' | 'on'
+  // UI state machine: 'off' | 'connecting' | 'disconnecting' | 'on'
   hero: 'off',
+  disconnecting: false,
   // From vpn_status
   serviceAvailable: false,
   running: false,
@@ -390,12 +391,13 @@ function activeConn() {
 }
 
 async function toggleConnection() {
-  if (state.hero === 'connecting') return;
+  if (state.hero === 'connecting' || state.hero === 'disconnecting') return;
   if (state.hero === 'on') return disconnect();
   return connect();
 }
 
 async function connect() {
+  state.disconnecting = false;
   const conn = activeConn();
   if (!conn) {
     showToast('Select a saved connection first, or add one.', 'error');
@@ -419,12 +421,29 @@ async function connect() {
 }
 
 async function disconnect() {
+  state.disconnecting = true;
+  state.sessionStart = null;
+  setHero('disconnecting');
   try {
     await invoke('vpn_disconnect');
+    await waitForStopped();
   } catch (e) {
+    state.disconnecting = false;
     showToast(friendlyError(e), 'error');
   } finally {
     await refreshStatus();
+  }
+}
+
+async function waitForStopped() {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const status = await invoke('vpn_status');
+    applyStatus(status);
+    if (!status.service_available || status.state === 'Stopped' || status.state === 'Failed') {
+      return;
+    }
+    await new Promise(r => setTimeout(r, 250));
   }
 }
 
@@ -447,6 +466,7 @@ function applyStatus(status) {
   const btn = $('connect-btn');
 
   if (!state.serviceAvailable) {
+    state.disconnecting = false;
     setHero('off');
     btn.disabled = true;
     btn.title = daemonHintText();
@@ -455,22 +475,33 @@ function applyStatus(status) {
     return;
   }
 
+  const nextHero = heroFromVpnStatus(status, state.hero, state.disconnecting);
+
   if (state.vpnState === 'Failed') {
+    state.disconnecting = false;
     setHero('off');
     state.sessionStart = null;
     btn.disabled = !activeConn();
     btn.title = activeConn() ? '' : 'Select or add a saved connection first';
     if (state.lastError) showToast(friendlyError(state.lastError), 'error');
-  } else if (state.running || state.vpnState === 'Connected') {
-    // First transition into 'on' → stamp sessionStart
+  } else if (nextHero === 'on') {
+    state.disconnecting = false;
+    // First transition into 'on' stamps sessionStart
     if (state.hero !== 'on') state.sessionStart = Date.now();
     setHero('on');
     btn.disabled = false;
     btn.title = '';
     hideToast('hint');
-  } else if (state.vpnState === 'Starting') {
+  } else if (nextHero === 'disconnecting') {
+    setHero('disconnecting');
+    btn.disabled = true;
+    btn.title = 'Disconnecting...';
+    hideToast('hint');
+  } else if (nextHero === 'connecting') {
     setHero('connecting');
-  } else if (state.hero !== 'connecting') {
+    btn.title = '';
+  } else {
+    state.disconnecting = false;
     setHero('off');
     state.sessionStart = null;
     btn.disabled = !activeConn();
@@ -486,20 +517,29 @@ function setHero(s) {
 
   const btn = $('connect-btn');
   btn.textContent = s === 'on' ? 'DISCONNECT' :
-                    s === 'connecting' ? 'CONNECTING…' : 'CONNECT';
-  if (s === 'connecting') btn.disabled = true;
+                    s === 'connecting' ? 'CONNECTING...' :
+                    s === 'disconnecting' ? 'DISCONNECTING...' : 'CONNECT';
+  if (s === 'connecting' || s === 'disconnecting') btn.disabled = true;
 
   const labels = {
     off: 'NOT CONNECTED',
     connecting: 'ESTABLISHING TUNNEL',
+    disconnecting: 'DISCONNECTING',
     on: 'ENCRYPTED',
   };
   $('title-state-label').textContent = labels[s];
 
-  const heroStatus = { off: '// NOT CONNECTED', connecting: '// ESTABLISHING TUNNEL', on: '// ENCRYPTED' };
+  const heroStatus = {
+    off: '// NOT CONNECTED',
+    connecting: '// ESTABLISHING TUNNEL',
+    disconnecting: '// DISCONNECTING',
+    on: '// ENCRYPTED',
+  };
   $('hero-status').textContent = heroStatus[s];
 
-  $('core-label').textContent = s === 'connecting' ? 'HANDSHAKE' : 'TUNNEL';
+  $('core-label').textContent =
+    s === 'connecting' ? 'HANDSHAKE' :
+    s === 'disconnecting' ? 'CLEANUP' : 'TUNNEL';
 
   applyHeroForSelection();
   renderConnectionList();
@@ -511,7 +551,8 @@ function applyHeroForSelection() {
     $('hero-title').textContent = conn.label;
     $('hero-subtitle').textContent =
       state.hero === 'on' ? 'Your traffic is encrypted through this node' :
-      state.hero === 'connecting' ? 'Establishing an encrypted tunnel…' :
+      state.hero === 'connecting' ? 'Establishing an encrypted tunnel...' :
+      state.hero === 'disconnecting' ? 'Closing tunnel and cleaning up routes' :
       'Tunnel your connection through this node';
     $('hero-node-id').textContent = conn.id.slice(0, 8).toUpperCase();
     $('hero-lat').textContent = conn.endpoint.toUpperCase();
@@ -523,6 +564,7 @@ function applyHeroForSelection() {
   }
   $('connect-btn').disabled =
     state.hero === 'connecting' ||
+    state.hero === 'disconnecting' ||
     (!state.running && !state.serviceAvailable) ||
     (state.hero === 'off' && !conn);
 }

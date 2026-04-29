@@ -2,7 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { escapeHtml, initials, bandwidthWalk, friendlyError, toConfig } from '../utils.js';
+import {
+  escapeHtml,
+  initials,
+  bandwidthWalk,
+  friendlyError,
+  heroFromVpnStatus,
+  toConfig,
+} from '../utils.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -172,6 +179,32 @@ describe('toConfig', () => {
     expect(config.kc_realm).toBeNull();
     expect(config.kc_client_id).toBeNull();
     expect(config.ech_config).toBeNull();
+  });
+});
+
+describe('heroFromVpnStatus', () => {
+  it('maps stopped to off even when the current hero is connecting', () => {
+    expect(heroFromVpnStatus(
+      { service_available: true, running: false, state: 'Stopped' },
+      'connecting',
+      false,
+    )).toBe('off');
+  });
+
+  it('maps stopping to disconnecting instead of connecting', () => {
+    expect(heroFromVpnStatus(
+      { service_available: true, running: false, state: 'Stopping' },
+      'on',
+      true,
+    )).toBe('disconnecting');
+  });
+
+  it('keeps a local disconnect flow out of the yellow connecting state', () => {
+    expect(heroFromVpnStatus(
+      { service_available: true, running: false, state: 'Starting' },
+      'disconnecting',
+      true,
+    )).toBe('disconnecting');
   });
 });
 

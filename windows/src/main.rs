@@ -178,7 +178,9 @@ fn load_config() -> Option<Config> {
     let path = config_path();
     if path.exists() {
         let content = std::fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&content).ok()
+        let mut config: Config = serde_json::from_str(&content).ok()?;
+        config.normalize_transport();
+        Some(config)
     } else {
         None
     }
@@ -186,7 +188,9 @@ fn load_config() -> Option<Config> {
 
 fn save_config(config: &Config) -> Result<()> {
     let path = config_path();
-    let content = serde_json::to_string_pretty(config)?;
+    let mut config = config.clone();
+    config.normalize_transport();
+    let content = serde_json::to_string_pretty(&config)?;
     std::fs::write(&path, content)?;
     println!("Config saved to {}", path.display());
     Ok(())
@@ -314,10 +318,15 @@ async fn prompt_new_config() -> Result<Config> {
     let censorship_resistant =
         cr_input == "j" || cr_input == "ja" || cr_input == "y" || cr_input == "yes";
 
-    print!("HTTP/3 Datagram Framing? (Nur nützlich mit CR Mode) [j/N]: ");
-    stdout.flush()?;
-    let h3_input = read_line()?.to_lowercase();
-    let http3_framing = h3_input == "j" || h3_input == "ja" || h3_input == "y" || h3_input == "yes";
+    let http3_framing = if censorship_resistant {
+        println!("HTTP/3 Datagram Framing wird im CR Mode automatisch aktiviert.");
+        true
+    } else {
+        print!("HTTP/3 Datagram Framing? (Nur nützlich mit CR Mode) [j/N]: ");
+        stdout.flush()?;
+        let h3_input = read_line()?.to_lowercase();
+        h3_input == "j" || h3_input == "ja" || h3_input == "y" || h3_input == "yes"
+    };
 
     // Prefer $VPN_ECH_CONFIG (for headless/scripted use). Fall back to an
     // interactive prompt when censorship_resistant mode is on.

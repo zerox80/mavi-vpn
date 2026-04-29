@@ -15,7 +15,6 @@
   <div id="titlebar">
     <button id="theme-toggle" title="Toggle theme">
       <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <!-- sun by default; JS swaps to moon for dark -->
         <circle cx="12" cy="12" r="4" />
         <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
       </svg>
@@ -23,7 +22,7 @@
 
     <div id="wordmark">
       <span class="mark">mavi</span>
-      <span class="meta">v0.1 · PRIVATE TUNNEL</span>
+      <span class="meta">v0.1 - PRIVATE TUNNEL</span>
     </div>
 
     <div id="title-state">
@@ -42,7 +41,6 @@
       <div id="tabs">
         <button class="tab active" data-tab="connect">CONNECT</button>
         <button class="tab" data-tab="network">NETWORK</button>
-        <button class="tab" data-tab="settings">SETTINGS</button>
       </div>
 
       <!-- CONNECT tab -->
@@ -54,7 +52,7 @@
               <path d="M7.5 7.5l3 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
             </svg>
             <input id="search" type="text" placeholder="Filter saved connections" />
-            <span class="kbd">⌘K</span>
+            <span class="kbd">Ctrl+K</span>
           </div>
         </div>
 
@@ -68,72 +66,16 @@
       <!-- NETWORK tab -->
       <div class="tab-panel" data-panel="network">
         <div class="net-panel">
-          <div class="row"><span>NODE</span><span id="net-node">—</span></div>
-          <div class="row"><span>ENDPOINT</span><span id="net-endpoint">—</span></div>
-          <div class="row"><span>PUBLIC IP</span><span id="net-ip">—</span></div>
+          <div class="row"><span>NODE</span><span id="net-node">-</span></div>
+          <div class="row"><span>ENDPOINT</span><span id="net-endpoint">-</span></div>
+          <div class="row"><span>PUBLIC IP</span><span id="net-ip">-</span></div>
           <hr style="border:none;border-top:1px solid var(--line);margin:12px 0" />
-          <div class="row"><span>PROTOCOL</span><span>QUIC · TLS 1.3</span></div>
+          <div class="row"><span>PROTOCOL</span><span>QUIC - TLS 1.3</span></div>
           <div class="row"><span>CIPHER</span><span>CHACHA20-POLY1305</span></div>
           <div class="row"><span>TRANSPORT</span><span>HTTP/3</span></div>
           <hr style="border:none;border-top:1px solid var(--line);margin:12px 0" />
           <div class="row"><span>SESSION</span><span id="net-session">00:00:00</span></div>
           <div class="row"><span>SERVICE</span><span id="net-service">OFFLINE</span></div>
-        </div>
-      </div>
-
-      <!-- SETTINGS tab -->
-      <div class="tab-panel" data-panel="settings">
-        <div class="settings-panel">
-          <div class="field">
-            <label for="endpoint">Server Endpoint</label>
-            <input type="text" id="endpoint" placeholder="vpn.example.com:4433" />
-          </div>
-          <div class="field" id="token-field">
-            <label for="token">Pre-shared Key</label>
-            <input type="password" id="token" placeholder="Pre-shared token" />
-          </div>
-          <div class="field">
-            <label for="cert_pin">Certificate PIN (SHA-256)</label>
-            <input type="text" id="cert_pin" placeholder="hex fingerprint" />
-          </div>
-          <div class="field">
-            <label for="ech_config">ECH Config (hex, optional)</label>
-            <input type="text" id="ech_config" placeholder="hex ECHConfigList" />
-          </div>
-          <div class="checkbox-field">
-            <input type="checkbox" id="cr_mode" />
-            <label for="cr_mode">Censorship-resistant mode</label>
-          </div>
-          <div class="checkbox-field">
-            <input type="checkbox" id="h3_framing" />
-            <label for="h3_framing">HTTP/3 framing (RFC 9297)</label>
-          </div>
-          <div class="field">
-            <label for="vpn_mtu">VPN MTU (1280–1360, default 1280)</label>
-            <input type="number" id="vpn_mtu" placeholder="1280" min="1280" max="1360" />
-          </div>
-
-          <hr />
-          <div class="checkbox-field">
-            <input type="checkbox" id="kc_auth" />
-            <label for="kc_auth">Keycloak authentication</label>
-          </div>
-          <div id="kc-fields" class="hidden">
-            <div class="field">
-              <label for="kc_url">Keycloak URL</label>
-              <input type="text" id="kc_url" placeholder="https://auth.example.com" />
-            </div>
-            <div class="field">
-              <label for="kc_realm">Realm</label>
-              <input type="text" id="kc_realm" placeholder="mavi-vpn" />
-            </div>
-            <div class="field">
-              <label for="kc_client_id">Client ID</label>
-              <input type="text" id="kc_client_id" placeholder="mavi-client" />
-            </div>
-          </div>
-
-          <button id="save-btn" class="btn-save">SAVE CREDENTIALS</button>
         </div>
       </div>
     </aside>
@@ -147,12 +89,12 @@
 
       <div id="hero-top">
         <div class="col left">
-          <div>NODE / <span id="hero-node-id">—</span></div>
+          <div>NODE / <span id="hero-node-id">-</span></div>
           <div><span id="hero-lat">NO SELECTION</span></div>
         </div>
         <div class="col right">
           <div>SESSION / <span id="hero-session">00:00:00</span></div>
-          <div>QUIC · CHACHA20-POLY1305</div>
+          <div>QUIC - CHACHA20-POLY1305</div>
         </div>
       </div>
 
@@ -185,7 +127,7 @@
         <div id="sparkline-wrap">
           <svg id="sparkline" viewBox="0 0 200 28" preserveAspectRatio="none"></svg>
         </div>
-        <div class="ip-readout">IP · <span id="ip-readout">—</span></div>
+        <div class="ip-readout">IP - <span id="ip-readout">-</span></div>
       </div>
 
       <div id="toast"></div>
@@ -201,11 +143,15 @@
     <div class="form">
       <div class="field">
         <label for="m_label">Label</label>
-        <input type="text" id="m_label" placeholder="e.g. Home · Frankfurt" />
+        <input type="text" id="m_label" placeholder="e.g. Home - Frankfurt" />
       </div>
       <div class="field">
         <label for="m_endpoint">Endpoint</label>
         <input type="text" id="m_endpoint" placeholder="vpn.example.com:4433" />
+      </div>
+      <div class="field" id="m-token-field">
+        <label for="m_token">Pre-shared Key</label>
+        <input type="password" id="m_token" placeholder="Pre-shared token" />
       </div>
       <div class="field">
         <label for="m_cert_pin">Certificate PIN (SHA-256)</label>
@@ -224,7 +170,7 @@
         <label for="m_h3_framing">HTTP/3 framing</label>
       </div>
       <div class="field">
-        <label for="m_vpn_mtu">VPN MTU (1280–1360, default 1280)</label>
+        <label for="m_vpn_mtu">VPN MTU (1280-1360, default 1280)</label>
         <input type="number" id="m_vpn_mtu" placeholder="1280" min="1280" max="1360" />
       </div>
       <hr style="border:none;border-top:1px solid var(--line);margin:12px 0" />

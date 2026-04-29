@@ -1,7 +1,7 @@
 // Mavi VPN — frontend controller
 // Vanilla JS port of the design in ~/Downloads/Mavi-VPN/, wired to the real
-// Tauri backend. IPC Config (sensitive, shared with daemon) is persisted via
-// save_config/load_config; UI state (theme, saved connections) via save_prefs.
+// Tauri backend. Saved connections are the user-editable source of truth;
+// config.json is only a runtime snapshot and legacy migration source.
 
 import { escapeHtml, initials, bandwidthWalk, friendlyError, toConfig } from './utils.js';
 
@@ -37,7 +37,13 @@ const state = {
   // Session wall clock
   sessionStart: null,
   // Saved UI prefs
-  prefs: { theme: 'light', accent: '#2B44FF', connections: [], active_id: null },
+  prefs: {
+    theme: 'light',
+    accent: '#2B44FF',
+    connections: [],
+    active_id: null,
+    legacy_config_migrated: false,
+  },
   // Search filter
   search: '',
 };
@@ -64,7 +70,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   wireTabs();
   wireSidebarSearch();
-  wireSettingsForm();
   wireModal();
   wireHero();
   wireThemeToggle();
@@ -73,17 +78,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load UI prefs (connections, theme) — tolerate missing backend
   try {
     const prefs = await invoke('load_prefs');
-    if (prefs) state.prefs = prefs;
+    if (prefs) state.prefs = normalizePrefs(prefs);
   } catch (e) { console.warn('load_prefs failed:', e); }
+
+  // One-time migration from the old editable runtime config into saved connections.
+  try {
+    const config = await invoke('load_config');
+    await migrateLegacyConfig(config);
+  } catch (e) { console.warn('legacy config migration skipped:', e); }
 
   applyTheme(state.prefs.theme);
   renderConnectionList();
-
-  // Hydrate the SETTINGS form from the shared IPC Config (sensitive token lives here)
-  try {
-    const config = await invoke('load_config');
-    if (config) fillSettings(config);
-  } catch (e) { /* no saved config yet */ }
 
   startCoreAnimation();
   renderSparkline();
@@ -128,6 +133,63 @@ function applyTheme(theme) {
 async function savePrefs() {
   try { await invoke('save_prefs', { prefs: state.prefs }); }
   catch (e) { console.warn('save_prefs failed:', e); }
+}
+
+function normalizePrefs(prefs = {}) {
+  return {
+    theme: prefs.theme || 'light',
+    accent: prefs.accent || '#2B44FF',
+    connections: Array.isArray(prefs.connections) ? prefs.connections : [],
+    active_id: prefs.active_id ?? null,
+    legacy_config_migrated: !!prefs.legacy_config_migrated,
+  };
+}
+
+function validMtu(value) {
+  const mtu = Number(value);
+  return Number.isInteger(mtu) && mtu >= 1280 && mtu <= 1360 ? mtu : null;
+}
+
+function generateConnectionId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+function connectionFromLegacyConfig(config, existing = null) {
+  const kcAuth = !!config.kc_auth;
+  return {
+    id: existing?.id || generateConnectionId(),
+    label: existing?.label || config.endpoint,
+    endpoint: config.endpoint,
+    token: kcAuth ? null : (config.token || null),
+    cert_pin: config.cert_pin || '',
+    ech_config: config.ech_config || null,
+    censorship_resistant: !!config.censorship_resistant,
+    http3_framing: !!config.http3_framing,
+    kc_auth: kcAuth || null,
+    kc_url: kcAuth ? (config.kc_url || null) : null,
+    kc_realm: kcAuth ? (config.kc_realm || null) : null,
+    kc_client_id: kcAuth ? (config.kc_client_id || null) : null,
+    vpn_mtu: validMtu(config.vpn_mtu),
+  };
+}
+
+async function migrateLegacyConfig(config) {
+  if (state.prefs.legacy_config_migrated) return;
+
+  state.prefs.legacy_config_migrated = true;
+  if (config?.endpoint) {
+    const idx = state.prefs.connections.findIndex(c => c.endpoint === config.endpoint);
+    if (idx >= 0) {
+      state.prefs.connections[idx] = connectionFromLegacyConfig(config, state.prefs.connections[idx]);
+      if (!state.prefs.active_id) state.prefs.active_id = state.prefs.connections[idx].id;
+    } else {
+      const conn = connectionFromLegacyConfig(config);
+      state.prefs.connections.push(conn);
+      state.prefs.active_id = conn.id;
+    }
+  }
+
+  await savePrefs();
 }
 
 // ============================================================================
@@ -210,23 +272,6 @@ function renderConnectionList() {
 async function selectConnection(id) {
   state.prefs.active_id = id;
   await savePrefs();
-  const conn = state.prefs.connections.find(c => c.id === id);
-  if (conn) {
-    // Sync non-sensitive fields from the saved connection into SETTINGS,
-    // but leave token untouched — tokens persist in 0o600 config.json
-    $('endpoint').value = conn.endpoint;
-    $('cert_pin').value = conn.cert_pin;
-    $('ech_config').value = conn.ech_config || '';
-    $('cr_mode').checked = !!conn.censorship_resistant;
-    $('h3_framing').checked = !!conn.http3_framing;
-    $('kc_auth').checked = !!conn.kc_auth;
-    $('kc_url').value = conn.kc_url || '';
-    $('kc_realm').value = conn.kc_realm || '';
-    $('kc_client_id').value = conn.kc_client_id || '';
-    $('vpn_mtu').value = conn.vpn_mtu || '';
-    $('kc-fields').classList.toggle('hidden', !conn.kc_auth);
-    $('token-field').classList.toggle('hidden', !!conn.kc_auth);
-  }
   renderConnectionList();
   applyHeroForSelection();
 }
@@ -238,9 +283,7 @@ async function selectConnection(id) {
 let _editingId = null;
 
 function wireModal() {
-  $('m_kc_auth').addEventListener('change', () => {
-    $('m-kc-fields').classList.toggle('hidden', !$('m_kc_auth').checked);
-  });
+  $('m_kc_auth').addEventListener('change', updateModalAuthFields);
   $('modal-cancel').addEventListener('click', closeModal);
   $('modal-backdrop').addEventListener('click', (e) => {
     if (e.target.id === 'modal-backdrop') closeModal();
@@ -249,12 +292,19 @@ function wireModal() {
   $('modal-delete').addEventListener('click', deleteModal);
 }
 
+function updateModalAuthFields() {
+  const kcAuth = $('m_kc_auth').checked;
+  $('m-kc-fields').classList.toggle('hidden', !kcAuth);
+  $('m-token-field').classList.toggle('hidden', kcAuth);
+}
+
 function openModal(id) {
   _editingId = id;
   const existing = id ? state.prefs.connections.find(c => c.id === id) : null;
   $('modal-title').textContent = existing ? 'Edit Connection' : 'New Connection';
   $('m_label').value = existing?.label ?? '';
   $('m_endpoint').value = existing?.endpoint ?? '';
+  $('m_token').value = existing?.token ?? '';
   $('m_cert_pin').value = existing?.cert_pin ?? '';
   $('m_ech_config').value = existing?.ech_config ?? '';
   $('m_cr_mode').checked = !!existing?.censorship_resistant;
@@ -264,7 +314,7 @@ function openModal(id) {
   $('m_kc_realm').value = existing?.kc_realm ?? '';
   $('m_kc_client_id').value = existing?.kc_client_id ?? '';
   $('m_vpn_mtu').value = existing?.vpn_mtu ?? '';
-  $('m-kc-fields').classList.toggle('hidden', !$('m_kc_auth').checked);
+  updateModalAuthFields();
   $('modal-delete').classList.toggle('hidden', !existing);
   $('modal-backdrop').classList.add('visible');
   setTimeout(() => $('m_label').focus(), 0);
@@ -278,17 +328,20 @@ function closeModal() {
 async function saveModal() {
   const label = $('m_label').value.trim();
   const endpoint = $('m_endpoint').value.trim();
+  const token = $('m_token').value.trim();
   const cert_pin = $('m_cert_pin').value.trim();
+  const kc_auth = $('m_kc_auth').checked || null;
   if (!label) return showToast('Label is required.', 'error');
   if (!endpoint) return showToast('Endpoint is required.', 'error');
+  if (!kc_auth && !token) return showToast('Pre-shared key is required unless Keycloak is enabled.', 'error');
   if (!cert_pin) return showToast('Certificate PIN is required.', 'error');
 
-  const kc_auth = $('m_kc_auth').checked || null;
   const mtuVal = parseInt($('m_vpn_mtu').value, 10);
   const conn = {
-    id: _editingId || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
+    id: _editingId || generateConnectionId(),
     label,
     endpoint,
+    token: kc_auth ? null : token,
     cert_pin,
     ech_config: $('m_ech_config').value.trim() || null,
     censorship_resistant: $('m_cr_mode').checked,
@@ -325,59 +378,6 @@ async function deleteModal() {
 }
 
 // ============================================================================
-// Settings form (IPC Config — shared with daemon)
-// ============================================================================
-
-function wireSettingsForm() {
-  $('kc_auth').addEventListener('change', () => {
-    $('kc-fields').classList.toggle('hidden', !$('kc_auth').checked);
-    $('token-field').classList.toggle('hidden', $('kc_auth').checked);
-  });
-  $('save-btn').addEventListener('click', async () => {
-    try {
-      await invoke('save_config', { config: readSettings() });
-      showToast('Credentials saved.', 'success');
-    } catch (e) {
-      showToast('Failed to save: ' + e, 'error');
-    }
-  });
-}
-
-function readSettings() {
-  const kcAuth = $('kc_auth').checked;
-  const mtuVal = parseInt($('vpn_mtu').value, 10);
-  return {
-    endpoint: $('endpoint').value.trim(),
-    token: $('token').value.trim(),
-    cert_pin: $('cert_pin').value.trim(),
-    ech_config: $('ech_config').value.trim() || null,
-    censorship_resistant: $('cr_mode').checked,
-    http3_framing: $('h3_framing').checked,
-    kc_auth: kcAuth || null,
-    kc_url: kcAuth ? ($('kc_url').value.trim() || null) : null,
-    kc_realm: kcAuth ? ($('kc_realm').value.trim() || null) : null,
-    kc_client_id: kcAuth ? ($('kc_client_id').value.trim() || null) : null,
-    vpn_mtu: (mtuVal >= 1280 && mtuVal <= 1360) ? mtuVal : null,
-  };
-}
-
-function fillSettings(config) {
-  $('endpoint').value = config.endpoint || '';
-  $('token').value = config.token || '';
-  $('cert_pin').value = config.cert_pin || '';
-  $('ech_config').value = config.ech_config || '';
-  $('cr_mode').checked = !!config.censorship_resistant;
-  $('h3_framing').checked = !!config.http3_framing;
-  $('vpn_mtu').value = config.vpn_mtu || '';
-  $('kc_auth').checked = !!config.kc_auth;
-  $('kc_url').value = config.kc_url || '';
-  $('kc_realm').value = config.kc_realm || '';
-  $('kc_client_id').value = config.kc_client_id || '';
-  $('kc-fields').classList.toggle('hidden', !config.kc_auth);
-  $('token-field').classList.toggle('hidden', !!config.kc_auth);
-}
-
-// ============================================================================
 // Hero / state machine
 // ============================================================================
 
@@ -401,18 +401,10 @@ async function connect() {
     showToast('Select a saved connection first, or add one.', 'error');
     return;
   }
-  // Merge saved connection with current form (token lives in the form, not in prefs)
-  const form = readSettings();
-  const config = {
-    ...toConfig(conn, form.token),
-    // If endpoint/cert_pin differ in the form, prefer the saved one — the form
-    // reflects the active connection after selectConnection() copied it over.
-    endpoint: conn.endpoint,
-    cert_pin: conn.cert_pin,
-  };
 
+  const config = toConfig(conn);
   if (!config.token && !config.kc_auth) {
-    showToast('Pre-shared key required (Settings tab) or enable Keycloak.', 'error');
+    showToast('Edit the saved connection and enter a pre-shared key, or enable Keycloak.', 'error');
     return;
   }
 
@@ -420,7 +412,6 @@ async function connect() {
   try {
     await invoke('save_config', { config });
     await invoke('vpn_connect', { config });
-    // vpn-status-update event will push us to 'on'
   } catch (e) {
     showToast(friendlyError(e), 'error');
     setHero('off');

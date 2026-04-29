@@ -47,6 +47,7 @@ pub async fn connect_and_handshake(
     ech_config_list: Option<Vec<u8>>,
     vpn_mtu: Option<u16>,
 ) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
+    let effective_http3_framing = http3_framing || censorship_resistant;
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
     // Decide up-front whether we will offer ECH GREASE and which SNI to send on
@@ -87,7 +88,7 @@ pub async fn connect_and_handshake(
         .with_no_client_auth();
 
     // HTTP/3 transport requires h3. Raw mode keeps mavivpn as the preferred ALPN.
-    client_crypto.alpn_protocols = if http3_framing || censorship_resistant {
+    client_crypto.alpn_protocols = if effective_http3_framing {
         vec![b"h3".to_vec()]
     } else {
         vec![b"mavivpn".to_vec(), b"h3".to_vec()]
@@ -218,7 +219,7 @@ pub async fn connect_and_handshake(
         token.len()
     );
 
-    let (config, h3_guard) = if http3_framing {
+    let (config, h3_guard) = if effective_http3_framing {
         let config_started = Instant::now();
         let (cfg, guard) = connect_and_handshake_h3(connection.clone(), token).await?;
         info!(

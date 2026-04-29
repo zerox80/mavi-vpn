@@ -103,6 +103,7 @@ async fn vpn_connect(mut config: Config) -> Result<String, String> {
 
         config.token = token;
     }
+    config.normalize_transport();
 
     match send_ipc_request(&IpcRequest::Start(config)).await? {
         IpcResponse::Ok => Ok("Connected".into()),
@@ -148,10 +149,11 @@ async fn vpn_status() -> Result<VpnStatus, String> {
 }
 
 #[tauri::command]
-async fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
+async fn save_config(app: AppHandle, mut config: Config) -> Result<(), String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let config_path = config_dir.join("config.json");
+    config.normalize_transport();
     let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&config_path, content).map_err(|e| e.to_string())?;
 
@@ -173,7 +175,8 @@ async fn load_config(app: AppHandle) -> Result<Option<Config>, String> {
         return Ok(None);
     }
     let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-    let config: Config = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let mut config: Config = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    config.normalize_transport();
     Ok(Some(config))
 }
 
@@ -205,6 +208,16 @@ struct SavedConn {
     vpn_mtu: Option<u16>,
 }
 
+impl SavedConn {
+    fn normalize_transport(&mut self) -> bool {
+        let old_http3_framing = self.http3_framing;
+        if self.censorship_resistant {
+            self.http3_framing = true;
+        }
+        self.http3_framing != old_http3_framing
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct Prefs {
     #[serde(default = "default_theme")]
@@ -228,6 +241,16 @@ impl Default for Prefs {
     }
 }
 
+impl Prefs {
+    fn normalize_transport(&mut self) -> bool {
+        let mut changed = false;
+        for conn in &mut self.connections {
+            changed |= conn.normalize_transport();
+        }
+        changed
+    }
+}
+
 fn default_theme() -> String {
     "light".into()
 }
@@ -248,15 +271,17 @@ async fn load_prefs(app: AppHandle) -> Result<Prefs, String> {
         });
     }
     let content = std::fs::read_to_string(prefs_path).map_err(|e| e.to_string())?;
-    let prefs: Prefs = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let mut prefs: Prefs = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    prefs.normalize_transport();
     Ok(prefs)
 }
 
 #[tauri::command]
-async fn save_prefs(app: AppHandle, prefs: Prefs) -> Result<(), String> {
+async fn save_prefs(app: AppHandle, mut prefs: Prefs) -> Result<(), String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let prefs_path = config_dir.join("prefs.json");
+    prefs.normalize_transport();
     let content = serde_json::to_string_pretty(&prefs).map_err(|e| e.to_string())?;
     std::fs::write(&prefs_path, content).map_err(|e| e.to_string())?;
 
@@ -396,7 +421,7 @@ mod tests {
                 endpoint: "vpn.example.com:443".into(),
                 cert_pin: "deadbeef".into(),
                 ech_config: None,
-                http3_framing: false,
+                http3_framing: true,
                 censorship_resistant: true,
                 kc_auth: None,
                 kc_url: None,
@@ -411,6 +436,33 @@ mod tests {
         assert_eq!(deserialized.theme, "dark");
         assert_eq!(deserialized.connections.len(), 1);
         assert_eq!(deserialized.connections[0].label, "My Server");
+        assert!(deserialized.connections[0].http3_framing);
+    }
+
+    #[test]
+    fn prefs_normalizes_cr_connections_to_h3() {
+        let mut prefs = Prefs {
+            theme: "light".into(),
+            accent: "#2B44FF".into(),
+            connections: vec![SavedConn {
+                id: "abc123".into(),
+                label: "My Server".into(),
+                endpoint: "vpn.example.com:443".into(),
+                cert_pin: "deadbeef".into(),
+                ech_config: None,
+                http3_framing: false,
+                censorship_resistant: true,
+                kc_auth: None,
+                kc_url: None,
+                kc_realm: None,
+                kc_client_id: None,
+                vpn_mtu: None,
+            }],
+            active_id: None,
+        };
+
+        assert!(prefs.normalize_transport());
+        assert!(prefs.connections[0].http3_framing);
     }
 
     #[test]

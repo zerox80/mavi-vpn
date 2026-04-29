@@ -9,6 +9,7 @@ import okhttp3.*
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.Base64 as JavaBase64
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,11 +28,13 @@ object OAuthHelper {
     @Volatile private var codeVerifier: String? = null
     @Volatile private var oauthState: String? = null
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .build()
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .build()
+    }
 
     private fun generateRandomBase64(): String {
         val sr = SecureRandom()
@@ -87,19 +90,47 @@ object OAuthHelper {
             return false
         }
 
+        val exp = accessTokenExpiresAt(token) ?: return false
+        val now = System.currentTimeMillis() / 1000L
+        return now + skewSeconds < exp
+    }
+
+    fun accessTokenExpiresAt(token: String): Long? {
+        if (token.isBlank()) {
+            return null
+        }
+
         return try {
-            val payload = parseJwtPayload(token) ?: return false
+            val payload = parseJwtPayload(token) ?: return null
             val exp = payload.optLong("exp", -1L)
-            if (exp <= 0L) {
-                Log.w("OAuthHelper", "JWT missing usable exp claim")
-                return false
+            exp.takeIf { it > 0L }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun parseTokenResponse(body: String, fallbackRefreshToken: String? = null): OAuthTokens? {
+        return try {
+            val json = JSONObject(body)
+            val accessToken = json.optString("access_token", "")
+            if (accessToken.isBlank()) {
+                return null
             }
 
-            val now = System.currentTimeMillis() / 1000L
-            now + skewSeconds < exp
-        } catch (e: Exception) {
-            Log.e("OAuthHelper", "Failed to inspect access token expiry: ${e.message}")
-            false
+            val responseRefreshToken = json.optString("refresh_token", "")
+            val refreshToken = if (responseRefreshToken.isNotBlank()) {
+                responseRefreshToken
+            } else {
+                fallbackRefreshToken.orEmpty()
+            }
+
+            if (refreshToken.isBlank()) {
+                return null
+            }
+
+            OAuthTokens(accessToken, refreshToken)
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -173,14 +204,14 @@ object OAuthHelper {
 
         try {
             val response = httpClient.newCall(request).execute()
-            val body = response.body?.string() ?: return@withContext null
+            val body = response.body.string()
             if (response.isSuccessful) {
-                val json = JSONObject(body)
-                if (!json.has("access_token") || !json.has("refresh_token")) {
+                val tokens = parseTokenResponse(body)
+                if (tokens == null) {
                     Log.e("OAuthHelper", "Token response missing 'access_token' or 'refresh_token' field")
                     return@withContext null
                 }
-                return@withContext OAuthTokens(json.getString("access_token"), json.getString("refresh_token"))
+                return@withContext tokens
             }
             Log.e("OAuthHelper", "Token exchange failed with HTTP ${response.code}: $body")
             null
@@ -208,14 +239,14 @@ object OAuthHelper {
 
         try {
             val response = httpClient.newCall(request).execute()
-            val body = response.body?.string() ?: return@withContext RefreshResult.NetworkError("Empty response body")
+            val body = response.body.string()
             if (response.isSuccessful) {
-                val json = JSONObject(body)
-                if (!json.has("access_token") || !json.has("refresh_token")) {
-                    Log.e("OAuthHelper", "Refresh response missing tokens")
+                val tokens = parseTokenResponse(body, fallbackRefreshToken = refreshToken)
+                if (tokens == null) {
+                    Log.e("OAuthHelper", "Refresh response missing access token")
                     return@withContext RefreshResult.Error("Invalid JSON from Keycloak")
                 }
-                return@withContext RefreshResult.Success(OAuthTokens(json.getString("access_token"), json.getString("refresh_token")))
+                return@withContext RefreshResult.Success(tokens)
             }
             if (response.code >= 500) {
                  return@withContext RefreshResult.NetworkError("Server Error (HTTP ${response.code})")
@@ -237,7 +268,8 @@ object OAuthHelper {
             return null
         }
 
-        val decoded = Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        val payload = parts[1].padEnd((parts[1].length + 3) / 4 * 4, '=')
+        val decoded = JavaBase64.getUrlDecoder().decode(payload)
         return JSONObject(String(decoded, Charsets.UTF_8))
     }
 }

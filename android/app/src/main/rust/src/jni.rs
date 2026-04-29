@@ -228,6 +228,8 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
             } else {
                 None
             };
+            let effective_http3_framing =
+                crate::connection::effective_http3_framing(censorship_resistant, http3_framing);
 
             let result = rt.block_on(async {
                 connect_and_handshake(
@@ -236,7 +238,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
                     endpoint,
                     cert_pin_str,
                     censorship_resistant,
-                    http3_framing,
+                    effective_http3_framing,
                     ech_config_hex,
                     vpn_mtu_opt,
                 )
@@ -246,7 +248,8 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
             match result {
                 Ok((connection, config, h3_guard)) => {
                     clear_last_init_error();
-                    let session = VpnSession::new(rt, connection, config, http3_framing, h3_guard);
+                    let session =
+                        VpnSession::new(rt, connection, config, effective_http3_framing, h3_guard);
                     Box::into_raw(Box::new(session)) as jlong
                 }
                 Err(e) => {

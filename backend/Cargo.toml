@@ -28,7 +28,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 etherparse = { workspace = true }
-constant_time_eq = "0.4"
+constant_time_eq = "0.5"
 shared = { workspace = true }
 sha2 = "0.11"
 hex = "0.4"

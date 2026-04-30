@@ -31,9 +31,10 @@ async fn main() {
             },
             "stop" => send_request(IpcRequest::Stop).await,
             "status" => send_request(IpcRequest::Status).await,
+            "repair" => send_request(IpcRequest::RepairNetwork).await,
             _ => {
                 println!("Unknown command: {}", cmd);
-                println!("Usage: mavi-vpn-client [start|stop|status]");
+                println!("Usage: mavi-vpn-client [start|stop|status|repair]");
                 Ok(())
             }
         }

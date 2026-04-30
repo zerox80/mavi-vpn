@@ -10,9 +10,9 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.0",
-    "@vitest/coverage-v8": "^3",
-    "jsdom": "^26",
-    "vitest": "^3"
+    "@vitest/coverage-v8": "^4",
+    "jsdom": "^29",
+    "vitest": "^4"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.0"

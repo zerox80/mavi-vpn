@@ -450,18 +450,13 @@ pub fn cleanup_routes(host_route: Option<&str>) {
             .output();
     }
     clear_persisted_host_route();
-    let _ = std::process::Command::new("netsh")
-        .args(["interface", "ipv6", "delete", "route", "::/1", "MaviVPN"])
-        .output();
-    let _ = std::process::Command::new("netsh")
-        .args([
-            "interface",
-            "ipv6",
-            "delete",
-            "route",
-            "8000::/1",
-            "MaviVPN",
-        ])
+    let cmd = "foreach ($prefix in @('::/1','8000::/1')) { \
+        Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue \
+        | Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -IncludeHidden -ErrorAction SilentlyContinue).Name -like 'MaviVPN*' } \
+        | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue | Out-Null \
+    }";
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", cmd])
         .output();
 }
 
@@ -564,7 +559,8 @@ fn set_nrpt_dns_rule(dns_v4: Ipv4Addr, dns_v6: Option<Ipv6Addr>) {
     let started = Instant::now();
 
     let script = format!(
-        "Add-DnsClientNrptRule -Namespace '.' -NameServers {} -Comment '{}' -ErrorAction SilentlyContinue; \
+        "Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Comment -eq '{}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
+        Add-DnsClientNrptRule -Namespace '.' -NameServers {} -Comment '{}' -ErrorAction SilentlyContinue; \
         New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Force -ErrorAction SilentlyContinue | Out-Null; \
         New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name DisableSmartNameResolution -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null; \
         New-Item -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters' -Force -ErrorAction SilentlyContinue | Out-Null; \
@@ -574,7 +570,7 @@ fn set_nrpt_dns_rule(dns_v4: Ipv4Addr, dns_v6: Option<Ipv6Addr>) {
         Clear-DnsClientCache -ErrorAction SilentlyContinue; \
         Register-DnsClient -ErrorAction SilentlyContinue; \
         Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue",
-        dns_servers, NRPT_COMMENT
+        NRPT_COMMENT, dns_servers, NRPT_COMMENT
     );
     let _ = run_powershell_cmd("Configure DNS leak prevention", &script);
 
@@ -598,4 +594,12 @@ pub fn remove_nrpt_dns_rule() {
     let _ = run_powershell_cmd("Remove DNS leak prevention", &cmd);
 
     info!("DNS leak prevention removed, normal DNS restored");
+}
+
+/// Emergency cleanup for startup, service stop/shutdown, repair commands, and uninstallers.
+/// This is intentionally idempotent: every operation tolerates missing routes/rules.
+pub fn cleanup_stale_network_state() {
+    info!("Cleaning stale MaviVPN network state");
+    cleanup_routes(None);
+    remove_nrpt_dns_rule();
 }

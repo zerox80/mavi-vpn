@@ -56,6 +56,46 @@ def ask(question, default="y"):
     answer = input(c("1;37", f"  ? {question} [{yn}]: ")).strip().lower()
     return (answer in ("y", "yes", "j", "ja")) if answer else (default == "y")
 
+def repair_network_state():
+    """Remove stale MaviVPN routes and DNS policy left by interrupted sessions."""
+    ps = r"""
+route delete 0.0.0.0 mask 128.0.0.0 2>$null | Out-Null
+route delete 128.0.0.0 mask 128.0.0.0 2>$null | Out-Null
+$persisted = Join-Path $env:ProgramData 'mavi-vpn\last_host_route.txt'
+if (Test-Path $persisted) {
+    $prefix = (Get-Content $persisted -Raw -ErrorAction SilentlyContinue).Trim()
+    if ($prefix) {
+        Remove-NetRoute -DestinationPrefix $prefix -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    }
+    Remove-Item $persisted -Force -ErrorAction SilentlyContinue
+}
+foreach ($prefix in @('::/1','8000::/1')) {
+    Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue |
+        Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -IncludeHidden -ErrorAction SilentlyContinue).Name -like 'MaviVPN*' } |
+        Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+}
+Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+    Where-Object { $_.Comment -eq 'MaviVPN' } |
+    Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue
+Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' -Name DisableSmartNameResolution -ErrorAction SilentlyContinue
+Remove-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' -Name DisableParallelAandAAAA -ErrorAction SilentlyContinue
+Get-NetAdapter -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' } |
+    ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue }
+Clear-DnsClientCache -ErrorAction SilentlyContinue
+Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue
+"""
+    info("Cleaning stale MaviVPN routes and DNS policy...")
+    r = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode == 0:
+        ok("Network repair cleanup completed")
+    else:
+        warn("Network repair cleanup may be incomplete; try running as Administrator.")
+
 # ---------------------------------------------------------------------------
 # NSIS uninstaller detection
 # ---------------------------------------------------------------------------
@@ -141,6 +181,9 @@ def main():
     print()
 
     removed_anything = False
+
+    step("Network repair")
+    repair_network_state()
 
     # ── NSIS uninstaller ─────────────────────────────────────────────────────
     step("NSIS uninstaller")

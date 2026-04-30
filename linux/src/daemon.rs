@@ -188,6 +188,14 @@ async fn dispatch_request(req: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> I
             guard.active_config = None;
             IpcResponse::Ok
         }
+        IpcRequest::RepairNetwork => {
+            info!("Handling RepairNetwork request");
+            guard.vpn_running.store(false, Ordering::SeqCst);
+            guard.active_config = None;
+            drop(guard);
+            crate::network::cleanup_stale_network_state();
+            IpcResponse::Ok
+        }
         IpcRequest::Start(config) => {
             info!("Handling Start request for endpoint: {}", config.endpoint);
             let still_running = guard.vpn_running.load(Ordering::SeqCst)

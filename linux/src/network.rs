@@ -227,6 +227,28 @@ impl NetworkConfig {
     }
 }
 
+/// Best-effort cleanup for daemon repair requests and stale state after crashes.
+/// This intentionally tolerates missing routes or DNS backups.
+pub fn cleanup_stale_network_state() {
+    info!("Cleaning stale MaviVPN network state...");
+
+    let _ = run_cmd("ip", &["route", "del", "0.0.0.0/1"]);
+    let _ = run_cmd("ip", &["route", "del", "128.0.0.0/1"]);
+    let _ = run_cmd("ip", &["-6", "route", "del", "::/1"]);
+    let _ = run_cmd("ip", &["-6", "route", "del", "8000::/1"]);
+    let _ = run_cmd("ip", &["link", "set", "mavi0", "down"]);
+
+    let current = std::fs::read(RESOLV_CONF_PATH).ok();
+    let mavi_owned = current
+        .as_deref()
+        .is_some_and(is_mavi_generated_resolv_conf);
+    if mavi_owned || load_persistent_backup().is_some() {
+        restore_dns(&None, false);
+    }
+
+    info!("Stale MaviVPN network cleanup complete.");
+}
+
 /// Detects the current physical IPv4 default gateway and interface.
 fn detect_physical_gateway() -> (Option<String>, Option<String>) {
     detect_physical_gateway_for(&["route", "show", "default"], "IPv4")

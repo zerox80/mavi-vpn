@@ -9,6 +9,7 @@
 //!   sudo mavi-vpn daemon                     # Start as IPC daemon (for GUI)
 //!   mavi-vpn start                           # Send start to running daemon
 //!   mavi-vpn stop                            # Send stop to running daemon
+//!   mavi-vpn repair                          # Repair stale daemon networking
 //!   mavi-vpn status                          # Check VPN status
 
 #[cfg(target_os = "linux")]
@@ -98,6 +99,7 @@ mod linux_app {
                 run_ipc_start(config_path)
             }
             Some("stop") => run_ipc_stop(),
+            Some("repair") => run_ipc_repair(),
 
             Some("status") => {
                 run_status();
@@ -227,6 +229,24 @@ mod linux_app {
         })
     }
 
+    fn run_ipc_repair() -> Result<()> {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            match daemon::send_request(shared::ipc::IpcRequest::RepairNetwork).await {
+                Ok(shared::ipc::IpcResponse::Ok) => {
+                    println!("\x1b[1;32mNetwork repair cleanup completed.\x1b[0m")
+                }
+                Ok(shared::ipc::IpcResponse::Error(e)) => eprintln!("Error: {}", e),
+                Ok(_) => eprintln!("Unexpected response"),
+                Err(e) => eprintln!(
+                    "Failed to communicate with daemon: {}\nIs the daemon running?",
+                    e
+                ),
+            }
+            Ok(())
+        })
+    }
+
     fn run_status() {
         // First try IPC daemon
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -285,6 +305,7 @@ mod linux_app {
         println!("  daemon                Start IPC daemon (requires root)");
         println!("  start                 Send connect to running daemon");
         println!("  stop                  Send disconnect to running daemon");
+        println!("  repair                Repair stale routes/DNS via daemon");
         println!();
         println!("Other:");
         println!("  status                Check VPN status");

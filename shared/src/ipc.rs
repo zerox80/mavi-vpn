@@ -81,6 +81,8 @@ pub enum IpcRequest {
     Stop,
     /// Query the current tunnel status.
     Status,
+    /// Remove stale MaviVPN routes and DNS/NRPT state without starting a tunnel.
+    RepairNetwork,
 }
 
 /// More precise lifecycle state for clients that need to distinguish setup
@@ -217,6 +219,12 @@ mod tests {
     fn ipc_request_status_roundtrip() {
         let decoded = roundtrip_request(&IpcRequest::Status);
         assert!(matches!(decoded, IpcRequest::Status));
+    }
+
+    #[test]
+    fn ipc_request_repair_network_roundtrip() {
+        let decoded = roundtrip_request(&IpcRequest::RepairNetwork);
+        assert!(matches!(decoded, IpcRequest::RepairNetwork));
     }
 
     #[test]

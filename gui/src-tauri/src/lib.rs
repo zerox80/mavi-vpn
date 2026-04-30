@@ -122,6 +122,15 @@ async fn vpn_disconnect() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn vpn_repair_network() -> Result<String, String> {
+    match send_ipc_request(&IpcRequest::RepairNetwork).await? {
+        IpcResponse::Ok => Ok("Network repaired".into()),
+        IpcResponse::Error(e) => Err(e),
+        _ => Err("Unexpected response".into()),
+    }
+}
+
+#[tauri::command]
 async fn vpn_status() -> Result<VpnStatus, String> {
     match send_ipc_request(&IpcRequest::Status).await {
         Ok(IpcResponse::Status {
@@ -379,6 +388,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             vpn_connect,
             vpn_disconnect,
+            vpn_repair_network,
             vpn_status,
             save_config,
             load_config,

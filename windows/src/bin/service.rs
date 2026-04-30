@@ -39,6 +39,10 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 /// state lock indefinitely by opening a connection and stalling mid-read.
 const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
+static REPAIR_CLEANUP_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 struct VpnServiceState {
     vpn_running: Arc<AtomicBool>,
     vpn_connected: Arc<AtomicBool>,
@@ -107,6 +111,8 @@ pub fn main() -> Result<(), windows_service::Error> {
         // Brief wait for the service to stop
         std::thread::sleep(Duration::from_secs(2));
 
+        run_network_repair_cleanup();
+
         // 2. Delete the service
         let status = std::process::Command::new("sc")
             .args(["delete", SERVICE_NAME])
@@ -155,9 +161,12 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
 
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
-            ServiceControl::Stop => {
-                info!("Received Stop signal from Service Control Manager");
+            event @ (ServiceControl::Stop
+            | ServiceControl::Preshutdown
+            | ServiceControl::Shutdown) => {
+                info!("Received {:?} signal from Service Control Manager", event);
                 stop_signal_handler.store(true, Ordering::SeqCst);
+                run_network_repair_cleanup();
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -191,7 +200,9 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
     status_handle.set_service_status(ServiceStatus {
         service_type: SERVICE_TYPE,
         current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SESSION_CHANGE,
+        controls_accepted: ServiceControlAccept::STOP
+            | ServiceControlAccept::PRESHUTDOWN
+            | ServiceControlAccept::SESSION_CHANGE,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
         wait_hint: Duration::default(),
@@ -238,6 +249,8 @@ async fn run_service_loop(
         vpn_task: None,
         active_config: None,
     }));
+
+    run_network_repair_cleanup();
 
     // Generate secure token for IPC and save to file BEFORE binding listener
     let token_bytes: [u8; 32] = rand::random();
@@ -404,6 +417,20 @@ async fn dispatch_request(
             guard.active_config = None;
             ipc::IpcResponse::Ok
         }
+        ipc::IpcRequest::RepairNetwork => {
+            info!("Handling RepairNetwork request from client");
+            let task_running = guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished());
+            guard.vpn_running.store(false, Ordering::SeqCst);
+            guard.vpn_connected.store(false, Ordering::SeqCst);
+            guard.vpn_stopping.store(task_running, Ordering::SeqCst);
+            if let Ok(mut last_error) = guard.last_error.lock() {
+                *last_error = None;
+            }
+            guard.active_config = None;
+            drop(guard);
+            run_network_repair_cleanup();
+            ipc::IpcResponse::Ok
+        }
         ipc::IpcRequest::Start(config) => {
             info!("Handling Start request for endpoint: {}", config.endpoint);
             if guard.vpn_stopping.load(Ordering::SeqCst) {
@@ -453,6 +480,16 @@ async fn dispatch_request(
             }
         }
     }
+}
+
+#[cfg(not(test))]
+fn run_network_repair_cleanup() {
+    vpn_core::cleanup_stale_network_state();
+}
+
+#[cfg(test)]
+fn run_network_repair_cleanup() {
+    REPAIR_CLEANUP_CALLS.fetch_add(1, Ordering::SeqCst);
 }
 
 fn classify_status(
@@ -616,6 +653,62 @@ mod tests {
             assert!(guard.last_error.lock().unwrap().is_none());
             guard.vpn_task.take()
         };
+        if let Some(task) = task {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_request_without_task_reports_stopped() {
+        let state = test_state();
+        {
+            let mut guard = state.lock().await;
+            guard.vpn_running.store(true, Ordering::SeqCst);
+            guard.vpn_connected.store(true, Ordering::SeqCst);
+            guard.active_config = Some(test_config());
+        }
+
+        assert!(matches!(
+            dispatch_request(ipc::IpcRequest::Stop, &state).await,
+            ipc::IpcResponse::Ok
+        ));
+
+        let guard = state.lock().await;
+        assert!(!guard.vpn_running.load(Ordering::SeqCst));
+        assert!(!guard.vpn_connected.load(Ordering::SeqCst));
+        assert!(!guard.vpn_stopping.load(Ordering::SeqCst));
+        assert!(guard.active_config.is_none());
+    }
+
+    #[tokio::test]
+    async fn repair_network_stops_active_task_and_runs_cleanup() {
+        REPAIR_CLEANUP_CALLS.store(0, Ordering::SeqCst);
+        let state = test_state();
+        let sleeper = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        {
+            let mut guard = state.lock().await;
+            guard.vpn_running.store(true, Ordering::SeqCst);
+            guard.vpn_connected.store(true, Ordering::SeqCst);
+            guard.active_config = Some(test_config());
+            guard.vpn_task = Some(sleeper);
+        }
+
+        assert!(matches!(
+            dispatch_request(ipc::IpcRequest::RepairNetwork, &state).await,
+            ipc::IpcResponse::Ok
+        ));
+
+        let task = {
+            let mut guard = state.lock().await;
+            assert!(!guard.vpn_running.load(Ordering::SeqCst));
+            assert!(!guard.vpn_connected.load(Ordering::SeqCst));
+            assert!(guard.vpn_stopping.load(Ordering::SeqCst));
+            assert!(guard.active_config.is_none());
+            guard.vpn_task.take()
+        };
+        assert_eq!(REPAIR_CLEANUP_CALLS.load(Ordering::SeqCst), 1);
         if let Some(task) = task {
             task.abort();
         }

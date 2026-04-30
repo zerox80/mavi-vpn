@@ -23,6 +23,11 @@ use self::network::{
 };
 use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter, is_wintun_ring_full};
 
+#[cfg_attr(test, allow(dead_code))]
+pub fn cleanup_stale_network_state() {
+    network::cleanup_stale_network_state();
+}
+
 // --- Default timing parameters ---
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;

@@ -44,15 +44,12 @@ async fn main() {
         println!("\n❌ Error: {}", e);
     }
 
-    // Keep window open when launched via double-click
     println!("\nPress Enter to exit...");
     let _ = read_line();
 }
 
 async fn interactive_mode() -> Result<()> {
-    // First, check status
     let status_res = send_request_internal(IpcRequest::Status).await;
-
     match status_res {
         Ok(IpcResponse::Status {
             running: true,
@@ -76,11 +73,9 @@ async fn interactive_mode() -> Result<()> {
             println!("VPN is disconnected.");
             let config = load_or_prompt_config().await?;
             send_request(IpcRequest::Start(config)).await?;
-
             println!("\n✅ VPN is now CONNECTED!");
             println!("To safely DISCONNECT and exit, press Enter...");
             let _ = read_line();
-
             println!("Disconnecting...");
             send_request(IpcRequest::Stop).await?;
             println!("✅ Disconnected. Goodbye!");
@@ -96,7 +91,6 @@ async fn interactive_mode() -> Result<()> {
         }
         _ => {}
     }
-
     Ok(())
 }
 
@@ -122,24 +116,19 @@ async fn send_request_internal(req: IpcRequest) -> Result<IpcResponse> {
     };
 
     let mut client = TcpStream::connect(ipc::LOCAL_IPC_ADDR).await?;
-
     let req_buf = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())?;
     client.write_u32_le(req_buf.len() as u32).await?;
     client.write_all(&req_buf).await?;
-
     let mut len_buf = [0u8; 4];
     client.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > 65536 {
         return Err(anyhow::anyhow!("Response too large"));
     }
-
     let mut buf = vec![0u8; len];
     client.read_exact(&mut buf).await?;
-
     let (resp, _) = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
         .map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
-
     Ok(resp)
 }
 
@@ -161,11 +150,15 @@ async fn send_request(req: IpcRequest) -> Result<()> {
             endpoint,
             state,
             last_error,
+            assigned_ip,
         }) => {
             println!("Status: {}", if running { "RUNNING" } else { "STOPPED" });
             println!("State: {:?}", state);
             if let Some(ep) = endpoint {
                 println!("Endpoint: {}", ep);
+            }
+            if let Some(ip) = assigned_ip {
+                println!("Public IP: {}", ip);
             }
             if let Some(err) = last_error {
                 println!("Last error: {}", err);
@@ -186,11 +179,15 @@ async fn wait_for_connected() -> Result<()> {
             Ok(IpcResponse::Status {
                 running: true,
                 endpoint,
+                assigned_ip,
                 ..
             }) => {
                 println!("VPN is now CONNECTED.");
                 if let Some(ep) = endpoint {
                     println!("Endpoint: {}", ep);
+                }
+                if let Some(ip) = assigned_ip {
+                    println!("Public IP: {}", ip);
                 }
                 return Ok(());
             }
@@ -213,10 +210,7 @@ async fn wait_for_connected() -> Result<()> {
     anyhow::bail!("VPN is still starting. Run status to check progress.")
 }
 
-// Config loading and prompting functions
-
 fn config_path() -> PathBuf {
-    // Use %APPDATA%\MaviVPN\ so normal users can read/write without admin.
     let dir = std::env::var("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -275,81 +269,62 @@ async fn load_or_prompt_config() -> Result<Config> {
             println!("  VPN MTU: {}", mtu);
         }
         println!();
-
         print!("Diese Konfiguration verwenden? [J/n]: ");
         io::stdout().flush()?;
         let input = read_line()?.to_lowercase();
-
         if input.is_empty() || input == "j" || input == "ja" || input == "y" || input == "yes" {
             println!();
-
-            // If Keycloak was used, we MUST fetch a fresh token because JWTs expire quickly!
             if saved.kc_auth.unwrap_or(false) {
                 let kc_url = saved.kc_url.as_deref().unwrap_or("");
                 let realm = saved.kc_realm.as_deref().unwrap_or("mavi-vpn");
                 let client_id = saved.kc_client_id.as_deref().unwrap_or("mavi-client");
-
                 println!("Erneuere Keycloak-Sitzung...");
                 let fresh_token = oauth::start_oauth_flow(kc_url, realm, client_id).await?;
                 println!("Sitzung erfolgreich erneuert!");
                 saved.token = fresh_token;
-
-                // Save the fresh token to disk as well (though it expires again soon)
                 save_config(&saved)?;
             }
-
             return Ok(saved);
         }
         println!();
     }
-
     let config = prompt_new_config().await?;
     save_config(&config)?;
     Ok(config)
 }
 
-// fetch_keycloak_token removed, now using browser-based oauth::start_oauth_flow
-
 async fn prompt_new_config() -> Result<Config> {
     let mut stdout = io::stdout();
-
     print!("Server Endpoint (z.B. vpn.example.com:443): ");
     stdout.flush()?;
     let endpoint = read_line()?;
-
     print!("Nutze Keycloak Authentifizierung? [j/N]: ");
     stdout.flush()?;
     let is_keycloak = read_line()?.to_lowercase();
-
     let mut kc_auth = Some(false);
     let mut saved_kc_url = None;
     let mut saved_kc_realm = None;
     let mut saved_kc_client_id = None;
-
     let token;
     if is_keycloak == "j" || is_keycloak == "ja" || is_keycloak == "y" || is_keycloak == "yes" {
         kc_auth = Some(true);
         print!("Keycloak Server URL (z.B. https://auth.example.com): ");
         stdout.flush()?;
         let kc_url = read_line()?;
-
         print!("Realm (default: mavi-vpn): ");
         stdout.flush()?;
         let mut realm = read_line()?;
         if realm.is_empty() {
             realm = "mavi-vpn".to_string();
         }
-
         print!("Client ID (default: mavi-client): ");
         stdout.flush()?;
         let mut client_id = read_line()?;
         if client_id.is_empty() {
             client_id = "mavi-client".to_string();
         }
-
         token = oauth::start_oauth_flow(&kc_url, &realm, &client_id).await?;
         println!("Keycloak Login abgeschlossen! Speichere Konfiguration...");
-
         saved_kc_url = Some(kc_url);
         saved_kc_realm = Some(realm);
         saved_kc_client_id = Some(client_id);
@@ -358,17 +333,14 @@ async fn prompt_new_config() -> Result<Config> {
         stdout.flush()?;
         token = read_line()?;
     }
-
     print!("Certificate PIN (SHA256 hex): ");
     stdout.flush()?;
     let cert_pin = read_line()?;
-
     print!("Censorship Resistant Mode? [j/N]: ");
     stdout.flush()?;
     let cr_input = read_line()?.to_lowercase();
     let censorship_resistant =
         cr_input == "j" || cr_input == "ja" || cr_input == "y" || cr_input == "yes";
-
     let http3_framing = if censorship_resistant {
         println!("HTTP/3 Datagram Framing wird im CR Mode automatisch aktiviert.");
         true
@@ -378,9 +350,6 @@ async fn prompt_new_config() -> Result<Config> {
         let h3_input = read_line()?.to_lowercase();
         h3_input == "j" || h3_input == "ja" || h3_input == "y" || h3_input == "yes"
     };
-
-    // Prefer $VPN_ECH_CONFIG (for headless/scripted use). Fall back to an
-    // interactive prompt when censorship_resistant mode is on.
     let ech_config = match std::env::var("VPN_ECH_CONFIG") {
         Ok(s) if !s.is_empty() => Some(s),
         _ if censorship_resistant => {
@@ -390,7 +359,7 @@ async fn prompt_new_config() -> Result<Config> {
             if input.is_empty() {
                 None
             } else if shared::hex::decode_hex(&input).is_none() {
-                eprintln!("Warnung: ECHConfigList-Hex ist ungültig (ungerade Länge oder kein gültiges Hex) – ECH wird deaktiviert");
+                eprintln!("Warnung: ECHConfigList-Hex ist ungültig – ECH wird deaktiviert");
                 None
             } else {
                 Some(input)
@@ -398,7 +367,6 @@ async fn prompt_new_config() -> Result<Config> {
         }
         _ => None,
     };
-
     print!("VPN MTU (1280–1360, optional – Enter für Standard 1280): ");
     stdout.flush()?;
     let vpn_mtu_input = read_line()?;
@@ -413,9 +381,7 @@ async fn prompt_new_config() -> Result<Config> {
             }
         }
     };
-
     println!();
-
     Ok(Config {
         endpoint,
         token,

@@ -7,7 +7,7 @@ mod network;
 mod wintun_mod;
 
 use crate::ipc::Config;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes};
 use shared::{icmp, masque, ControlMessage};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,24 +32,40 @@ pub fn cleanup_stale_network_state() {
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
 
+use std::sync::OnceLock;
+
+static WINTUN_ADAPTER: OnceLock<(wintun::Wintun, Arc<Adapter>)> = OnceLock::new();
+
+fn get_global_adapter() -> Result<Arc<Adapter>> {
+    if let Some((_, adapter)) = WINTUN_ADAPTER.get() {
+        return Ok(adapter.clone());
+    }
+
+    let dll_path = extract_wintun_dll()?;
+    let wintun =
+        unsafe { wintun::load_from_path(&dll_path) }.context("Failed to load wintun.dll")?;
+    let adapter = get_or_create_adapter(&wintun)?;
+
+    let (_, adapter) = WINTUN_ADAPTER.get_or_init(|| (wintun, adapter));
+    Ok(adapter.clone())
+}
+
 /// Entry point for the VPN runner. Manages the reconnection loop and WinTUN lifecycle.
 pub async fn run_vpn(
     mut config: Config,
     running: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     last_error: Arc<StdMutex<Option<String>>>,
+    assigned_ip: Arc<StdMutex<Option<String>>>,
 ) -> Result<()> {
     config.normalize_transport();
     connected.store(false, Ordering::SeqCst);
     // 1. Prepare environment
     let cert_pin_bytes =
         decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
-    let dll_path = extract_wintun_dll()?;
-    let wintun =
-        unsafe { wintun::load_from_path(&dll_path) }.context("Failed to load wintun.dll")?;
 
-    // 2. Open or create the virtual adapter
-    let adapter = get_or_create_adapter(&wintun)?;
+    // 2. Open or create the virtual adapter (cached globally)
+    let adapter = get_global_adapter()?;
 
     let mut backoff = Duration::from_secs(RECONNECT_INITIAL_SECS);
 
@@ -67,6 +83,7 @@ pub async fn run_vpn(
             &running,
             &connected,
             &last_error,
+            &assigned_ip,
         )
         .await;
 
@@ -113,13 +130,18 @@ pub async fn run_vpn(
     connected.store(false, Ordering::SeqCst);
     cleanup_routes(None);
     remove_nrpt_dns_rule();
+    if let Ok(mut ip) = assigned_ip.lock() {
+        *ip = None;
+    }
     info!("VPN Service Stopped.");
     Ok(())
 }
+
 enum SessionEnd {
     UserStopped,
     ConnectionLost,
 }
+
 /// Manages a single active VPN session (handshake + packet pumping).
 async fn run_session(
     config: &Config,
@@ -128,15 +150,11 @@ async fn run_session(
     global_running: &Arc<AtomicBool>,
     connected: &Arc<AtomicBool>,
     last_error: &Arc<StdMutex<Option<String>>>,
+    assigned_ip_state: &Arc<StdMutex<Option<String>>>,
 ) -> Result<SessionEnd> {
     let socket = create_udp_socket()?;
 
     // 1. QUIC Handshake & Auth
-    //    `_h3_guard` keeps the h3 SendRequest + driver task alive for the entire
-    //    session; dropping it earlier would send CONNECTION_CLOSE(H3_NO_ERROR) and
-    //    kill the VPN datagram plane. It lives to the end of `run_session` scope.
-    // Optional ECH GREASE + SNI-spoofing config, derived from the admin's
-    // out-of-band ECHConfigList (hex in config.json). None → legacy path.
     let ech_bytes = config
         .ech_config
         .as_deref()
@@ -206,6 +224,11 @@ async fn run_session(
             .unwrap_or_else(|| v6.to_string()),
     };
 
+    // Store the server's public IP in shared state for the GUI
+    if let Ok(mut ip) = assigned_ip_state.lock() {
+        *ip = Some(endpoint_ip_str.clone());
+    }
+
     let adapter_config_started = Instant::now();
     let route_cleanup = SessionRouteGuard::new(set_adapter_network_config(
         adapter,
@@ -231,6 +254,29 @@ async fn run_session(
             .start_session(wintun::MAX_RING_CAPACITY)
             .context("Failed to start WinTUN session")?,
     );
+
+    // Hard verification for IPv6 if assigned
+    if let Some(ipv6) = assigned_ipv6 {
+        let idx = adapter
+            .get_adapter_index()
+            .context("Failed to get adapter index for IPv6 verification")?;
+
+        // 1. Wait for IPv6 address confirmation (DAD, etc)
+        if !network::wait_for_ipv6_address(idx, ipv6).await {
+            bail!(
+                "IPv6 address {} failed verification (possibly duplicate or stack error)",
+                ipv6
+            );
+        }
+        info!("IPv6 address {} verified", ipv6);
+
+        // 2. Verify On-Link split routes exist
+        if !network::verify_ipv6_split_routes(idx)? {
+            bail!("IPv6 split routes (::/1, 8000::/1) not found in routing table");
+        }
+        info!("IPv6 split routes verified as On-Link");
+    }
+
     connected.store(true, Ordering::SeqCst);
     if let Ok(mut last) = last_error.lock() {
         *last = None;
@@ -280,8 +326,6 @@ async fn run_session(
             }
             match session_tun.try_receive() {
                 Ok(Some(packet)) => {
-                    // In H3 mode, prepend [Quarter Stream ID] [Context ID]
-                    // (connect-ip datagram framing, RFC 9484 §5 — 2 bytes).
                     let packet_bytes = packet.bytes();
                     if pool.capacity() < packet_bytes.len() + masque::DATAGRAM_PREFIX.len() {
                         pool.reserve(4 * 1024 * 1024);
@@ -299,8 +343,6 @@ async fn run_session(
                             if packet.bytes().is_empty() {
                                 continue;
                             }
-
-                            // Synthesise ICMP PTB signal back to OS
                             let version = packet.bytes()[0] >> 4;
                             let source_ip = if version == 4 {
                                 Some(std::net::IpAddr::V4(gateway))
@@ -314,7 +356,6 @@ async fn run_session(
                             } else {
                                 tun_mtu_for_ptb
                             };
-
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(
                                 packet.bytes(),
                                 reported_mtu,
@@ -360,17 +401,14 @@ async fn run_session(
     let quic_to_tun = tokio::spawn(async move {
         let mut pending_datagram: Option<Bytes> = None;
         let mut yield_count = 0u8;
-
         loop {
             if !run_quic_in.load(Ordering::Relaxed) || !alive_quic_in.load(Ordering::Relaxed) {
                 break;
             }
-
             let data = match pending_datagram.take() {
                 Some(data) => data,
                 None => match conn_quic.read_datagram().await {
                     Ok(mut data) => {
-                        // Strip [Quarter Stream ID] [Context ID] for connect-ip.
                         if is_h3_framing_dl {
                             let inner_len = match masque::unwrap_datagram(&data) {
                                 Some(slice) => slice.len(),
@@ -392,11 +430,9 @@ async fn run_session(
                     }
                 },
             };
-
             if data.is_empty() {
                 continue;
             }
-
             match session_quic_in.allocate_send_packet(data.len() as u16) {
                 Ok(mut packet) => {
                     yield_count = 0;
@@ -405,8 +441,6 @@ async fn run_session(
                 }
                 Err(e) if is_wintun_ring_full(&e) => {
                     pending_datagram = Some(data);
-                    // Hybrid backoff: gracefully yield time to the runtime without triggering
-                    // the ~15.6ms system timer penalty on Windows for short bursts of backpressure.
                     if yield_count < 10 {
                         yield_count += 1;
                         tokio::task::yield_now().await;
@@ -430,6 +464,9 @@ async fn run_session(
     quic_to_tun.abort();
     let _ = tun_to_quic.join();
     connected.store(false, Ordering::SeqCst);
+    if let Ok(mut ip) = assigned_ip_state.lock() {
+        *ip = None;
+    }
     drop(route_cleanup);
 
     if global_running.load(Ordering::Relaxed) {

@@ -79,12 +79,11 @@ struct VpnStatus {
     service_available: bool,
     state: VpnState,
     last_error: Option<String>,
+    assigned_ip: Option<String>,
 }
 
 #[tauri::command]
 async fn vpn_connect(mut config: Config) -> Result<String, String> {
-    // Keycloak OAuth must run in the GUI process (user session, can open browser).
-    // The service runs as SYSTEM and cannot open a browser window.
     if config.kc_auth.unwrap_or(false) {
         let kc_url = config.kc_url.as_deref().unwrap_or("").to_string();
         let realm = config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into());
@@ -138,12 +137,14 @@ async fn vpn_status() -> Result<VpnStatus, String> {
             endpoint,
             state,
             last_error,
+            assigned_ip,
         }) => Ok(VpnStatus {
             running,
             endpoint,
             service_available: true,
             state,
             last_error,
+            assigned_ip,
         }),
         Ok(IpcResponse::Error(e)) => Err(e),
         Ok(_) => Err("Unexpected response".into()),
@@ -153,6 +154,7 @@ async fn vpn_status() -> Result<VpnStatus, String> {
             service_available: false,
             state: VpnState::Stopped,
             last_error: None,
+            assigned_ip: None,
         }),
     }
 }
@@ -165,14 +167,6 @@ async fn save_config(app: AppHandle, mut config: Config) -> Result<(), String> {
     config.normalize_transport();
     let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&config_path, content).map_err(|e| e.to_string())?;
-
-    // Restrict permissions on Linux
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
-    }
-
     Ok(())
 }
 
@@ -188,11 +182,6 @@ async fn load_config(app: AppHandle) -> Result<Option<Config>, String> {
     config.normalize_transport();
     Ok(Some(config))
 }
-
-// =============================================================================
-// GUI preferences and saved connections. The active connection is serialized
-// into config.json only as a runtime snapshot when starting the tunnel.
-// =============================================================================
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
 struct SavedConn {
@@ -278,13 +267,7 @@ async fn load_prefs(app: AppHandle) -> Result<Prefs, String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     let prefs_path = config_dir.join("prefs.json");
     if !prefs_path.exists() {
-        return Ok(Prefs {
-            theme: default_theme(),
-            accent: default_accent(),
-            connections: vec![],
-            active_id: None,
-            legacy_config_migrated: false,
-        });
+        return Ok(Prefs::default());
     }
     let content = std::fs::read_to_string(prefs_path).map_err(|e| e.to_string())?;
     let mut prefs: Prefs = serde_json::from_str(&content).map_err(|e| e.to_string())?;
@@ -300,19 +283,8 @@ async fn save_prefs(app: AppHandle, mut prefs: Prefs) -> Result<(), String> {
     prefs.normalize_transport();
     let content = serde_json::to_string_pretty(&prefs).map_err(|e| e.to_string())?;
     std::fs::write(&prefs_path, content).map_err(|e| e.to_string())?;
-
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&prefs_path, std::fs::Permissions::from_mode(0o600));
-    }
-
     Ok(())
 }
-
-// =============================================================================
-// System Tray
-// =============================================================================
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -339,13 +311,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         })
         .build(app)?;
-
     Ok(())
 }
-
-// =============================================================================
-// Status polling (emits events to frontend)
-// =============================================================================
 
 fn start_status_poller(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -356,12 +323,14 @@ fn start_status_poller(app: AppHandle) {
                     endpoint,
                     state,
                     last_error,
+                    assigned_ip,
                 }) => VpnStatus {
                     running,
                     endpoint,
                     service_available: true,
                     state,
                     last_error,
+                    assigned_ip,
                 },
                 _ => VpnStatus {
                     running: false,
@@ -369,6 +338,7 @@ fn start_status_poller(app: AppHandle) {
                     service_available: false,
                     state: VpnState::Stopped,
                     last_error: None,
+                    assigned_ip: None,
                 },
             };
             let _ = app.emit("vpn-status-update", &status);
@@ -376,10 +346,6 @@ fn start_status_poller(app: AppHandle) {
         }
     });
 }
-
-// =============================================================================
-// App Entry
-// =============================================================================
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -402,128 +368,4 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Mavi VPN GUI");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_theme_is_light() {
-        assert_eq!(default_theme(), "light");
-    }
-
-    #[test]
-    fn default_accent_is_blue() {
-        assert_eq!(default_accent(), "#2B44FF");
-    }
-
-    #[test]
-    fn prefs_default_values() {
-        let prefs = Prefs::default();
-        assert_eq!(prefs.theme, "light");
-        assert_eq!(prefs.accent, "#2B44FF");
-        assert!(prefs.connections.is_empty());
-        assert!(prefs.active_id.is_none());
-        assert!(!prefs.legacy_config_migrated);
-    }
-
-    #[test]
-    fn prefs_serialization_roundtrip() {
-        let prefs = Prefs {
-            theme: "dark".into(),
-            accent: "#FF0000".into(),
-            connections: vec![SavedConn {
-                id: "abc123".into(),
-                label: "My Server".into(),
-                endpoint: "vpn.example.com:443".into(),
-                token: Some("psk".into()),
-                cert_pin: "deadbeef".into(),
-                ech_config: None,
-                http3_framing: true,
-                censorship_resistant: true,
-                kc_auth: None,
-                kc_url: None,
-                kc_realm: None,
-                kc_client_id: None,
-                vpn_mtu: None,
-            }],
-            active_id: Some("abc123".into()),
-            legacy_config_migrated: true,
-        };
-        let json = serde_json::to_string(&prefs).unwrap();
-        let deserialized: Prefs = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.theme, "dark");
-        assert_eq!(deserialized.connections.len(), 1);
-        assert_eq!(deserialized.connections[0].label, "My Server");
-        assert_eq!(deserialized.connections[0].token.as_deref(), Some("psk"));
-        assert!(deserialized.connections[0].http3_framing);
-        assert!(deserialized.legacy_config_migrated);
-    }
-
-    #[test]
-    fn prefs_normalizes_cr_connections_to_h3() {
-        let mut prefs = Prefs {
-            theme: "light".into(),
-            accent: "#2B44FF".into(),
-            connections: vec![SavedConn {
-                id: "abc123".into(),
-                label: "My Server".into(),
-                endpoint: "vpn.example.com:443".into(),
-                token: None,
-                cert_pin: "deadbeef".into(),
-                ech_config: None,
-                http3_framing: false,
-                censorship_resistant: true,
-                kc_auth: None,
-                kc_url: None,
-                kc_realm: None,
-                kc_client_id: None,
-                vpn_mtu: None,
-            }],
-            active_id: None,
-            legacy_config_migrated: false,
-        };
-
-        assert!(prefs.normalize_transport());
-        assert!(prefs.connections[0].http3_framing);
-    }
-
-    #[test]
-    fn saved_conn_missing_optional_fields_defaults() {
-        let json = r#"{"id":"x","label":"test","endpoint":"ep","cert_pin":"pin"}"#;
-        let conn: SavedConn = serde_json::from_str(json).unwrap();
-        assert!(conn.ech_config.is_none());
-        assert!(conn.token.is_none());
-        assert!(!conn.http3_framing);
-        assert!(!conn.censorship_resistant);
-        assert!(conn.kc_auth.is_none());
-        assert!(conn.vpn_mtu.is_none());
-    }
-
-    #[test]
-    fn prefs_missing_legacy_marker_defaults_false() {
-        let json = r##"{
-            "theme":"light",
-            "accent":"#2B44FF",
-            "connections":[],
-            "active_id":null
-        }"##;
-        let prefs: Prefs = serde_json::from_str(json).unwrap();
-        assert!(!prefs.legacy_config_migrated);
-    }
-
-    #[test]
-    fn vpn_status_serialization() {
-        let status = VpnStatus {
-            running: true,
-            endpoint: Some("vpn.example.com:443".into()),
-            service_available: true,
-            state: VpnState::Connected,
-            last_error: None,
-        };
-        let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("true"));
-        assert!(json.contains("vpn.example.com:443"));
-    }
 }

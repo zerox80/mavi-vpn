@@ -48,6 +48,7 @@ struct VpnServiceState {
     vpn_connected: Arc<AtomicBool>,
     vpn_stopping: Arc<AtomicBool>,
     last_error: Arc<StdMutex<Option<String>>>,
+    assigned_ip: Arc<StdMutex<Option<String>>>,
     vpn_task: Option<tokio::task::JoinHandle<()>>,
     active_config: Option<ipc::Config>,
 }
@@ -142,17 +143,17 @@ fn run_standalone() {
 
     let stop_signal_handler = stop_signal.clone();
     rt.spawn(async move {
-        use tokio::signal::windows::{ctrl_c, ctrl_close, ctrl_break};
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close};
         let mut s_c = ctrl_c().expect("Failed to listen for Ctrl+C");
         let mut s_close = ctrl_close().expect("Failed to listen for Ctrl+Close");
         let mut s_break = ctrl_break().expect("Failed to listen for Ctrl+Break");
-        
+
         tokio::select! {
             _ = s_c.recv() => info!("Received Ctrl+C signal"),
             _ = s_close.recv() => info!("Received Ctrl+Close signal (Alt+F4 or Window Close)"),
             _ = s_break.recv() => info!("Received Ctrl+Break signal"),
         }
-        
+
         info!("Termination signal received, stopping service gracefully...");
         stop_signal_handler.store(true, Ordering::SeqCst);
     });
@@ -162,11 +163,11 @@ fn run_standalone() {
             Ok(_) => {
                 info!("Service loop exited gracefully");
                 run_network_repair_cleanup();
-            },
+            }
             Err(e) => {
                 error!("Service loop error: {:?}", e);
                 run_network_repair_cleanup();
-            },
+            }
         }
     });
 }
@@ -270,6 +271,7 @@ async fn run_service_loop(
         vpn_connected: Arc::new(AtomicBool::new(false)),
         vpn_stopping: Arc::new(AtomicBool::new(false)),
         last_error: Arc::new(StdMutex::new(None)),
+        assigned_ip: Arc::new(StdMutex::new(None)),
         vpn_task: None,
         active_config: None,
     }));
@@ -420,6 +422,7 @@ async fn dispatch_request(
             let stopping = guard.vpn_stopping.load(Ordering::SeqCst);
             let starting = guard.vpn_running.load(Ordering::SeqCst) && !connected;
             let last_error = guard.last_error.lock().ok().and_then(|e| e.clone());
+            let assigned_ip = guard.assigned_ip.lock().ok().and_then(|e| e.clone());
             let state = classify_status(connected, stopping, starting, last_error.as_deref());
 
             ipc::IpcResponse::Status {
@@ -427,6 +430,7 @@ async fn dispatch_request(
                 endpoint: guard.active_config.as_ref().map(|c| c.endpoint.clone()),
                 state,
                 last_error,
+                assigned_ip,
             }
         }
         ipc::IpcRequest::Stop => {
@@ -437,6 +441,9 @@ async fn dispatch_request(
             guard.vpn_stopping.store(task_running, Ordering::SeqCst);
             if let Ok(mut last_error) = guard.last_error.lock() {
                 *last_error = None;
+            }
+            if let Ok(mut assigned_ip) = guard.assigned_ip.lock() {
+                *assigned_ip = None;
             }
             guard.active_config = None;
             ipc::IpcResponse::Ok
@@ -475,6 +482,7 @@ async fn dispatch_request(
                 let connected = guard.vpn_connected.clone();
                 let stopping = guard.vpn_stopping.clone();
                 let last_error = guard.last_error.clone();
+                let assigned_ip = guard.assigned_ip.clone();
 
                 guard.vpn_task = Some(tokio::spawn(async move {
                     if let Err(e) = vpn_core::run_vpn(
@@ -482,6 +490,7 @@ async fn dispatch_request(
                         flag.clone(),
                         connected.clone(),
                         last_error.clone(),
+                        assigned_ip,
                     )
                     .await
                     {
@@ -496,10 +505,13 @@ async fn dispatch_request(
                             *last = None;
                         }
                     }
+                    let _ = tokio::task::spawn_blocking(|| {
+                        run_network_repair_cleanup();
+                    })
+                    .await;
                     flag.store(false, Ordering::SeqCst);
                     connected.store(false, Ordering::SeqCst);
                     stopping.store(false, Ordering::SeqCst);
-                    run_network_repair_cleanup();
                 }));
                 ipc::IpcResponse::Ok
             }
@@ -642,6 +654,7 @@ mod tests {
             vpn_connected: Arc::new(AtomicBool::new(false)),
             vpn_stopping: Arc::new(AtomicBool::new(false)),
             last_error: Arc::new(StdMutex::new(None)),
+            assigned_ip: Arc::new(StdMutex::new(None)),
             vpn_task: None,
             active_config: None,
         }))

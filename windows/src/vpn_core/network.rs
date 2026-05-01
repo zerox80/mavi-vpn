@@ -55,12 +55,12 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let msg = format!("[FAIL] {} â†’ {} {}", display, stdout, stderr);
+            let msg = format!("[FAIL] {} → {} {}", display, stdout, stderr);
             warn!(cmd = %msg);
             false
         }
         Err(e) => {
-            let msg = format!("[ERR] {} â†’ {}", display, e);
+            let msg = format!("[ERR] {} → {}", display, e);
             warn!(cmd = %msg);
             false
         }
@@ -80,12 +80,12 @@ fn run_powershell_cmd(display: &str, script: &str) -> bool {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let msg = format!("[FAIL] {} â†’ {} {}", display, stdout, stderr);
+            let msg = format!("[FAIL] {} → {} {}", display, stdout, stderr);
             warn!(cmd = %msg);
             false
         }
         Err(e) => {
-            let msg = format!("[ERR] {} â†’ {}", display, e);
+            let msg = format!("[ERR] {} → {}", display, e);
             warn!(cmd = %msg);
             false
         }
@@ -212,9 +212,9 @@ pub fn set_adapter_network_config(
     );
 
     // 1. Ensure adapter is administratively up once it is visible in the OS.
-    // 2. Set IPv4 address â€” positional syntax is the most reliable across Windows versions.
+    // 2. Set IPv4 address — positional syntax is the most reliable across Windows versions.
     //    "netsh interface ipv4 set address <name> static <ip> <mask>"
-    //    Do NOT set gateway here â€” we add split routes manually.
+    //    Do NOT set gateway here — we add split routes manually.
     let address_started = Instant::now();
     if !run_cmd(
         "netsh",
@@ -366,12 +366,12 @@ pub fn set_adapter_network_config(
         ],
     );
 
-    // 6. Host exception FIRST â€” must run before split routes so that
+    // 6. Host exception FIRST — must run before split routes so that
     //    Get-NetRoute still sees the real physical default route.
     let route_started = Instant::now();
     let endpoint_route = add_host_route_exception_fixed(endpoint);
 
-    // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 â€” override default route without deleting it.
+    // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 — override default route without deleting it.
     run_cmd(
         "route",
         &[

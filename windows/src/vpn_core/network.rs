@@ -251,6 +251,84 @@ fn win32_set_mtu(adapter_index: u32, mtu: u32, family: u16) -> Result<()> {
     Ok(())
 }
 
+fn win32_delete_ip(adapter_index: u32, ip: IpAddr) -> Result<()> {
+    let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { std::mem::zeroed() };
+    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+    row.Address = to_sockaddr_inet(ip);
+    row.InterfaceIndex = adapter_index;
+
+    let res = unsafe { DeleteUnicastIpAddressEntry(&row) };
+    if res == 0 || res == 1168 {
+        // 1168 is ERROR_NOT_FOUND, which is fine for cleanup
+        Ok(())
+    } else {
+        Err(win_err(res))
+    }
+}
+
+fn win32_delete_route(adapter_index: u32, destination: IpAddr, prefix_len: u8) -> Result<()> {
+    let mut row: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+    unsafe { InitializeIpForwardEntry(&mut row) };
+    row.InterfaceIndex = adapter_index;
+    row.DestinationPrefix.Prefix = to_sockaddr_inet(destination);
+    row.DestinationPrefix.PrefixLength = prefix_len;
+
+    let res = unsafe { DeleteIpForwardEntry2(&row) };
+    if res == 0 || res == 1168 {
+        Ok(())
+    } else {
+        Err(win_err(res))
+    }
+}
+
+fn win32_cleanup_all_routes_on_interface(adapter_index: u32) {
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    if unsafe { GetIpForwardTable2(AF_INET as u16, &mut table) } == 0 {
+        let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+        for row in rows {
+            if row.InterfaceIndex == adapter_index {
+                unsafe { DeleteIpForwardEntry2(row) };
+            }
+        }
+        unsafe { FreeMibTable(table as _) };
+    }
+    // Repeat for IPv6
+    let mut table_v6: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    if unsafe { GetIpForwardTable2(AF_INET6 as u16, &mut table_v6) } == 0 {
+        let rows = unsafe { std::slice::from_raw_parts((*table_v6).Table.as_ptr(), (*table_v6).NumEntries as usize) };
+        for row in rows {
+            if row.InterfaceIndex == adapter_index {
+                unsafe { DeleteIpForwardEntry2(row) };
+            }
+        }
+        unsafe { FreeMibTable(table_v6 as _) };
+    }
+}
+
+fn win32_cleanup_all_ips_on_interface(adapter_index: u32) {
+    let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+    if unsafe { GetUnicastIpAddressTable(AF_INET as u16, &mut table) } == 0 {
+        let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+        for row in rows {
+            if row.InterfaceIndex == adapter_index {
+                unsafe { DeleteUnicastIpAddressEntry(row) };
+            }
+        }
+        unsafe { FreeMibTable(table as _) };
+    }
+    // IPv6
+    let mut table_v6: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+    if unsafe { GetUnicastIpAddressTable(AF_INET6 as u16, &mut table_v6) } == 0 {
+        let rows = unsafe { std::slice::from_raw_parts((*table_v6).Table.as_ptr(), (*table_v6).NumEntries as usize) };
+        for row in rows {
+            if row.InterfaceIndex == adapter_index {
+                unsafe { DeleteUnicastIpAddressEntry(row) };
+            }
+        }
+        unsafe { FreeMibTable(table_v6 as _) };
+    }
+}
+
 pub fn split_endpoint(endpoint: &str) -> (&str, Option<&str>) {
     if let Some(rest) = endpoint.strip_prefix('[') {
         if let Some(end) = rest.find(']') {
@@ -379,30 +457,46 @@ pub fn set_adapter_network_config(
 }
 
 pub fn cleanup_routes(host_route: Option<&str>) {
-    let _ = std::process::Command::new("route").args(["delete", "0.0.0.0", "mask", "128.0.0.0"]).output();
-    let _ = std::process::Command::new("route").args(["delete", "128.0.0.0", "mask", "128.0.0.0"]).output();
+    let started = Instant::now();
 
-    let mut host_routes = Vec::new();
+    // 1. Fast Win32 cleanup for standard split routes
+    let _ = win32_delete_route(0, IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1);
+    let _ = win32_delete_route(0, IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 1);
+
+    // 2. Identify MaviVPN adapter index to clean all its routes
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    if unsafe { GetIfTable2(&mut table) } == 0 {
+        let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+        for row in rows {
+            let name = String::from_utf16_lossy(&row.Alias);
+            if name.contains("MaviVPN") {
+                win32_cleanup_all_routes_on_interface(row.InterfaceIndex);
+                win32_cleanup_all_ips_on_interface(row.InterfaceIndex);
+            }
+        }
+        unsafe { FreeMibTable(table as _) };
+    }
+
+    // 3. Host route cleanup
+    let mut host_prefixes = Vec::new();
     if let Some(prefix) = host_route {
-        host_routes.push(prefix.to_string());
+        host_prefixes.push(prefix.to_string());
     }
     if let Some(prefix) = load_persisted_host_route() {
-        if !host_routes.iter().any(|item| item == &prefix) {
-            host_routes.push(prefix);
+        if !host_prefixes.iter().any(|item| item == &prefix) {
+            host_prefixes.push(prefix);
         }
     }
 
-    let mut ps_script = String::from("$ErrorActionPreference = 'SilentlyContinue'; ");
-    for prefix in host_routes {
-        ps_script.push_str(&format!("Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false; ", prefix));
+    if !host_prefixes.is_empty() {
+        let mut ps_script = String::from("$ErrorActionPreference = 'SilentlyContinue'; ");
+        for prefix in host_prefixes {
+            ps_script.push_str(&format!("Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false; ", prefix));
+        }
+        let _ = run_powershell_cmd("Cleanup host routes", &ps_script);
     }
-    ps_script.push_str("foreach ($prefix in @('::/1','8000::/1')) { \
-        Get-NetRoute -DestinationPrefix $prefix \
-        | Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -IncludeHidden).Name -like 'MaviVPN*' } \
-        | Remove-NetRoute -Confirm:$false \
-    }");
 
-    let _ = run_powershell_cmd("Cleanup routes", &ps_script);
+    info!("Network cleanup completed in {} ms", started.elapsed().as_millis());
     clear_persisted_host_route();
 }
 

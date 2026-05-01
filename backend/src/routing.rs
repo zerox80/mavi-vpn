@@ -100,15 +100,6 @@ pub fn spawn_tun_reader(
         let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
         let mut scratch = vec![0u8; 65536];
 
-        let mut local_peers_v4: std::collections::HashMap<
-            std::net::Ipv4Addr,
-            tokio::sync::mpsc::Sender<bytes::Bytes>,
-        > = std::collections::HashMap::new();
-        let mut local_peers_v6: std::collections::HashMap<
-            std::net::Ipv6Addr,
-            tokio::sync::mpsc::Sender<bytes::Bytes>,
-        > = std::collections::HashMap::new();
-
         let mut last_drop_warn = std::time::Instant::now();
         let mut drop_count = 0u64;
         let mut stats = TunReaderStats::default();
@@ -155,51 +146,24 @@ pub fn spawn_tun_reader(
                                     let dest_ip = ipv4_header.destination_addr();
                                     let packet_len = packet.len() as u64;
 
-                                    let mut remove = false;
-
-                                    // Fast-path: Only 1 hash traversal!
-                                    if let Some(tx_client) = local_peers_v4.get(&dest_ip) {
+                                    let tx_client_opt = state_reader.peers.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
+                                    if let Some(tx_client) = tx_client_opt {
                                         match tx_client.try_send(framed) {
                                             Ok(()) => {
                                                 stats.routed_packets += 1;
                                                 stats.routed_bytes += packet_len;
                                             }
-                                            Err(TrySendError::Closed(_)) => {
-                                                stats.channel_closed += 1;
-                                                remove = true;
-                                            }
                                             Err(TrySendError::Full(_)) => {
                                                 stats.channel_full += 1;
                                                 record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
                                             }
+                                            Err(TrySendError::Closed(_)) => {
+                                                stats.channel_closed += 1;
+                                                state_reader.peers.remove(&dest_ip);
+                                            }
                                         }
                                     } else {
-                                        let tx_client_opt = state_reader.peers.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
-                                        if let Some(tx_client) = tx_client_opt {
-                                            match tx_client.try_send(framed) {
-                                                Ok(()) => {
-                                                    stats.routed_packets += 1;
-                                                    stats.routed_bytes += packet_len;
-                                                    local_peers_v4.insert(dest_ip, tx_client);
-                                                }
-                                                Err(TrySendError::Full(_)) => {
-                                                    stats.channel_full += 1;
-                                                    record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
-                                                    local_peers_v4.insert(dest_ip, tx_client);
-                                                }
-                                                Err(TrySendError::Closed(_)) => {
-                                                    stats.channel_closed += 1;
-                                                    state_reader.peers.remove(&dest_ip);
-                                                }
-                                            }
-                                        } else {
-                                            stats.no_peer_v4 += 1;
-                                        }
-                                    }
-
-                                    if remove {
-                                        local_peers_v4.remove(&dest_ip);
-                                        state_reader.peers.remove(&dest_ip);
+                                        stats.no_peer_v4 += 1;
                                     }
                                 } else {
                                     stats.invalid_ip += 1;
@@ -209,50 +173,24 @@ pub fn spawn_tun_reader(
                                     let dest_ip = ipv6_header.destination_addr();
                                     let packet_len = packet.len() as u64;
 
-                                    let mut remove = false;
-
-                                    if let Some(tx_client) = local_peers_v6.get(&dest_ip) {
+                                    let tx_client_opt = state_reader.peers_v6.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
+                                    if let Some(tx_client) = tx_client_opt {
                                         match tx_client.try_send(framed) {
                                             Ok(()) => {
                                                 stats.routed_packets += 1;
                                                 stats.routed_bytes += packet_len;
                                             }
-                                            Err(TrySendError::Closed(_)) => {
-                                                stats.channel_closed += 1;
-                                                remove = true;
-                                            }
                                             Err(TrySendError::Full(_)) => {
                                                 stats.channel_full += 1;
                                                 record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
                                             }
+                                            Err(TrySendError::Closed(_)) => {
+                                                stats.channel_closed += 1;
+                                                state_reader.peers_v6.remove(&dest_ip);
+                                            }
                                         }
                                     } else {
-                                        let tx_client_opt = state_reader.peers_v6.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
-                                        if let Some(tx_client) = tx_client_opt {
-                                            match tx_client.try_send(framed) {
-                                                Ok(()) => {
-                                                    stats.routed_packets += 1;
-                                                    stats.routed_bytes += packet_len;
-                                                    local_peers_v6.insert(dest_ip, tx_client);
-                                                }
-                                                Err(TrySendError::Full(_)) => {
-                                                    stats.channel_full += 1;
-                                                    record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
-                                                    local_peers_v6.insert(dest_ip, tx_client);
-                                                }
-                                                Err(TrySendError::Closed(_)) => {
-                                                    stats.channel_closed += 1;
-                                                    state_reader.peers_v6.remove(&dest_ip);
-                                                }
-                                            }
-                                        } else {
-                                            stats.no_peer_v6 += 1;
-                                        }
-                                    }
-
-                                    if remove {
-                                        local_peers_v6.remove(&dest_ip);
-                                        state_reader.peers_v6.remove(&dest_ip);
+                                        stats.no_peer_v6 += 1;
                                     }
                                 } else {
                                     stats.invalid_ip += 1;

@@ -36,7 +36,7 @@ mod linux_app {
     use std::io::{self, Write};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use tracing::info;
 
     const CONFIG_FILE: &str = "mavi-vpn.json";
@@ -134,6 +134,9 @@ mod linux_app {
             let config = load_or_prompt_config(config_path).await?;
 
             let running = Arc::new(AtomicBool::new(true));
+            let connected = Arc::new(AtomicBool::new(false));
+            let last_error = Arc::new(StdMutex::new(None));
+            let assigned_ip = Arc::new(StdMutex::new(None));
             let running_signal = running.clone();
 
             tokio::spawn(async move {
@@ -156,7 +159,7 @@ mod linux_app {
             println!("\x1b[1;32mConnecting...\x1b[0m");
             println!("Press Ctrl+C to disconnect.\n");
 
-            vpn_core::run_vpn(config, running).await?;
+            vpn_core::run_vpn(config, running, connected, last_error, assigned_ip).await?;
 
             println!("\x1b[1;32mDisconnected. Goodbye!\x1b[0m");
             Ok(())

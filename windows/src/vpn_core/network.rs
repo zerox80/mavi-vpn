@@ -101,7 +101,7 @@ fn wait_for_adapter_alias(adapter_index: u32, requested_name: &str) -> Result<St
                 if ($adapter.Status -eq 'Disabled') {{ $adapter | Enable-NetAdapter -Confirm:$false -ErrorAction Stop | Out-Null }}; \
                 Write-Output $adapter.Name; exit 0 \
             }}; \
-            Start-Sleep -Milliseconds 100 \
+            Start-Sleep -Milliseconds 20 \
         }}; \
         exit 1"
     );
@@ -153,7 +153,7 @@ fn wait_for_ipv4_address(adapter_index: u32, ip: Ipv4Addr) -> bool {
         "for ($i = 0; $i -lt 50; $i++) {{ \
             $addr = Get-NetIPAddress -InterfaceIndex {adapter_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object IPAddress -eq '{ip_str}' | Select-Object -First 1; \
             if ($addr) {{ Write-Output 'ok'; exit 0 }}; \
-            Start-Sleep -Milliseconds 100 \
+            Start-Sleep -Milliseconds 20 \
         }}; \
         exit 1"
     );
@@ -461,12 +461,10 @@ pub fn set_adapter_network_config(
 /// Remove the two split-tunnel routes and the host exception.
 /// Called both before a new session (stale cleanup) and on disconnect.
 pub fn cleanup_routes(host_route: Option<&str>) {
-    let _ = std::process::Command::new("route")
-        .args(["delete", "0.0.0.0", "mask", "128.0.0.0"])
-        .output();
-    let _ = std::process::Command::new("route")
-        .args(["delete", "128.0.0.0", "mask", "128.0.0.0"])
-        .output();
+    // Delete standard split routes using route.exe (fast)
+    let _ = std::process::Command::new("route").args(["delete", "0.0.0.0", "mask", "128.0.0.0"]).output();
+    let _ = std::process::Command::new("route").args(["delete", "128.0.0.0", "mask", "128.0.0.0"]).output();
+
     let mut host_routes = Vec::new();
     if let Some(prefix) = host_route {
         host_routes.push(prefix.to_string());
@@ -476,21 +474,20 @@ pub fn cleanup_routes(host_route: Option<&str>) {
             host_routes.push(prefix);
         }
     }
+
+    // Combine all NetRoute removals into one PowerShell call
+    let mut ps_script = String::from("$ErrorActionPreference = 'SilentlyContinue'; ");
     for prefix in host_routes {
-        let cmd = format!("Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null", prefix);
-        let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &cmd])
-            .output();
+        ps_script.push_str(&format!("Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false; ", prefix));
     }
+    ps_script.push_str("foreach ($prefix in @('::/1','8000::/1')) { \
+        Get-NetRoute -DestinationPrefix $prefix \
+        | Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -IncludeHidden).Name -like 'MaviVPN*' } \
+        | Remove-NetRoute -Confirm:$false \
+    }");
+
+    let _ = run_powershell_cmd("Cleanup routes", &ps_script);
     clear_persisted_host_route();
-    let cmd = "foreach ($prefix in @('::/1','8000::/1')) { \
-        Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue \
-        | Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -IncludeHidden -ErrorAction SilentlyContinue).Name -like 'MaviVPN*' } \
-        | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue | Out-Null \
-    }";
-    let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", cmd])
-        .output();
 }
 
 fn persisted_host_route_path() -> PathBuf {
@@ -583,50 +580,12 @@ fn nrpt_cleanup_script() -> String {
 $ErrorActionPreference = 'SilentlyContinue'
 $comment = '__NRPT_COMMENT__'
 
-function Test-MaviVpnNrptRule {
-    param($Rule)
-    if ($null -eq $Rule) { return $false }
-    if ($Rule.Comment -eq $comment) { return $true }
-
-    # MaviVPN installs a global "." NRPT rule. After an interrupted shutdown this
-    # can strand DNS on the VPN resolver, so startup/repair cleanup removes it
-    # even if Windows did not preserve the Comment field.
-    $namespaces = @($Rule.Namespace) | ForEach-Object { "$_" }
-    if ($namespaces -contains '.') { return $true }
-
-    return $false
-}
-
+# Efficiently remove only the rules we created
 Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
-    Where-Object { Test-MaviVpnNrptRule $_ } |
+    Where-Object { $_.Comment -eq $comment -or $_.Namespace -eq '.' } |
     Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue
 
-$policyRoots = @(
-    'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig',
-    'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DNSClient\DnsPolicyConfig',
-    'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig'
-)
-
-foreach ($root in $policyRoots) {
-    if (-not (Test-Path $root)) { continue }
-    Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
-        $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-        $name = "$($props.Name)"
-        $namespace = "$($props.Namespace)"
-        $ruleComment = "$($props.Comment)"
-        if ($ruleComment -eq $comment -or $name -eq '.' -or $namespace -eq '.') {
-            Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' -Name DisableSmartNameResolution -ErrorAction SilentlyContinue
-Remove-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' -Name DisableParallelAandAAAA -ErrorAction SilentlyContinue
-
-Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -notlike 'MaviVPN*' -and $_.InterfaceDescription -notlike '*WireGuard*' } |
-    ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue }
-
+# Fast cache clear, no service restarts or per-adapter resets needed for modern Windows
 Clear-DnsClientCache -ErrorAction SilentlyContinue
 "#
     .replace("__NRPT_COMMENT__", NRPT_COMMENT)
@@ -638,16 +597,14 @@ fn configure_vpn_dns_preference(adapter_name: &str, adapter_index: u32) {
     let escaped_adapter_name = adapter_name.replace('\'', "''");
 
     let script = format!(
-        "Add-DnsClientNrptRule -Namespace '.' -NameServers '1.1.1.1','8.8.8.8' -Comment '{}' -ErrorAction SilentlyContinue; \
-        Get-NetIPInterface -InterfaceIndex {} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Set-NetIPInterface -InterfaceMetric 1 -ErrorAction SilentlyContinue; \
-        Get-NetIPInterface -InterfaceIndex {} -AddressFamily IPv6 -ErrorAction SilentlyContinue | Set-NetIPInterface -InterfaceMetric 1 -ErrorAction SilentlyContinue; \
-        Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue | Set-NetIPInterface -InterfaceMetric 1 -ErrorAction SilentlyContinue; \
-        New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name DisableSmartNameResolution -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null; \
-        Clear-DnsClientCache -ErrorAction SilentlyContinue; \
-        Register-DnsClient -ErrorAction SilentlyContinue; \
-        Start-Service -Name Dnscache -ErrorAction SilentlyContinue",
+        "$ErrorActionPreference = 'SilentlyContinue'; \
+        Add-DnsClientNrptRule -Namespace '.' -NameServers '1.1.1.1','8.8.8.8' -Comment '{}'; \
+        $ifIdx = {}; \
+        Get-NetIPInterface -InterfaceIndex $ifIdx | Set-NetIPInterface -InterfaceMetric 1; \
+        Set-NetIPInterface -InterfaceAlias '{}' -InterfaceMetric 1; \
+        New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name DisableSmartNameResolution -PropertyType DWord -Value 1 -Force | Out-Null; \
+        Clear-DnsClientCache",
         NRPT_COMMENT,
-        adapter_index,
         adapter_index,
         escaped_adapter_name
     );

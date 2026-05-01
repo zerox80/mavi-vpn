@@ -191,6 +191,43 @@ fn wait_for_ipv4_address(adapter_index: u32, ip: Ipv4Addr) -> bool {
     false
 }
 
+fn wait_for_ipv6_address(adapter_index: u32, ip: Ipv6Addr) -> bool {
+    let started = Instant::now();
+    let target_octets = ip.octets();
+
+    for _ in 0..500 {
+        let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+        if unsafe { GetUnicastIpAddressTable(AF_INET6 as u16, &mut table) } == 0 {
+            let mut found = false;
+            let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+            for row in rows {
+                unsafe {
+                    if row.InterfaceIndex == adapter_index
+                        && row.Address.Ipv6.sin6_addr.u.Byte == target_octets
+                    {
+                        // Check if it's preferred (4) or at least not duplicate
+                        if row.DadState == 4 || row.DadState == 3 {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            unsafe { FreeMibTable(table as _) };
+            if found {
+                info!(
+                    "IPv6 {} confirmed on adapter in {} ms",
+                    ip,
+                    started.elapsed().as_millis()
+                );
+                return true;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
 fn win32_add_ip(adapter_index: u32, ip: IpAddr, prefix_len: u8) -> Result<()> {
     let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { std::mem::zeroed() };
     unsafe { InitializeUnicastIpAddressEntry(&mut row) };
@@ -392,7 +429,20 @@ pub fn set_adapter_network_config(
 
     // 2. Set IPv6 address if available
     if let (Some(ipv6), Some(plen)) = (assigned_ipv6, netmask_v6) {
-        let _ = win32_add_ip(adapter_index, IpAddr::V6(ipv6), plen);
+        let v6_started = Instant::now();
+        match win32_add_ip(adapter_index, IpAddr::V6(ipv6), plen) {
+            Ok(_) => {
+                if wait_for_ipv6_address(adapter_index, ipv6) {
+                    info!("IPv6 assignment successful");
+                } else {
+                    warn!("IPv6 {} set but not confirmed (DAD might have failed)", ipv6);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to set IPv6 {}: {}", ipv6, e);
+            }
+        }
+        info!("IPv6 setup phase took {} ms", v6_started.elapsed().as_millis());
     }
 
     // 3. Set stable public DNS on the VPN adapter

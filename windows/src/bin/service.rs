@@ -56,7 +56,8 @@ define_windows_service!(ffi_service_main, my_service_main);
 
 pub fn main() -> Result<(), windows_service::Error> {
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive("mavi_vpn=info".parse().unwrap());
+        .add_directive("mavi_vpn=info".parse().unwrap())
+        .add_directive("wintun=off".parse().unwrap());
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     info!("Starting service dispatcher for {}", SERVICE_NAME);
@@ -139,10 +140,33 @@ fn run_standalone() {
     let stop_signal = Arc::new(AtomicBool::new(false));
     let reharden_signal = Arc::new(AtomicBool::new(false));
 
+    let stop_signal_handler = stop_signal.clone();
+    rt.spawn(async move {
+        use tokio::signal::windows::{ctrl_c, ctrl_close, ctrl_break};
+        let mut s_c = ctrl_c().expect("Failed to listen for Ctrl+C");
+        let mut s_close = ctrl_close().expect("Failed to listen for Ctrl+Close");
+        let mut s_break = ctrl_break().expect("Failed to listen for Ctrl+Break");
+        
+        tokio::select! {
+            _ = s_c.recv() => info!("Received Ctrl+C signal"),
+            _ = s_close.recv() => info!("Received Ctrl+Close signal (Alt+F4 or Window Close)"),
+            _ = s_break.recv() => info!("Received Ctrl+Break signal"),
+        }
+        
+        info!("Termination signal received, stopping service gracefully...");
+        stop_signal_handler.store(true, Ordering::SeqCst);
+    });
+
     rt.block_on(async {
         match run_service_loop(stop_signal.clone(), reharden_signal.clone()).await {
-            Ok(_) => info!("Service loop exited gracefully"),
-            Err(e) => error!("Service loop error: {:?}", e),
+            Ok(_) => {
+                info!("Service loop exited gracefully");
+                run_network_repair_cleanup();
+            },
+            Err(e) => {
+                error!("Service loop error: {:?}", e);
+                run_network_repair_cleanup();
+            },
         }
     });
 }
@@ -475,6 +499,7 @@ async fn dispatch_request(
                     flag.store(false, Ordering::SeqCst);
                     connected.store(false, Ordering::SeqCst);
                     stopping.store(false, Ordering::SeqCst);
+                    run_network_repair_cleanup();
                 }));
                 ipc::IpcResponse::Ok
             }

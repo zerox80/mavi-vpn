@@ -96,8 +96,11 @@ pub async fn connect_and_handshake(
 
     // Resolve endpoint and connect
     let resolve_started = Instant::now();
-    let mut addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
-    order_resolved_addrs(&mut addrs, &endpoint_str);
+    let endpoint_clean = endpoint_str.trim();
+    let mut addrs: Vec<_> = tokio::net::lookup_host(endpoint_clean).await.map_err(|e| {
+        anyhow::anyhow!("DNS lookup failed for [{:?}]: {}", endpoint_clean, e)
+    })?.collect();
+    order_resolved_addrs(&mut addrs, endpoint_clean);
     let addr = *addrs.first().context("Failed to resolve endpoint")?;
     info!(
         "Resolved {} to {} address(es) in {} ms",

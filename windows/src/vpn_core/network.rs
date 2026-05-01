@@ -55,12 +55,12 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let msg = format!("[FAIL] {} → {} {}", display, stdout, stderr);
+            let msg = format!("[FAIL] {} â†’ {} {}", display, stdout, stderr);
             warn!(cmd = %msg);
             false
         }
         Err(e) => {
-            let msg = format!("[ERR] {} → {}", display, e);
+            let msg = format!("[ERR] {} â†’ {}", display, e);
             warn!(cmd = %msg);
             false
         }
@@ -80,12 +80,12 @@ fn run_powershell_cmd(display: &str, script: &str) -> bool {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let msg = format!("[FAIL] {} → {} {}", display, stdout, stderr);
+            let msg = format!("[FAIL] {} â†’ {} {}", display, stdout, stderr);
             warn!(cmd = %msg);
             false
         }
         Err(e) => {
-            let msg = format!("[ERR] {} → {}", display, e);
+            let msg = format!("[ERR] {} â†’ {}", display, e);
             warn!(cmd = %msg);
             false
         }
@@ -196,7 +196,7 @@ pub fn set_adapter_network_config(
     assigned_ipv6: Option<Ipv6Addr>,
     netmask_v6: Option<u8>,
     gateway_v6: Option<Ipv6Addr>,
-    dns_v6: Option<Ipv6Addr>,
+    _dns_v6: Option<Ipv6Addr>,
 ) -> Result<Option<String>> {
     let requested_adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let adapter_index = adapter.get_adapter_index()?;
@@ -204,7 +204,6 @@ pub fn set_adapter_network_config(
     let ip_str = ip.to_string();
     let mask_str = netmask.to_string();
     let gw_str = gateway.to_string();
-    let dns_str = dns.to_string();
     let adapter_name = wait_for_adapter_alias(adapter_index, &requested_adapter_name)?;
 
     info!(
@@ -213,9 +212,9 @@ pub fn set_adapter_network_config(
     );
 
     // 1. Ensure adapter is administratively up once it is visible in the OS.
-    // 2. Set IPv4 address — positional syntax is the most reliable across Windows versions.
+    // 2. Set IPv4 address â€” positional syntax is the most reliable across Windows versions.
     //    "netsh interface ipv4 set address <name> static <ip> <mask>"
-    //    Do NOT set gateway here — we add split routes manually.
+    //    Do NOT set gateway here â€” we add split routes manually.
     let address_started = Instant::now();
     if !run_cmd(
         "netsh",
@@ -228,6 +227,7 @@ pub fn set_adapter_network_config(
             "static",
             &ip_str,
             &mask_str,
+            &gw_str,
         ],
     ) {
         // Retry with "add" in case "set" fails on fresh adapter
@@ -241,6 +241,7 @@ pub fn set_adapter_network_config(
                 &adapter_name,
                 &ip_str,
                 &mask_str,
+                &gw_str,
             ],
         );
     }
@@ -277,7 +278,11 @@ pub fn set_adapter_network_config(
         );
     }
 
-    // 4. Set DNS
+    // 4. Set stable public DNS on the VPN adapter.
+    //
+    // The server-provided DNS can be unreachable or incompatible with Windows'
+    // resolver, causing ERR_NAME_NOT_RESOLVED while the tunnel is connected.
+    // Prefer known-good resolvers without installing a global NRPT "." rule.
     run_cmd(
         "netsh",
         &[
@@ -287,25 +292,51 @@ pub fn set_adapter_network_config(
             "dnsservers",
             &adapter_name,
             "static",
-            &dns_str,
+            "1.1.1.1",
             "primary",
+            "validate=no",
         ],
     );
-    if let Some(dv6) = dns_v6 {
-        let dv6_str = dv6.to_string();
-        run_cmd(
-            "netsh",
-            &[
-                "interface",
-                "ipv6",
-                "add",
-                "dnsservers",
-                &adapter_name,
-                &dv6_str,
-                "index=1",
-            ],
-        );
-    }
+    run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "add",
+            "dnsservers",
+            &adapter_name,
+            "8.8.8.8",
+            "index=2",
+            "validate=no",
+        ],
+    );
+    run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv6",
+            "set",
+            "dnsservers",
+            &adapter_name,
+            "static",
+            "2606:4700:4700::1111",
+            "primary",
+            "validate=no",
+        ],
+    );
+    run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv6",
+            "add",
+            "dnsservers",
+            &adapter_name,
+            "2001:4860:4860::8888",
+            "index=2",
+            "validate=no",
+        ],
+    );
 
     // 5. Set MTU from the operator-configured inner TUN MTU (default 1280).
     let _ = adapter.set_mtu(usize::from(tun_mtu));
@@ -335,12 +366,12 @@ pub fn set_adapter_network_config(
         ],
     );
 
-    // 6. Host exception FIRST — must run before split routes so that
+    // 6. Host exception FIRST â€” must run before split routes so that
     //    Get-NetRoute still sees the real physical default route.
     let route_started = Instant::now();
     let endpoint_route = add_host_route_exception_fixed(endpoint);
 
-    // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 — override default route without deleting it.
+    // 7. Split routes 0.0.0.0/1 + 128.0.0.0/1 â€” override default route without deleting it.
     run_cmd(
         "route",
         &[
@@ -415,8 +446,10 @@ pub fn set_adapter_network_config(
         }
     }
 
-    // 8. DNS leak prevention (NRPT + SMHNR)
-    set_nrpt_dns_rule(dns, dns_v6);
+    // 8. DNS preference: prefer the VPN adapter without installing a global
+    // NRPT "." rule. A global rule can strand Windows name resolution on the
+    // VPN DNS server and cause ERR_NAME_NOT_RESOLVED while connected.
+    configure_vpn_dns_preference(&adapter_name, adapter_index);
 
     info!(
         "Network config complete: endpoint_exception={}",
@@ -503,28 +536,24 @@ fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
         IpAddr::V6(v6) => format!("{}/128", v6),
     };
 
-    let (default_prefix, family, empty_next_hop) = match server_ip {
-        IpAddr::V4(_) => ("0.0.0.0/0", "IPv4", "0.0.0.0"),
-        IpAddr::V6(_) => ("::/0", "IPv6", "::"),
+    let (ip_version, empty_next_hop) = match server_ip {
+        IpAddr::V4(_) => ("4", "0.0.0.0"),
+        IpAddr::V6(_) => ("6", "::"),
     };
 
     let ps = format!(
-        "$best = Get-NetRoute -DestinationPrefix '{}' -AddressFamily {} \
-        | Where-Object {{ (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).InterfaceDescription -notlike '*WireGuard*' -and \
-          (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).Name -notlike 'MaviVPN*' }} \
-        | Sort-Object {{ $_.RouteMetric + $_.InterfaceMetric }} \
-        | Select-Object -First 1; \
-        if ($best) {{ \
-            if ($best.NextHop -and $best.NextHop -ne '{}') {{ \
-                New-NetRoute -DestinationPrefix '{}' -InterfaceIndex $best.InterfaceIndex -NextHop $best.NextHop -RouteMetric 1 -ErrorAction SilentlyContinue | Out-Null; \
-                Write-Output $best.NextHop \
+        "$gw = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object {{ $_.InterfaceAlias -notlike 'MaviVPN*' -and $_.InterfaceAlias -notlike '*WireGuard*' -and $_.NextHop -ne '0.0.0.0' }} | Sort-Object InterfaceMetric, RouteMetric | Select-Object -First 1; \
+        if ($gw) {{ \
+            $hop = $gw.NextHop; \
+            $ifIdx = $gw.InterfaceIndex; \
+            if ($hop -and $hop -ne '{}') {{ \
+                New-NetRoute -DestinationPrefix '{}' -InterfaceIndex $ifIdx -NextHop $hop -RouteMetric 1 -ErrorAction SilentlyContinue | Out-Null; \
+                Write-Output $hop \
             }} else {{ \
-                New-NetRoute -DestinationPrefix '{}' -InterfaceIndex $best.InterfaceIndex -RouteMetric 1 -ErrorAction SilentlyContinue | Out-Null; \
+                New-NetRoute -DestinationPrefix '{}' -InterfaceIndex $ifIdx -RouteMetric 1 -ErrorAction SilentlyContinue | Out-Null; \
                 Write-Output 'On-Link' \
             }} \
         }}",
-        default_prefix,
-        family,
         empty_next_hop,
         route_prefix,
         route_prefix,
@@ -549,48 +578,90 @@ fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
 
 const NRPT_COMMENT: &str = "MaviVPN";
 
-/// Configures NRPT (Name Resolution Policy Table) to force all DNS through the VPN.
-/// This prevents DNS leaks where Windows might try local DNS even when the VPN is up.
-fn set_nrpt_dns_rule(dns_v4: Ipv4Addr, dns_v6: Option<Ipv6Addr>) {
-    let dns_servers = match dns_v6 {
-        Some(v6) => format!("'{}','{}'", dns_v4, v6),
-        None => format!("'{}'", dns_v4),
-    };
+fn nrpt_cleanup_script() -> String {
+    r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$comment = '__NRPT_COMMENT__'
+
+function Test-MaviVpnNrptRule {
+    param($Rule)
+    if ($null -eq $Rule) { return $false }
+    if ($Rule.Comment -eq $comment) { return $true }
+
+    # MaviVPN installs a global "." NRPT rule. After an interrupted shutdown this
+    # can strand DNS on the VPN resolver, so startup/repair cleanup removes it
+    # even if Windows did not preserve the Comment field.
+    $namespaces = @($Rule.Namespace) | ForEach-Object { "$_" }
+    if ($namespaces -contains '.') { return $true }
+
+    return $false
+}
+
+Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+    Where-Object { Test-MaviVpnNrptRule $_ } |
+    Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue
+
+$policyRoots = @(
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig',
+    'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DNSClient\DnsPolicyConfig',
+    'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig'
+)
+
+foreach ($root in $policyRoots) {
+    if (-not (Test-Path $root)) { continue }
+    Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
+        $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+        $name = "$($props.Name)"
+        $namespace = "$($props.Namespace)"
+        $ruleComment = "$($props.Comment)"
+        if ($ruleComment -eq $comment -or $name -eq '.' -or $namespace -eq '.') {
+            Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' -Name DisableSmartNameResolution -ErrorAction SilentlyContinue
+Remove-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' -Name DisableParallelAandAAAA -ErrorAction SilentlyContinue
+
+Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike 'MaviVPN*' -and $_.InterfaceDescription -notlike '*WireGuard*' } |
+    ForEach-Object { Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue }
+
+Clear-DnsClientCache -ErrorAction SilentlyContinue
+"#
+    .replace("__NRPT_COMMENT__", NRPT_COMMENT)
+}
+
+/// Prefer the VPN adapter's DNS without installing a global NRPT rule.
+fn configure_vpn_dns_preference(adapter_name: &str, adapter_index: u32) {
     let started = Instant::now();
+    let escaped_adapter_name = adapter_name.replace('\'', "''");
 
     let script = format!(
-        "Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Comment -eq '{}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
-        Add-DnsClientNrptRule -Namespace '.' -NameServers {} -Comment '{}' -ErrorAction SilentlyContinue; \
-        New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Force -ErrorAction SilentlyContinue | Out-Null; \
+        "Add-DnsClientNrptRule -Namespace '.' -NameServers '1.1.1.1','8.8.8.8' -Comment '{}' -ErrorAction SilentlyContinue; \
+        Get-NetIPInterface -InterfaceIndex {} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Set-NetIPInterface -InterfaceMetric 1 -ErrorAction SilentlyContinue; \
+        Get-NetIPInterface -InterfaceIndex {} -AddressFamily IPv6 -ErrorAction SilentlyContinue | Set-NetIPInterface -InterfaceMetric 1 -ErrorAction SilentlyContinue; \
+        Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue | Set-NetIPInterface -InterfaceMetric 1 -ErrorAction SilentlyContinue; \
         New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name DisableSmartNameResolution -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null; \
-        New-Item -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters' -Force -ErrorAction SilentlyContinue | Out-Null; \
-        New-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters' -Name DisableParallelAandAAAA -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null; \
-        Get-NetAdapter -Name 'MaviVPN*' -ErrorAction SilentlyContinue | Set-NetIPInterface -InterfaceMetric 1 -ErrorAction SilentlyContinue; \
-        Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' }} | ForEach-Object {{ Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue }}; \
         Clear-DnsClientCache -ErrorAction SilentlyContinue; \
         Register-DnsClient -ErrorAction SilentlyContinue; \
-        Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue",
-        NRPT_COMMENT, dns_servers, NRPT_COMMENT
+        Start-Service -Name Dnscache -ErrorAction SilentlyContinue",
+        NRPT_COMMENT,
+        adapter_index,
+        adapter_index,
+        escaped_adapter_name
     );
-    let _ = run_powershell_cmd("Configure DNS leak prevention", &script);
+    let _ = run_powershell_cmd("Configure VPN DNS preference", &script);
 
     info!(
-        "DNS leak prevention configured: NRPT + SMHNR disabled ({} ms)",
+        "VPN DNS preference configured without global NRPT ({} ms)",
         started.elapsed().as_millis()
     );
 }
 
 /// Cleans up NRPT rules and restores DNS settings on exit.
 pub fn remove_nrpt_dns_rule() {
-    let cmd = format!(
-        "Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Comment -eq '{}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
-        Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name DisableSmartNameResolution -ErrorAction SilentlyContinue; \
-        Remove-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters' -Name DisableParallelAandAAAA -ErrorAction SilentlyContinue; \
-        Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -notlike 'MaviVPN*' -and $_.Status -eq 'Up' }} | ForEach-Object {{ Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue }}; \
-        Clear-DnsClientCache -ErrorAction SilentlyContinue; \
-        Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue",
-        NRPT_COMMENT
-    );
+    let cmd = nrpt_cleanup_script();
     let _ = run_powershell_cmd("Remove DNS leak prevention", &cmd);
 
     info!("DNS leak prevention removed, normal DNS restored");

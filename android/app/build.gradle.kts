@@ -42,13 +42,20 @@ tasks.register<Exec>("cargoBuild") {
     val cargoCommand = if (Os.isFamily(Os.FAMILY_WINDOWS)) "cargo.exe" else "cargo"
 
     commandLine(
-        cargoCommand, "ndk",
-        "-t", "armeabi-v7a",
-        "-t", "arm64-v8a",
-        "-t", "x86",
-        "-t", "x86_64",
-        "-o", "../jniLibs",
-        "build", "--release",
+        cargoCommand,
+        "ndk",
+        "-t",
+        "armeabi-v7a",
+        "-t",
+        "arm64-v8a",
+        "-t",
+        "x86",
+        "-t",
+        "x86_64",
+        "-o",
+        "../jniLibs",
+        "build",
+        "--release",
     )
 }
 

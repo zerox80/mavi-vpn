@@ -18,6 +18,7 @@ use shared::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
@@ -35,7 +36,13 @@ const RECONNECT_MAX_SECS: u64 = 30;
 const TUN_DEVICE_NAME: &str = "mavi0";
 
 /// Entry point for the VPN runner. Manages the reconnection loop and TUN lifecycle.
-pub async fn run_vpn(mut config: Config, running: Arc<AtomicBool>) -> Result<()> {
+pub async fn run_vpn(
+    mut config: Config,
+    running: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
+    last_error: Arc<StdMutex<Option<String>>>,
+    assigned_ip: Arc<StdMutex<Option<String>>>,
+) -> Result<()> {
     config.normalize_transport();
 
     let cert_pin_bytes =
@@ -44,7 +51,15 @@ pub async fn run_vpn(mut config: Config, running: Arc<AtomicBool>) -> Result<()>
     let mut backoff = Duration::from_secs(RECONNECT_INITIAL_SECS);
 
     while running.load(Ordering::Relaxed) {
-        let outcome = run_session(&config, &cert_pin_bytes, &running).await;
+        let outcome = run_session(
+            &config,
+            &cert_pin_bytes,
+            &running,
+            &connected,
+            &last_error,
+            &assigned_ip,
+        )
+        .await;
 
         if !running.load(Ordering::Relaxed) {
             break;
@@ -146,6 +161,9 @@ async fn run_session(
     config: &Config,
     cert_pin_bytes: &[u8],
     global_running: &Arc<AtomicBool>,
+    connected_flag: &Arc<AtomicBool>,
+    last_error_state: &Arc<StdMutex<Option<String>>>,
+    assigned_ip_state: &Arc<StdMutex<Option<String>>>,
 ) -> Result<SessionEnd> {
     let socket = create_udp_socket()?;
 
@@ -199,12 +217,20 @@ async fn run_session(
                 dns_server_v6,
             ),
             ControlMessage::Error { message } => {
-                return Err(anyhow::anyhow!("Server rejected connection: {}", message))
+                let msg = format!("Server rejected connection: {}", message);
+                if let Ok(mut last) = last_error_state.lock() {
+                    *last = Some(msg.clone());
+                }
+                return Err(anyhow::anyhow!(msg));
             }
             _ => return Err(anyhow::anyhow!("Unexpected server response")),
         };
 
     info!("Handshake successful. Internal IPv4: {}", assigned_ip);
+    connected_flag.store(true, Ordering::SeqCst);
+    if let Ok(mut ip) = assigned_ip_state.lock() {
+        *ip = Some(assigned_ip.to_string());
+    }
 
     // 3. Create TUN device
     let tun = TunDevice::create(TUN_DEVICE_NAME)?;
@@ -382,6 +408,10 @@ async fn run_session(
 
     // Cleanup networking
     net_config.cleanup();
+    connected_flag.store(false, Ordering::SeqCst);
+    if let Ok(mut ip) = assigned_ip_state.lock() {
+        *ip = None;
+    }
 
     if global_running.load(Ordering::Relaxed) {
         Ok(SessionEnd::ConnectionLost)

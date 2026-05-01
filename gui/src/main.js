@@ -508,6 +508,9 @@ function applyStatus(status) {
     btn.title = activeConn() ? '' : 'Select or add a saved connection first';
     hideToast('hint');
   }
+  if (status.assigned_ip) {
+    $('ip-readout').textContent = status.assigned_ip;
+  }
   updateNetworkPanel();
 }
 
@@ -845,7 +848,6 @@ function startStatsAnimation() {
       tick++;
       $('stat-down').textContent = (42 + (tick % 7) * 3.1).toFixed(1);
       $('stat-up').textContent = (11 + (tick % 5) * 1.4).toFixed(1);
-      $('ip-readout').textContent = `185.24.${80 + (tick % 30)}.${11 + (tick % 200)}`;
     } else {
       $('stat-down').textContent = '0.0';
       $('stat-up').textContent = '0.0';

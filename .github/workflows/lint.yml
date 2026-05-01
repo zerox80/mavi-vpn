@@ -2,16 +2,51 @@ name: Lint
 
 on:
   push:
+    branches: [ main, master ]
   pull_request:
+    branches: [ main, master ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── Rust: cargo fmt + clippy ──────────────────────────────────────────────────
-  rust-lint:
-    name: Rust Lint
+  # ── Miscellaneous: Actionlint, Hadolint, Codespell, Ruff ─────────────────────
+  misc-lint:
+    name: Miscellaneous Lint
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Actionlint
+        uses: reviewdog/action-actionlint@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-review
+
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          recursive: true
+
+      - name: Codespell
+        uses: codespell-project/actions-codespell@v2
+        with:
+          ignore_words_list: "wintun,tauri"
+          skip: "./.git,./target,./gui/node_modules,./android/app/build"
+
+      - name: Ruff (Python)
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "check ."
+
+  # ── Rust: cargo fmt + clippy (Matrix) ─────────────────────────────────────────
+  rust-lint:
+    name: Rust Lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,17 +56,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: rust-lint-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: rust-lint-cargo-
+      - uses: swatinem/rust-cache@v2
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y cmake pkg-config libglib2.0-dev libwebkit2gtk-4.1-dev libssl-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev
@@ -39,10 +67,17 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      - name: cargo clippy
-        run: cargo clippy --workspace --exclude windows-vpn --exclude mavivpn --all-targets -- -D warnings
+      - name: cargo clippy (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        # On Linux we check everything except windows-specific crates that might fail compilation
+        run: cargo clippy --workspace --exclude windows-vpn --all-targets -- -D warnings
 
-  # ── Kotlin: ktlint ────────────────────────────────────────────────────────────
+      - name: cargo clippy (Windows)
+        if: matrix.os == 'windows-latest'
+        # On Windows we specifically check the windows-vpn crate
+        run: cargo clippy -p windows-vpn --all-targets -- -D warnings
+
+  # ── Kotlin: ktlint + android lint ───────────────────────────────────────────
   kotlin-lint:
     name: Kotlin Lint
     runs-on: ubuntu-latest
@@ -53,9 +88,39 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          cache: gradle
 
       - name: ktlint check
         working-directory: android
         run: |
           chmod +x gradlew
           ./gradlew ktlintCheck
+
+      - name: Android Lint
+        working-directory: android
+        run: ./gradlew lint
+
+  # ── Frontend: ESLint + Prettier ─────────────────────────────────────────────
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier
+        run: npm run format -- --check

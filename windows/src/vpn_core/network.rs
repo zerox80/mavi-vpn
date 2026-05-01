@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -29,17 +29,13 @@ fn to_sockaddr_inet(ip: IpAddr) -> SOCKADDR_INET {
     match ip {
         IpAddr::V4(v4) => {
             addr.si_family = AF_INET;
-            unsafe {
-                addr.Ipv4.sin_family = AF_INET;
-                addr.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(v4.octets());
-            }
+            addr.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(v4.octets());
+            addr.Ipv4.sin_port = 0;
         }
         IpAddr::V6(v6) => {
             addr.si_family = AF_INET6;
-            unsafe {
-                addr.Ipv6.sin6_family = AF_INET6;
-                addr.Ipv6.sin6_addr.u.Byte = v6.octets();
-            }
+            addr.Ipv6.sin6_addr.u.Byte = v6.octets();
+            addr.Ipv6.sin6_port = 0;
         }
     }
     addr
@@ -165,7 +161,9 @@ fn wait_for_ipv4_address(adapter_index: u32, ip: Ipv4Addr) -> bool {
         let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
         if unsafe { GetUnicastIpAddressTable(AF_INET as u16, &mut table) } == 0 {
             let mut found = false;
-            let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+            let rows = unsafe {
+                std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+            };
             for row in rows {
                 unsafe {
                     if row.InterfaceIndex == adapter_index
@@ -191,40 +189,51 @@ fn wait_for_ipv4_address(adapter_index: u32, ip: Ipv4Addr) -> bool {
     false
 }
 
-fn wait_for_ipv6_address(adapter_index: u32, ip: Ipv6Addr) -> bool {
+pub async fn wait_for_ipv6_address(adapter_index: u32, ip: Ipv6Addr) -> bool {
     let started = Instant::now();
     let target_octets = ip.octets();
+    let mut last_state = 0;
 
     for _ in 0..500 {
-        let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-        if unsafe { GetUnicastIpAddressTable(AF_INET6 as u16, &mut table) } == 0 {
-            let mut found = false;
-            let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
-            for row in rows {
-                unsafe {
-                    if row.InterfaceIndex == adapter_index
-                        && row.Address.Ipv6.sin6_addr.u.Byte == target_octets
-                    {
-                        // Check if it's preferred (4) or at least not duplicate
-                        if row.DadState == 4 || row.DadState == 3 {
-                            found = true;
-                            break;
+        let mut found = false;
+        {
+            let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+            if unsafe { GetUnicastIpAddressTable(AF_INET6 as u16, &mut table) } == 0 {
+                let rows = unsafe {
+                    std::slice::from_raw_parts(
+                        (*table).Table.as_ptr(),
+                        (*table).NumEntries as usize,
+                    )
+                };
+                for row in rows {
+                    unsafe {
+                        if row.InterfaceIndex == adapter_index
+                            && row.Address.Ipv6.sin6_addr.u.Byte == target_octets
+                        {
+                            last_state = row.DadState;
+                            // Check if it's preferred (4) or at least not duplicate
+                            if row.DadState == 4 || row.DadState == 3 {
+                                found = true;
+                                break;
+                            }
                         }
                     }
                 }
-            }
-            unsafe { FreeMibTable(table as _) };
-            if found {
-                info!(
-                    "IPv6 {} confirmed on adapter in {} ms",
-                    ip,
-                    started.elapsed().as_millis()
-                );
-                return true;
+                unsafe { FreeMibTable(table as _) };
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        if found {
+            info!(
+                "IPv6 {} confirmed on adapter in {} ms",
+                ip,
+                started.elapsed().as_millis()
+            );
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+    warn!("IPv6 {} DAD timeout! Last DadState: {}", ip, last_state);
     false
 }
 
@@ -288,20 +297,170 @@ fn win32_set_mtu(adapter_index: u32, mtu: u32, family: u16) -> Result<()> {
     Ok(())
 }
 
-fn win32_delete_ip(adapter_index: u32, ip: IpAddr) -> Result<()> {
-    let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { std::mem::zeroed() };
-    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
-    row.Address = to_sockaddr_inet(ip);
-    row.InterfaceIndex = adapter_index;
+fn powershell_configure_interface_aggressive(adapter_index: u32) -> bool {
+    let script = format!(
+        "$ErrorActionPreference = 'SilentlyContinue'; \
+        Set-NetIPInterface -InterfaceIndex {} -AddressFamily IPv4 -InterfaceMetric 1 -AutomaticMetric Disabled -Dhcp Disabled; \
+        Set-NetIPInterface -InterfaceIndex {} -AddressFamily IPv6 -InterfaceMetric 1 -AutomaticMetric Disabled -RouterDiscovery Disabled -Dhcp Disabled; \
+        Clear-DnsClientCache; ",
+        adapter_index, adapter_index
+    );
+    run_powershell_cmd("Aggressive interface configuration", &script)
+}
 
-    let res = unsafe { DeleteUnicastIpAddressEntry(&row) };
-    if res == 0 || res == 1168 {
-        // 1168 is ERROR_NOT_FOUND, which is fine for cleanup
-        Ok(())
+// Neighbor functions removed - no longer needed for Layer 3 WinTUN On-Link routing
+
+fn prefix_policy_path() -> PathBuf {
+    let base = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    base.join("mavi-vpn").join("last_prefix_policy.txt")
+}
+
+fn persist_prefix_policy(prefix: &str) {
+    let path = prefix_policy_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, prefix);
+}
+
+fn load_persisted_prefix_policy() -> Option<String> {
+    std::fs::read_to_string(prefix_policy_path())
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn clear_persisted_prefix_policy() {
+    let _ = std::fs::remove_file(prefix_policy_path());
+}
+
+fn apply_ipv6_prefix_policy(prefix: &str) -> bool {
+    // Attempt set first (idempotent if exists)
+    let set_ok = run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv6",
+            "set",
+            "prefixpolicy",
+            &format!("prefix={}", prefix),
+            "precedence=100",
+            "label=13",
+            "store=active",
+        ],
+    );
+
+    if set_ok {
+        persist_prefix_policy(prefix);
+        info!("Applied IPv6 prefix policy with set: {}", prefix);
+        return true;
+    }
+
+    // Fallback to add if set failed (likely didn't exist)
+    let add_ok = run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv6",
+            "add",
+            "prefixpolicy",
+            &format!("prefix={}", prefix),
+            "precedence=100",
+            "label=13",
+            "store=active",
+        ],
+    );
+
+    if add_ok {
+        persist_prefix_policy(prefix);
+        info!("Applied IPv6 prefix policy with add: {}", prefix);
     } else {
-        Err(win_err(res))
+        warn!("Failed to apply IPv6 prefix policy: {}", prefix);
+    }
+
+    add_ok
+}
+
+fn cleanup_ipv6_prefix_policy() {
+    if let Some(prefix) = load_persisted_prefix_policy() {
+        let ok = run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv6",
+                "delete",
+                "prefixpolicy",
+                &format!("prefix={}", prefix),
+            ],
+        );
+
+        if ok {
+            info!("Removed MaviVPN IPv6 prefix policy: {}", prefix);
+        } else {
+            warn!("Failed to remove MaviVPN IPv6 prefix policy: {}", prefix);
+        }
+
+        clear_persisted_prefix_policy();
     }
 }
+
+pub fn verify_ipv6_split_routes(adapter_index: u32) -> Result<bool> {
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    // AF_INET6 is a u16 in windows-sys
+    if unsafe { GetIpForwardTable2(AF_INET6 as u16, &mut table) } != 0 {
+        bail!("Failed to get IPv6 forward table");
+    }
+
+    let rows = unsafe {
+        std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+    };
+
+    let mut found_zero = false;
+    let mut found_eight = false;
+
+    for row in rows {
+        if row.InterfaceIndex == adapter_index {
+            let prefix = row.DestinationPrefix;
+            // sin6_addr.u.Byte is the [u8; 16] array
+            let addr_bytes = unsafe { prefix.Prefix.Ipv6.sin6_addr.u.Byte };
+            let plen = prefix.PrefixLength;
+
+            // Check for ::/1 (all zeros)
+            if plen == 1 && addr_bytes.iter().all(|&b| b == 0) {
+                found_zero = true;
+            }
+            // Check for 8000::/1 (0x80 followed by zeros)
+            if plen == 1 && addr_bytes[0] == 0x80 && addr_bytes[1..].iter().all(|&b| b == 0) {
+                found_eight = true;
+            }
+        }
+    }
+
+    unsafe { FreeMibTable(table as _) };
+    Ok(found_zero && found_eight)
+}
+fn ipv6_network_prefix(ip: Ipv6Addr, prefix_len: u8) -> String {
+    let segments = ip.segments();
+    let mut masked = [0u16; 8];
+    let mut bits_left = prefix_len;
+    for i in 0..8 {
+        if bits_left >= 16 {
+            masked[i] = segments[i];
+            bits_left -= 16;
+        } else if bits_left > 0 {
+            let mask = 0xFFFFu16 << (16 - bits_left);
+            masked[i] = segments[i] & mask;
+            bits_left = 0;
+        } else {
+            masked[i] = 0;
+        }
+    }
+    format!("{}/{}", Ipv6Addr::from(masked), prefix_len)
+}
+
+// win32_delete_ip removed as it was unused
 
 fn win32_delete_route(adapter_index: u32, destination: IpAddr, prefix_len: u8) -> Result<()> {
     let mut row: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
@@ -321,7 +480,9 @@ fn win32_delete_route(adapter_index: u32, destination: IpAddr, prefix_len: u8) -
 fn win32_cleanup_all_routes_on_interface(adapter_index: u32) {
     let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
     if unsafe { GetIpForwardTable2(AF_INET as u16, &mut table) } == 0 {
-        let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+        let rows = unsafe {
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+        };
         for row in rows {
             if row.InterfaceIndex == adapter_index {
                 unsafe { DeleteIpForwardEntry2(row) };
@@ -332,7 +493,9 @@ fn win32_cleanup_all_routes_on_interface(adapter_index: u32) {
     // Repeat for IPv6
     let mut table_v6: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
     if unsafe { GetIpForwardTable2(AF_INET6 as u16, &mut table_v6) } == 0 {
-        let rows = unsafe { std::slice::from_raw_parts((*table_v6).Table.as_ptr(), (*table_v6).NumEntries as usize) };
+        let rows = unsafe {
+            std::slice::from_raw_parts((*table_v6).Table.as_ptr(), (*table_v6).NumEntries as usize)
+        };
         for row in rows {
             if row.InterfaceIndex == adapter_index {
                 unsafe { DeleteIpForwardEntry2(row) };
@@ -345,7 +508,9 @@ fn win32_cleanup_all_routes_on_interface(adapter_index: u32) {
 fn win32_cleanup_all_ips_on_interface(adapter_index: u32) {
     let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
     if unsafe { GetUnicastIpAddressTable(AF_INET as u16, &mut table) } == 0 {
-        let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+        let rows = unsafe {
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+        };
         for row in rows {
             if row.InterfaceIndex == adapter_index {
                 unsafe { DeleteUnicastIpAddressEntry(row) };
@@ -356,13 +521,51 @@ fn win32_cleanup_all_ips_on_interface(adapter_index: u32) {
     // IPv6
     let mut table_v6: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
     if unsafe { GetUnicastIpAddressTable(AF_INET6 as u16, &mut table_v6) } == 0 {
-        let rows = unsafe { std::slice::from_raw_parts((*table_v6).Table.as_ptr(), (*table_v6).NumEntries as usize) };
+        let rows = unsafe {
+            std::slice::from_raw_parts((*table_v6).Table.as_ptr(), (*table_v6).NumEntries as usize)
+        };
         for row in rows {
             if row.InterfaceIndex == adapter_index {
                 unsafe { DeleteUnicastIpAddressEntry(row) };
             }
         }
         unsafe { FreeMibTable(table_v6 as _) };
+    }
+
+    // Wait up to 1.5 seconds for the stack to actually clear the IPs asynchronously
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(1500) {
+        let mut still_has_ips = false;
+
+        let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+        if unsafe { GetUnicastIpAddressTable(AF_INET as u16, &mut table) } == 0 {
+            let rows = unsafe {
+                std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+            };
+            if rows.iter().any(|r| r.InterfaceIndex == adapter_index) {
+                still_has_ips = true;
+            }
+            unsafe { FreeMibTable(table as _) };
+        }
+
+        let mut table_v6: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+        if unsafe { GetUnicastIpAddressTable(AF_INET6 as u16, &mut table_v6) } == 0 {
+            let rows = unsafe {
+                std::slice::from_raw_parts(
+                    (*table_v6).Table.as_ptr(),
+                    (*table_v6).NumEntries as usize,
+                )
+            };
+            if rows.iter().any(|r| r.InterfaceIndex == adapter_index) {
+                still_has_ips = true;
+            }
+            unsafe { FreeMibTable(table_v6 as _) };
+        }
+
+        if !still_has_ips {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -407,9 +610,24 @@ pub fn set_adapter_network_config(
         adapter_name, adapter_index, ip, gateway, dns
     );
 
+    // 0. Aggressive PowerShell configuration (Metric, RD)
+    let _ = powershell_configure_interface_aggressive(adapter_index);
+
+    // 0b. Apply IPv6 Prefix Policy to favor VPN ULA over physical GUA (Hardening)
+    if let (Some(ipv6), Some(plen)) = (assigned_ipv6, netmask_v6) {
+        let prefix = ipv6_network_prefix(ipv6, plen);
+        apply_ipv6_prefix_policy(&prefix);
+    }
+
     // 1. Set IPv4 address via Win32 (Non-persistent by default in API)
     let address_started = Instant::now();
     win32_add_ip(adapter_index, IpAddr::V4(ip), 24)?;
+
+    // 2. Set IPv6 address if available
+    if let (Some(ipv6), Some(plen)) = (assigned_ipv6, netmask_v6) {
+        win32_add_ip(adapter_index, IpAddr::V6(ipv6), plen as u8)?;
+        info!("IPv6 address {}/{} set via Win32", ipv6, plen);
+    }
 
     // Verify the IP was actually set
     if wait_for_ipv4_address(adapter_index, ip) {
@@ -425,24 +643,6 @@ pub fn set_adapter_network_config(
             adapter_name,
             adapter_index
         );
-    }
-
-    // 2. Set IPv6 address if available
-    if let (Some(ipv6), Some(plen)) = (assigned_ipv6, netmask_v6) {
-        let v6_started = Instant::now();
-        match win32_add_ip(adapter_index, IpAddr::V6(ipv6), plen) {
-            Ok(_) => {
-                if wait_for_ipv6_address(adapter_index, ipv6) {
-                    info!("IPv6 assignment successful");
-                } else {
-                    warn!("IPv6 {} set but not confirmed (DAD might have failed)", ipv6);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to set IPv6 {}: {}", ipv6, e);
-            }
-        }
-        info!("IPv6 setup phase took {} ms", v6_started.elapsed().as_millis());
     }
 
     // 3. Set stable public DNS on the VPN adapter
@@ -483,12 +683,42 @@ pub fn set_adapter_network_config(
     let endpoint_route = add_host_route_exception_fixed(endpoint);
 
     // 6. Split routes via Win32 (Non-persistent)
-    let _ = win32_add_route(adapter_index, IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1, Some(IpAddr::V4(gateway)), 5);
-    let _ = win32_add_route(adapter_index, IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 1, Some(IpAddr::V4(gateway)), 5);
+    let _ = win32_add_route(
+        adapter_index,
+        IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+        1,
+        Some(IpAddr::V4(gateway)),
+        1,
+    );
+    let _ = win32_add_route(
+        adapter_index,
+        IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
+        1,
+        Some(IpAddr::V4(gateway)),
+        1,
+    );
 
-    if let Some(gv6) = gateway_v6 {
-        let _ = win32_add_route(adapter_index, IpAddr::V6(Ipv6Addr::UNSPECIFIED), 1, Some(IpAddr::V6(gv6)), 5);
-        let _ = win32_add_route(adapter_index, IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)), 1, Some(IpAddr::V6(gv6)), 5);
+    // 6. Set IPv6 default split routes (::/1 and 8000::/1) as On-Link routes
+    if gateway_v6.is_some() {
+        win32_add_route(
+            adapter_index,
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            1,
+            None, // On-Link
+            1,
+        )
+        .context("Failed to install IPv6 split route ::/1")?;
+
+        win32_add_route(
+            adapter_index,
+            IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
+            1,
+            None, // On-Link
+            1,
+        )
+        .context("Failed to install IPv6 split route 8000::/1")?;
+
+        info!("IPv6 On-Link split routes installed via Win32");
     }
 
     info!(
@@ -507,6 +737,11 @@ pub fn set_adapter_network_config(
 }
 
 pub fn cleanup_routes(host_route: Option<&str>) {
+    info!("Cleaning up MaviVPN routes...");
+
+    // Clean up prefix policies first
+    cleanup_ipv6_prefix_policy();
+
     let started = Instant::now();
 
     // 1. Fast Win32 cleanup for standard split routes
@@ -516,12 +751,16 @@ pub fn cleanup_routes(host_route: Option<&str>) {
     // 2. Identify MaviVPN adapter index to clean all its routes
     let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
     if unsafe { GetIfTable2(&mut table) } == 0 {
-        let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+        let rows = unsafe {
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+        };
         for row in rows {
             let name = String::from_utf16_lossy(&row.Alias);
             if name.contains("MaviVPN") {
                 win32_cleanup_all_routes_on_interface(row.InterfaceIndex);
                 win32_cleanup_all_ips_on_interface(row.InterfaceIndex);
+                // Small settling delay for the Windows network stack to process the deletions
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
         unsafe { FreeMibTable(table as _) };
@@ -541,12 +780,18 @@ pub fn cleanup_routes(host_route: Option<&str>) {
     if !host_prefixes.is_empty() {
         let mut ps_script = String::from("$ErrorActionPreference = 'SilentlyContinue'; ");
         for prefix in host_prefixes {
-            ps_script.push_str(&format!("Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false; ", prefix));
+            ps_script.push_str(&format!(
+                "Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false; ",
+                prefix
+            ));
         }
         let _ = run_powershell_cmd("Cleanup host routes", &ps_script);
     }
 
-    info!("Network cleanup completed in {} ms", started.elapsed().as_millis());
+    info!(
+        "Network cleanup completed in {} ms",
+        started.elapsed().as_millis()
+    );
     clear_persisted_host_route();
 }
 
@@ -633,27 +878,26 @@ fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
 const NRPT_COMMENT: &str = "MaviVPN";
 
 fn nrpt_cleanup_script() -> String {
-    format!(r#"
+    format!(
+        r#"
 $ErrorActionPreference = 'SilentlyContinue'
 Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{}' -or $_.Namespace -eq '.' }} | Remove-DnsClientNrptRule -Force
 Clear-DnsClientCache
-"#, NRPT_COMMENT)
+"#,
+        NRPT_COMMENT
+    )
 }
 
-fn configure_vpn_dns_preference(adapter_name: &str, adapter_index: u32) {
+fn configure_vpn_dns_preference(adapter_name: &str, _adapter_index: u32) {
     let started = Instant::now();
-    let escaped_adapter_name = adapter_name.replace('\'', "''");
+    let _escaped_adapter_name = adapter_name.replace('\'', "''");
 
     let script = format!(
         "$ErrorActionPreference = 'SilentlyContinue'; \
         Add-DnsClientNrptRule -Namespace '.' -NameServers '1.1.1.1','8.8.8.8' -Comment '{}'; \
-        Set-NetIPInterface -InterfaceIndex {} -InterfaceMetric 1; \
-        Set-NetIPInterface -InterfaceAlias '{}' -InterfaceMetric 1; \
         New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name DisableSmartNameResolution -PropertyType DWord -Value 1 -Force | Out-Null; \
         Clear-DnsClientCache",
-        NRPT_COMMENT,
-        adapter_index,
-        escaped_adapter_name
+        NRPT_COMMENT
     );
     let _ = run_powershell_cmd("Configure VPN DNS preference", &script);
 
@@ -670,7 +914,34 @@ pub fn remove_nrpt_dns_rule() {
 }
 
 pub fn cleanup_stale_network_state() {
-    info!("Cleaning stale MaviVPN network state");
+    info!("Cleaning up stale MaviVPN network state...");
     cleanup_routes(None);
     remove_nrpt_dns_rule();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+
+    #[test]
+    fn test_ipv6_network_prefix() {
+        let ip = "fd00::5".parse::<Ipv6Addr>().unwrap();
+        assert_eq!(ipv6_network_prefix(ip, 64), "fd00::/64");
+
+        let ip2 = "fd00:1234::5".parse::<Ipv6Addr>().unwrap();
+        assert_eq!(ipv6_network_prefix(ip2, 64), "fd00:1234::/64");
+
+        let ip3 = "fd12:3456:789a::5".parse::<Ipv6Addr>().unwrap();
+        assert_eq!(ipv6_network_prefix(ip3, 48), "fd12:3456:789a::/48");
+
+        let ip4 = "2001:db8:abcd:ef01:2345:6789:abcd:ef01"
+            .parse::<Ipv6Addr>()
+            .unwrap();
+        assert_eq!(ipv6_network_prefix(ip4, 32), "2001:db8::/32");
+        assert_eq!(
+            ipv6_network_prefix(ip4, 128),
+            "2001:db8:abcd:ef01:2345:6789:abcd:ef01/128"
+        );
+    }
 }

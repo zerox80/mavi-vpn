@@ -1,6 +1,5 @@
 package com.mavi.vpn
 
-import java.util.Base64
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,6 +7,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Base64
 
 class KeycloakTokenManagerTest {
     @Test
@@ -67,89 +67,104 @@ class KeycloakTokenManagerTest {
     }
 
     @Test
-    fun managerDoesNotRefreshUsableAccessToken() = runBlocking {
-        var refreshCalls = 0
-        val token = jwt(exp = nowSeconds() + 600)
-        val store = FakeTokenStore(accessToken = token, refreshToken = "refresh")
-        val manager = KeycloakTokenManager(store) { _, _, _, _ ->
-            refreshCalls++
-            RefreshResult.Error("unexpected")
+    fun managerDoesNotRefreshUsableAccessToken() {
+        runBlocking {
+            var refreshCalls = 0
+            val token = jwt(exp = nowSeconds() + 600)
+            val store = FakeTokenStore(accessToken = token, refreshToken = "refresh")
+            val manager =
+                KeycloakTokenManager(store) { _, _, _, _ ->
+                    refreshCalls++
+                    RefreshResult.Error("unexpected")
+                }
+
+            val result = manager.getUsableAccessToken(skewSeconds = 60)
+
+            assertTrue(result is TokenAcquireResult.Usable)
+            assertEquals(token, (result as TokenAcquireResult.Usable).accessToken)
+            assertFalse(result.refreshed)
+            assertEquals(0, refreshCalls)
+            assertFalse(store.sessionInvalid)
         }
-
-        val result = manager.getUsableAccessToken(skewSeconds = 60)
-
-        assertTrue(result is TokenAcquireResult.Usable)
-        assertEquals(token, (result as TokenAcquireResult.Usable).accessToken)
-        assertFalse(result.refreshed)
-        assertEquals(0, refreshCalls)
-        assertFalse(store.sessionInvalid)
     }
 
     @Test
-    fun managerRefreshesExpiredAccessTokenAndPersistsRotatedTokens() = runBlocking {
-        val refreshedAccess = jwt(exp = nowSeconds() + 600)
-        val store = FakeTokenStore(accessToken = jwt(exp = nowSeconds() - 1), refreshToken = "old-refresh")
-        val manager = KeycloakTokenManager(store) { refreshToken, keycloakUrl, realm, clientId ->
-            assertEquals("old-refresh", refreshToken)
-            assertEquals("https://auth.example.com", keycloakUrl)
-            assertEquals("mavi-vpn", realm)
-            assertEquals("mavi-client", clientId)
-            RefreshResult.Success(OAuthTokens(refreshedAccess, "new-refresh"))
+    fun managerRefreshesExpiredAccessTokenAndPersistsRotatedTokens() {
+        runBlocking {
+            val refreshedAccess = jwt(exp = nowSeconds() + 600)
+            val store = FakeTokenStore(accessToken = jwt(exp = nowSeconds() - 1), refreshToken = "old-refresh")
+            val manager =
+                KeycloakTokenManager(store) { refreshToken, keycloakUrl, realm, clientId ->
+                    assertEquals("old-refresh", refreshToken)
+                    assertEquals("https://auth.example.com", keycloakUrl)
+                    assertEquals("mavi-vpn", realm)
+                    assertEquals("mavi-client", clientId)
+                    RefreshResult.Success(OAuthTokens(refreshedAccess, "new-refresh"))
+                }
+
+            val result = manager.getUsableAccessToken(skewSeconds = 60)
+
+            assertTrue(result is TokenAcquireResult.Usable)
+            assertEquals(refreshedAccess, store.accessToken)
+            assertEquals("new-refresh", store.refreshToken)
+            assertFalse(store.sessionInvalid)
         }
-
-        val result = manager.getUsableAccessToken(skewSeconds = 60)
-
-        assertTrue(result is TokenAcquireResult.Usable)
-        assertEquals(refreshedAccess, store.accessToken)
-        assertEquals("new-refresh", store.refreshToken)
-        assertFalse(store.sessionInvalid)
     }
 
     @Test
-    fun managerLeavesTokensIntactOnTemporaryRefreshFailure() = runBlocking {
-        val expiredAccess = jwt(exp = nowSeconds() - 1)
-        val store = FakeTokenStore(accessToken = expiredAccess, refreshToken = "refresh")
-        val manager = KeycloakTokenManager(store) { _, _, _, _ ->
-            RefreshResult.NetworkError("offline")
+    fun managerLeavesTokensIntactOnTemporaryRefreshFailure() {
+        runBlocking {
+            val expiredAccess = jwt(exp = nowSeconds() - 1)
+            val store = FakeTokenStore(accessToken = expiredAccess, refreshToken = "refresh")
+            val manager =
+                KeycloakTokenManager(store) { _, _, _, _ ->
+                    RefreshResult.NetworkError("offline")
+                }
+
+            val result = manager.getUsableAccessToken(skewSeconds = 60)
+
+            assertTrue(result is TokenAcquireResult.TemporaryFailure)
+            assertEquals(expiredAccess, store.accessToken)
+            assertEquals("refresh", store.refreshToken)
+            assertFalse(store.sessionInvalid)
         }
-
-        val result = manager.getUsableAccessToken(skewSeconds = 60)
-
-        assertTrue(result is TokenAcquireResult.TemporaryFailure)
-        assertEquals(expiredAccess, store.accessToken)
-        assertEquals("refresh", store.refreshToken)
-        assertFalse(store.sessionInvalid)
     }
 
     @Test
-    fun managerClearsTokensOnlyWhenRefreshIsRejected() = runBlocking {
-        val store = FakeTokenStore(accessToken = jwt(exp = nowSeconds() - 1), refreshToken = "refresh")
-        val manager = KeycloakTokenManager(store) { _, _, _, _ ->
-            RefreshResult.Error("invalid_grant")
+    fun managerClearsTokensOnlyWhenRefreshIsRejected() {
+        runBlocking {
+            val store = FakeTokenStore(accessToken = jwt(exp = nowSeconds() - 1), refreshToken = "refresh")
+            val manager =
+                KeycloakTokenManager(store) { _, _, _, _ ->
+                    RefreshResult.Error("invalid_grant")
+                }
+
+            val result = manager.getUsableAccessToken(skewSeconds = 60)
+
+            assertTrue(result is TokenAcquireResult.NeedsLogin)
+            assertEquals("", store.accessToken)
+            assertEquals("", store.refreshToken)
+            assertTrue(store.sessionInvalid)
         }
-
-        val result = manager.getUsableAccessToken(skewSeconds = 60)
-
-        assertTrue(result is TokenAcquireResult.NeedsLogin)
-        assertEquals("", store.accessToken)
-        assertEquals("", store.refreshToken)
-        assertTrue(store.sessionInvalid)
     }
 
     @Test
-    fun managerDoesNotClearTokensWhenRefreshTokenIsMissing() = runBlocking {
-        val expiredAccess = jwt(exp = nowSeconds() - 1)
-        val store = FakeTokenStore(accessToken = expiredAccess, refreshToken = "")
-        val manager = KeycloakTokenManager(store) { _, _, _, _ ->
-            RefreshResult.Error("unexpected")
+    fun managerDoesNotClearTokensWhenRefreshTokenIsMissing() {
+        runBlocking {
+            val expiredAccess = jwt(exp = nowSeconds() - 1)
+            val store = FakeTokenStore(accessToken = expiredAccess, refreshToken = "")
+            val manager =
+                KeycloakTokenManager(store) { _, _, _, _ ->
+                    RefreshResult.Error("unexpected")
+                }
+
+            val result = manager.getUsableAccessToken(skewSeconds = 60)
+
+            assertTrue(result is TokenAcquireResult.NeedsLogin)
+            assertEquals(expiredAccess, store.accessToken)
+            assertEquals("", store.refreshToken)
+            assertFalse(store.sessionInvalid)
         }
-
-        val result = manager.getUsableAccessToken(skewSeconds = 60)
-
-        assertTrue(result is TokenAcquireResult.NeedsLogin)
-        assertEquals(expiredAccess, store.accessToken)
-        assertEquals("", store.refreshToken)
-        assertFalse(store.sessionInvalid)
     }
 
     private class FakeTokenStore(
@@ -167,11 +182,7 @@ class KeycloakTokenManagerTest {
         return "$header.$payload.signature"
     }
 
-    private fun encode(json: String): String {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(json.toByteArray(Charsets.UTF_8))
-    }
+    private fun encode(json: String): String = Base64.getUrlEncoder().withoutPadding().encodeToString(json.toByteArray(Charsets.UTF_8))
 
-    private fun nowSeconds(): Long {
-        return System.currentTimeMillis() / 1000L
-    }
+    private fun nowSeconds(): Long = System.currentTimeMillis() / 1000L
 }

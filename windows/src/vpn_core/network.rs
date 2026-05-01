@@ -159,7 +159,7 @@ fn wait_for_ipv4_address(adapter_index: u32, ip: Ipv4Addr) -> bool {
 
     for _ in 0..500 {
         let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-        if unsafe { GetUnicastIpAddressTable(AF_INET as u16, &mut table) } == 0 {
+        if unsafe { GetUnicastIpAddressTable(AF_INET, &mut table) } == 0 {
             let mut found = false;
             let rows = unsafe {
                 std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
@@ -198,7 +198,7 @@ pub async fn wait_for_ipv6_address(adapter_index: u32, ip: Ipv6Addr) -> bool {
         let mut found = false;
         {
             let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-            if unsafe { GetUnicastIpAddressTable(AF_INET6 as u16, &mut table) } == 0 {
+            if unsafe { GetUnicastIpAddressTable(AF_INET6, &mut table) } == 0 {
                 let rows = unsafe {
                     std::slice::from_raw_parts(
                         (*table).Table.as_ptr(),
@@ -409,7 +409,7 @@ fn cleanup_ipv6_prefix_policy() {
 pub fn verify_ipv6_split_routes(adapter_index: u32) -> Result<bool> {
     let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
     // AF_INET6 is a u16 in windows-sys
-    if unsafe { GetIpForwardTable2(AF_INET6 as u16, &mut table) } != 0 {
+    if unsafe { GetIpForwardTable2(AF_INET6, &mut table) } != 0 {
         bail!("Failed to get IPv6 forward table");
     }
 
@@ -479,7 +479,7 @@ fn win32_delete_route(adapter_index: u32, destination: IpAddr, prefix_len: u8) -
 
 fn win32_cleanup_all_routes_on_interface(adapter_index: u32) {
     let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
-    if unsafe { GetIpForwardTable2(AF_INET as u16, &mut table) } == 0 {
+    if unsafe { GetIpForwardTable2(AF_INET, &mut table) } == 0 {
         let rows = unsafe {
             std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
         };
@@ -492,7 +492,7 @@ fn win32_cleanup_all_routes_on_interface(adapter_index: u32) {
     }
     // Repeat for IPv6
     let mut table_v6: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
-    if unsafe { GetIpForwardTable2(AF_INET6 as u16, &mut table_v6) } == 0 {
+    if unsafe { GetIpForwardTable2(AF_INET6, &mut table_v6) } == 0 {
         let rows = unsafe {
             std::slice::from_raw_parts((*table_v6).Table.as_ptr(), (*table_v6).NumEntries as usize)
         };
@@ -507,7 +507,7 @@ fn win32_cleanup_all_routes_on_interface(adapter_index: u32) {
 
 fn win32_cleanup_all_ips_on_interface(adapter_index: u32) {
     let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-    if unsafe { GetUnicastIpAddressTable(AF_INET as u16, &mut table) } == 0 {
+    if unsafe { GetUnicastIpAddressTable(AF_INET, &mut table) } == 0 {
         let rows = unsafe {
             std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
         };
@@ -520,7 +520,7 @@ fn win32_cleanup_all_ips_on_interface(adapter_index: u32) {
     }
     // IPv6
     let mut table_v6: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-    if unsafe { GetUnicastIpAddressTable(AF_INET6 as u16, &mut table_v6) } == 0 {
+    if unsafe { GetUnicastIpAddressTable(AF_INET6, &mut table_v6) } == 0 {
         let rows = unsafe {
             std::slice::from_raw_parts((*table_v6).Table.as_ptr(), (*table_v6).NumEntries as usize)
         };
@@ -538,7 +538,7 @@ fn win32_cleanup_all_ips_on_interface(adapter_index: u32) {
         let mut still_has_ips = false;
 
         let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-        if unsafe { GetUnicastIpAddressTable(AF_INET as u16, &mut table) } == 0 {
+        if unsafe { GetUnicastIpAddressTable(AF_INET, &mut table) } == 0 {
             let rows = unsafe {
                 std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
             };
@@ -549,7 +549,7 @@ fn win32_cleanup_all_ips_on_interface(adapter_index: u32) {
         }
 
         let mut table_v6: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-        if unsafe { GetUnicastIpAddressTable(AF_INET6 as u16, &mut table_v6) } == 0 {
+        if unsafe { GetUnicastIpAddressTable(AF_INET6, &mut table_v6) } == 0 {
             let rows = unsafe {
                 std::slice::from_raw_parts(
                     (*table_v6).Table.as_ptr(),
@@ -625,7 +625,7 @@ pub fn set_adapter_network_config(
 
     // 2. Set IPv6 address if available
     if let (Some(ipv6), Some(plen)) = (assigned_ipv6, netmask_v6) {
-        win32_add_ip(adapter_index, IpAddr::V6(ipv6), plen as u8)?;
+        win32_add_ip(adapter_index, IpAddr::V6(ipv6), plen)?;
         info!("IPv6 address {}/{} set via Win32", ipv6, plen);
     }
 

@@ -11,7 +11,7 @@ pub async fn authenticate_client(
     token: &str,
     state: &Arc<AppState>,
     config: &Config,
-    keycloak: &Option<Arc<KeycloakValidator>>,
+    keycloak: Option<&Arc<KeycloakValidator>>,
 ) -> Result<(Ipv4Addr, Ipv6Addr)> {
     if let Some(kc) = keycloak {
         if !kc.validate_token(token).await? {
@@ -37,7 +37,7 @@ mod tests {
     async fn valid_token_authenticates() {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
-        let result = authenticate_client("correct-token", &state, &config, &None).await;
+        let result = authenticate_client("correct-token", &state, &config, None).await;
         assert!(result.is_ok());
     }
 
@@ -45,7 +45,7 @@ mod tests {
     async fn invalid_token_rejects() {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
-        let result = authenticate_client("wrong-token", &state, &config, &None).await;
+        let result = authenticate_client("wrong-token", &state, &config, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid Token"));
     }
@@ -54,7 +54,7 @@ mod tests {
     async fn empty_token_rejects() {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
-        let result = authenticate_client("", &state, &config, &None).await;
+        let result = authenticate_client("", &state, &config, None).await;
         assert!(result.is_err());
     }
 
@@ -62,7 +62,7 @@ mod tests {
     async fn valid_token_returns_ip_pair() {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
-        let (ip4, ip6) = authenticate_client("correct-token", &state, &config, &None)
+        let (ip4, ip6) = authenticate_client("correct-token", &state, &config, None)
             .await
             .unwrap();
         assert_eq!(ip4, Ipv4Addr::new(10, 8, 0, 2));
@@ -73,10 +73,10 @@ mod tests {
     async fn pool_exhaustion_returns_error() {
         let state = Arc::new(AppState::new("10.0.0.0/30").unwrap());
         let config = test_config();
-        let _ = authenticate_client("correct-token", &state, &config, &None)
+        let _ = authenticate_client("correct-token", &state, &config, None)
             .await
             .unwrap();
-        let result = authenticate_client("correct-token", &state, &config, &None).await;
+        let result = authenticate_client("correct-token", &state, &config, None).await;
         assert!(result.is_err());
     }
 
@@ -84,7 +84,7 @@ mod tests {
     async fn case_sensitive_token() {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
-        let result = authenticate_client("CORRECT-TOKEN", &state, &config, &None).await;
+        let result = authenticate_client("CORRECT-TOKEN", &state, &config, None).await;
         assert!(result.is_err());
     }
 }

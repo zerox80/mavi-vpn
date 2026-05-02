@@ -23,6 +23,8 @@ struct TunnelStats {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::cast_precision_loss)]
 pub async fn run_tunnel(
     connection: Arc<quinn::Connection>,
     mut rx_client: mpsc::Receiver<Bytes>,
@@ -105,8 +107,8 @@ pub async fn run_tunnel(
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         let mut last_server_to_client_bytes = 0;
         let mut last_client_to_server_bytes = 0;
-        let mut last_udp_tx_bytes = 0;
-        let mut last_udp_rx_bytes = 0;
+        let mut sent_udp_bytes_last = 0;
+        let mut received_udp_bytes_last = 0;
         loop {
             interval.tick().await;
             let quic = stats_conn.stats();
@@ -116,19 +118,20 @@ pub async fn run_tunnel(
                 (server_to_client_bytes - last_server_to_client_bytes) as f64 * 8.0 / 5_000_000.0;
             let client_to_server_mbps =
                 (client_to_server_bytes - last_client_to_server_bytes) as f64 * 8.0 / 5_000_000.0;
-            let udp_tx_mbps = (quic.udp_tx.bytes - last_udp_tx_bytes) as f64 * 8.0 / 5_000_000.0;
-            let udp_rx_mbps = (quic.udp_rx.bytes - last_udp_rx_bytes) as f64 * 8.0 / 5_000_000.0;
+            let egress_mbps = (quic.udp_tx.bytes - sent_udp_bytes_last) as f64 * 8.0 / 5_000_000.0;
+            let ingress_mbps =
+                (quic.udp_rx.bytes - received_udp_bytes_last) as f64 * 8.0 / 5_000_000.0;
             last_server_to_client_bytes = server_to_client_bytes;
             last_client_to_server_bytes = client_to_server_bytes;
-            last_udp_tx_bytes = quic.udp_tx.bytes;
-            last_udp_rx_bytes = quic.udp_rx.bytes;
+            sent_udp_bytes_last = quic.udp_tx.bytes;
+            received_udp_bytes_last = quic.udp_rx.bytes;
 
             info!(
                 "[SERVER TUNNEL STATS] s2c_app={:.1}mbit c2s_app={:.1}mbit quic_udp_tx={:.1}mbit quic_udp_rx={:.1}mbit rtt={}ms cwnd={} lost_pkts={} lost_bytes={} max_dgram={} dgram_space={} s2c_pkts={} s2c_queue_len={} s2c_send_err={} s2c_too_large={} c2s_pkts={} c2s_tun_drops={}",
                 server_to_client_mbps,
                 client_to_server_mbps,
-                udp_tx_mbps,
-                udp_rx_mbps,
+                egress_mbps,
+                ingress_mbps,
                 quic.path.rtt.as_millis(),
                 quic.path.cwnd,
                 quic.path.lost_packets,
@@ -152,7 +155,7 @@ pub async fn run_tunnel(
     let res = loop {
         let datagram = match connection.read_datagram().await {
             Ok(data) => data,
-            Err(e) => break Err(anyhow::anyhow!("Connection lost: {}", e)),
+            Err(e) => break Err(anyhow::anyhow!("Connection lost: {e}")),
         };
 
         if datagram.is_empty() {

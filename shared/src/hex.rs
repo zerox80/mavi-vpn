@@ -1,5 +1,6 @@
 /// Decode a lowercase or uppercase hexadecimal string into bytes.
 /// Returns `None` if the string has an odd length or contains non-hex characters.
+#[must_use]
 pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -44,7 +45,11 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn hex_roundtrip_proptest(bytes in proptest::collection::vec(0u8..=255, 0..100)) {
-            let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+            use std::fmt::Write;
+            let mut hex_str = String::with_capacity(bytes.len() * 2);
+            for b in &bytes {
+                let _ = write!(hex_str, "{b:02x}");
+            }
             let decoded = decode_hex(&hex_str).unwrap();
             assert_eq!(decoded, bytes);
         }

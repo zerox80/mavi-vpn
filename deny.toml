@@ -1,0 +1,43 @@
+# cargo-deny configuration (Version 2)
+
+[advisories]
+version = 2
+db-path = "~/.cargo/advisories"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Levels for advisories are now handled via lint levels if needed,
+# but vulnerability = "deny" is usually the default.
+ignore = []
+
+[licenses]
+version = 2
+# unlicensed = "deny" is now the default behavior if no licenses are allowed
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "CC0-1.0",
+  "Zlib",
+  "OpenSSL",
+  "MPL-2.0",
+  "Unicode-DFS-2016",
+  "BSL-1.0",
+  "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+highlight = "all"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+  "https://github.com/zerox80/quinn",
+  "https://github.com/zerox80/h3",
+  "https://github.com/time-rs/time",
+]

@@ -55,7 +55,7 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
     if let Some(parent) = token_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Pre-emptively remove any stale file so a previous world-readable token
+    // Preemptively remove any stale file so a previous world-readable token
     // from an unpatched version cannot leak via a race between create+chmod.
     let _ = std::fs::remove_file(&token_path);
     let write_result = std::fs::OpenOptions::new()

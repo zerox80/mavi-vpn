@@ -57,6 +57,4 @@ fun drawableToBitmap(drawable: Drawable): Bitmap? {
     }
 }
 
-fun Bitmap.toImageBitmap(): ImageBitmap {
-    return this.asImageBitmap()
-}
+fun Bitmap.toImageBitmap(): ImageBitmap = this.asImageBitmap()

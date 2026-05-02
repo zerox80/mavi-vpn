@@ -116,13 +116,12 @@ mod tests {
         let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        let keys: Vec<PrivateKeyDer> = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
-            .collect::<std::result::Result<Vec<_>, _>>()
+        let keys = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
+            .map(|res| res.map(PrivateKeyDer::Pkcs8))
+            .next()
             .unwrap()
-            .into_iter()
-            .map(PrivateKeyDer::Pkcs8)
-            .collect();
-        (certs, keys.into_iter().next().unwrap())
+            .unwrap();
+        (certs, keys)
     }
 
     #[test]

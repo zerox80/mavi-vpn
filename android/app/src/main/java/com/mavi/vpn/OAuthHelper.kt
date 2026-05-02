@@ -5,14 +5,16 @@ import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import androidx.browser.customtabs.CustomTabsIntent
-import okhttp3.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.FormBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64 as JavaBase64
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 data class OAuthTokens(val accessToken: String, val refreshToken: String)
 

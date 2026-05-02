@@ -29,7 +29,7 @@ where
         .header("content-type", "text/html; charset=utf-8")
         .header("server", "nginx")
         .body(())
-        .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Response build error: {e}"))?;
     let _ = req_stream.send_response(response).await;
     let _ = req_stream
         .send_data(Bytes::from_static(
@@ -41,6 +41,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub async fn handle_h3_connection(
     connection: quinn::Connection,
     pre_bi: Option<(quinn::SendStream, quinn::RecvStream)>,
@@ -69,17 +70,17 @@ pub async fn handle_h3_connection(
         .enable_extended_connect(true)
         .build(h3_conn_wrapper)
         .await
-        .map_err(|e| anyhow::anyhow!("H3 build failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 build failed: {e}"))?;
 
     let resolver = h3_conn
         .accept()
         .await
-        .map_err(|e| anyhow::anyhow!("H3 accept error: {}", e))?
+        .map_err(|e| anyhow::anyhow!("H3 accept error: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("Expected H3 request"))?;
     let (req, mut req_stream) = resolver
         .resolve_request()
         .await
-        .map_err(|e| anyhow::anyhow!("H3 resolve error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 resolve error: {e}"))?;
     let connect_ip_requested =
         req.extensions().get::<h3::ext::Protocol>().copied() == Some(h3::ext::Protocol::CONNECT_IP);
     info!(
@@ -103,7 +104,7 @@ pub async fn handle_h3_connection(
                 .status(http::StatusCode::NOT_FOUND)
                 .header("content-type", "text/html; charset=utf-8")
                 .body(())
-                .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Response build error: {e}"))?;
             let _ = req_stream.send_response(response).await;
             let _ = req_stream
                 .send_data(Bytes::from_static(
@@ -123,12 +124,12 @@ pub async fn handle_h3_connection(
         .unwrap_or("")
         .to_string();
 
-    let auth_result = authenticate_client(&token, &state, &config, &keycloak).await;
+    let auth_result = authenticate_client(&token, &state, &config, keycloak.as_ref()).await;
 
     let (assigned_ip, assigned_ip6) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
-            let error_msg = format!("Unauthorized: {}", e);
+            let error_msg = format!("Unauthorized: {e}");
             warn!("H3 Unauthorized from {}: {}", remote_addr, e);
             if config.censorship_resistant {
                 send_h3_camouflage_response(&mut req_stream).await?;
@@ -136,12 +137,12 @@ pub async fn handle_h3_connection(
                 let response = Response::builder()
                     .status(http::StatusCode::UNAUTHORIZED)
                     .body(())
-                    .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Response build error: {e}"))?;
                 let _ = req_stream.send_response(response).await;
                 let _ = req_stream.send_data(Bytes::from("Unauthorized")).await;
                 let _ = req_stream.finish().await;
             }
-            return Err(anyhow::anyhow!("H3 Error: {}", error_msg));
+            return Err(anyhow::anyhow!("H3 Error: {error_msg}"));
         }
     };
 
@@ -223,15 +224,15 @@ pub async fn handle_h3_connection(
     let response = Response::builder()
         .status(http::StatusCode::OK)
         .body(())
-        .map_err(|e| anyhow::anyhow!("Response build error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Response build error: {e}"))?;
     req_stream
         .send_response(response)
         .await
-        .map_err(|e| anyhow::anyhow!("H3 send_response error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 send_response error: {e}"))?;
     req_stream
         .send_data(Bytes::from(capsule_stream))
         .await
-        .map_err(|e| anyhow::anyhow!("H3 send_data error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 send_data error: {e}"))?;
 
     info!(
         "H3 Authenticated {} | SNI: {} -> IPv4: {}, IPv6: {}",

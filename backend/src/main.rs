@@ -3,6 +3,7 @@
 //! High-performance VPN server leveraging QUIC as the transport layer and TUN devices
 //! for network integration.
 
+#![allow(clippy::multiple_crate_versions)]
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use crate::utils::cleanup_legacy_rules;
 mod handlers;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -76,7 +78,7 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(parent).context("Failed to create certificate directory")?;
         }
     }
-    let (certs, key) = cert::load_or_generate_certs(cert_path, key_path)?;
+    let (certs, key) = cert::load_or_generate_certs(&cert_path, &key_path)?;
 
     // ECH (Encrypted Client Hello) setup — generates and persists an HPKE key
     // pair + ECHConfigList when censorship-resistant mode is enabled. The
@@ -108,58 +110,58 @@ async fn main() -> Result<()> {
     // Keycloak Validator Setup
     let mut keycloak = None;
     if config.keycloak_enabled {
-        if let Some(url) = &config.keycloak_url {
-            let kc = crate::keycloak::KeycloakValidator::new(
-                url.clone(),
-                config.keycloak_realm.clone(),
-                config.keycloak_client_id.clone(),
-            );
+        let Some(url) = &config.keycloak_url else {
+            panic!("FATAL: VPN_KEYCLOAK_ENABLED=true but VPN_KEYCLOAK_URL is not set!");
+        };
 
-            info!("Initializing Keycloak validator for {}...", url);
+        let kc = crate::keycloak::KeycloakValidator::new(
+            url.clone(),
+            config.keycloak_realm.clone(),
+            config.keycloak_client_id.clone(),
+        );
 
-            // Retry with exponential backoff — Keycloak may not be ready yet
-            let max_retries = 5u32;
-            let mut success = false;
-            for attempt in 1..=max_retries {
-                match kc.init_and_fetch().await {
-                    Ok(_) => {
-                        info!(
-                            "Keycloak JWKS loaded successfully (attempt {}/{})",
-                            attempt, max_retries
-                        );
-                        success = true;
+        info!("Initializing Keycloak validator for {}...", url);
+
+        // Retry with exponential backoff — Keycloak may not be ready yet
+        let max_retries = 5u32;
+        let mut success = false;
+        for attempt in 1..=max_retries {
+            match kc.init_and_fetch().await {
+                Ok(()) => {
+                    info!(
+                        "Keycloak JWKS loaded successfully (attempt {}/{})",
+                        attempt, max_retries
+                    );
+                    success = true;
+                    break;
+                }
+                Err(e) => {
+                    let delay = std::time::Duration::from_secs(2u64.pow(attempt - 1));
+                    warn!(
+                        "Failed to fetch Keycloak JWKS (attempt {}/{}): {}. Retrying in {}s...",
+                        attempt,
+                        max_retries,
+                        e,
+                        delay.as_secs()
+                    );
+                    if attempt == max_retries {
                         break;
                     }
-                    Err(e) => {
-                        let delay = std::time::Duration::from_secs(2u64.pow(attempt - 1));
-                        warn!(
-                            "Failed to fetch Keycloak JWKS (attempt {}/{}): {}. Retrying in {}s...",
-                            attempt,
-                            max_retries,
-                            e,
-                            delay.as_secs()
-                        );
-                        if attempt == max_retries {
-                            break;
-                        }
-                        tokio::time::sleep(delay).await;
-                    }
+                    tokio::time::sleep(delay).await;
                 }
             }
+        }
 
-            if success {
-                keycloak = Some(Arc::new(kc));
-            } else {
-                // DO NOT silently fall back to static token — that's a security disaster.
-                panic!(
-                    "FATAL: Could not load Keycloak JWKS after {} attempts. \
-                     Refusing to start with broken auth. \
-                     Ensure Keycloak is reachable at: {}/realms/{}/protocol/openid-connect/certs",
-                    max_retries, url, config.keycloak_realm
-                );
-            }
+        if success {
+            keycloak = Some(Arc::new(kc));
         } else {
-            panic!("FATAL: VPN_KEYCLOAK_ENABLED=true but VPN_KEYCLOAK_URL is not set!");
+            // DO NOT silently fall back to static token — that's a security disaster.
+            panic!(
+                "FATAL: Could not load Keycloak JWKS after {} attempts. \
+                 Refusing to start with broken auth. \
+                 Ensure Keycloak is reachable at: {}/realms/{}/protocol/openid-connect/certs",
+                max_retries, url, config.keycloak_realm
+            );
         }
     }
 
@@ -189,12 +191,9 @@ async fn main() -> Result<()> {
 
     // Accept incoming connections
     while let Some(conn) = endpoint.accept().await {
-        let permit = match connection_semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                warn!("Connection limit reached (1000), rejecting new connection");
-                continue;
-            }
+        let Ok(permit) = connection_semaphore.clone().try_acquire_owned() else {
+            warn!("Connection limit reached (1000), rejecting new connection");
+            continue;
         };
 
         let state = state.clone();

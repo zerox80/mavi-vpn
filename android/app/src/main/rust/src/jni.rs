@@ -59,7 +59,7 @@ fn classify_init_error(message: &str) -> jlong {
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 #[allow(clippy::too_many_lines)]
-pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
+pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
     env_unowned: EnvUnowned<'local>,
     _this: JObject<'local>,
     service: JObject<'local>,
@@ -271,7 +271,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
 ///
 /// # Panics
 /// Panics if the JNI environment fails to create a new string.
-pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getLastInitError<'local>(
+pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_getLastInitError<'local>(
     env_unowned: EnvUnowned<'local>,
     _class: JClass<'local>,
 ) -> jni::sys::jstring {
@@ -292,7 +292,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getLastInitError<
 ///
 /// # Panics
 /// Panics if the JNI environment fails to create a new string.
-pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getConfig<'local>(
+pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_getConfig<'local>(
     env_unowned: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
@@ -317,7 +317,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getConfig<'local>
 
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_startLoop<'local>(
+pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_startLoop<'local>(
     mut _env: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
@@ -341,7 +341,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_startLoop<'local>
 
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_stop<'local>(
+pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_stop<'local>(
     mut _env: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
@@ -359,7 +359,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_stop<'local>(
 
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_free<'local>(
+pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_free<'local>(
     mut _env: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
@@ -374,7 +374,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_free<'local>(
 
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
-pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_networkChanged<'local>(
+pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_networkChanged<'local>(
     mut _env: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,

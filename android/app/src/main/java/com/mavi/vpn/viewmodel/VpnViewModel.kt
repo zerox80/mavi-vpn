@@ -10,7 +10,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-class VpnViewModel(application: Application) : AndroidViewModel(application) {
+class VpnViewModel(
+    application: Application,
+) : AndroidViewModel(application) {
     private val prefs = PrefsManager(application)
 
     // UI State
@@ -86,7 +88,13 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         prefs.savedUseKeycloak = useKeycloak.value
     }
 
-    fun saveSettings(mode: String, packages: String, crMode: Boolean, h3Mode: Boolean, vpnMtuValue: Int) {
+    fun saveSettings(
+        mode: String,
+        packages: String,
+        crMode: Boolean,
+        h3Mode: Boolean,
+        vpnMtuValue: Int,
+    ) {
         splitMode.value = mode
         splitPackages.value = packages
         censorshipResistant.value = crMode

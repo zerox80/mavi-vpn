@@ -1,7 +1,6 @@
 package com.mavi.vpn
 
 import android.app.Activity
-import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
@@ -31,18 +30,21 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: VpnViewModel by viewModels()
 
-    private val vpnPrepareLauncher = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-             startVpnService(
-                 viewModel.serverIp.value,
-                 viewModel.serverPort.value,
-                 viewModel.authToken.value,
-                 viewModel.certPin.value,
-                 viewModel.splitMode.value,
-                 viewModel.splitPackages.value
-             )
+    private val vpnPrepareLauncher =
+        registerForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                startVpnService(
+                    viewModel.serverIp.value,
+                    viewModel.serverPort.value,
+                    viewModel.authToken.value,
+                    viewModel.certPin.value,
+                    viewModel.splitMode.value,
+                    viewModel.splitPackages.value,
+                )
+            }
         }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,19 +61,26 @@ class MainActivity : ComponentActivity() {
                     if (currentScreen == "home") {
                         VpnScreen(
                             viewModel = viewModel,
-                            onConnect = { ip, port, token, pin -> 
-                                prepareAndStartVpn(ip, port, token, pin, viewModel.splitMode.value, viewModel.splitPackages.value) 
+                            onConnect = { ip, port, token, pin ->
+                                prepareAndStartVpn(
+                                    ip,
+                                    port,
+                                    token,
+                                    pin,
+                                    viewModel.splitMode.value,
+                                    viewModel.splitPackages.value,
+                                )
                             },
                             onDisconnect = { stopVpn() },
-                            onOpenSettings = { currentScreen = "settings" }
+                            onOpenSettings = { currentScreen = "settings" },
                         )
                     } else {
                         SettingsScreen(
                             viewModel = viewModel,
-                            onBack = { mode, pkgs, crMode, h3Mode, vpnMtu -> 
+                            onBack = { mode, pkgs, crMode, h3Mode, vpnMtu ->
                                 viewModel.saveSettings(mode, pkgs, crMode, h3Mode, vpnMtu)
                                 currentScreen = "home"
-                            }
+                            },
                         )
                     }
                 }
@@ -79,7 +88,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun prepareAndStartVpn(ip: String, port: String, token: String, pin: String, splitMode: String, splitPackages: String) {
+    private fun prepareAndStartVpn(
+        ip: String,
+        port: String,
+        token: String,
+        pin: String,
+        splitMode: String,
+        splitPackages: String,
+    ) {
         val intent = VpnService.prepare(this)
         if (intent != null) {
             // Store details in VM if needed, or rely on them being there
@@ -103,13 +119,14 @@ class MainActivity : ComponentActivity() {
                 
                 val returnedState = data.getQueryParameter("state")
                 lifecycleScope.launch {
-                    val tokens = OAuthHelper.exchangeCodeForToken(
-                        code,
-                        returnedState,
-                        viewModel.kcUrl.value,
-                        viewModel.kcRealm.value,
-                        viewModel.kcClientId.value
-                    )
+                    val tokens =
+                        OAuthHelper.exchangeCodeForToken(
+                            code,
+                            returnedState,
+                            viewModel.kcUrl.value,
+                            viewModel.kcRealm.value,
+                            viewModel.kcClientId.value,
+                        )
                     if (tokens != null) {
                         viewModel.saveOAuthTokens(tokens)
                         recreate()
@@ -119,7 +136,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startVpnService(ip: String, port: String, token: String, pin: String, splitMode: String, splitPackages: String) {
+    private fun startVpnService(
+        ip: String,
+        port: String,
+        token: String,
+        pin: String,
+        splitMode: String,
+        splitPackages: String,
+    ) {
         val intent = Intent(this, MaviVpnService::class.java).apply {
             action = "CONNECT"
             putExtra("IP", ip)

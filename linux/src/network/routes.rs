@@ -57,3 +57,7 @@ pub(super) fn parse_endpoint_ip(s: &str) -> Result<IpAddr> {
         .parse::<IpAddr>()
         .with_context(|| format!("not a valid IP address: {:?}", s))
 }
+
+pub(super) fn netmask_to_prefix(netmask: Ipv4Addr) -> u8 {
+    u32::from_be_bytes(netmask.octets()).count_ones() as u8
+}

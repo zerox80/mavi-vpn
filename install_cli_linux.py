@@ -36,6 +36,7 @@ def step(msg):        print(c("1;37", f"\n[{msg}]"))
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent
+CONTROL_GROUP = "mavivpn"
 
 def run(cmd, cwd=None, check=True):
     info(f"Running: {' '.join(cmd)}")
@@ -61,6 +62,36 @@ def is_root():
 def sudo(*cmd):
     """Run a command with sudo if not already root."""
     return run(([] if is_root() else ["sudo"]) + list(cmd))
+
+def detect_target_user():
+    """Return the desktop user that should be allowed to control the daemon."""
+    for key in ("SUDO_USER", "USER", "LOGNAME"):
+        user = os.environ.get(key)
+        if user and user != "root":
+            return user
+    return None
+
+def configure_ipc_group():
+    """Create the daemon-control group and add the installing user to it."""
+    step("Configuring daemon access")
+    sudo("groupadd", "--system", "--force", CONTROL_GROUP)
+    ok(f"Group '{CONTROL_GROUP}' is available")
+
+    target_user = detect_target_user()
+    if not target_user:
+        prompt = f"  ? Desktop username to add to '{CONTROL_GROUP}' (blank to skip): "
+        target_user = input(c("1;37", prompt)).strip() or None
+
+    if not target_user:
+        warn(
+            f"No desktop user was added to '{CONTROL_GROUP}'. "
+            "Non-root CLI/GUI control will not work until a trusted user is added."
+        )
+        return None
+
+    sudo("usermod", "-aG", CONTROL_GROUP, target_user)
+    ok(f"User '{target_user}' added to '{CONTROL_GROUP}'")
+    return target_user
 
 # ---------------------------------------------------------------------------
 # Main
@@ -111,6 +142,8 @@ def main():
     sudo("install", "-m", "755", str(binary), str(dest))
     ok(f"Binary installed to {dest}")
 
+    configured_user = configure_ipc_group()
+
     # ── systemd service ───────────────────────────────────────────────────────
     if not shutil.which("systemctl"):
         warn("systemctl not found – skipping service setup.")
@@ -118,7 +151,7 @@ def main():
         print()
         print(c("0;37",
             "  The systemd service runs the daemon as root on boot.\n"
-            "  Once active, GUI and CLI work without sudo."
+            f"  Users in the '{CONTROL_GROUP}' group can control it without sudo."
         ))
         if ask("Install systemd service?"):
             service_src = ROOT / "linux" / "mavi-vpn.service"
@@ -149,6 +182,12 @@ def main():
     print(c("0;37",  "    mavi-vpn start                    connect via daemon"))
     print(c("0;37",  "    mavi-vpn stop                     disconnect"))
     print(c("0;37",  "    mavi-vpn status"))
+    if configured_user:
+        print(c("1;33", f"\n  Log out and back in as '{configured_user}', then run:"))
+        print(c("0;37",  "    mavi-vpn status"))
+        print(c("0;37",  "  or start the Mavi VPN GUI."))
+    else:
+        print(c("1;33", f"\n  Add trusted desktop users to '{CONTROL_GROUP}' before using daemon mode without sudo."))
 
 
 if __name__ == "__main__":

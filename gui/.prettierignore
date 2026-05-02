@@ -1,0 +1,6 @@
+# Ignore auto-generated files
+src-tauri/wix/service.wxs
+
+# Ignore build artifacts
+dist/
+node_modules/

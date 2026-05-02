@@ -3,8 +3,5 @@
   "identifier": "default",
   "description": "Default capabilities for Mavi VPN",
   "windows": ["main"],
-  "permissions": [
-    "core:default",
-    "shell:allow-open"
-  ]
+  "permissions": ["core:default", "shell:allow-open"]
 }

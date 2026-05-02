@@ -175,6 +175,11 @@ cargo build --release -p linux-vpn
 # Install binary
 sudo install -m 755 target/release/mavi-vpn /usr/local/bin/
 
+# Allow the current desktop user to control the root daemon
+sudo groupadd --system --force mavivpn
+sudo usermod -aG mavivpn $USER
+# Log out and back in before using daemon mode without sudo.
+
 # Install systemd service (optional)
 sudo cp linux/mavi-vpn.service /etc/systemd/system/
 sudo systemctl daemon-reload

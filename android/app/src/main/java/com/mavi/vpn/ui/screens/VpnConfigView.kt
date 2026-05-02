@@ -67,12 +67,12 @@ fun ConfigView(
     val authToken by viewModel.authToken.collectAsState()
     val certPin by viewModel.certPin.collectAsState()
     val echConfig by viewModel.echConfig.collectAsState()
-    
+
     val useKeycloak by viewModel.useKeycloak.collectAsState()
     val kcUrl by viewModel.kcUrl.collectAsState()
     val kcRealm by viewModel.kcRealm.collectAsState()
     val kcClientId by viewModel.kcClientId.collectAsState()
-    
+
     val errorMessage by viewModel.errorMessage.collectAsState()
     val hasKeycloakRefreshToken = viewModel.hasSavedKeycloakRefreshToken()
     val keycloakSessionInvalid = viewModel.isSavedKeycloakSessionInvalid()

@@ -21,13 +21,17 @@ fn last_init_error() -> &'static Mutex<String> {
 }
 
 fn set_last_init_error(message: &str) {
-    let mut last = last_init_error().lock().unwrap_or_else(|e| e.into_inner());
+    let mut last = last_init_error()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     last.clear();
     last.push_str(message);
 }
 
 fn clear_last_init_error() {
-    let mut last = last_init_error().lock().unwrap_or_else(|e| e.into_inner());
+    let mut last = last_init_error()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     last.clear();
 }
 
@@ -54,6 +58,7 @@ fn classify_init_error(message: &str) -> jlong {
 
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
+#[allow(clippy::too_many_lines)]
 pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
     env_unowned: EnvUnowned<'local>,
     _this: JObject<'local>,
@@ -82,39 +87,30 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
                 let _ = rustls::crypto::ring::default_provider().install_default();
             });
 
-            info!("JNI init called. CR Mode: {}", censorship_resistant);
+            info!("JNI init called. CR Mode: {censorship_resistant}");
 
             let get_string = |env: &mut Env, jstr: &JString| -> Option<String> {
                 #[allow(deprecated)]
                 match env.get_string(jstr) {
                     Ok(s) => Some(s.into()),
                     Err(e) => {
-                        error!("Failed to get string from JNI: {}", e);
+                        error!("Failed to get string from JNI: {e}");
                         None
                     }
                 }
             };
 
-            let token = match get_string(env, &token) {
-                Some(s) => s,
-                None => {
-                    set_last_init_error("Failed to read VPN token from JNI");
-                    return INIT_FATAL_CONFIG;
-                }
+            let Some(token) = get_string(env, &token) else {
+                set_last_init_error("Failed to read VPN token from JNI");
+                return INIT_FATAL_CONFIG;
             };
-            let endpoint = match get_string(env, &endpoint) {
-                Some(s) => s,
-                None => {
-                    set_last_init_error("Failed to read VPN endpoint from JNI");
-                    return INIT_FATAL_CONFIG;
-                }
+            let Some(endpoint) = get_string(env, &endpoint) else {
+                set_last_init_error("Failed to read VPN endpoint from JNI");
+                return INIT_FATAL_CONFIG;
             };
-            let cert_pin_str = match get_string(env, &cert_pin) {
-                Some(s) => s,
-                None => {
-                    set_last_init_error("Failed to read certificate pin from JNI");
-                    return INIT_FATAL_CONFIG;
-                }
+            let Some(cert_pin_str) = get_string(env, &cert_pin) else {
+                set_last_init_error("Failed to read certificate pin from JNI");
+                return INIT_FATAL_CONFIG;
             };
 
             // Optional: hex-encoded ECHConfigList. Empty string → no ECH override.
@@ -123,7 +119,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
 
             if cert_pin_str.is_empty() {
                 let message = "Certificate PIN is empty. Connection aborted.";
-                error!("{}", message);
+                error!("{message}");
                 set_last_init_error(message);
                 return INIT_FATAL_CERT;
             }
@@ -135,24 +131,24 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
             ) {
                 Ok(sock) => sock,
                 Err(e) => {
-                    let message = format!("Failed to create UDP socket: {}", e);
-                    error!("{}", message);
+                    let message = format!("Failed to create UDP socket: {e}");
+                    error!("{message}");
                     set_last_init_error(&message);
                     return INIT_RETRYABLE_FAILURE;
                 }
             };
 
             if let Err(e) = socket2_sock.set_only_v6(false) {
-                let message = format!("Failed to enable dual-stack UDP socket: {}", e);
-                error!("{}", message);
+                let message = format!("Failed to enable dual-stack UDP socket: {e}");
+                error!("{message}");
                 set_last_init_error(&message);
                 return INIT_RETRYABLE_FAILURE;
             }
             if let Err(e) = socket2_sock.bind(&socket2::SockAddr::from(
                 std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0),
             )) {
-                let message = format!("Failed to bind UDP socket: {}", e);
-                error!("{}", message);
+                let message = format!("Failed to bind UDP socket: {e}");
+                error!("{message}");
                 set_last_init_error(&message);
                 return INIT_RETRYABLE_FAILURE;
             }
@@ -198,12 +194,12 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
                     jni::jni_sig!("(I)Z"),
                     &[JValue::Int(sock_fd as jint)],
                 )
-                .and_then(|val| val.z())
+                .and_then(jni::JValueOwned::z)
                 .unwrap_or(false);
 
             if !protected {
                 let message = "Failed to protect VPN socket!";
-                error!("{}", message);
+                error!("{message}");
                 set_last_init_error(message);
                 return INIT_RETRYABLE_FAILURE;
             }
@@ -216,14 +212,16 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    let message = format!("Failed to create runtime: {}", e);
-                    error!("{}", message);
+                    let message = format!("Failed to create runtime: {e}");
+                    error!("{message}");
                     set_last_init_error(&message);
                     return INIT_RETRYABLE_FAILURE;
                 }
             };
 
             let vpn_mtu_opt = if vpn_mtu > 0 {
+                #[allow(clippy::cast_possible_truncation)]
+                #[allow(clippy::cast_sign_loss)]
                 Some(vpn_mtu as u16)
             } else {
                 None
@@ -254,24 +252,25 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_init<'local>(
                 }
                 Err(e) => {
                     let message = e.to_string();
-                    error!("Handshake failed: {}", message);
+                    error!("Handshake failed: {message}");
                     set_last_init_error(&message);
                     classify_init_error(&message)
                 }
             }
         }));
 
-    match result {
-        Ok(handle) => handle,
-        Err(_) => {
-            set_last_init_error("Unexpected panic in native init");
-            INIT_RETRYABLE_FAILURE
-        }
-    }
+    result.unwrap_or_else(|_| {
+        set_last_init_error("Unexpected panic in native init");
+        INIT_RETRYABLE_FAILURE
+    })
 }
 
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
+/// Returns the last error message that occurred during initialization.
+///
+/// # Panics
+/// Panics if the JNI environment fails to create a new string.
 pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getLastInitError<'local>(
     env_unowned: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -280,7 +279,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getLastInitError<
     let env = guard.borrow_env_mut();
     let message = last_init_error()
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     env.new_string(message)
         .unwrap_or_else(|_| env.new_string("").unwrap())
@@ -289,6 +288,10 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getLastInitError<
 
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
+/// Returns the VPN configuration as a JSON string.
+///
+/// # Panics
+/// Panics if the JNI environment fails to create a new string.
 pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getConfig<'local>(
     env_unowned: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -309,10 +312,7 @@ pub extern "system" fn Java_com_mavi_vpn_native_1lib_NativeLib_getConfig<'local>
             .into_raw()
     }));
 
-    match result {
-        Ok(s) => s,
-        Err(_) => env.new_string("{}").unwrap().into_raw(),
-    }
+    result.unwrap_or_else(|_| env.new_string("{}").unwrap().into_raw())
 }
 
 #[allow(improper_ctypes_definitions)]

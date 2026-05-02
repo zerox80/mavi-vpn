@@ -19,7 +19,7 @@ use rustls::internal::msgs::handshake::EchConfigPayload;
 
 /// Information extracted from a server `ECHConfigList` for client use.
 pub struct ClientEch {
-    /// DNS name to send as the outer SNI in the QUIC ClientHello.
+    /// DNS name to send as the outer SNI in the QUIC `ClientHello`.
     pub outer_sni: String,
     /// An `EchMode::Grease`-capable configuration that mimics the server's
     /// advertised HPKE suite + public key.
@@ -34,12 +34,11 @@ pub fn parse(ech_config_list: &[u8]) -> Result<Option<ClientEch>> {
     let mut reader = Reader::init(ech_config_list);
     let payloads: Vec<EchConfigPayload> =
         <Vec<EchConfigPayload> as rustls::internal::msgs::codec::Codec>::read(&mut reader)
-            .map_err(|e| anyhow::anyhow!("failed to decode ECHConfigList: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to decode ECHConfigList: {e:?}"))?;
 
     for payload in payloads {
-        let contents = match payload {
-            EchConfigPayload::V18(c) => c,
-            _ => continue,
+        let EchConfigPayload::V18(contents) = payload else {
+            continue;
         };
         let outer_sni = contents.public_name.as_ref().to_string();
         let kem = contents.key_config.kem_id;

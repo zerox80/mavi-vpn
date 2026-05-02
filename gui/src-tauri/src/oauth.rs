@@ -16,11 +16,12 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Run the Keycloak PKCE OAuth2 flow in the user's browser session.
+/// Run the Keycloak PKCE `OAuth2` flow in the user's browser session.
 ///
 /// This must be called from the GUI process (not the service) because it needs
 /// to open a browser window in the user's desktop session.
 /// Returns the access token string on success.
+#[allow(clippy::too_many_lines)]
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
     // 1. Generate PKCE verifier and challenge
     let verifier_bytes: [u8; 32] = rand::random();
@@ -34,13 +35,12 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
     // 2. Bind the fixed callback port
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
+    let listener = TcpListener::bind(format!("127.0.0.1:{OAUTH_CALLBACK_PORT}"))
         .await
         .context(format!(
-            "Could not bind callback port {}. Is another instance running?",
-            OAUTH_CALLBACK_PORT
+            "Could not bind callback port {OAUTH_CALLBACK_PORT}. Is another instance running?"
         ))?;
-    let redirect_uri = format!("http://127.0.0.1:{}/callback", OAUTH_CALLBACK_PORT);
+    let redirect_uri = format!("http://127.0.0.1:{OAUTH_CALLBACK_PORT}/callback");
 
     // 3. Build the Keycloak authorization URL
     let auth_endpoint = format!(
@@ -81,7 +81,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
 
             let path = first_line.split_whitespace().nth(1).unwrap_or("/");
             let parsed =
-                url::Url::parse(&format!("http://localhost{}", path)).ok();
+                url::Url::parse(&format!("http://localhost{path}")).ok();
 
             if let Some(u) = parsed {
                 let returned_state = u
@@ -91,8 +91,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
                 if returned_state.as_deref() != Some(oauth_state.as_str()) {
                     let html = "<html><body><h1 style='color:red'>Login failed</h1><p>OAuth state invalid.</p></body></html>";
                     let resp = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
-                        html
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}"
                     );
                     let _ = socket.write_all(resp.as_bytes()).await;
                     return Err(anyhow::anyhow!("OAuth state mismatch"));
@@ -109,8 +108,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
                         <p>You can close this window and return to Mavi VPN.</p>\
                         <script>setTimeout(()=>window.close(),3000)</script></body></html>";
                     let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
-                        html
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}"
                     );
                     let _ = socket.write_all(resp.as_bytes()).await;
                     return Ok::<String, anyhow::Error>(code);
@@ -126,11 +124,10 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
                         html_escape(&err)
                     );
                     let resp = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
-                        html
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}"
                     );
                     let _ = socket.write_all(resp.as_bytes()).await;
-                    return Err(anyhow::anyhow!("Keycloak error: {}", err));
+                    return Err(anyhow::anyhow!("Keycloak error: {err}"));
                 }
             }
         }
@@ -164,7 +161,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
 
     if !res.status().is_success() {
         let body = res.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Token exchange failed: {}", body));
+        return Err(anyhow::anyhow!("Token exchange failed: {body}"));
     }
 
     let json: serde_json::Value = res.json().await?;

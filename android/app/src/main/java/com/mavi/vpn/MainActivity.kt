@@ -6,22 +6,26 @@ import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
-import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
-import com.mavi.vpn.ui.screens.VpnScreen
 import com.mavi.vpn.ui.screens.SettingsScreen
+import com.mavi.vpn.ui.screens.VpnScreen
 import com.mavi.vpn.ui.theme.MaviVpnTheme
 import com.mavi.vpn.viewmodel.VpnViewModel
 import kotlinx.coroutines.launch
-import androidx.compose.runtime.*
 
 class MainActivity : ComponentActivity() {
 

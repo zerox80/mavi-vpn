@@ -15,6 +15,7 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
     // 1. Generate PKCE verifier and challenge
     let verifier_bytes: [u8; 32] = rand::random();
@@ -28,13 +29,12 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
     // 2. Start local TCP listener on fixed port
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
+    let listener = TcpListener::bind(format!("127.0.0.1:{OAUTH_CALLBACK_PORT}"))
         .await
         .context(format!(
-            "Could not bind callback port {}. Is another instance running?",
-            OAUTH_CALLBACK_PORT
+            "Could not bind callback port {OAUTH_CALLBACK_PORT}. Is another instance running?"
         ))?;
-    let redirect_uri = format!("http://127.0.0.1:{}/callback", OAUTH_CALLBACK_PORT);
+    let redirect_uri = format!("http://127.0.0.1:{OAUTH_CALLBACK_PORT}/callback");
 
     // 3. Construct Authorization URL
     let auth_endpoint = format!(
@@ -54,14 +54,14 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .append_pair("state", &oauth_state);
 
     // 4. Open browser
-    println!("\nÖffne Webbrowser für den Login...");
+    println!("\nOpening web browser for login...");
     if webbrowser::open(auth_url.as_str()).is_err() {
         println!(
-            "Konnte Browser nicht automatisch öffnen. Bitte klicke manuell auf diesen Link:\n{}",
+            "Could not open browser automatically. Please manually click this link:\n{}",
             auth_url.as_str()
         );
     }
-    println!("Warte auf erfolgreichen Login im Browser (Timeout in 5 Minuten)...");
+    println!("Waiting for successful login in browser (Timeout in 5 minutes)...");
 
     // 5. Wait for callback
     let auth_code = tokio::time::timeout(Duration::from_secs(300), async {
@@ -79,38 +79,38 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
             if parts.len() < 2 { continue; }
             let path_and_query = parts[1];
 
-            let parsed_url = url::Url::parse(&format!("http://localhost{}", path_and_query)).ok();
+            let parsed_url = url::Url::parse(&format!("http://localhost{path_and_query}")).ok();
             if let Some(u) = parsed_url {
                 let returned_state = u.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.into_owned());
                 if returned_state.as_deref() != Some(oauth_state.as_str()) {
-                    let html = "<html><body><h1 style=\"color: red;\">Login fehlgeschlagen!</h1><p>OAuth state ungültig.</p></body></html>";
-                    let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}", html);
+                    let html = "<html><body><h1 style=\"color: red;\">Login failed!</h1><p>OAuth state invalid.</p></body></html>";
+                    let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}");
                     let _ = socket.write_all(response.as_bytes()).await;
                     return Err(anyhow::anyhow!("OAuth state mismatch"));
                 }
 
                 if let Some(code) = u.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.into_owned()) {
-                    let html = "<html><head><title>Login Erfolgreich</title></head><body style=\"font-family: sans-serif; text-align: center; padding-top: 50px;\"><h1 style=\"color: green;\">Login erfolgreich!</h1><p>Du kannst dieses Fenster jetzt schliessen und in dein Terminal zurueckkehren.</p><script>setTimeout(function(){window.close();}, 3000);</script></body></html>";
-                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}", html);
+                    let html = "<html><head><title>Login Successful</title></head><body style=\"font-family: sans-serif; text-align: center; padding-top: 50px;\"><h1 style=\"color: green;\">Login successful!</h1><p>You can now close this window and return to your terminal.</p><script>setTimeout(function(){window.close();}, 3000);</script></body></html>";
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}");
                     let _ = socket.write_all(response.as_bytes()).await;
                     return Ok::<String, anyhow::Error>(code);
                 }
 
                 if let Some(err) = u.query_pairs().find(|(k, _)| k == "error").map(|(_, v)| v.into_owned()) {
-                    let html = format!("<html><body><h1 style=\"color: red;\">Login fehlgeschlagen!</h1><p>Fehler: {}</p></body></html>", html_escape(&err));
-                    let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}", html);
+                    let html = format!("<html><body><h1 style=\"color: red;\">Login failed!</h1><p>Error: {}</p></body></html>", html_escape(&err));
+                    let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}");
                     let _ = socket.write_all(response.as_bytes()).await;
-                    return Err(anyhow::anyhow!("Keycloak Fehler: {}", err));
+                    return Err(anyhow::anyhow!("Keycloak error: {err}"));
                 }
             }
 
-            let html = "<html><body><h1>Fehler</h1><p>Ungueltiger Callback.</p></body></html>";
-            let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}", html);
+            let html = "<html><body><h1>Error</h1><p>Invalid callback.</p></body></html>";
+            let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}");
             let _ = socket.write_all(response.as_bytes()).await;
         }
-    }).await.context("Login Timeout (5 Minuten)")??;
+    }).await.context("Login Timeout (5 minutes)")??;
 
-    println!("Login Callback empfangen! Hole Access Token...");
+    println!("Login callback received! Retrieving Access Token...");
 
     // 6. Exchange code for token
     let token_endpoint = format!(
@@ -135,19 +135,16 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .form(&params)
         .send()
         .await
-        .context("Verbindung zu Keycloak fehlgeschlagen")?;
+        .context("Connection to Keycloak failed")?;
     if !res.status().is_success() {
         let error_text = res.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Token Exchange fehlgeschlagen: {}",
-            error_text
-        ));
+        return Err(anyhow::anyhow!("Token exchange failed: {error_text}"));
     }
 
     let json: serde_json::Value = res.json().await?;
     let access_token = json["access_token"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Kein access_token gefunden"))?;
+        .ok_or_else(|| anyhow::anyhow!("No access_token found"))?;
 
     Ok(access_token.to_string())
 }

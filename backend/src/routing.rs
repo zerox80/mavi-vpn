@@ -22,6 +22,7 @@ struct TunReaderStats {
 }
 
 impl TunReaderStats {
+    #[allow(clippy::cast_precision_loss)]
     fn log_interval(&self, previous: &mut Self) {
         let read_packets = self.read_packets - previous.read_packets;
         let read_bytes = self.read_bytes - previous.read_bytes;
@@ -92,6 +93,7 @@ fn record_s2c_channel_drop<D: Display>(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn spawn_tun_reader(
     mut tun_reader: tokio::io::ReadHalf<tun::AsyncDevice>,
     state_reader: Arc<AppState>,

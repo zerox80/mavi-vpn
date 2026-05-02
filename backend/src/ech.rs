@@ -1,13 +1,13 @@
 //! Encrypted Client Hello (ECH) support for mavi-vpn server.
 //!
-//! This module generates and persists HPKE keys and ECHConfigList bytes used
-//! for ECH. The ECHConfigList is distributed out-of-band to clients (next to
+//! This module generates and persists HPKE keys and `ECHConfigList` bytes used
+//! for ECH. The `ECHConfigList` is distributed out-of-band to clients (next to
 //! `cert_pin.txt`). Clients use it to:
 //!
 //!   1. Read the `public_name` (the "cover" SNI sent on the wire), and
 //!   2. Obtain an HPKE public key + suite for building an ECH GREASE extension.
 //!
-//! Server-side ECH acceptance (decrypting the inner ClientHello) is not
+//! Server-side ECH acceptance (decrypting the inner `ClientHello`) is not
 //! implemented in rustls 0.23.x. Clients therefore use `EchMode::Grease` plus
 //! SNI spoofing to the `public_name`. This still hides the real server name
 //! from on-path observers because the server does not rely on SNI (it uses
@@ -92,7 +92,7 @@ pub fn load_or_generate(
             // because we only publish one config.
             config_id: 0,
             kem_id: HpkeKem::DHKEM_X25519_HKDF_SHA256,
-            public_key: PayloadU16::new(public_key.0.clone()),
+            public_key: PayloadU16::new(public_key.0),
             symmetric_cipher_suites: vec![HpkeSymmetricCipherSuite {
                 kdf_id: HpkeKdf::HKDF_SHA256,
                 aead_id: HpkeAead::AES_128_GCM,
@@ -142,11 +142,11 @@ pub fn load_or_generate(
     })
 }
 
-/// Parse an ECHConfigList and return the first V18 entry's `public_name`.
+/// Parse an `ECHConfigList` and return the first V18 entry's `public_name`.
 fn parse_ech_public_name(bytes: &[u8]) -> Result<String> {
     let mut reader = Reader::init(bytes);
     let payloads: Vec<EchConfigPayload> = Vec::read(&mut reader)
-        .map_err(|e| anyhow::anyhow!("failed to decode ECHConfigList: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("failed to decode ECHConfigList: {e:?}"))?;
 
     for payload in payloads {
         if let EchConfigPayload::V18(contents) = payload {

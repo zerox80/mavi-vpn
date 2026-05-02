@@ -55,6 +55,13 @@ struct VpnServiceState {
 
 define_windows_service!(ffi_service_main, my_service_main);
 
+/// Entry point for the Mavi VPN service process.
+///
+/// # Panics
+/// Panics if the default tracing filter cannot be parsed.
+///
+/// # Errors
+/// Returns an error if the windows service dispatcher fails to start.
 pub fn main() -> Result<(), windows_service::Error> {
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive("mavi_vpn=info".parse().unwrap())
@@ -160,7 +167,7 @@ fn run_standalone() {
 
     rt.block_on(async {
         match run_service_loop(stop_signal.clone(), reharden_signal.clone()).await {
-            Ok(_) => {
+            Ok(()) => {
                 info!("Service loop exited gracefully");
                 run_network_repair_cleanup();
             }
@@ -241,10 +248,7 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
 
     info!("Service is now running");
 
-    let res = rt.block_on(run_service_loop(
-        stop_signal.clone(),
-        reharden_signal.clone(),
-    ));
+    let res = rt.block_on(run_service_loop(stop_signal, reharden_signal));
     if let Err(e) = res {
         error!("Service loop failed: {}", e);
     }
@@ -320,6 +324,7 @@ async fn run_service_loop(
                 let _ = t.await;
             } else {
                 guard.vpn_stopping.store(false, Ordering::SeqCst);
+                drop(guard);
             }
             break;
         }
@@ -330,9 +335,8 @@ async fn run_service_loop(
         }
 
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            () = tokio::time::sleep(Duration::from_millis(500)) => {
                 // Periodically wake up to check stop_signal
-                continue;
             }
             conn_res = listener.accept() => {
                 let (socket, peer) = match conn_res {
@@ -375,38 +379,39 @@ async fn handle_ipc_client(
         rx.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         if len > 65536 {
-            anyhow::bail!("IPC request too large: {} bytes", len);
+            anyhow::bail!("IPC request too large: {len} bytes");
         }
         let mut buf = vec![0u8; len];
         rx.read_exact(&mut buf).await?;
         let (msg, _): (ipc::SecureIpcRequest, _) =
             bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-                .map_err(|e| anyhow::anyhow!("IPC decode error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("IPC decode error: {e}"))?;
         Ok::<_, anyhow::Error>(msg)
     })
     .await
-    .map_err(|_| anyhow::anyhow!("IPC request timeout from {}", peer))??;
+    .map_err(|_| anyhow::anyhow!("IPC request timeout from {peer}"))??;
 
-    let resp = if !constant_time_eq(req_msg.auth_token.as_bytes(), auth_token.as_bytes()) {
+    let resp = if constant_time_eq(req_msg.auth_token.as_bytes(), auth_token.as_bytes()) {
+        dispatch_request(req_msg.request, &state).await
+    } else {
         error!(
             "Rejecting IPC request from {} due to invalid auth token",
             peer
         );
         ipc::IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
-    } else {
-        dispatch_request(req_msg.request, &state).await
     };
 
     let resp_buf = bincode::serde::encode_to_vec(&resp, bincode::config::standard())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize IPC response: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to serialize IPC response: {e}"))?;
 
     tokio::time::timeout(IPC_REQUEST_TIMEOUT, async {
+        #[allow(clippy::cast_possible_truncation)]
         tx.write_u32_le(resp_buf.len() as u32).await?;
         tx.write_all(&resp_buf).await?;
         Ok::<_, std::io::Error>(())
     })
     .await
-    .map_err(|_| anyhow::anyhow!("IPC response write timeout to {}", peer))??;
+    .map_err(|_| anyhow::anyhow!("IPC response write timeout to {peer}"))??;
 
     Ok(())
 }
@@ -462,60 +467,62 @@ async fn dispatch_request(
             run_network_repair_cleanup();
             ipc::IpcResponse::Ok
         }
-        ipc::IpcRequest::Start(config) => {
-            info!("Handling Start request for endpoint: {}", config.endpoint);
-            if guard.vpn_stopping.load(Ordering::SeqCst) {
-                ipc::IpcResponse::Error("VPN is stopping; retry shortly".to_string())
-            } else if guard.vpn_running.load(Ordering::SeqCst)
-                || guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished())
-            {
-                ipc::IpcResponse::Error("VPN is already running".to_string())
-            } else {
-                guard.active_config = Some(config.clone());
-                guard.vpn_running.store(true, Ordering::SeqCst);
-                guard.vpn_connected.store(false, Ordering::SeqCst);
-                guard.vpn_stopping.store(false, Ordering::SeqCst);
-                if let Ok(mut last_error) = guard.last_error.lock() {
-                    *last_error = None;
-                }
-                let flag = guard.vpn_running.clone();
-                let connected = guard.vpn_connected.clone();
-                let stopping = guard.vpn_stopping.clone();
-                let last_error = guard.last_error.clone();
-                let assigned_ip = guard.assigned_ip.clone();
+        ipc::IpcRequest::Start(config) => handle_start_request(config, &mut guard),
+    }
+}
 
-                guard.vpn_task = Some(tokio::spawn(async move {
-                    if let Err(e) = vpn_core::run_vpn(
-                        config,
-                        flag.clone(),
-                        connected.clone(),
-                        last_error.clone(),
-                        assigned_ip,
-                    )
-                    .await
-                    {
-                        let msg = e.to_string();
-                        error!("VPN task failed: {}", msg);
-                        if flag.load(Ordering::SeqCst) {
-                            if let Ok(mut last) = last_error.lock() {
-                                *last = Some(msg);
-                            }
-                        } else if let Ok(mut last) = last_error.lock() {
-                            // Stop-requested failures are part of teardown, not user-visible connection errors.
-                            *last = None;
-                        }
-                    }
-                    let _ = tokio::task::spawn_blocking(|| {
-                        run_network_repair_cleanup();
-                    })
-                    .await;
-                    flag.store(false, Ordering::SeqCst);
-                    connected.store(false, Ordering::SeqCst);
-                    stopping.store(false, Ordering::SeqCst);
-                }));
-                ipc::IpcResponse::Ok
-            }
+fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) -> ipc::IpcResponse {
+    info!("Handling Start request for endpoint: {}", config.endpoint);
+    if guard.vpn_stopping.load(Ordering::SeqCst) {
+        ipc::IpcResponse::Error("VPN is stopping; retry shortly".to_string())
+    } else if guard.vpn_running.load(Ordering::SeqCst)
+        || guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished())
+    {
+        ipc::IpcResponse::Error("VPN is already running".to_string())
+    } else {
+        guard.active_config = Some(config.clone());
+        guard.vpn_running.store(true, Ordering::SeqCst);
+        guard.vpn_connected.store(false, Ordering::SeqCst);
+        guard.vpn_stopping.store(false, Ordering::SeqCst);
+        if let Ok(mut last_error) = guard.last_error.lock() {
+            *last_error = None;
         }
+        let flag = guard.vpn_running.clone();
+        let connected = guard.vpn_connected.clone();
+        let stopping = guard.vpn_stopping.clone();
+        let last_error = guard.last_error.clone();
+        let assigned_ip = guard.assigned_ip.clone();
+
+        guard.vpn_task = Some(tokio::spawn(async move {
+            if let Err(e) = vpn_core::run_vpn(
+                config,
+                flag.clone(),
+                connected.clone(),
+                last_error.clone(),
+                assigned_ip,
+            )
+            .await
+            {
+                let msg = e.to_string();
+                error!("VPN task failed: {}", msg);
+                if flag.load(Ordering::SeqCst) {
+                    if let Ok(mut last) = last_error.lock() {
+                        *last = Some(msg);
+                    }
+                } else if let Ok(mut last) = last_error.lock() {
+                    // Stop-requested failures are part of teardown, not user-visible connection errors.
+                    *last = None;
+                }
+            }
+            let _ = tokio::task::spawn_blocking(|| {
+                run_network_repair_cleanup();
+            })
+            .await;
+            flag.store(false, Ordering::SeqCst);
+            connected.store(false, Ordering::SeqCst);
+            stopping.store(false, Ordering::SeqCst);
+        }));
+        ipc::IpcResponse::Ok
     }
 }
 
@@ -529,7 +536,7 @@ fn run_network_repair_cleanup() {
     REPAIR_CLEANUP_CALLS.fetch_add(1, Ordering::SeqCst);
 }
 
-fn classify_status(
+const fn classify_status(
     connected: bool,
     stopping: bool,
     starting: bool,
@@ -557,7 +564,7 @@ fn harden_ipc_token_permissions(token_path: &Path) {
     ];
 
     if let Some(user_sid) = active_console_user_sid() {
-        args.push(format!("*{}:(R)", user_sid));
+        args.push(format!("*{user_sid}:(R)"));
     } else {
         warn!("No interactive user detected while hardening the IPC token ACL; local clients may need to run elevated until the service is restarted after login");
     }
@@ -716,6 +723,7 @@ mod tests {
         assert!(!guard.vpn_connected.load(Ordering::SeqCst));
         assert!(!guard.vpn_stopping.load(Ordering::SeqCst));
         assert!(guard.active_config.is_none());
+        drop(guard);
     }
 
     #[tokio::test]
@@ -764,7 +772,7 @@ mod tests {
             ipc::IpcResponse::Error(msg) => {
                 assert_eq!(msg, "VPN is stopping; retry shortly");
             }
-            other => panic!("Expected Error, got {:?}", other),
+            other => panic!("Expected Error, got {other:?}"),
         }
     }
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mavi VPN â€“ GUI Uninstaller (Windows)
+Mavi VPN - GUI Uninstaller (Windows)
 
 Removes:
   mavi-vpn-gui.exe   Tauri GUI binary
@@ -14,7 +14,6 @@ Usage:
 import ctypes
 import os
 import sys
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -24,12 +23,30 @@ from pathlib import Path
 
 NO_COLOR = not sys.stdout.isatty() or bool(os.environ.get("NO_COLOR"))
 
-def c(code, text):    return text if NO_COLOR else f"\033[{code}m{text}\033[0m"
-def info(msg):        print(c("1;36", "  â†’"), msg)
-def ok(msg):          print(c("1;32", "  âœ“"), msg)
-def warn(msg):        print(c("1;33", "  !"), msg)
-def err(msg):         print(c("1;31", "  âœ—"), msg)
-def step(msg):        print(c("1;37", f"\n[{msg}]"))
+
+def c(code, text):
+    return text if NO_COLOR else f"\033[{code}m{text}\033[0m"
+
+
+def info(msg):
+    print(c("1;36", "  ->"), msg)
+
+
+def ok(msg):
+    print(c("1;32", "  [OK]"), msg)
+
+
+def warn(msg):
+    print(c("1;33", "  [!]"), msg)
+
+
+def err(msg):
+    print(c("1;31", "  [X]"), msg)
+
+
+def step(msg):
+    print(c("1;37", f"\n### {msg} ###"))
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,11 +54,13 @@ def step(msg):        print(c("1;37", f"\n[{msg}]"))
 
 ROOT = Path(__file__).resolve().parent
 
+
 def is_admin() -> bool:
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except Exception:
         return False
+
 
 def run_elevated(exe: str, args: str = ""):
     """Launch an executable with UAC elevation (RunAs)."""
@@ -51,10 +70,12 @@ def run_elevated(exe: str, args: str = ""):
     )
     return ret > 32
 
+
 def ask(question, default="y"):
     yn = "Y/n" if default == "y" else "y/N"
     answer = input(c("1;37", f"  ? {question} [{yn}]: ")).strip().lower()
     return (answer in ("y", "yes", "j", "ja")) if answer else (default == "y")
+
 
 def repair_network_state():
     """Remove stale MaviVPN routes and DNS policy left by interrupted sessions."""
@@ -111,6 +132,7 @@ Start-Service -Name Dnscache -ErrorAction SilentlyContinue
     else:
         warn("Network repair cleanup may be incomplete; try running as Administrator.")
 
+
 # ---------------------------------------------------------------------------
 # NSIS uninstaller detection
 # ---------------------------------------------------------------------------
@@ -153,6 +175,7 @@ def find_nsis_uninstaller():
 
     return None
 
+
 # ---------------------------------------------------------------------------
 # PATH helpers
 # ---------------------------------------------------------------------------
@@ -179,6 +202,7 @@ def remove_from_path(dir_to_remove):
         except (FileNotFoundError, PermissionError):
             pass
 
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -190,9 +214,9 @@ def main():
         sys.exit(1)
 
     print()
-    print(c("1;36", "  â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"))
-    print(c("1;36", "  â•‘   Mavi VPN â€“ GUI Uninstaller (Windows)    â•‘"))
-    print(c("1;36", "  â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"))
+    print(c("1;36", "  +-------------------------------------------+"))
+    print(c("1;36", "  |   Mavi VPN - GUI Uninstaller (Windows)    |"))
+    print(c("1;36", "  +-------------------------------------------+"))
     print()
 
     removed_anything = False
@@ -200,7 +224,7 @@ def main():
     step("Network repair")
     repair_network_state()
 
-    # â”€â”€ NSIS uninstaller â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- NSIS uninstaller -------------------------------------------------------
     step("NSIS uninstaller")
     nsis_uninstaller = find_nsis_uninstaller()
 
@@ -210,20 +234,20 @@ def main():
             if is_admin():
                 subprocess.run([nsis_uninstaller], check=False)
             else:
-                info("NSIS uninstaller needs admin rights â€” requesting elevation...")
+                info("NSIS uninstaller needs admin rights - requesting elevation...")
                 if not run_elevated(nsis_uninstaller):
                     warn("UAC elevation was cancelled or failed.")
             ok("NSIS uninstaller started")
             removed_anything = True
-            # NSIS handles everything â€“ skip manual removal
+            # NSIS handles everything - skip manual removal
             _offer_cli_uninstall()
             print()
             ok("GUI uninstallation complete!")
             return
     else:
-        ok("No NSIS installation found â€“ trying manual removal.")
+        ok("No NSIS installation found - trying manual removal.")
 
-    # â”€â”€ Manual removal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Manual removal ---------------------------------------------------------
     step("GUI binary")
     prog_dir = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MaviVPN"
     local_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "MaviVPN"
@@ -246,10 +270,10 @@ def main():
                 ok(f"Removed: {gui_exe}")
                 removed_anything = True
             except PermissionError:
-                err(f"Cannot remove {gui_exe} â€“ file in use or missing permissions.")
+                err(f"Cannot remove {gui_exe} - file in use or missing permissions.")
                 warn("Try running as Administrator.")
     else:
-        ok(f"GUI binary not found in {install_dir} â€“ skipping.")
+        ok(f"GUI binary not found in {install_dir} - skipping.")
 
     # Remove directory if empty (and no CLI binaries left)
     if install_dir.exists():
@@ -261,7 +285,7 @@ def main():
         except OSError:
             pass
 
-    # â”€â”€ Desktop shortcut â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Desktop shortcut -------------------------------------------------------
     step("Desktop shortcut")
     shortcut = Path.home() / "Desktop" / "Mavi VPN.lnk"
     if shortcut.exists():
@@ -270,9 +294,9 @@ def main():
             ok(f"Removed: {shortcut}")
             removed_anything = True
     else:
-        ok("Desktop shortcut not found â€“ skipping.")
+        ok("Desktop shortcut not found - skipping.")
 
-    # â”€â”€ PATH cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- PATH cleanup -----------------------------------------------------------
     step("PATH cleanup")
     if ask("Remove MaviVPN directory from system/user PATH?"):
         try:
@@ -281,10 +305,10 @@ def main():
         except Exception as e:
             warn(f"Could not update PATH: {e}")
 
-    # â”€â”€ Optionally also remove CLI/service â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Optionally also remove CLI/service -------------------------------------
     _offer_cli_uninstall()
 
-    # â”€â”€ Done â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Done -------------------------------------------------------------------
     print()
     if removed_anything:
         ok("GUI uninstallation complete!")
@@ -304,7 +328,7 @@ def _offer_cli_uninstall():
         if ask("Also uninstall CLI and Windows Service?", default="n"):
             subprocess.run([sys.executable, str(cli_script)])
     else:
-        ok("CLI service not installed or uninstaller not found â€“ skipping.")
+        ok("CLI service not installed or uninstaller not found - skipping.")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,11 @@ members = [
     "gui/src-tauri",
 ]
 
+[workspace.lints.clippy]
+pedantic = "warn"
+nursery = "warn"
+cargo = "warn"
+
 [workspace.dependencies]
 shared = { path = "shared" }
 tokio = { version = "1.0", features = ["full"] }
@@ -48,3 +53,4 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+

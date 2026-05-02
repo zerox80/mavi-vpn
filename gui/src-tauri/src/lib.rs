@@ -1,3 +1,4 @@
+#![allow(clippy::multiple_crate_versions)]
 //! # Mavi VPN GUI - Tauri Backend
 //!
 //! Communicates with the VPN daemon/service via TCP IPC on 127.0.0.1:14433.
@@ -21,7 +22,7 @@ use tokio::net::TcpStream;
 async fn send_ipc_request(req: &IpcRequest) -> Result<IpcResponse, String> {
     let token_path = shared::ipc::ipc_token_path();
     let auth_token = std::fs::read_to_string(&token_path)
-        .map_err(|e| format!("Failed to read IPC token (is the service running?): {}", e))?
+        .map_err(|e| format!("Failed to read IPC token (is the service running?): {e}"))?
         .trim()
         .to_string();
 
@@ -32,11 +33,12 @@ async fn send_ipc_request(req: &IpcRequest) -> Result<IpcResponse, String> {
 
     let mut stream = TcpStream::connect(LOCAL_IPC_ADDR)
         .await
-        .map_err(|e| format!("Service not running: {}", e))?;
+        .map_err(|e| format!("Service not running: {e}"))?;
 
     let encoded = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())
         .map_err(|e| e.to_string())?;
 
+    #[allow(clippy::cast_possible_truncation)]
     stream
         .write_u32_le(encoded.len() as u32)
         .await
@@ -98,7 +100,7 @@ async fn vpn_connect(mut config: Config) -> Result<String, String> {
 
         let token = oauth::start_oauth_flow(&kc_url, &realm, &client_id)
             .await
-            .map_err(|e| format!("Keycloak login failed: {}", e))?;
+            .map_err(|e| format!("Keycloak login failed: {e}"))?;
 
         config.token = token;
     }
@@ -107,7 +109,7 @@ async fn vpn_connect(mut config: Config) -> Result<String, String> {
     match send_ipc_request(&IpcRequest::Start(config)).await? {
         IpcResponse::Ok => Ok("Connected".into()),
         IpcResponse::Error(e) => Err(e),
-        _ => Err("Unexpected response".into()),
+        IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
     }
 }
 
@@ -116,7 +118,7 @@ async fn vpn_disconnect() -> Result<String, String> {
     match send_ipc_request(&IpcRequest::Stop).await? {
         IpcResponse::Ok => Ok("Disconnected".into()),
         IpcResponse::Error(e) => Err(e),
-        _ => Err("Unexpected response".into()),
+        IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
     }
 }
 
@@ -125,7 +127,7 @@ async fn vpn_repair_network() -> Result<String, String> {
     match send_ipc_request(&IpcRequest::RepairNetwork).await? {
         IpcResponse::Ok => Ok("Network repaired".into()),
         IpcResponse::Error(e) => Err(e),
-        _ => Err("Unexpected response".into()),
+        IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
     }
 }
 
@@ -210,7 +212,7 @@ struct SavedConn {
 }
 
 impl SavedConn {
-    fn normalize_transport(&mut self) -> bool {
+    const fn normalize_transport(&mut self) -> bool {
         let old_http3_framing = self.http3_framing;
         if self.censorship_resistant {
             self.http3_framing = true;
@@ -348,6 +350,10 @@ fn start_status_poller(app: AppHandle) {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Entry point for the Mavi VPN GUI application.
+///
+/// # Panics
+/// Panics if the Tauri application fails to start.
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

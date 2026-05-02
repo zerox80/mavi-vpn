@@ -2,6 +2,16 @@
 name = "quic-tester"
 version = "0.1.0"
 edition = "2024"
+description = "Mavi VPN QUIC Testing Tool"
+license = "MIT"
+repository = "https://github.com/zerox80/mavi-vpn"
+readme = "../README.md"
+keywords = ["vpn", "quic", "testing"]
+categories = ["network-programming"]
+
+
+[lints]
+workspace = true
 
 [dependencies]
 quinn.workspace = true
@@ -9,3 +19,4 @@ rustls.workspace = true
 tokio.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true
+

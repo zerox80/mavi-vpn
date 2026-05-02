@@ -2,6 +2,12 @@
 name = "windows-vpn"
 version = "0.1.0"
 edition = "2021"
+description = "Mavi VPN Windows Client"
+license = "MIT"
+repository = "https://github.com/zerox80/mavi-vpn"
+readme = "../README.md"
+keywords = ["vpn", "quic", "privacy"]
+categories = ["network-programming"]
 
 [[bin]]
 name = "mavi-vpn-client"
@@ -10,6 +16,10 @@ path = "src/main.rs"
 [[bin]]
 name = "mavi-vpn-service"
 path = "src/bin/service.rs"
+
+
+[lints]
+workspace = true
 
 [dependencies]
 shared = { workspace = true }
@@ -58,3 +68,4 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+

@@ -1,6 +1,6 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-Mavi VPN â€“ CLI Uninstaller (Windows)
+Mavi VPN - CLI Uninstaller (Windows)
 
 Removes:
   MaviVPNService         Windows Service
@@ -23,12 +23,30 @@ from pathlib import Path
 
 NO_COLOR = not sys.stdout.isatty() or bool(os.environ.get("NO_COLOR"))
 
-def c(code, text):    return text if NO_COLOR else f"\033[{code}m{text}\033[0m"
-def info(msg):        print(c("1;36", "  â†’"), msg)
-def ok(msg):          print(c("1;32", "  âœ“"), msg)
-def warn(msg):        print(c("1;33", "  !"), msg)
-def err(msg):         print(c("1;31", "  âœ—"), msg)
-def step(msg):        print(c("1;37", f"\n[{msg}]"))
+
+def c(code, text):
+    return text if NO_COLOR else f"\033[{code}m{text}\033[0m"
+
+
+def info(msg):
+    print(c("1;36", "  ->"), msg)
+
+
+def ok(msg):
+    print(c("1;32", "  [OK]"), msg)
+
+
+def warn(msg):
+    print(c("1;33", "  [!]"), msg)
+
+
+def err(msg):
+    print(c("1;31", "  [X]"), msg)
+
+
+def step(msg):
+    print(c("1;37", f"\n### {msg} ###"))
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,10 +56,12 @@ def run(cmd, check=False):
     info(f"Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
     return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True)
 
+
 def ask(question, default="y"):
     yn = "Y/n" if default == "y" else "y/N"
     answer = input(c("1;37", f"  ? {question} [{yn}]: ")).strip().lower()
     return (answer in ("y", "yes", "j", "ja")) if answer else (default == "y")
+
 
 def repair_network_state():
     """Remove stale MaviVPN routes and DNS policy left by interrupted sessions."""
@@ -98,6 +118,7 @@ Start-Service -Name Dnscache -ErrorAction SilentlyContinue
     else:
         warn("Network repair cleanup may be incomplete; try running as Administrator.")
 
+
 # ---------------------------------------------------------------------------
 # Service helpers
 # ---------------------------------------------------------------------------
@@ -107,7 +128,7 @@ def stop_and_remove_service():
     r = subprocess.run(["sc", "query", "MaviVPNService"], capture_output=True, text=True)
     if r.returncode != 0:
         repair_network_state()
-        ok("MaviVPNService not registered â€“ skipping.")
+        ok("MaviVPNService not registered - skipping.")
         return False
 
     info("MaviVPNService found.")
@@ -135,6 +156,7 @@ def stop_and_remove_service():
     ok("Windows Service removed")
     return True
 
+
 # ---------------------------------------------------------------------------
 # PATH helpers
 # ---------------------------------------------------------------------------
@@ -161,6 +183,7 @@ def remove_from_path(dir_to_remove):
         except (FileNotFoundError, PermissionError):
             pass
 
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -172,20 +195,20 @@ def main():
         sys.exit(1)
 
     print()
-    print(c("1;36", "  â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"))
-    print(c("1;36", "  â•‘   Mavi VPN â€“ CLI Uninstaller (Windows)    â•‘"))
-    print(c("1;36", "  â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"))
+    print(c("1;36", "  +-------------------------------------------+"))
+    print(c("1;36", "  |   Mavi VPN - CLI Uninstaller (Windows)    |"))
+    print(c("1;36", "  +-------------------------------------------+"))
     print()
 
     removed_anything = False
 
-    # â”€â”€ Windows Service â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Windows Service --------------------------------------------------------
     step("Windows Service")
     if ask("Stop and remove MaviVPNService?"):
         if stop_and_remove_service():
             removed_anything = True
 
-    # â”€â”€ Binaries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Binaries ---------------------------------------------------------------
     step("Binaries")
     default_dir = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MaviVPN"
 
@@ -214,7 +237,7 @@ def main():
                     f.unlink()
                     ok(f"Removed: {f}")
                 except PermissionError:
-                    err(f"Cannot remove {f} â€“ file in use or missing permissions.")
+                    err(f"Cannot remove {f} - file in use or missing permissions.")
                     warn("Try running as Administrator.")
             removed_anything = True
 
@@ -227,9 +250,9 @@ def main():
             except OSError:
                 pass
     else:
-        ok(f"No binaries found in {install_dir} â€“ skipping.")
+        ok(f"No binaries found in {install_dir} - skipping.")
 
-    # â”€â”€ PATH cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- PATH cleanup -----------------------------------------------------------
     step("PATH cleanup")
     if ask("Remove MaviVPN directory from system/user PATH?"):
         try:
@@ -238,7 +261,7 @@ def main():
         except Exception as e:
             warn(f"Could not update PATH: {e}")
 
-    # â”€â”€ Done â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Done -------------------------------------------------------------------
     print()
     if removed_anything:
         ok("CLI uninstallation complete!")

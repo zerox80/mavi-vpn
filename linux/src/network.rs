@@ -4,7 +4,7 @@
 //! Uses `ip` commands for routing and supports both systemd-resolved and
 //! direct /etc/resolv.conf manipulation for DNS.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::{info, warn};
 

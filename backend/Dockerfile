@@ -9,7 +9,7 @@ FROM debian:bookworm-slim
 WORKDIR /app
 
 # Install runtime dependencies for VPN/Networking
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     iptables \
     iproute2 \
     ca-certificates \
@@ -18,7 +18,6 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/target/release/mavi-vpn /app/mavi-vpn
 COPY entrypoint.sh /app/entrypoint.sh
 
-RUN chmod +x /app/entrypoint.sh
-RUN mkdir -p /app/data
+RUN chmod +x /app/entrypoint.sh && mkdir -p /app/data
 
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -40,6 +40,7 @@ tempfile = "3"
 proptest = "1"
 dotenvy = "0.15"
 http = "1"
+async-trait = "0.1"
 
 [patch.crates-io]
 quinn = { git = "https://github.com/zerox80/quinn", branch = "main" }

@@ -27,7 +27,7 @@ pub fn ipc_token_path() -> std::path::PathBuf {
 
 /// Configuration required to establish a VPN session.
 /// Passed from the client to the service via IPC.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Remote VPN server address (e.g., "vpn.example.com:4433").
     pub endpoint: String,
@@ -75,7 +75,7 @@ impl Config {
 }
 
 /// Commands sent from the client UI to the background service.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpcRequest {
     /// Start the VPN tunnel with the given configuration.
     Start(Config),
@@ -100,7 +100,7 @@ pub enum VpnState {
 
 /// A wrapper around `IpcRequest` that includes the authentication token.
 /// This ensures only authorized local users can command the background service.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecureIpcRequest {
     /// The secret token read from `ipc_token_path()`.
     pub auth_token: String,
@@ -197,5 +197,77 @@ mod tests {
         config.http3_framing = false;
         assert!(!config.normalize_transport());
         assert!(!config.http3_framing);
+    }
+
+    #[test]
+    fn test_ipc_request_roundtrip() {
+        let configs = vec![
+            IpcRequest::Start(Config {
+                endpoint: "vpn.example.com:4433".to_string(),
+                token: "secret".to_string(),
+                cert_pin: "pinned".to_string(),
+                censorship_resistant: true,
+                http3_framing: false,
+                kc_auth: Some(true),
+                kc_url: Some("https://auth.com".to_string()),
+                kc_realm: Some("master".to_string()),
+                kc_client_id: Some("vpn-client".to_string()),
+                ech_config: None,
+                vpn_mtu: Some(1300),
+            }),
+            IpcRequest::Stop,
+            IpcRequest::Status,
+            IpcRequest::RepairNetwork,
+        ];
+
+        for req in configs {
+            let encoded = bincode::serde::encode_to_vec(&req, bincode::config::standard()).unwrap();
+            let (decoded, _): (IpcRequest, usize) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(req, decoded);
+        }
+    }
+
+    #[test]
+    fn test_ipc_response_roundtrip() {
+        let responses = vec![
+            IpcResponse::Ok,
+            IpcResponse::Error("Failed to start".to_string()),
+            IpcResponse::Status {
+                running: true,
+                endpoint: Some("1.2.3.4:443".to_string()),
+                state: VpnState::Connected,
+                last_error: None,
+                assigned_ip: Some("10.8.0.2".to_string()),
+            },
+            IpcResponse::Status {
+                running: false,
+                endpoint: None,
+                state: VpnState::Failed,
+                last_error: Some("Auth failed".to_string()),
+                assigned_ip: None,
+            },
+        ];
+
+        for res in responses {
+            let encoded = bincode::serde::encode_to_vec(&res, bincode::config::standard()).unwrap();
+            let (decoded, _): (IpcResponse, usize) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(res, decoded);
+        }
+    }
+
+    #[test]
+    fn test_secure_ipc_request_roundtrip() {
+        let req = SecureIpcRequest {
+            auth_token: "local-secret".to_string(),
+            request: IpcRequest::Status,
+        };
+
+        let encoded = bincode::serde::encode_to_vec(&req, bincode::config::standard()).unwrap();
+        let (decoded, _): (SecureIpcRequest, usize) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+
+        assert_eq!(req, decoded);
     }
 }

@@ -13,7 +13,7 @@ use log::{info, warn};
 #[cfg(target_os = "android")]
 use shared::masque;
 #[cfg(target_os = "android")]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "android")]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -21,38 +21,9 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use tokio::io::unix::AsyncFd;
 
 #[cfg(target_os = "android")]
-struct AndroidTunnelStats {
-    tun_to_quic_bytes: AtomicU64,
-    tun_to_quic_packets: AtomicU64,
-    quic_send_errors: AtomicU64,
-    quic_too_large: AtomicU64,
-    quic_to_tun_bytes: AtomicU64,
-    quic_to_tun_packets: AtomicU64,
-    tun_write_bytes: AtomicU64,
-    tun_write_packets: AtomicU64,
-    tun_write_drops: AtomicU64,
-    tun_write_errors: AtomicU64,
-    icmp_feedback_packets: AtomicU64,
-}
-
+mod stats;
 #[cfg(target_os = "android")]
-impl AndroidTunnelStats {
-    fn new() -> Self {
-        Self {
-            tun_to_quic_bytes: AtomicU64::new(0),
-            tun_to_quic_packets: AtomicU64::new(0),
-            quic_send_errors: AtomicU64::new(0),
-            quic_too_large: AtomicU64::new(0),
-            quic_to_tun_bytes: AtomicU64::new(0),
-            quic_to_tun_packets: AtomicU64::new(0),
-            tun_write_bytes: AtomicU64::new(0),
-            tun_write_packets: AtomicU64::new(0),
-            tun_write_drops: AtomicU64::new(0),
-            tun_write_errors: AtomicU64::new(0),
-            icmp_feedback_packets: AtomicU64::new(0),
-        }
-    }
-}
+use stats::AndroidTunnelStats;
 
 #[cfg(not(target_os = "android"))]
 #[allow(dead_code)]

@@ -213,10 +213,6 @@ fn is_systemd_resolved_active() -> bool {
         .unwrap_or(false)
 }
 
-fn netmask_to_prefix(netmask: Ipv4Addr) -> u8 {
-    u32::from_be_bytes(netmask.octets()).count_ones() as u8
-}
-
 /// Marker written at the top of `/etc/resolv.conf` while the VPN owns DNS.
 /// Used to detect files left behind by a previous (crashed) session so we
 /// don't adopt the VPN's own nameserver line as the "original" backup.

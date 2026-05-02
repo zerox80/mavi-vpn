@@ -145,41 +145,14 @@ impl KeycloakValidator {
                 #[allow(clippy::cast_possible_wrap)]
                 let leeway = validation.leeway as i64;
 
-                let Some(exp) = claims.get("exp").and_then(json_number_as_i64) else {
-                    warn!("JWT missing 'exp' claim - rejecting token");
-                    return Ok(false);
-                };
-
-                if now > exp + leeway {
-                    warn!("JWT expired: exp={}, now={}", exp, now);
-                    return Ok(false);
-                }
-
-                if let Some(nbf) = claims.get("nbf").and_then(json_number_as_i64) {
-                    if now + leeway < nbf {
-                        warn!("JWT not yet valid: nbf={}, now={}", nbf, now);
-                        return Ok(false);
-                    }
-                }
-
-                let Some(azp) = claims.get("azp").and_then(|v| v.as_str()) else {
-                    warn!("JWT missing 'azp' claim — rejecting token");
-                    return Ok(false);
-                };
-
-                // Strict check: Only accept tokens that were explicitly issued to THIS client ID.
-                if !constant_time_eq(azp.as_bytes(), self.client_id.as_bytes()) {
-                    warn!(
-                        "JWT azp mismatch: expected '{}', got '{}'. Rejecting token for security.",
-                        self.client_id, azp
-                    );
+                if !Self::validate_claims(claims, &self.client_id, now, leeway) {
                     return Ok(false);
                 }
 
                 info!(
                     "Keycloak JWT validated successfully (sub: {}, azp: {})",
                     claims.get("sub").and_then(|v| v.as_str()).unwrap_or("?"),
-                    azp
+                    claims.get("azp").and_then(|v| v.as_str()).unwrap_or("?")
                 );
                 Ok(true)
             }
@@ -191,6 +164,41 @@ impl KeycloakValidator {
                 Err(anyhow::anyhow!("JWT decode error: {e}"))
             }
         }
+    }
+
+    fn validate_claims(claims: &serde_json::Value, client_id: &str, now: i64, leeway: i64) -> bool {
+        let Some(exp) = claims.get("exp").and_then(json_number_as_i64) else {
+            warn!("JWT missing 'exp' claim - rejecting token");
+            return false;
+        };
+
+        if now > exp + leeway {
+            warn!("JWT expired: exp={}, now={}", exp, now);
+            return false;
+        }
+
+        if let Some(nbf) = claims.get("nbf").and_then(json_number_as_i64) {
+            if now + leeway < nbf {
+                warn!("JWT not yet valid: nbf={}, now={}", nbf, now);
+                return false;
+            }
+        }
+
+        let Some(azp) = claims.get("azp").and_then(|v| v.as_str()) else {
+            warn!("JWT missing 'azp' claim — rejecting token");
+            return false;
+        };
+
+        // Strict check: Only accept tokens that were explicitly issued to THIS client ID.
+        if !constant_time_eq(azp.as_bytes(), client_id.as_bytes()) {
+            warn!(
+                "JWT azp mismatch: expected '{}', got '{}'. Rejecting token for security.",
+                client_id, azp
+            );
+            return false;
+        }
+
+        true
     }
 }
 
@@ -275,5 +283,69 @@ mod tests {
             "client-1".to_string(),
         );
         assert_eq!(v.client_id, "client-1");
+    }
+
+    #[test]
+    fn test_validate_claims() {
+        let client_id = "my-client";
+        let now = 1000;
+        let leeway = 30;
+
+        // Valid token
+        let claims = serde_json::json!({
+            "exp": 1100,
+            "azp": "my-client",
+            "sub": "user1"
+        });
+        assert!(KeycloakValidator::validate_claims(&claims, client_id, now, leeway));
+
+        // Missing exp
+        let claims = serde_json::json!({
+            "azp": "my-client"
+        });
+        assert!(!KeycloakValidator::validate_claims(&claims, client_id, now, leeway));
+
+        // Expired
+        let claims = serde_json::json!({
+            "exp": 900,
+            "azp": "my-client"
+        });
+        assert!(!KeycloakValidator::validate_claims(&claims, client_id, now, leeway));
+
+        // Expired but within leeway
+        let claims = serde_json::json!({
+            "exp": 980,
+            "azp": "my-client"
+        });
+        assert!(KeycloakValidator::validate_claims(&claims, client_id, now, leeway));
+
+        // nbf in the future
+        let claims = serde_json::json!({
+            "exp": 1100,
+            "nbf": 1050,
+            "azp": "my-client"
+        });
+        assert!(!KeycloakValidator::validate_claims(&claims, client_id, now, leeway));
+
+        // nbf in the future but within leeway
+        let claims = serde_json::json!({
+            "exp": 1100,
+            "nbf": 1020,
+            "azp": "my-client"
+        });
+        assert!(KeycloakValidator::validate_claims(&claims, client_id, now, leeway));
+
+        // Missing azp
+        let claims = serde_json::json!({
+            "exp": 1100
+        });
+        assert!(!KeycloakValidator::validate_claims(&claims, client_id, now, leeway));
+
+        // azp mismatch
+        let claims = serde_json::json!({
+            "exp": 1100,
+            "azp": "wrong-client"
+        });
+        assert!(!KeycloakValidator::validate_claims(&claims, client_id, now, leeway));
     }
 }

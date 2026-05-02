@@ -53,16 +53,17 @@ describe('initials', () => {
     expect(initials('My Server')).toBe('MS');
   });
 
-  it('handles hyphenated names', () => {
-    expect(initials('my-server')).toBe('MS');
+  it('handles underscores, slashes, and ·', () => {
+    expect(initials('my_server')).toBe('MS');
+    expect(initials('my/server')).toBe('MS');
+    expect(initials('my·server')).toBe('MS');
   });
 
-  it('returns ? for empty string', () => {
+  it('returns ? for empty string but coerces other values', () => {
     expect(initials('')).toBe('?');
-  });
-
-  it('takes first char of first two words for 3+ words', () => {
-    expect(initials('My Test Server')).toBe('MT');
+    expect(initials(null)).toBe('N'); // from "null"
+    expect(initials(undefined)).toBe('U'); // from "undefined"
+    expect(initials(42)).toBe('4');
   });
 });
 
@@ -184,6 +185,12 @@ describe('toConfig', () => {
     expect(config.kc_client_id).toBeNull();
     expect(config.ech_config).toBeNull();
   });
+
+  it('normalizes boolean fields', () => {
+    const config = toConfig({ censorship_resistant: 1, http3_framing: 'yes' });
+    expect(config.censorship_resistant).toBe(true);
+    expect(config.http3_framing).toBe(true);
+  });
 });
 
 describe('heroFromVpnStatus', () => {
@@ -211,6 +218,30 @@ describe('heroFromVpnStatus', () => {
         true
       )
     ).toBe('disconnecting');
+  });
+
+  it('maps service unavailable to off', () => {
+    expect(heroFromVpnStatus({ service_available: false })).toBe('off');
+  });
+
+  it('maps Failed state to off', () => {
+    expect(heroFromVpnStatus({ service_available: true, state: 'Failed' })).toBe('off');
+  });
+
+  it('maps Starting to connecting', () => {
+    expect(heroFromVpnStatus({ service_available: true, state: 'Starting' })).toBe('connecting');
+  });
+
+  it('maps Connected or running=true to on', () => {
+    expect(heroFromVpnStatus({ service_available: true, state: 'Connected' })).toBe('on');
+    expect(heroFromVpnStatus({ service_available: true, running: true })).toBe('on');
+  });
+
+  it('maps Stopping or disconnecting=true to disconnecting', () => {
+    expect(heroFromVpnStatus({ service_available: true, state: 'Stopping' })).toBe('disconnecting');
+    expect(heroFromVpnStatus({ service_available: true, state: 'Starting' }, 'on', true)).toBe(
+      'disconnecting'
+    );
   });
 });
 

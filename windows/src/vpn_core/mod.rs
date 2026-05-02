@@ -50,7 +50,7 @@ fn get_global_adapter() -> Result<Arc<Adapter>> {
     Ok(adapter.clone())
 }
 
-/// Entry point for the VPN runner. Manages the reconnection loop and WinTUN lifecycle.
+/// Entry point for the VPN runner. Manages the reconnection loop and `WinTUN` lifecycle.
 pub async fn run_vpn(
     mut config: Config,
     running: Arc<AtomicBool>,
@@ -143,6 +143,7 @@ enum SessionEnd {
 }
 
 /// Manages a single active VPN session (handshake + packet pumping).
+#[allow(clippy::too_many_lines)]
 async fn run_session(
     config: &Config,
     cert_pin_bytes: &[u8],
@@ -203,9 +204,9 @@ async fn run_session(
                 dns_server_v6,
             ),
             ControlMessage::Error { message } => {
-                return Err(anyhow::anyhow!("Server rejected connection: {}", message))
+                return Err(anyhow::anyhow!("Server rejected connection: {message}"))
             }
-            _ => {
+            ControlMessage::Auth { .. } => {
                 return Err(anyhow::anyhow!(
                     "Unexpected server response during handshake"
                 ))
@@ -220,8 +221,7 @@ async fn run_session(
         std::net::IpAddr::V4(v4) => v4.to_string(),
         std::net::IpAddr::V6(v6) => v6
             .to_ipv4_mapped()
-            .map(|v4| v4.to_string())
-            .unwrap_or_else(|| v6.to_string()),
+            .map_or_else(|| v6.to_string(), |v4| v4.to_string()),
     };
 
     // Store the server's public IP in shared state for the GUI
@@ -263,10 +263,7 @@ async fn run_session(
 
         // 1. Wait for IPv6 address confirmation (DAD, etc)
         if !network::wait_for_ipv6_address(idx, ipv6).await {
-            bail!(
-                "IPv6 address {} failed verification (possibly duplicate or stack error)",
-                ipv6
-            );
+            bail!("IPv6 address {ipv6} failed verification (possibly duplicate or stack error)");
         }
         info!("IPv6 address {} verified", ipv6);
 
@@ -330,14 +327,11 @@ async fn run_session(
                     if pool.capacity() < packet_bytes.len() + masque::DATAGRAM_PREFIX.len() {
                         pool.reserve(4 * 1024 * 1024);
                     }
-                    let payload = if is_h3_framing {
+                    if is_h3_framing {
                         pool.extend_from_slice(&masque::DATAGRAM_PREFIX);
-                        pool.extend_from_slice(packet_bytes);
-                        pool.split().freeze()
-                    } else {
-                        pool.extend_from_slice(packet_bytes);
-                        pool.split().freeze()
-                    };
+                    }
+                    pool.extend_from_slice(packet_bytes);
+                    let payload = pool.split().freeze();
                     if let Err(e) = conn_quic.send_datagram(payload) {
                         if matches!(e, quinn::SendDatagramError::TooLarge) {
                             if packet.bytes().is_empty() {
@@ -361,6 +355,7 @@ async fn run_session(
                                 reported_mtu,
                                 source_ip,
                             ) {
+                                #[allow(clippy::cast_possible_truncation)]
                                 if let Ok(mut reply) =
                                     session_tun.allocate_send_packet(icmp_packet.len() as u16)
                                 {
@@ -407,8 +402,8 @@ async fn run_session(
             }
             let data = match pending_datagram.take() {
                 Some(data) => data,
-                None => match conn_quic.read_datagram().await {
-                    Ok(mut data) => {
+                None => {
+                    if let Ok(mut data) = conn_quic.read_datagram().await {
                         if is_h3_framing_dl {
                             let inner_len = match masque::unwrap_datagram(&data) {
                                 Some(slice) => slice.len(),
@@ -419,20 +414,18 @@ async fn run_session(
                             }
                             let prefix = data.len() - inner_len;
                             data.advance(prefix);
-                            data
-                        } else {
-                            data
                         }
-                    }
-                    Err(_) => {
+                        data
+                    } else {
                         alive_quic_in.store(false, Ordering::SeqCst);
                         break;
                     }
-                },
+                }
             };
             if data.is_empty() {
                 continue;
             }
+            #[allow(clippy::cast_possible_truncation)]
             match session_quic_in.allocate_send_packet(data.len() as u16) {
                 Ok(mut packet) => {
                     yield_count = 0;

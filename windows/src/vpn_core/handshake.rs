@@ -18,8 +18,8 @@ use tracing::{info, warn};
 /// Dropping `h3::client::SendRequest` decrements its internal `sender_count`; when the
 /// last one goes, its `Drop` impl calls `handle_connection_error_on_stream(H3_NO_ERROR,
 /// "Connection closed by client")` which tears down the underlying quinn connection.
-/// We therefore keep the SendRequest alive for the whole session so the VPN datagram
-/// plane can keep using the same quinn::Connection.
+/// We therefore keep the `SendRequest` alive for the whole session so the VPN datagram
+/// plane can keep using the same `quinn::Connection`.
 pub struct H3SessionGuard {
     _send_request: h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
     drive_handle: tokio::task::JoinHandle<()>,
@@ -37,6 +37,7 @@ const IDLE_TIMEOUT_SECS: u64 = 60;
 
 /// QUIC connection setup with custom certificate pinning.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub async fn connect_and_handshake(
     socket: std::net::UdpSocket,
     token: String,
@@ -99,7 +100,7 @@ pub async fn connect_and_handshake(
     let endpoint_clean = endpoint_str.trim();
     let mut addrs: Vec<_> = tokio::net::lookup_host(endpoint_clean)
         .await
-        .map_err(|e| anyhow::anyhow!("DNS lookup failed for [{:?}]: {}", endpoint_clean, e))?
+        .map_err(|e| anyhow::anyhow!("DNS lookup failed for [{endpoint_clean:?}]: {e}"))?
         .collect();
     order_resolved_addrs(&mut addrs, endpoint_clean);
     let addr = *addrs.first().context("Failed to resolve endpoint")?;
@@ -111,13 +112,13 @@ pub async fn connect_and_handshake(
     );
     // When ECH is active we send the config's `public_name` as the outer SNI
     // instead of the real server hostname. Cert-pin auth is unaffected.
-    let server_name: String = match ech_state.as_ref() {
-        Some(ech) => ech.outer_sni.clone(),
-        None => {
+    let server_name: String = ech_state.as_ref().map_or_else(
+        || {
             let (host, _) = split_endpoint(&endpoint_str);
             host.to_string()
-        }
-    };
+        },
+        |ech| ech.outer_sni.clone(),
+    );
     if server_name.is_empty() {
         anyhow::bail!("Endpoint host missing");
     }
@@ -211,20 +212,17 @@ pub async fn connect_and_handshake(
             }
         }
     }
-    let connection = match connection {
-        Some(conn) => conn,
-        None => {
-            return Err(last_error
-                .unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str)))
-        }
+    let Some(connection) = connection else {
+        return Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("No reachable address for {endpoint_str}")));
     };
     info!(
         "QUIC handshake OK, sending auth token ({} bytes)",
         token.len()
     );
 
+    let config_started = Instant::now();
     let (config, h3_guard) = if effective_http3_framing {
-        let config_started = Instant::now();
         let (cfg, guard) = connect_and_handshake_h3(connection.clone(), token).await?;
         info!(
             "Received H3 server config in {} ms",
@@ -233,17 +231,17 @@ pub async fn connect_and_handshake(
         (cfg, Some(guard))
     } else {
         // Perform application-level handshake
-        let config_started = Instant::now();
         let (mut send, mut recv) = connection.open_bi().await?;
         let auth_msg = ControlMessage::Auth { token };
         let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
+        #[allow(clippy::cast_possible_truncation)]
         send.write_u32_le(bytes.len() as u32).await?;
         send.write_all(&bytes).await?;
         let _ = send.finish(); // properly close the send side of the auth stream
 
         let len = recv.read_u32_le().await? as usize;
         if len > 65536 {
-            anyhow::bail!("Server response too large: {} bytes", len);
+            anyhow::bail!("Server response too large: {len} bytes");
         }
         if len == 0x1901 {
             // This magic length happens when the server sends the HTTP/3 spoof payload
@@ -266,17 +264,17 @@ pub async fn connect_and_handshake(
     Ok((connection, config, h3_guard))
 }
 
-pub(crate) fn endpoint_host_is_explicit_ipv6(endpoint: &str) -> bool {
+pub fn endpoint_host_is_explicit_ipv6(endpoint: &str) -> bool {
     let (host, _) = split_endpoint(endpoint);
     host.parse::<Ipv6Addr>().is_ok()
 }
 
-pub(crate) fn order_resolved_addrs(addrs: &mut [SocketAddr], endpoint: &str) {
+pub fn order_resolved_addrs(addrs: &mut [SocketAddr], endpoint: &str) {
     if endpoint_host_is_explicit_ipv6(endpoint) {
         return;
     }
 
-    addrs.sort_by_key(|addr| if addr.is_ipv4() { 0 } else { 1 });
+    addrs.sort_by_key(|addr| i32::from(!addr.is_ipv4()));
 }
 
 fn validate_server_mtu(
@@ -296,9 +294,7 @@ fn validate_server_mtu(
 
         if mtu_source != TunMtuSource::Default && *mtu != local_tun_mtu {
             anyhow::bail!(
-                "MTU mismatch: local/client VPN MTU is {}, but server pushed {}. Configure both sides to the same VPN_MTU.",
-                local_tun_mtu,
-                mtu
+                "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {mtu}. Configure both sides to the same VPN_MTU."
             );
         }
 
@@ -321,7 +317,7 @@ fn validate_server_mtu(
 /// Returns the decoded `ControlMessage` plus an `H3SessionGuard` that owns the
 /// `SendRequest` handle and the background driver task. The caller MUST hold
 /// the guard for the entire VPN session — dropping it sends
-/// CONNECTION_CLOSE(H3_NO_ERROR) and terminates the underlying quinn connection.
+/// `CONNECTION_CLOSE(H3_NO_ERROR)` and terminates the underlying quinn connection.
 async fn connect_and_handshake_h3(
     connection: quinn::Connection,
     token: String,
@@ -333,7 +329,7 @@ async fn connect_and_handshake_h3(
     let (mut driver, mut send_request) = builder
         .build::<_, _, bytes::Bytes>(h3_conn)
         .await
-        .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 client init failed: {e}"))?;
 
     // Drive the H3 connection in the background. This task lives for the whole
     // VPN session (via H3SessionGuard) so h3's control/QPACK streams keep being
@@ -350,7 +346,7 @@ async fn connect_and_handshake_h3(
         .method(http::Method::CONNECT)
         .uri("https://mavi-vpn/.well-known/masque/ip/*/*/")
         .extension(h3::ext::Protocol::CONNECT_IP)
-        .header("authorization", format!("Bearer {}", token))
+        .header("authorization", format!("Bearer {token}"))
         .header("capsule-protocol", "?1")
         .body(())
         .context("Failed to build H3 CONNECT request")?;
@@ -358,14 +354,14 @@ async fn connect_and_handshake_h3(
     let mut stream = send_request
         .send_request(req)
         .await
-        .map_err(|e| anyhow::anyhow!("H3 send_request failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 send_request failed: {e}"))?;
     // NB: do NOT finish the stream — connect-ip keeps the request stream open
     // for bidirectional capsule traffic throughout the session.
 
     let resp = stream
         .recv_response()
         .await
-        .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {e}"))?;
 
     if resp.status() != http::StatusCode::OK {
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
@@ -395,7 +391,7 @@ async fn connect_and_handshake_h3(
                 config = Some(
                     bincode::serde::decode_from_slice(&payload, bincode::config::standard())
                         .map(|(v, _)| v)
-                        .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {}", e))?,
+                        .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {e}"))?,
                 );
                 break 'read;
             }
@@ -409,7 +405,7 @@ async fn connect_and_handshake_h3(
             Ok(Ok(None)) => {
                 anyhow::bail!("Server closed connect-ip stream before MAVI_CONFIG")
             }
-            Ok(Err(e)) => anyhow::bail!("H3 recv_data failed: {}", e),
+            Ok(Err(e)) => anyhow::bail!("H3 recv_data failed: {e}"),
             Err(_) => anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule"),
         };
         capsule_buf.extend_from_slice(chunk.chunk());

@@ -144,7 +144,7 @@ Mavi VPN utilizes the `quinn` library, a pure-Rust implementation of the IETF QU
 `quinn-proto` serves as the foundational, deterministic state machine. It handles:
 - **Packet Decoding**: Decoding various headers (Initial, Long, Short).
 - **Frame Serialization**: Handling Ack, Stream, ConnectionClose, and Datagram frames.
-- **Congestion Control**: Plugable backends for BBR, Cubic, and NewReno.
+- **Congestion Control**: Pluggable backends for BBR, Cubic, and NewReno.
 - **Cryptography**: Abstracted via traits to allow backends like `ring` and `rustls` (specifically **`aws-lc-rs`** for high performance).
 
 ### 🔹 9.3 Advanced UDP Socket Interface (Quinn-UDP)

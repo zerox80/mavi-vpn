@@ -1,3 +1,4 @@
+#![allow(clippy::cast_possible_truncation)]
 use crate::state::AppState;
 use anyhow::Result;
 use std::{
@@ -77,6 +78,7 @@ pub async fn emulate_http3(conn: &quinn::Connection, stream: &mut quinn::SendStr
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::cast_possible_truncation)]
     use super::*;
 
     #[test]
@@ -96,12 +98,12 @@ mod tests {
 
     #[test]
     fn prefix_len_slash_32() {
-        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(255, 255, 255, 255)), 32);
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::BROADCAST), 32);
     }
 
     #[test]
     fn prefix_len_slash_0() {
-        assert_eq!(prefix_len_from_mask(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        assert_eq!(prefix_len_from_mask(Ipv4Addr::UNSPECIFIED), 0);
     }
 
     #[test]

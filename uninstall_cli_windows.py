@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Mavi VPN â€“ CLI Uninstaller (Windows)
 
@@ -13,7 +13,6 @@ Usage:
 
 import os
 import sys
-import shutil
 import subprocess
 import time
 from pathlib import Path

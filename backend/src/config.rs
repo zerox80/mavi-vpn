@@ -101,7 +101,7 @@ pub struct Config {
     pub mss_clamping: bool,
 
     /// The IPv6 DNS server IP address pushed to clients (only used when IPv6 is active).
-    /// If not set, defaults to 2606:4700:4700::1111 (Cloudflare).
+    /// If not set, defaults to `2606:4700:4700::1111` (Cloudflare).
     #[arg(long, env = "VPN_DNS_V6")]
     pub dns_v6: Option<std::net::Ipv6Addr>,
 
@@ -114,7 +114,7 @@ pub struct Config {
     #[arg(long, env = "VPN_KEYCLOAK_ENABLED", default_value = "false")]
     pub keycloak_enabled: bool,
 
-    /// Keycloak Server URL (e.g., https://auth.example.com)
+    /// Keycloak Server URL (e.g., <https://auth.example.com>)
     #[arg(long, env = "VPN_KEYCLOAK_URL")]
     pub keycloak_url: Option<String>,
 
@@ -126,7 +126,7 @@ pub struct Config {
     #[arg(long, env = "VPN_KEYCLOAK_CLIENT_ID", default_value = "mavi-client")]
     pub keycloak_client_id: String,
 
-    /// ECH "public_name" — the cover/outer SNI that clients will send on the
+    /// ECH "`public_name`" — the cover/outer SNI that clients will send on the
     /// wire. Must be a plausible-looking domain (e.g. a CDN). Only used when
     /// `censorship_resistant` is enabled.
     #[arg(
@@ -136,7 +136,7 @@ pub struct Config {
     )]
     pub ech_public_name: String,
 
-    /// Path to the persisted ECHConfigList bytes (clients consume this).
+    /// Path to the persisted `ECHConfigList` bytes (clients consume this).
     #[arg(long, env = "VPN_ECH_CONFIG", default_value = "data/ech_config.bin")]
     pub ech_config_path: std::path::PathBuf,
 

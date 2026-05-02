@@ -274,6 +274,14 @@ mod linux_app {
             return;
         }
 
+        if let Err(e) = ipc_result {
+            let msg = e.to_string();
+            if msg.contains("mavivpn") || msg.contains("permission denied") {
+                eprintln!("{msg}");
+                return;
+            }
+        }
+
         // Fallback: check TUN device directly (for direct CLI mode)
         let tun_exists = std::path::Path::new("/sys/class/net/mavi0").exists();
         if tun_exists {

@@ -22,7 +22,7 @@ use tokio::net::TcpStream;
 async fn send_ipc_request(req: &IpcRequest) -> Result<IpcResponse, String> {
     let token_path = shared::ipc::ipc_token_path();
     let auth_token = std::fs::read_to_string(&token_path)
-        .map_err(|e| format!("Failed to read IPC token (is the service running?): {e}"))?
+        .map_err(|e| ipc_token_read_error(&token_path, e))?
         .trim()
         .to_string();
 
@@ -68,6 +68,27 @@ async fn send_ipc_request(req: &IpcRequest) -> Result<IpcResponse, String> {
         .map_err(|e| e.to_string())?;
 
     Ok(resp)
+}
+
+fn ipc_token_read_error(token_path: &std::path::Path, error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        if cfg!(target_os = "linux") {
+            format!(
+                "Failed to read IPC token at {}: permission denied. Your user must be in the 'mavivpn' group to control the daemon. Run `sudo usermod -aG mavivpn $USER`, log out and back in, then retry.",
+                token_path.display()
+            )
+        } else {
+            format!(
+                "Failed to read IPC token at {}: permission denied.",
+                token_path.display()
+            )
+        }
+    } else {
+        format!(
+            "Failed to read IPC token (is the service running?) at {}: {error}",
+            token_path.display()
+        )
+    }
 }
 
 // =============================================================================

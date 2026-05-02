@@ -6,9 +6,11 @@
 use anyhow::Result;
 use base64::Engine;
 use constant_time_eq::constant_time_eq;
+use nix::unistd::{chown, Gid, Group};
 use shared::ipc::{self, Config, IpcRequest, IpcResponse, LOCAL_IPC_ADDR};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -23,6 +25,24 @@ use tracing::{error, info, warn};
 /// the request body combined. Prevents a local process from holding the daemon
 /// state lock indefinitely by opening a connection and stalling mid-read.
 const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const IPC_CONTROL_GROUP: &str = "mavivpn";
+const IPC_TOKEN_ROOT_ONLY_MODE: u32 = 0o600;
+const IPC_TOKEN_GROUP_MODE: u32 = 0o640;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IpcTokenAccess {
+    RootOnly,
+    Group(Gid),
+}
+
+impl IpcTokenAccess {
+    const fn mode(self) -> u32 {
+        match self {
+            Self::RootOnly => IPC_TOKEN_ROOT_ONLY_MODE,
+            Self::Group(_) => IPC_TOKEN_GROUP_MODE,
+        }
+    }
+}
 
 struct DaemonState {
     vpn_running: Arc<AtomicBool>,
@@ -46,36 +66,11 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
         active_config: None,
     }));
 
-    let listener = TcpListener::bind(LOCAL_IPC_ADDR).await?;
-
     let token_bytes: [u8; 32] = rand::random();
     let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
+    write_ipc_token(&ipc::ipc_token_path(), &auth_token)?;
 
-    let token_path = ipc::ipc_token_path();
-    if let Some(parent) = token_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Preemptively remove any stale file so a previous world-readable token
-    // from an unpatched version cannot leak via a race between create+chmod.
-    let _ = std::fs::remove_file(&token_path);
-    let write_result = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&token_path)
-        .and_then(|mut f| f.write_all(auth_token.as_bytes()));
-
-    if let Err(e) = write_result {
-        error!("Failed to write IPC token to {:?}: {}", token_path, e);
-    } else if let Err(e) =
-        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644))
-    {
-        error!(
-            "Failed to harden IPC token permissions on {:?}: {}",
-            token_path, e
-        );
-    }
+    let listener = TcpListener::bind(LOCAL_IPC_ADDR).await?;
     info!(
         "Daemon listening on {} (Auth token generated)",
         LOCAL_IPC_ADDR
@@ -123,6 +118,73 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
                 });
             }
         }
+    }
+
+    Ok(())
+}
+
+fn resolve_ipc_token_access() -> Result<IpcTokenAccess> {
+    match Group::from_name(IPC_CONTROL_GROUP)? {
+        Some(group) => Ok(IpcTokenAccess::Group(group.gid)),
+        None => {
+            warn!(
+                "Unix group '{}' does not exist; IPC token will be root-only. \
+                 Run the Linux installer or create the group and add trusted users.",
+                IPC_CONTROL_GROUP
+            );
+            Ok(IpcTokenAccess::RootOnly)
+        }
+    }
+}
+
+fn write_ipc_token(token_path: &Path, auth_token: &str) -> Result<()> {
+    let access = resolve_ipc_token_access()?;
+    write_ipc_token_with_access(token_path, auth_token, access)
+}
+
+fn write_ipc_token_with_access(
+    token_path: &Path,
+    auth_token: &str,
+    access: IpcTokenAccess,
+) -> Result<()> {
+    if let Some(parent) = token_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Remove stale world-readable files left by older versions, then create the
+    // new token as root-only. Permissions are widened only after chown succeeds.
+    match std::fs::remove_file(token_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(IPC_TOKEN_ROOT_ONLY_MODE)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(token_path)
+        .and_then(|mut f| f.write_all(auth_token.as_bytes()))?;
+
+    if let IpcTokenAccess::Group(gid) = access {
+        chown(token_path, None, Some(gid))?;
+    }
+
+    std::fs::set_permissions(token_path, std::fs::Permissions::from_mode(access.mode()))?;
+
+    match access {
+        IpcTokenAccess::RootOnly => warn!(
+            "IPC token at {:?} is root-only. Non-root CLI/GUI users must be added to '{}' \
+             after running the installer, then log out and back in.",
+            token_path, IPC_CONTROL_GROUP
+        ),
+        IpcTokenAccess::Group(gid) => info!(
+            "IPC token permissions hardened at {:?}: mode {:o}, group {}",
+            token_path,
+            access.mode(),
+            gid.as_raw()
+        ),
     }
 
     Ok(())
@@ -296,7 +358,7 @@ async fn dispatch_request(req: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> I
 pub async fn send_request(req: IpcRequest) -> Result<IpcResponse> {
     let token_path = ipc::ipc_token_path();
     let auth_token = std::fs::read_to_string(&token_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read IPC token from {:?}: {}", token_path, e))?
+        .map_err(|e| ipc_token_read_error(&token_path, e))?
         .trim()
         .to_string();
 
@@ -325,4 +387,60 @@ pub async fn send_request(req: IpcRequest) -> Result<IpcResponse> {
         .map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
 
     Ok(resp)
+}
+
+fn ipc_token_read_error(token_path: &Path, error: io::Error) -> anyhow::Error {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        anyhow::anyhow!(
+            "Failed to read IPC token from {:?}: permission denied. \
+             Your user must be in the '{}' group to control the daemon. \
+             Run `sudo usermod -aG {} $USER`, log out and back in, then retry.",
+            token_path,
+            IPC_CONTROL_GROUP,
+            IPC_CONTROL_GROUP
+        )
+    } else {
+        anyhow::anyhow!("Failed to read IPC token from {:?}: {}", token_path, error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn ipc_token_modes_are_not_world_readable() {
+        assert_eq!(IpcTokenAccess::RootOnly.mode(), 0o600);
+        assert_eq!(IpcTokenAccess::Group(Gid::from_raw(123)).mode(), 0o640);
+        assert_eq!(IpcTokenAccess::RootOnly.mode() & 0o007, 0);
+        assert_eq!(IpcTokenAccess::Group(Gid::from_raw(123)).mode() & 0o007, 0);
+    }
+
+    #[test]
+    fn root_only_token_file_is_created_with_0600() {
+        let dir = tempdir().unwrap();
+        let token_path = dir.path().join("mavi-vpn.token");
+
+        write_ipc_token_with_access(&token_path, "secret", IpcTokenAccess::RootOnly).unwrap();
+
+        let metadata = fs::metadata(&token_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&token_path).unwrap(), "secret");
+    }
+
+    #[test]
+    fn existing_token_is_replaced_without_world_readable_bits() {
+        let dir = tempdir().unwrap();
+        let token_path = dir.path().join("mavi-vpn.token");
+        fs::write(&token_path, "old").unwrap();
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_ipc_token_with_access(&token_path, "new", IpcTokenAccess::RootOnly).unwrap();
+
+        let metadata = fs::metadata(&token_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&token_path).unwrap(), "new");
+    }
 }

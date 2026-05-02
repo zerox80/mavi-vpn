@@ -176,6 +176,8 @@ python3 install_cli_linux.py       # Installs CLI + optional systemd service
 python3 install_gui_linux.py       # Installs Tauri GUI (deb/rpm/AppImage)
 ```
 
+The CLI installer creates the `mavivpn` group and adds your desktop user so the GUI/CLI can control the root daemon after you log out and back in.
+
 **Usage:**
 ```bash
 sudo mavi-vpn                      # Interactive connect (direct mode)

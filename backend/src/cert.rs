@@ -89,8 +89,8 @@ pub fn load_or_generate_certs(
         // Parse PEM formatted certificates and keys
         let certs = CertificateDer::pem_reader_iter(&mut &cert_chain[..])
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let key = PrivateKeyDer::from_pem_slice(&key)
-            .context("No private key found in key file")?;
+        let key =
+            PrivateKeyDer::from_pem_slice(&key).context("No private key found in key file")?;
 
         // Calculate and log the SHA-256 fingerprint of the end-entity certificate
         if let Some(cert) = certs.first() {

@@ -9,6 +9,12 @@ members = [
     "gui/src-tauri",
 ]
 
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
 
 [workspace.dependencies]
 shared = { path = "shared" }

@@ -101,7 +101,7 @@ async fn send_request_internal(req: IpcRequest) -> Result<IpcResponse> {
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 anyhow::anyhow!(
-                    "Failed to read IPC token from {}: access denied. Run the client as Administrator or restart the service after logging in.",
+                    "Failed to read IPC token from {}: access denied. Your Windows user is not allowed to control the Mavi VPN service. Log in and restart the service so it can grant your desktop session access, or run the client as Administrator.",
                     token_path.display()
                 )
             } else {

@@ -152,7 +152,15 @@ pub async fn handle_connection(
 
         match msg {
             ControlMessage::Auth { token } => {
-                authenticate_client(&token, &state, &config, keycloak.as_ref()).await
+                authenticate_client(
+                    &token,
+                    &state,
+                    &config,
+                    keycloak
+                        .as_deref()
+                        .map(|kc| kc as &dyn crate::handlers::auth::TokenValidator),
+                )
+                .await
             }
             _ => anyhow::bail!("Protocol error: Expected Auth"),
         }

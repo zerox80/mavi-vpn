@@ -49,6 +49,7 @@ mimalloc = "0.1.48"
 jsonwebtoken = { version = "10.3", default-features = false, features = ["aws_lc_rs"] }
 reqwest = { version = "0.13", features = ["json", "rustls-no-provider"], default-features = false }
 serde_json = "1.0"
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

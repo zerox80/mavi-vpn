@@ -124,7 +124,15 @@ pub async fn handle_h3_connection(
         .unwrap_or("")
         .to_string();
 
-    let auth_result = authenticate_client(&token, &state, &config, keycloak.as_ref()).await;
+    let auth_result = authenticate_client(
+        &token,
+        &state,
+        &config,
+        keycloak
+            .as_deref()
+            .map(|kc| kc as &dyn crate::handlers::auth::TokenValidator),
+    )
+    .await;
 
     let (assigned_ip, assigned_ip6) = match auth_result {
         Ok(ips) => ips,

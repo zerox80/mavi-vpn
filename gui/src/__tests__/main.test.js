@@ -103,11 +103,15 @@ describe('friendlyError', () => {
   });
 
   it('detects timeout', () => {
-    expect(friendlyError('connection timed out')).toBe('Connection timed out. Check endpoint and firewall.');
+    expect(friendlyError('connection timed out')).toBe(
+      'Connection timed out. Check endpoint and firewall.'
+    );
   });
 
   it('detects certificate error', () => {
-    expect(friendlyError('certificate verification failed')).toBe('Certificate error. Verify the certificate PIN.');
+    expect(friendlyError('certificate verification failed')).toBe(
+      'Certificate error. Verify the certificate PIN.'
+    );
   });
 
   it('returns raw message for unknown errors', () => {
@@ -184,27 +188,29 @@ describe('toConfig', () => {
 
 describe('heroFromVpnStatus', () => {
   it('maps stopped to off even when the current hero is connecting', () => {
-    expect(heroFromVpnStatus(
-      { service_available: true, running: false, state: 'Stopped' },
-      'connecting',
-      false,
-    )).toBe('off');
+    expect(
+      heroFromVpnStatus(
+        { service_available: true, running: false, state: 'Stopped' },
+        'connecting',
+        false
+      )
+    ).toBe('off');
   });
 
   it('maps stopping to disconnecting instead of connecting', () => {
-    expect(heroFromVpnStatus(
-      { service_available: true, running: false, state: 'Stopping' },
-      'on',
-      true,
-    )).toBe('disconnecting');
+    expect(
+      heroFromVpnStatus({ service_available: true, running: false, state: 'Stopping' }, 'on', true)
+    ).toBe('disconnecting');
   });
 
   it('keeps a local disconnect flow out of the yellow connecting state', () => {
-    expect(heroFromVpnStatus(
-      { service_available: true, running: false, state: 'Starting' },
-      'disconnecting',
-      true,
-    )).toBe('disconnecting');
+    expect(
+      heroFromVpnStatus(
+        { service_available: true, running: false, state: 'Starting' },
+        'disconnecting',
+        true
+      )
+    ).toBe('disconnecting');
   });
 });
 

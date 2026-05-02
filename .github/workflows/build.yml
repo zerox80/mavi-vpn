@@ -62,7 +62,7 @@ jobs:
             target/release/mavi-vpn=/usr/local/bin/mavi-vpn \
             linux/mavi-vpn.service=/lib/systemd/system/mavi-vpn.service
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-cli
           path: |
@@ -116,7 +116,7 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: android-apk
           path: android/app/build/outputs/apk/debug/*.apk
@@ -171,7 +171,7 @@ jobs:
         working-directory: gui
         run: npm run tauri -- build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-gui
           path: |
@@ -243,7 +243,7 @@ jobs:
           Set-Content "gui\src-tauri\wix\service.wxs" $wxs
           Write-Host "service.wxs restored."
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-builds
           path: |

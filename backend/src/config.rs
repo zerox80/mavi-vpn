@@ -149,7 +149,7 @@ pub struct Config {
 /// Also attempts to load a `.env` file from the current working directory.
 pub fn load() -> Config {
     // Load .env file if it exists
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
     Config::parse()
 }
 

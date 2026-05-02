@@ -6,7 +6,24 @@ db-path = "~/.cargo/advisories"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 # Levels for advisories are now handled via lint levels if needed,
 # but vulnerability = "deny" is usually the default.
-ignore = []
+ignore = [
+  "RUSTSEC-2024-0370", # proc-macro-error (tauri dependency)
+  "RUSTSEC-2025-0081", # unic-char-property (tauri dependency)
+  "RUSTSEC-2025-0075", # unic-char-range (tauri dependency)
+  "RUSTSEC-2025-0080", # unic-common (tauri dependency)
+  "RUSTSEC-2025-0100", # unic-ucd-ident (tauri dependency)
+  "RUSTSEC-2025-0098", # unic-ucd-version (tauri dependency)
+  "RUSTSEC-2024-0413", # atk (tauri dependency - GTK3)
+  "RUSTSEC-2024-0416", # atk-sys (tauri dependency - GTK3)
+  "RUSTSEC-2024-0412", # gdk (tauri dependency - GTK3)
+  "RUSTSEC-2024-0418", # gdk-sys (tauri dependency - GTK3)
+  "RUSTSEC-2024-0411", # gdkwayland-sys (tauri dependency - GTK3)
+  "RUSTSEC-2024-0417", # gdkx11 (tauri dependency - GTK3)
+  "RUSTSEC-2024-0414", # gdkx11-sys (tauri dependency - GTK3)
+  "RUSTSEC-2024-0415", # gtk (tauri dependency - GTK3)
+  "RUSTSEC-2024-0420", # gtk-sys (tauri dependency - GTK3)
+  "RUSTSEC-2024-0419", # gtk3-macros (tauri dependency - GTK3)
+]
 
 [licenses]
 version = 2

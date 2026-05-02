@@ -5,23 +5,34 @@ import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import androidx.browser.customtabs.CustomTabsIntent
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64 as JavaBase64
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
-import java.security.MessageDigest
-import java.security.SecureRandom
-import java.util.Base64 as JavaBase64
-import java.util.concurrent.TimeUnit
 
-data class OAuthTokens(val accessToken: String, val refreshToken: String)
+data class OAuthTokens(
+    val accessToken: String,
+    val refreshToken: String,
+)
 
 sealed class RefreshResult {
-    data class Success(val tokens: OAuthTokens) : RefreshResult()
-    data class Error(val message: String) : RefreshResult()
-    data class NetworkError(val error: String) : RefreshResult()
+    data class Success(
+        val tokens: OAuthTokens,
+    ) : RefreshResult()
+
+    data class Error(
+        val message: String,
+    ) : RefreshResult()
+
+    data class NetworkError(
+        val error: String,
+    ) : RefreshResult()
 }
 
 object OAuthHelper {
@@ -139,8 +150,9 @@ object OAuthHelper {
     suspend fun isAccessTokenAcceptedByKeycloak(
         token: String,
         kcUrl: String,
-        realm: String
-    ): Boolean? = withContext(Dispatchers.IO) {
+        realm: String,
+    ): Boolean? =
+        withContext(Dispatchers.IO) {
         if (token.isBlank() || kcUrl.isBlank() || realm.isBlank()) {
             return@withContext null
         }
@@ -169,7 +181,14 @@ object OAuthHelper {
         }
     }
 
-    suspend fun exchangeCodeForToken(code: String, returnedState: String?, kcUrl: String, realm: String, clientId: String): OAuthTokens? = withContext(Dispatchers.IO) {
+    suspend fun exchangeCodeForToken(
+        code: String,
+        returnedState: String?,
+        kcUrl: String,
+        realm: String,
+        clientId: String,
+    ): OAuthTokens? =
+        withContext(Dispatchers.IO) {
         // Read and clear state atomically to prevent a second concurrent call from
         // consuming the same verifier (replay) or seeing a partially-overwritten state.
         val expectedState: String?
@@ -223,7 +242,13 @@ object OAuthHelper {
         }
     }
 
-    suspend fun refreshToken(refreshToken: String, kcUrl: String, realm: String, clientId: String): RefreshResult = withContext(Dispatchers.IO) {
+    suspend fun refreshToken(
+        refreshToken: String,
+        kcUrl: String,
+        realm: String,
+        clientId: String,
+    ): RefreshResult =
+        withContext(Dispatchers.IO) {
         if (refreshToken.isBlank()) return@withContext RefreshResult.Error("No refresh token available")
 
         val tokenUrl = "$kcUrl/realms/$realm/protocol/openid-connect/token"

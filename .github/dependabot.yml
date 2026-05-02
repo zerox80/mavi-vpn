@@ -1,10 +1,11 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
 version: 2
 updates:
+  # Maintain GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
   # Maintain dependencies for Cargo Workspace
   - package-ecosystem: "cargo"
     directory: "/"
@@ -15,6 +16,9 @@ updates:
       all:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Maintain Dockerfile at root
   - package-ecosystem: "docker"
@@ -22,10 +26,6 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-    groups:
-      all:
-        patterns:
-          - "*"
 
   # Maintain Dockerfile at backend/
   - package-ecosystem: "docker"
@@ -33,10 +33,6 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-    groups:
-      all:
-        patterns:
-          - "*"
 
   # Maintain Keycloak docker-compose at backend/keycloak/
   - package-ecosystem: "docker"
@@ -44,10 +40,6 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-    groups:
-      all:
-        patterns:
-          - "*"
 
   # Maintain Android dependencies
   - package-ecosystem: "gradle"
@@ -59,6 +51,9 @@ updates:
       all:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Maintain Tauri GUI / Frontend dependencies
   - package-ecosystem: "npm"
@@ -70,3 +65,6 @@ updates:
       all:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"

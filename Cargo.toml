@@ -9,10 +9,6 @@ members = [
     "gui/src-tauri",
 ]
 
-[workspace.lints.clippy]
-pedantic = "warn"
-nursery = "warn"
-cargo = "warn"
 
 [workspace.dependencies]
 shared = { path = "shared" }

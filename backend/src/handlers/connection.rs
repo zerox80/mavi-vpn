@@ -61,6 +61,8 @@ async fn detect_initial_streams(connection: &quinn::Connection) -> Result<Initia
     }
 }
 
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::cast_possible_truncation)]
 pub async fn handle_connection(
     conn: quinn::Incoming,
     state: Arc<AppState>,
@@ -73,9 +75,10 @@ pub async fn handle_connection(
     let remote_addr = connection.remote_address();
 
     let sni = negotiated_sni(&connection);
-    let alpn = negotiated_alpn(&connection)
-        .map(|p| String::from_utf8_lossy(&p).into_owned())
-        .unwrap_or_else(|| "<none>".to_string());
+    let alpn = negotiated_alpn(&connection).map_or_else(
+        || "<none>".to_string(),
+        |p| String::from_utf8_lossy(&p).into_owned(),
+    );
 
     if config.censorship_resistant {
         let expected = &config.ech_public_name;
@@ -145,11 +148,11 @@ pub async fn handle_connection(
         let msg: ControlMessage =
             bincode::serde::decode_from_slice(&buf, bincode::config::standard())
                 .map(|(v, _)| v)
-                .map_err(|e| anyhow::anyhow!("Protocol error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
 
         match msg {
             ControlMessage::Auth { token } => {
-                authenticate_client(&token, &state, &config, &keycloak).await
+                authenticate_client(&token, &state, &config, keycloak.as_ref()).await
             }
             _ => anyhow::bail!("Protocol error: Expected Auth"),
         }
@@ -159,27 +162,26 @@ pub async fn handle_connection(
     let (assigned_ip, assigned_ip6) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
-            let error_msg = format!("Unauthorized: {}", e);
+            let error_msg = format!("Unauthorized: {e}");
             if config.censorship_resistant {
                 warn!(
                     "Unauthorized probe from {}. Emulating HTTP/3. Error: {}",
                     remote_addr, e
                 );
                 let _ = emulate_http3(&connection, &mut send_stream).await;
-                return Err(anyhow::anyhow!("HTTP/3 probe response sent: {}", e));
-            } else {
-                let err_payload = ControlMessage::Error {
-                    message: error_msg.clone(),
-                };
-                if let Ok(encoded) =
-                    bincode::serde::encode_to_vec(&err_payload, bincode::config::standard())
-                {
-                    let _ = send_stream.write_u32_le(encoded.len() as u32).await;
-                    let _ = send_stream.write_all(&encoded).await;
-                    let _ = send_stream.finish();
-                }
-                return Err(anyhow::anyhow!("{}", error_msg));
+                return Err(anyhow::anyhow!("HTTP/3 probe response sent: {e}"));
             }
+            let err_payload = ControlMessage::Error {
+                message: error_msg.clone(),
+            };
+            if let Ok(encoded) =
+                bincode::serde::encode_to_vec(&err_payload, bincode::config::standard())
+            {
+                let _ = send_stream.write_u32_le(encoded.len() as u32).await;
+                let _ = send_stream.write_all(&encoded).await;
+                let _ = send_stream.finish();
+            }
+            return Err(anyhow::anyhow!("{error_msg}"));
         }
     };
 
@@ -238,13 +240,13 @@ pub async fn handle_connection(
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let stats = conn_stats.stats();
+            let conn_metrics = conn_stats.stats();
             info!(
                 "[SERVER QUIC STATS] Peer: {} | RTT: {}ms | CWND: {} bytes | Lost Packets: {} | Max Datagram: {}",
                 remote_addr,
-                stats.path.rtt.as_millis(),
-                stats.path.cwnd,
-                stats.path.lost_packets,
+                conn_metrics.path.rtt.as_millis(),
+                conn_metrics.path.cwnd,
+                conn_metrics.path.lost_packets,
                 conn_stats.max_datagram_size().unwrap_or(0)
             );
             if conn_stats.close_reason().is_some() {

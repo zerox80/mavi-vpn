@@ -1,4 +1,4 @@
-//! Android-side ECHConfigList parser — public_name only.
+//! Android-side `ECHConfigList` parser — `public_name` only.
 //!
 //! Android uses the `ring` crypto provider, which does NOT expose HPKE in
 //! rustls 0.23. We therefore cannot offer ECH GREASE (it requires a real HPKE

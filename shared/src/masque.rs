@@ -4,7 +4,7 @@
 //! (IETF MASQUE IP-level tunneling):
 //! - QUIC variable-length integer encoding (RFC 9000 §16)
 //! - Capsule Protocol framing (RFC 9297 §3.2)
-//! - ADDRESS_ASSIGN and ROUTE_ADVERTISEMENT capsules (RFC 9484 §4)
+//! - `ADDRESS_ASSIGN` and `ROUTE_ADVERTISEMENT` capsules (RFC 9484 §4)
 //! - HTTP/3 Datagram framing with Quarter Stream ID + Context ID (RFC 9484 §5)
 //!
 //! Mavi also emits a vendor-specific `MAVI_CONFIG` capsule (type 0x4D56 =
@@ -16,11 +16,11 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// RFC 9484 – ADDRESS_ASSIGN (IP address(es) assigned to the client).
+/// RFC 9484 – `ADDRESS_ASSIGN` (IP address(es) assigned to the client).
 pub const CAPSULE_ADDRESS_ASSIGN: u64 = 0x01;
-/// RFC 9484 – ADDRESS_REQUEST (client → server request for addresses).
+/// RFC 9484 – `ADDRESS_REQUEST` (client → server request for addresses).
 pub const CAPSULE_ADDRESS_REQUEST: u64 = 0x02;
-/// RFC 9484 – ROUTE_ADVERTISEMENT (IP ranges the tunnel can reach).
+/// RFC 9484 – `ROUTE_ADVERTISEMENT` (IP ranges the tunnel can reach).
 pub const CAPSULE_ROUTE_ADVERTISEMENT: u64 = 0x03;
 /// Vendor-specific capsule carrying `ControlMessage::Config` (bincode).
 /// Value "MV" (0x4D56). Unknown capsule types MUST be ignored per RFC 9297.
@@ -43,11 +43,13 @@ pub const CAPSULE_MAVI_CONFIG: u64 = 0x4D56;
 pub const DATAGRAM_PREFIX: [u8; 2] = [0x00, 0x00];
 
 /// Hard upper bound on how many unparsed capsule bytes a client will
-/// accumulate before bailing out. This exists to prevent a misbehaving or
-/// hostile server from pushing the client into unbounded memory growth
-/// while it waits for the vendor `MAVI_CONFIG` capsule. 64 KiB comfortably
-/// fits several ADDRESS_ASSIGN / ROUTE_ADVERTISEMENT entries plus a full
-/// bincode-serialized `ControlMessage::Config`.
+/// accumulate before bailing out.
+///
+/// This exists to prevent a misbehaving or hostile server from pushing the
+/// client into unbounded memory growth while it waits for the vendor
+/// `MAVI_CONFIG` capsule. 64 KiB comfortably fits several `ADDRESS_ASSIGN` /
+/// `ROUTE_ADVERTISEMENT` entries plus a full bincode-serialized
+/// `ControlMessage::Config`.
 pub const MAX_CAPSULE_BUF: usize = 64 * 1024;
 
 // --------------------------------------------------------------------------
@@ -56,7 +58,9 @@ pub const MAX_CAPSULE_BUF: usize = 64 * 1024;
 
 /// Writes a QUIC varint (RFC 9000 §16) to `buf`.
 ///
+/// # Panics
 /// Panics if `value >= 2^62`.
+#[allow(clippy::cast_possible_truncation)]
 pub fn write_varint(value: u64, buf: &mut Vec<u8>) {
     if value < (1 << 6) {
         buf.push(value as u8);
@@ -70,11 +74,15 @@ pub fn write_varint(value: u64, buf: &mut Vec<u8>) {
         let v = value | 0xC000_0000_0000_0000;
         buf.extend_from_slice(&v.to_be_bytes());
     } else {
-        panic!("varint out of range: {}", value);
+        panic!("varint out of range: {value}");
     }
 }
 
 /// Number of bytes `value` will occupy when encoded as a varint.
+///
+/// # Panics
+/// Panics if `value >= 2^62`.
+#[must_use]
 pub fn varint_len(value: u64) -> usize {
     if value < (1 << 6) {
         1
@@ -85,12 +93,13 @@ pub fn varint_len(value: u64) -> usize {
     } else if value < (1 << 62) {
         8
     } else {
-        panic!("varint out of range: {}", value)
+        panic!("varint out of range: {value}")
     }
 }
 
 /// Reads a varint from the head of `buf`. Returns `(value, bytes_consumed)`
 /// or `None` if the buffer is truncated.
+#[must_use]
 pub fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     if buf.is_empty() {
         return None;
@@ -99,9 +108,9 @@ pub fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     if buf.len() < len {
         return None;
     }
-    let mut v = (buf[0] & 0x3F) as u64;
+    let mut v = u64::from(buf[0] & 0x3F);
     for byte in &buf[1..len] {
-        v = (v << 8) | (*byte as u64);
+        v = (v << 8) | u64::from(*byte);
     }
     Some((v, len))
 }
@@ -125,17 +134,18 @@ pub fn encode_capsule(capsule_type: u64, payload: &[u8], out: &mut Vec<u8>) {
 /// capsule length cannot be represented as `usize` on the current target
 /// — this matters on 32-bit platforms like armv7 Android where `u64 as
 /// usize` would truncate.
+#[must_use]
 pub fn read_capsule(buf: &[u8]) -> Option<(u64, &[u8], usize)> {
-    let (ctype, n1) = read_varint(buf)?;
+    let (capsule_type, n1) = read_varint(buf)?;
     let rest = &buf[n1..];
-    let (clen, n2) = read_varint(rest)?;
+    let (payload_len, n2) = read_varint(rest)?;
     let start = n1 + n2;
-    let clen_usize = usize::try_from(clen).ok()?;
-    let end = start.checked_add(clen_usize)?;
+    let payload_len_usize = usize::try_from(payload_len).ok()?;
+    let end = start.checked_add(payload_len_usize)?;
     if buf.len() < end {
         return None;
     }
-    Some((ctype, &buf[start..end], end))
+    Some((capsule_type, &buf[start..end], end))
 }
 
 // --------------------------------------------------------------------------
@@ -154,6 +164,7 @@ pub struct AssignedAddress {
 }
 
 /// Encodes the payload of an `ADDRESS_ASSIGN` capsule (not the outer frame).
+#[must_use]
 pub fn encode_address_assign(assigns: &[AssignedAddress]) -> Vec<u8> {
     let mut payload = Vec::new();
     for a in assigns {
@@ -174,6 +185,7 @@ pub fn encode_address_assign(assigns: &[AssignedAddress]) -> Vec<u8> {
 }
 
 /// Decodes the payload of an `ADDRESS_ASSIGN` capsule.
+#[must_use]
 pub fn decode_address_assign(mut payload: &[u8]) -> Option<Vec<AssignedAddress>> {
     let mut out = Vec::new();
     while !payload.is_empty() {
@@ -234,6 +246,7 @@ pub struct IpAddressRange {
 }
 
 /// Encodes the payload of a `ROUTE_ADVERTISEMENT` capsule.
+#[must_use]
 pub fn encode_route_advertisement(ranges: &[IpAddressRange]) -> Vec<u8> {
     let mut payload = Vec::new();
     for r in ranges {
@@ -256,6 +269,7 @@ pub fn encode_route_advertisement(ranges: &[IpAddressRange]) -> Vec<u8> {
 }
 
 /// Decodes the payload of a `ROUTE_ADVERTISEMENT` capsule.
+#[must_use]
 pub fn decode_route_advertisement(mut payload: &[u8]) -> Option<Vec<IpAddressRange>> {
     let mut out = Vec::new();
     while !payload.is_empty() {
@@ -306,6 +320,7 @@ pub fn decode_route_advertisement(mut payload: &[u8]) -> Option<Vec<IpAddressRan
 // --------------------------------------------------------------------------
 
 /// Wraps an IP packet in the connect-ip datagram frame.
+#[must_use]
 pub fn wrap_datagram(ip_packet: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(ip_packet.len() + DATAGRAM_PREFIX.len());
     out.extend_from_slice(&DATAGRAM_PREFIX);
@@ -315,6 +330,7 @@ pub fn wrap_datagram(ip_packet: &[u8]) -> Vec<u8> {
 
 /// Extracts the IP packet out of a connect-ip datagram frame. Returns `None`
 /// if the prefix is truncated.
+#[must_use]
 pub fn unwrap_datagram(datagram: &[u8]) -> Option<&[u8]> {
     // Fast path: both varints encode as a single 0x00 byte.
     if datagram.len() >= 2 && datagram[0] == 0x00 && datagram[1] == 0x00 {
@@ -346,7 +362,7 @@ mod tests {
         ] {
             let mut buf = Vec::new();
             write_varint(v, &mut buf);
-            assert_eq!(buf.len(), varint_len(v), "len mismatch for {}", v);
+            assert_eq!(buf.len(), varint_len(v), "len mismatch for {v}");
             let (dec, n) = read_varint(&buf).unwrap();
             assert_eq!(dec, v);
             assert_eq!(n, buf.len());
@@ -382,8 +398,8 @@ mod tests {
     fn route_advertisement_roundtrip() {
         let ranges = vec![
             IpAddressRange {
-                start: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-                end: IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)),
+                start: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                end: IpAddr::V4(Ipv4Addr::BROADCAST),
                 ip_protocol: 0,
             },
             IpAddressRange {

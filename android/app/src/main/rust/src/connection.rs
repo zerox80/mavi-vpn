@@ -16,12 +16,12 @@ use crate::crypto::{decode_hex, PinnedServerVerifier};
 /// `h3::client::SendRequest::drop` decrements an internal sender count; when the last
 /// handle goes away it calls `handle_connection_error_on_stream(H3_NO_ERROR,
 /// "Connection closed by client")` and tears down the underlying quinn connection.
-/// Keeping this guard alongside the quinn::Connection prevents that early shutdown
+/// Keeping this guard alongside the `quinn::Connection` prevents that early shutdown
 /// so the VPN datagram plane can keep using the same connection after the H3 auth
 /// request completes.
 ///
 /// The CONNECT-IP request stream itself must also remain open for the lifetime of
-/// the session. Dropping it after reading MAVI_CONFIG can end the logical MASQUE
+/// the session. Dropping it after reading `MAVI_CONFIG` can end the logical MASQUE
 /// tunnel while QUIC datagrams are still being used.
 pub struct H3SessionGuard {
     _send_request: h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
@@ -35,11 +35,12 @@ impl Drop for H3SessionGuard {
     }
 }
 
-pub(crate) fn effective_http3_framing(censorship_resistant: bool, http3_framing: bool) -> bool {
+pub const fn effective_http3_framing(censorship_resistant: bool, http3_framing: bool) -> bool {
     http3_framing || censorship_resistant
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub async fn connect_and_handshake(
     socket: std::net::UdpSocket,
     token: String,
@@ -50,7 +51,7 @@ pub async fn connect_and_handshake(
     ech_config_hex: Option<String>,
     vpn_mtu: Option<u16>,
 ) -> anyhow::Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
-    info!("Connect and Handshake started. Pin: {}", cert_pin);
+    info!("Connect and Handshake started. Pin: {cert_pin}");
     let effective_http3_framing = effective_http3_framing(censorship_resistant, http3_framing);
 
     // Verifier Setup
@@ -80,9 +81,11 @@ pub async fn connect_and_handshake(
     }
 
     // Connect & MTU Logic
-    info!("Resolving host: {}", endpoint_str);
+    info!("Resolving host: {endpoint_str}");
     let addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
-    let _addr = *addrs.first().ok_or(anyhow::anyhow!("Invalid address"))?;
+    let _addr = *addrs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Invalid address"))?;
     // If an ECHConfigList was provided, spoof the outer SNI to its `public_name`.
     // Android's `ring` provider lacks HPKE so we cannot offer ECH GREASE, but
     // SNI override alone already hides the real hostname from on-path censors
@@ -91,7 +94,7 @@ pub async fn connect_and_handshake(
         Some(hex) => {
             let sni = crate::ech_client::outer_sni_from_hex(hex)
                 .ok_or_else(|| anyhow::anyhow!("Failed to parse provided ECH config hex"))?;
-            info!("ECH config parsed, overriding outer SNI: {}", sni);
+            info!("ECH config parsed, overriding outer SNI: {sni}");
             sni
         }
         None => endpoint_host(&endpoint_str),
@@ -117,7 +120,7 @@ pub async fn connect_and_handshake(
     // Performance Optimizations
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(None); // Disable idle timeout for Doze Mode!
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15))); // Less aggressive keep-alives
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15))); // Less aggressive keep-alive
 
     // MTU Pinning
     transport_config.mtu_discovery_config(None);
@@ -151,7 +154,7 @@ pub async fn connect_and_handshake(
     let mut last_error = None;
     let mut connection = None;
     for addr in addrs {
-        info!("Connecting to {} (SNI: {})", addr, server_name);
+        info!("Connecting to {addr} (SNI: {server_name})");
         match endpoint.connect(addr, &server_name) {
             Ok(connecting) => match connecting.await {
                 Ok(conn) => {
@@ -159,22 +162,19 @@ pub async fn connect_and_handshake(
                     break;
                 }
                 Err(err) => {
-                    info!("QUIC handshake to {} failed: {}", addr, err);
+                    info!("QUIC handshake to {addr} failed: {err}");
                     last_error = Some(anyhow::Error::from(err));
                 }
             },
             Err(err) => {
-                info!("endpoint.connect() failed for {}: {}", addr, err);
+                info!("endpoint.connect() failed for {addr}: {err}");
                 last_error = Some(anyhow::Error::from(err));
             }
         }
     }
-    let connection = match connection {
-        Some(conn) => conn,
-        None => {
-            return Err(last_error
-                .unwrap_or_else(|| anyhow::anyhow!("No reachable address for {}", endpoint_str)))
-        }
+    let Some(connection) = connection else {
+        return Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("No reachable address for {endpoint_str}")));
     };
     info!("Connection established");
 
@@ -193,7 +193,8 @@ pub async fn connect_and_handshake(
 
         let auth_msg = ControlMessage::Auth { token };
         let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        #[allow(clippy::cast_possible_truncation)]
         send_stream.write_u32_le(bytes.len() as u32).await?;
         send_stream.write_all(&bytes).await?;
         info!("Auth sent");
@@ -201,23 +202,23 @@ pub async fn connect_and_handshake(
         // Read Config
         let len = recv_stream.read_u32_le().await? as usize;
         if len > 65536 {
-            return Err(anyhow::anyhow!("Server response too large: {} bytes", len));
+            return Err(anyhow::anyhow!("Server response too large: {len} bytes"));
         }
         let mut buf = vec![0u8; len];
         if let Err(e) = recv_stream.read_exact(&mut buf).await {
             if len == 6401 && censorship_resistant {
                 return Err(anyhow::anyhow!("Access Denied: Server rejected the token. Check Keycloak logs or token validity."));
             }
-            return Err(anyhow::anyhow!("Handshake read error: {}", e));
+            return Err(anyhow::anyhow!("Handshake read error: {e}"));
         }
 
         let cfg: ControlMessage =
             bincode::serde::decode_from_slice(&buf, bincode::config::standard())
                 .map(|(v, _)| v)
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         if let ControlMessage::Error { message } = &cfg {
-            return Err(anyhow::anyhow!("Server Error: {}", message));
+            return Err(anyhow::anyhow!("Server Error: {message}"));
         }
         (cfg, None)
     };
@@ -231,9 +232,7 @@ fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> anyhow::R
     if let ControlMessage::Config { mtu, .. } = config {
         if *mtu != local_tun_mtu {
             anyhow::bail!(
-                "MTU mismatch: local/client VPN MTU is {}, but server pushed {}. Configure both sides to the same VPN_MTU.",
-                local_tun_mtu,
-                mtu
+                "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {mtu}. Configure both sides to the same VPN_MTU."
             );
         }
     }
@@ -251,12 +250,12 @@ async fn connect_and_handshake_h3(
     let (mut driver, mut send_request) = builder
         .build::<_, _, Bytes>(h3_conn)
         .await
-        .map_err(|e| anyhow::anyhow!("H3 client init failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 client init failed: {e}"))?;
 
     // Drive the H3 connection in the background for the lifetime of the session.
     let drive_handle = tokio::spawn(async move {
         let e = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
-        log::debug!("H3 driver finished: {}", e);
+        log::debug!("H3 driver finished: {e}");
     });
 
     // RFC 9484 connect-ip: Extended CONNECT with :protocol=connect-ip.
@@ -265,15 +264,15 @@ async fn connect_and_handshake_h3(
         .method(http::Method::CONNECT)
         .uri("https://mavi-vpn/.well-known/masque/ip/*/*/")
         .extension(h3::ext::Protocol::CONNECT_IP)
-        .header("authorization", format!("Bearer {}", token))
+        .header("authorization", format!("Bearer {token}"))
         .header("capsule-protocol", "?1")
         .body(())
-        .map_err(|e| anyhow::anyhow!("Failed to build H3 CONNECT request: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to build H3 CONNECT request: {e}"))?;
 
     let mut stream = send_request
         .send_request(req)
         .await
-        .map_err(|e| anyhow::anyhow!("H3 send_request failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 send_request failed: {e}"))?;
 
     // NOTE: do NOT call stream.finish(). connect-ip keeps the request stream
     // open bidirectionally for the whole session (for capsules + control).
@@ -281,7 +280,7 @@ async fn connect_and_handshake_h3(
     let resp = stream
         .recv_response()
         .await
-        .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("H3 recv_response failed: {e}"))?;
 
     if resp.status() != http::StatusCode::OK {
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
@@ -312,7 +311,7 @@ async fn connect_and_handshake_h3(
             if ctype == CAPSULE_MAVI_CONFIG {
                 let (cfg, _): (ControlMessage, _) =
                     bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-                        .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {e}"))?;
                 config = Some(cfg);
                 break 'read;
             }
@@ -324,7 +323,7 @@ async fn connect_and_handshake_h3(
             Ok(Ok(None)) => {
                 anyhow::bail!("Server closed connect-ip stream before MAVI_CONFIG")
             }
-            Ok(Err(e)) => anyhow::bail!("H3 recv_data failed: {}", e),
+            Ok(Err(e)) => anyhow::bail!("H3 recv_data failed: {e}"),
             Err(_) => anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule"),
         };
         capsule_buf.extend_from_slice(chunk.chunk());
@@ -339,7 +338,7 @@ async fn connect_and_handshake_h3(
     let config = config.expect("loop invariant: broken out only when config set");
 
     if let ControlMessage::Error { message } = &config {
-        return Err(anyhow::anyhow!("Server Error: {}", message));
+        return Err(anyhow::anyhow!("Server Error: {message}"));
     }
 
     Ok((

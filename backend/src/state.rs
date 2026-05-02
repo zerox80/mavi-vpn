@@ -23,7 +23,7 @@ pub struct AppState {
     /// The IPv4 subnet managed by this server (e.g. 10.8.0.0/24).
     pub network: Ipv4Network,
 
-    /// The IPv6 subnet managed by this server (Unique Local Address scope, default fd00::/64).
+    /// The IPv6 subnet managed by this server (Unique Local Address scope, default `fd00::/64`).
     pub network_v6: Ipv6Network,
 
     /// Stack of available (unassigned) IPv4 addresses.
@@ -45,7 +45,7 @@ impl AppState {
     pub fn new(cidr: &str) -> Result<Self> {
         let network: Ipv4Network = cidr
             .parse()
-            .map_err(|_| anyhow!("Invalid CIDR format: {}", cidr))?;
+            .map_err(|_| anyhow!("Invalid CIDR format: {cidr}"))?;
         // Internal IPv6 network (ULA range)
         let network_v6: Ipv6Network = "fd00::/64"
             .parse()
@@ -61,7 +61,7 @@ impl AppState {
         let mut free_ips = Vec::new();
         let gateway = network
             .nth(1)
-            .ok_or_else(|| anyhow!("CIDR '{}' too small to assign a gateway address", cidr))?; // By convention, server is .1
+            .ok_or_else(|| anyhow!("CIDR '{cidr}' too small to assign a gateway address"))?; // By convention, server is .1
         let broadcast = network.broadcast();
 
         for ip in network.iter() {
@@ -89,13 +89,19 @@ impl AppState {
     /// # Errors
     /// Returns an error if the pool is exhausted.
     pub fn assign_ip(&self) -> Result<Ipv4Addr> {
-        let mut free = self.free_ips.lock().unwrap_or_else(|e| e.into_inner());
+        let mut free = self
+            .free_ips
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         free.pop().ok_or_else(|| anyhow!("VPN IPv4 pool exhausted"))
     }
 
     /// Leases a free IPv6 address from the pool.
     pub fn assign_ipv6(&self) -> Result<Ipv6Addr> {
-        let mut free = self.free_ips_v6.lock().unwrap_or_else(|e| e.into_inner());
+        let mut free = self
+            .free_ips_v6
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ip) = free.pop() {
             return Ok(ip);
         }
@@ -104,7 +110,7 @@ impl AppState {
         let mut next = self
             .next_ipv6_host
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let candidate = u128::from(self.network_v6.network())
             .checked_add(u128::from(*next))
             .ok_or_else(|| anyhow!("VPN IPv6 pool exhausted"))?;
@@ -115,6 +121,7 @@ impl AppState {
         *next = next
             .checked_add(1)
             .ok_or_else(|| anyhow!("VPN IPv6 pool exhausted"))?;
+        drop(next);
         Ok(ip)
     }
 
@@ -124,8 +131,10 @@ impl AppState {
         match self.assign_ipv6() {
             Ok(ip6) => Ok((ip4, ip6)),
             Err(err) => {
-                let mut free = self.free_ips.lock().unwrap_or_else(|e| e.into_inner());
-                free.push(ip4);
+                self.free_ips
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(ip4);
                 Err(err)
             }
         }
@@ -141,11 +150,17 @@ impl AppState {
 
         // Then return to pools
         {
-            let mut free = self.free_ips.lock().unwrap_or_else(|e| e.into_inner());
+            let mut free = self
+                .free_ips
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             free.push(ip4);
         }
         {
-            let mut free = self.free_ips_v6.lock().unwrap_or_else(|e| e.into_inner());
+            let mut free = self
+                .free_ips_v6
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             free.push(ip6);
         }
     }
@@ -179,8 +194,7 @@ mod tests {
         let state = AppState::new("10.8.0.0/24").unwrap();
         assert_eq!(state.network.prefix(), 24);
         // /24 = 256 addresses, minus network (.0), gateway (.1), broadcast (.255) = 253
-        let free = state.free_ips.lock().unwrap();
-        assert_eq!(free.len(), 253);
+        assert_eq!(state.free_ips.lock().unwrap().len(), 253);
     }
 
     #[test]
@@ -189,17 +203,19 @@ mod tests {
         assert_eq!(state.network.prefix(), 16);
         // /16 = 65536 addresses, minus network (.0.0), gateway (.0.1), broadcast (.255.255) = 65533
         // Note: this test intentionally allocates a large pool to verify the size formula.
-        let free = state.free_ips.lock().unwrap();
-        assert_eq!(free.len(), 65533);
+        assert_eq!(state.free_ips.lock().unwrap().len(), 65533);
     }
 
     #[test]
     fn new_valid_cidr_30() {
         let state = AppState::new("10.0.0.0/30").unwrap();
         // /30 = 4 addresses: .0 (network), .1 (gateway), .2, .3 (broadcast) → 1 usable
-        let free = state.free_ips.lock().unwrap();
-        assert_eq!(free.len(), 1);
-        assert_eq!(free[0], Ipv4Addr::new(10, 0, 0, 2));
+        {
+            let free = state.free_ips.lock().unwrap();
+            assert_eq!(free.len(), 1);
+            assert_eq!(free[0], Ipv4Addr::new(10, 0, 0, 2));
+            drop(free);
+        }
     }
 
     #[test]
@@ -320,13 +336,16 @@ mod tests {
     #[test]
     fn pool_does_not_contain_gateway_or_broadcast() {
         let state = AppState::new("10.8.0.0/24").unwrap();
-        let free = state.free_ips.lock().unwrap();
         let gateway = Ipv4Addr::new(10, 8, 0, 1);
         let broadcast = Ipv4Addr::new(10, 8, 0, 255);
         let network = Ipv4Addr::new(10, 8, 0, 0);
-        assert!(!free.contains(&gateway));
-        assert!(!free.contains(&broadcast));
-        assert!(!free.contains(&network));
+        {
+            let free = state.free_ips.lock().unwrap();
+            assert!(!free.contains(&gateway));
+            assert!(!free.contains(&broadcast));
+            assert!(!free.contains(&network));
+            drop(free);
+        }
     }
 
     #[test]
@@ -378,7 +397,7 @@ mod tests {
         for handle in handles {
             let ips = handle.await.unwrap();
             for ip in ips {
-                assert!(all_assigned.insert(ip), "Duplicate IP assigned: {}", ip);
+                assert!(all_assigned.insert(ip), "Duplicate IP assigned: {ip}");
             }
         }
 

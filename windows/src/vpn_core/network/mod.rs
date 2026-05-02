@@ -120,8 +120,9 @@ pub fn set_adapter_network_config(
     win32_set_mtu(adapter_index, u32::from(tun_mtu), AF_INET6 as _);
 
     let route_started = Instant::now();
-    let endpoint_route = add_host_route_exception_fixed(endpoint)
-        .ok_or_else(|| anyhow::anyhow!("Failed to install host route exception for VPN endpoint"))?;
+    let endpoint_route = add_host_route_exception_fixed(endpoint).ok_or_else(|| {
+        anyhow::anyhow!("Failed to install host route exception for VPN endpoint")
+    })?;
 
     let _ = win32_add_route(
         adapter_index,

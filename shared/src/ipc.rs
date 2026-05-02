@@ -130,3 +130,72 @@ pub enum IpcResponse {
         assigned_ip: Option<String>,
     },
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_effective_http3_framing() {
+        let mut config = Config {
+            endpoint: "test".to_string(),
+            token: "test".to_string(),
+            cert_pin: "test".to_string(),
+            censorship_resistant: false,
+            http3_framing: false,
+            kc_auth: None,
+            kc_url: None,
+            kc_realm: None,
+            kc_client_id: None,
+            ech_config: None,
+            vpn_mtu: None,
+        };
+
+        // case: http3_framing=false, censorship_resistant=false => effective framing is false
+        assert!(!config.effective_http3_framing());
+
+        // case: http3_framing=true, censorship_resistant=false => effective framing is true
+        config.http3_framing = true;
+        assert!(config.effective_http3_framing());
+
+        // case: http3_framing=false, censorship_resistant=true => effective framing is true
+        config.http3_framing = false;
+        config.censorship_resistant = true;
+        assert!(config.effective_http3_framing());
+
+        // case: http3_framing=true, censorship_resistant=true => effective framing is true
+        config.http3_framing = true;
+        assert!(config.effective_http3_framing());
+    }
+
+    #[test]
+    fn test_normalize_transport() {
+        let mut config = Config {
+            endpoint: "test".to_string(),
+            token: "test".to_string(),
+            cert_pin: "test".to_string(),
+            censorship_resistant: true,
+            http3_framing: false,
+            kc_auth: None,
+            kc_url: None,
+            kc_realm: None,
+            kc_client_id: None,
+            ech_config: None,
+            vpn_mtu: None,
+        };
+
+        // normalize_transport() returns true only when it actually changes http3_framing
+        // censorship_resistant=true requires http3_framing=true
+        assert!(config.normalize_transport());
+        assert!(config.http3_framing);
+
+        // Second call should return false as no change is needed
+        assert!(!config.normalize_transport());
+        assert!(config.http3_framing);
+
+        // Case where no change is needed from the start
+        config.censorship_resistant = false;
+        config.http3_framing = false;
+        assert!(!config.normalize_transport());
+        assert!(!config.http3_framing);
+    }
+}

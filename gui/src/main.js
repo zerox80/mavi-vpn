@@ -3,7 +3,14 @@
 // Tauri backend. Saved connections are the user-editable source of truth;
 // config.json is only a runtime snapshot and legacy migration source.
 
-import { escapeHtml, initials, bandwidthWalk, friendlyError, heroFromVpnStatus, toConfig } from './utils.js';
+import {
+  escapeHtml,
+  initials,
+  bandwidthWalk,
+  friendlyError,
+  heroFromVpnStatus,
+  toConfig,
+} from './utils.js';
 
 // ============================================================================
 // Tauri API bootstrap — the API is injected by withGlobalTauri, but can lag
@@ -59,7 +66,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Wait briefly for window.__TAURI__ to populate
   let attempts = 0;
   while ((!window.__TAURI__ || !window.__TAURI__.core) && attempts < 20) {
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 50));
     attempts++;
   }
   if (window.__TAURI__ && window.__TAURI__.core) {
@@ -80,13 +87,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     const prefs = await invoke('load_prefs');
     if (prefs) state.prefs = normalizePrefs(prefs);
-  } catch (e) { console.warn('load_prefs failed:', e); }
+  } catch (e) {
+    console.warn('load_prefs failed:', e);
+  }
 
   // One-time migration from the old editable runtime config into saved connections.
   try {
     const config = await invoke('load_config');
     await migrateLegacyConfig(config);
-  } catch (e) { console.warn('legacy config migration skipped:', e); }
+  } catch (e) {
+    console.warn('legacy config migration skipped:', e);
+  }
 
   applyTheme(state.prefs.theme);
   renderConnectionList();
@@ -132,8 +143,11 @@ function applyTheme(theme) {
 }
 
 async function savePrefs() {
-  try { await invoke('save_prefs', { prefs: state.prefs }); }
-  catch (e) { console.warn('save_prefs failed:', e); }
+  try {
+    await invoke('save_prefs', { prefs: state.prefs });
+  } catch (e) {
+    console.warn('save_prefs failed:', e);
+  }
 }
 
 function normalizePrefs(prefs = {}) {
@@ -161,15 +175,15 @@ function connectionFromLegacyConfig(config, existing = null) {
     id: existing?.id || generateConnectionId(),
     label: existing?.label || config.endpoint,
     endpoint: config.endpoint,
-    token: kcAuth ? null : (config.token || null),
+    token: kcAuth ? null : config.token || null,
     cert_pin: config.cert_pin || '',
     ech_config: config.ech_config || null,
     censorship_resistant: !!config.censorship_resistant,
     http3_framing: !!config.http3_framing,
     kc_auth: kcAuth || null,
-    kc_url: kcAuth ? (config.kc_url || null) : null,
-    kc_realm: kcAuth ? (config.kc_realm || null) : null,
-    kc_client_id: kcAuth ? (config.kc_client_id || null) : null,
+    kc_url: kcAuth ? config.kc_url || null : null,
+    kc_realm: kcAuth ? config.kc_realm || null : null,
+    kc_client_id: kcAuth ? config.kc_client_id || null : null,
     vpn_mtu: validMtu(config.vpn_mtu),
   };
 }
@@ -179,9 +193,12 @@ async function migrateLegacyConfig(config) {
 
   state.prefs.legacy_config_migrated = true;
   if (config?.endpoint) {
-    const idx = state.prefs.connections.findIndex(c => c.endpoint === config.endpoint);
+    const idx = state.prefs.connections.findIndex((c) => c.endpoint === config.endpoint);
     if (idx >= 0) {
-      state.prefs.connections[idx] = connectionFromLegacyConfig(config, state.prefs.connections[idx]);
+      state.prefs.connections[idx] = connectionFromLegacyConfig(
+        config,
+        state.prefs.connections[idx]
+      );
       if (!state.prefs.active_id) state.prefs.active_id = state.prefs.connections[idx].id;
     } else {
       const conn = connectionFromLegacyConfig(config);
@@ -198,12 +215,13 @@ async function migrateLegacyConfig(config) {
 // ============================================================================
 
 function wireTabs() {
-  document.querySelectorAll('.tab').forEach(btn => {
+  document.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => {
       const name = btn.dataset.tab;
-      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === btn));
-      document.querySelectorAll('.tab-panel').forEach(p =>
-        p.classList.toggle('active', p.dataset.panel === name));
+      document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === btn));
+      document
+        .querySelectorAll('.tab-panel')
+        .forEach((p) => p.classList.toggle('active', p.dataset.panel === name));
     });
   });
 }
@@ -223,11 +241,13 @@ function wireSidebarSearch() {
 function renderConnectionList() {
   const list = $('connection-list');
   const q = state.search;
-  const filtered = state.prefs.connections.filter(c =>
-    !q || c.label.toLowerCase().includes(q) || c.endpoint.toLowerCase().includes(q));
+  const filtered = state.prefs.connections.filter(
+    (c) => !q || c.label.toLowerCase().includes(q) || c.endpoint.toLowerCase().includes(q)
+  );
 
   if (state.prefs.connections.length === 0) {
-    list.innerHTML = '<div class="conn-empty">No saved connections yet.<br/>Tap + ADD CONNECTION below.</div>';
+    list.innerHTML =
+      '<div class="conn-empty">No saved connections yet.<br/>Tap + ADD CONNECTION below.</div>';
     return;
   }
 
@@ -250,7 +270,8 @@ function renderConnectionList() {
     const isSelected = c.id === state.prefs.active_id;
     const isActive = isSelected && state.hero === 'on';
     const isConnecting = isSelected && state.hero === 'connecting';
-    row.className = 'conn-row' +
+    row.className =
+      'conn-row' +
       (isSelected ? ' selected' : '') +
       (isActive ? ' active' : '') +
       (isConnecting ? ' connecting' : '');
@@ -265,7 +286,10 @@ function renderConnectionList() {
       <div class="load"><span></span></div>
     `;
     // Secondary: edit on right-click
-    row.addEventListener('contextmenu', (e) => { e.preventDefault(); openModal(c.id); });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      openModal(c.id);
+    });
     list.appendChild(row);
   }
 }
@@ -301,7 +325,7 @@ function updateModalAuthFields() {
 
 function openModal(id) {
   _editingId = id;
-  const existing = id ? state.prefs.connections.find(c => c.id === id) : null;
+  const existing = id ? state.prefs.connections.find((c) => c.id === id) : null;
   $('modal-title').textContent = existing ? 'Edit Connection' : 'New Connection';
   $('m_label').value = existing?.label ?? '';
   $('m_endpoint').value = existing?.endpoint ?? '';
@@ -334,7 +358,8 @@ async function saveModal() {
   const kc_auth = $('m_kc_auth').checked || null;
   if (!label) return showToast('Label is required.', 'error');
   if (!endpoint) return showToast('Endpoint is required.', 'error');
-  if (!kc_auth && !token) return showToast('Pre-shared key is required unless Keycloak is enabled.', 'error');
+  if (!kc_auth && !token)
+    return showToast('Pre-shared key is required unless Keycloak is enabled.', 'error');
   if (!cert_pin) return showToast('Certificate PIN is required.', 'error');
 
   const mtuVal = parseInt($('m_vpn_mtu').value, 10);
@@ -348,14 +373,14 @@ async function saveModal() {
     censorship_resistant: $('m_cr_mode').checked,
     http3_framing: $('m_h3_framing').checked,
     kc_auth,
-    kc_url: kc_auth ? ($('m_kc_url').value.trim() || null) : null,
-    kc_realm: kc_auth ? ($('m_kc_realm').value.trim() || null) : null,
-    kc_client_id: kc_auth ? ($('m_kc_client_id').value.trim() || null) : null,
-    vpn_mtu: (mtuVal >= 1280 && mtuVal <= 1360) ? mtuVal : null,
+    kc_url: kc_auth ? $('m_kc_url').value.trim() || null : null,
+    kc_realm: kc_auth ? $('m_kc_realm').value.trim() || null : null,
+    kc_client_id: kc_auth ? $('m_kc_client_id').value.trim() || null : null,
+    vpn_mtu: mtuVal >= 1280 && mtuVal <= 1360 ? mtuVal : null,
   };
 
   if (_editingId) {
-    const idx = state.prefs.connections.findIndex(c => c.id === _editingId);
+    const idx = state.prefs.connections.findIndex((c) => c.id === _editingId);
     if (idx >= 0) state.prefs.connections[idx] = conn;
   } else {
     state.prefs.connections.push(conn);
@@ -370,7 +395,7 @@ async function saveModal() {
 
 async function deleteModal() {
   if (!_editingId) return;
-  state.prefs.connections = state.prefs.connections.filter(c => c.id !== _editingId);
+  state.prefs.connections = state.prefs.connections.filter((c) => c.id !== _editingId);
   if (state.prefs.active_id === _editingId) state.prefs.active_id = null;
   await savePrefs();
   closeModal();
@@ -387,7 +412,7 @@ function wireHero() {
 }
 
 function activeConn() {
-  return state.prefs.connections.find(c => c.id === state.prefs.active_id) || null;
+  return state.prefs.connections.find((c) => c.id === state.prefs.active_id) || null;
 }
 
 async function toggleConnection() {
@@ -443,7 +468,7 @@ async function waitForStopped() {
     if (!status.service_available || status.state === 'Stopped' || status.state === 'Failed') {
       return;
     }
-    await new Promise(r => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 250));
   }
 }
 
@@ -519,9 +544,14 @@ function setHero(s) {
   document.documentElement.setAttribute('data-state', s);
 
   const btn = $('connect-btn');
-  btn.textContent = s === 'on' ? 'DISCONNECT' :
-                    s === 'connecting' ? 'CONNECTING...' :
-                    s === 'disconnecting' ? 'DISCONNECTING...' : 'CONNECT';
+  btn.textContent =
+    s === 'on'
+      ? 'DISCONNECT'
+      : s === 'connecting'
+        ? 'CONNECTING...'
+        : s === 'disconnecting'
+          ? 'DISCONNECTING...'
+          : 'CONNECT';
   if (s === 'connecting' || s === 'disconnecting') btn.disabled = true;
 
   const labels = {
@@ -541,8 +571,7 @@ function setHero(s) {
   $('hero-status').textContent = heroStatus[s];
 
   $('core-label').textContent =
-    s === 'connecting' ? 'HANDSHAKE' :
-    s === 'disconnecting' ? 'CLEANUP' : 'TUNNEL';
+    s === 'connecting' ? 'HANDSHAKE' : s === 'disconnecting' ? 'CLEANUP' : 'TUNNEL';
 
   applyHeroForSelection();
   renderConnectionList();
@@ -553,10 +582,13 @@ function applyHeroForSelection() {
   if (conn) {
     $('hero-title').textContent = conn.label;
     $('hero-subtitle').textContent =
-      state.hero === 'on' ? 'Your traffic is encrypted through this node' :
-      state.hero === 'connecting' ? 'Establishing an encrypted tunnel...' :
-      state.hero === 'disconnecting' ? 'Closing tunnel and cleaning up routes' :
-      'Tunnel your connection through this node';
+      state.hero === 'on'
+        ? 'Your traffic is encrypted through this node'
+        : state.hero === 'connecting'
+          ? 'Establishing an encrypted tunnel...'
+          : state.hero === 'disconnecting'
+            ? 'Closing tunnel and cleaning up routes'
+            : 'Tunnel your connection through this node';
     $('hero-node-id').textContent = conn.id.slice(0, 8).toUpperCase();
     $('hero-lat').textContent = conn.endpoint.toUpperCase();
   } else {
@@ -677,14 +709,16 @@ function startCoreAnimation() {
 
   // Static-ish layers
   const halo = document.createElementNS(ns, 'circle');
-  halo.setAttribute('cx', R); halo.setAttribute('cy', R);
+  halo.setAttribute('cx', R);
+  halo.setAttribute('cy', R);
   halo.setAttribute('fill', `url(#mhalo-${accentClean})`);
   svg.appendChild(halo);
 
   const ringFracs = [0.42, 0.56, 0.72, 0.88];
   const rings = ringFracs.map((f, i) => {
     const c = document.createElementNS(ns, 'circle');
-    c.setAttribute('cx', R); c.setAttribute('cy', R);
+    c.setAttribute('cx', R);
+    c.setAttribute('cy', R);
     c.setAttribute('r', R * f);
     c.setAttribute('fill', 'none');
     c.setAttribute('stroke-width', i === 1 ? '1.5' : '1');
@@ -708,13 +742,15 @@ function startCoreAnimation() {
 
   // Core glow + solid + highlight
   const coreGlow = document.createElementNS(ns, 'circle');
-  coreGlow.setAttribute('cx', R); coreGlow.setAttribute('cy', R);
+  coreGlow.setAttribute('cx', R);
+  coreGlow.setAttribute('cy', R);
   coreGlow.setAttribute('fill', `url(#mcore-${accentClean})`);
   coreGlow.setAttribute('filter', 'url(#mblur)');
   svg.appendChild(coreGlow);
 
   const coreSolid = document.createElementNS(ns, 'circle');
-  coreSolid.setAttribute('cx', R); coreSolid.setAttribute('cy', R);
+  coreSolid.setAttribute('cx', R);
+  coreSolid.setAttribute('cy', R);
   svg.appendChild(coreSolid);
 
   const coreHighlight = document.createElementNS(ns, 'circle');
@@ -745,16 +781,17 @@ function startCoreAnimation() {
 
     rings.forEach((c, i) => {
       c.setAttribute('stroke', ringColor);
-      const op = off
-        ? 0.6
-        : 0.18 + 0.12 * (1 - i / rings.length) + 0.08 * pulse;
+      const op = off ? 0.6 : 0.18 + 0.12 * (1 - i / rings.length) + 0.08 * pulse;
       c.setAttribute('opacity', op.toFixed(3));
     });
 
     // ticks — hidden when off
     for (let i = 0; i < ticks.length; i++) {
-      if (off) { ticks[i].setAttribute('opacity', '0'); continue; }
-      const a = (i * 360 / 48) * Math.PI / 180;
+      if (off) {
+        ticks[i].setAttribute('opacity', '0');
+        continue;
+      }
+      const a = (((i * 360) / 48) * Math.PI) / 180;
       const r1 = R * 0.91;
       const r2 = R * (0.94 + 0.02 * Math.sin(t * 2 + i));
       ticks[i].setAttribute('x1', (R + Math.cos(a) * r1).toFixed(2));
@@ -769,7 +806,8 @@ function startCoreAnimation() {
     const coreR = R * 0.28 + (off ? 0 : 6 * breathe);
     coreGlow.setAttribute('r', coreR + 20);
     coreGlow.setAttribute('opacity', off ? '0' : '1');
-    const coreOffColor = getComputedStyle(document.documentElement).getPropertyValue('--core-off').trim() || '#E8E3D3';
+    const coreOffColor =
+      getComputedStyle(document.documentElement).getPropertyValue('--core-off').trim() || '#E8E3D3';
     coreSolid.setAttribute('r', coreR);
     coreSolid.setAttribute('fill', off ? coreOffColor : accent);
 
@@ -786,8 +824,11 @@ function startCoreAnimation() {
     // orbit dots
     const orbitR = R * 0.56;
     dots.forEach((d, i) => {
-      if (off) { d.setAttribute('opacity', '0'); return; }
-      const a = (rot + i * 72) * Math.PI / 180;
+      if (off) {
+        d.setAttribute('opacity', '0');
+        return;
+      }
+      const a = ((rot + i * 72) * Math.PI) / 180;
       d.setAttribute('cx', (R + Math.cos(a) * orbitR).toFixed(2));
       d.setAttribute('cy', (R + Math.sin(a) * orbitR).toFixed(2));
       const op = i === 0 ? 1 : 0.4 + 0.3 * Math.sin(t * 2 + i);
@@ -805,14 +846,17 @@ function startCoreAnimation() {
 
 function renderSparkline() {
   const svg = $('sparkline');
-  const W = 200, H = 28;
+  const W = 200,
+    H = 28;
   const values = bandwidthWalk(60);
   const max = Math.max(...values);
-  const points = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * W;
-    const y = H - (v / max) * H * 0.9 - 2;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
+  const points = values
+    .map((v, i) => {
+      const x = (i / (values.length - 1)) * W;
+      const y = H - (v / max) * H * 0.9 - 2;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
   svg.innerHTML = `
     <polyline id="spark-line" points="${points}" fill="none" stroke-width="1.2" />
     <polygon  id="spark-fill" points="0,${H} ${points} ${W},${H}" />
@@ -834,8 +878,10 @@ function updateSparklineColors() {
 }
 
 // Re-tint sparkline when state changes — hook into setHero via MutationObserver
-new MutationObserver(updateSparklineColors)
-  .observe(document.documentElement, { attributes: true, attributeFilter: ['data-state', 'data-theme'] });
+new MutationObserver(updateSparklineColors).observe(document.documentElement, {
+  attributes: true,
+  attributeFilter: ['data-state', 'data-theme'],
+});
 
 // ============================================================================
 // Stats ticker (deterministic fake, matches sample — no real telemetry yet)

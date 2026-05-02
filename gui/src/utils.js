@@ -1,11 +1,21 @@
 export function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (ch) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[ch]));
+  return String(s).replace(
+    /[&<>"']/g,
+    (ch) =>
+      ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      })[ch]
+  );
 }
 
 export function initials(label) {
-  const parts = String(label).split(/[\s·\-_/]+/).filter(Boolean);
+  const parts = String(label)
+    .split(/[\s·\-_/]+/)
+    .filter(Boolean);
   const s = (parts[0]?.[0] || '?') + (parts[1]?.[0] || '');
   return s.toUpperCase();
 }
@@ -22,7 +32,11 @@ export function bandwidthWalk(n, seed = 42) {
 
 export function friendlyError(e) {
   const s = String(e);
-  if (s.includes('10061') || s.includes('connection refused') || s.includes('Verbindung verweigert'))
+  if (
+    s.includes('10061') ||
+    s.includes('connection refused') ||
+    s.includes('Verbindung verweigert')
+  )
     return 'VPN daemon is not running.';
   if (s.includes('10060') || s.includes('timed out'))
     return 'Connection timed out. Check endpoint and firewall.';

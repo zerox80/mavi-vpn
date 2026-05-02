@@ -77,6 +77,11 @@ fn ipc_token_read_error(token_path: &std::path::Path, error: std::io::Error) -> 
                 "Failed to read IPC token at {}: permission denied. Your user must be in the 'mavivpn' group to control the daemon. Run `sudo usermod -aG mavivpn $USER`, log out and back in, then retry.",
                 token_path.display()
             )
+        } else if cfg!(target_os = "windows") {
+            format!(
+                "Failed to read IPC token at {}: permission denied. Your Windows user is not allowed to control the Mavi VPN service. Log in and restart the service so it can grant your desktop session access, or run the GUI as Administrator.",
+                token_path.display()
+            )
         } else {
             format!(
                 "Failed to read IPC token at {}: permission denied.",

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rcgen::generate_simple_self_signed;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
@@ -86,16 +87,10 @@ pub fn load_or_generate_certs(
         let key = fs::read(key_path).context("failed to read private key")?;
 
         // Parse PEM formatted certificates and keys
-        let certs = rustls_pemfile::certs(&mut &cert_chain[..])
+        let certs = CertificateDer::pem_reader_iter(&mut &cert_chain[..])
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let key = rustls_pemfile::pkcs8_private_keys(&mut &key[..])
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(PrivateKeyDer::Pkcs8)
-            .next()
-            .ok_or_else(|| {
-                anyhow::anyhow!("No PKCS#8 private key found in {}", key_path.display())
-            })?;
+        let key = PrivateKeyDer::from_pem_slice(&key)
+            .context("No private key found in key file")?;
 
         // Calculate and log the SHA-256 fingerprint of the end-entity certificate
         if let Some(cert) = certs.first() {
@@ -122,16 +117,10 @@ pub fn load_or_generate_certs(
         write_private_file(key_path, key_pem.as_bytes())?;
 
         // Re-parse the PEMs into rustls-internal DER formats
-        let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        let certs = CertificateDer::pem_reader_iter(&mut cert_pem.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let key = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(PrivateKeyDer::Pkcs8)
-            .next()
-            .ok_or_else(|| {
-                anyhow::anyhow!("No PKCS#8 private key found in generated certificate")
-            })?;
+        let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+            .context("No private key found in generated certificate")?;
 
         if let Some(cert) = certs.first() {
             write_cert_pin(cert_path, cert)?;

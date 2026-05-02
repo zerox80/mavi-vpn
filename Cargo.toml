@@ -27,7 +27,7 @@ bincode = { package = "bincode-next", version = "3.0.0-rc.2", features = ["serde
 tracing = "0.1"
 time = "=0.3.36"
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
-rustls-pemfile = "2.0"
+rustls-pki-types = "1.10"
 ipnetwork = "0.21"
 etherparse = "0.20"
 dashmap = "6.1"
@@ -36,6 +36,8 @@ h3 = "0.0.8"
 h3-quinn = { version = "0.0.10", features = ["datagram"] }
 tempfile = "3"
 proptest = "1"
+dotenvy = "0.15"
+http = "1"
 
 [patch.crates-io]
 quinn = { git = "https://github.com/zerox80/quinn", branch = "main" }

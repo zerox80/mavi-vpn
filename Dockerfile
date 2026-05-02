@@ -11,6 +11,7 @@ RUN sed -i '/members = \[/,/\]/c\members = ["backend", "shared"]' Cargo.toml
 COPY shared/Cargo.toml ./shared/Cargo.toml
 COPY backend/Cargo.toml ./backend/Cargo.toml
 # Install git for Cargo to fetch git dependencies
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 # 2. Create Dummy Source to Cache Dependencies
@@ -44,6 +45,7 @@ FROM debian:trixie-slim
 WORKDIR /app
 
 # Install runtime dependencies for VPN/Networking
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iptables \
     iproute2 \

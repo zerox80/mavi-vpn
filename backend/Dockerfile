@@ -9,6 +9,7 @@ FROM debian:bookworm-slim
 WORKDIR /app
 
 # Install runtime dependencies for VPN/Networking
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iptables \
     iproute2 \

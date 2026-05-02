@@ -15,6 +15,7 @@ pub const LOCAL_IPC_ADDR: &str = "127.0.0.1:14433";
 
 /// Path to the authentication token file used to secure the local TCP IPC socket.
 #[cfg(windows)]
+#[must_use]
 pub fn ipc_token_path() -> std::path::PathBuf {
     std::path::PathBuf::from(r"C:\ProgramData\mavi-vpn\ipc.token")
 }
@@ -61,11 +62,12 @@ pub struct Config {
 impl Config {
     /// CR mode must look like HTTP/3 on the wire and therefore always uses
     /// CONNECT-IP/H3 framing internally as well.
-    pub fn effective_http3_framing(&self) -> bool {
+    #[must_use]
+    pub const fn effective_http3_framing(&self) -> bool {
         self.http3_framing || self.censorship_resistant
     }
 
-    pub fn normalize_transport(&mut self) -> bool {
+    pub const fn normalize_transport(&mut self) -> bool {
         let old_http3_framing = self.http3_framing;
         self.http3_framing = self.effective_http3_framing();
         self.http3_framing != old_http3_framing
@@ -81,7 +83,7 @@ pub enum IpcRequest {
     Stop,
     /// Query the current tunnel status.
     Status,
-    /// Remove stale MaviVPN routes and DNS/NRPT state without starting a tunnel.
+    /// Remove stale `MaviVPN` routes and DNS/NRPT state without starting a tunnel.
     RepairNetwork,
 }
 
@@ -107,7 +109,7 @@ pub struct SecureIpcRequest {
 }
 
 /// Responses sent from the background service back to the client UI.
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IpcResponse {
     /// Command accepted and executed successfully.
     Ok,

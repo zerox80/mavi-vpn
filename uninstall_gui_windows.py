@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Mavi VPN â€“ GUI Uninstaller (Windows)
 
@@ -14,7 +14,6 @@ Usage:
 import ctypes
 import os
 import sys
-import shutil
 import subprocess
 from pathlib import Path
 

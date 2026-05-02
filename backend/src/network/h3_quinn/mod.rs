@@ -33,7 +33,7 @@ use tracing::instrument;
 // Note: We don't use the h3-datagram crate integration here.
 // VPN datagrams are handled directly via quinn::Connection with Quarter Stream ID prefix.
 
-/// BoxStream with Sync trait
+/// `BoxStream` with Sync trait
 type BoxStreamSync<'a, T> = Pin<Box<dyn Stream<Item = T> + Sync + Send + 'a>>;
 
 /// A QUIC connection backed by Quinn
@@ -57,7 +57,7 @@ impl Connection {
             conn: conn.clone(),
             incoming_bi: incoming_bi_stream(conn.clone(), pre_bi),
             opening_bi: None,
-            incoming_uni: incoming_uni_stream(conn.clone(), pre_uni),
+            incoming_uni: incoming_uni_stream(conn, pre_uni),
             opening_uni: None,
         }
     }
@@ -153,12 +153,12 @@ fn convert_connection_error(e: quinn::ConnectionError) -> h3::quic::ConnectionEr
         }
         quinn::ConnectionError::TimedOut => ConnectionErrorIncoming::Timeout,
 
-        error @ quinn::ConnectionError::VersionMismatch
-        | error @ quinn::ConnectionError::Reset
-        | error @ quinn::ConnectionError::LocallyClosed
-        | error @ quinn::ConnectionError::CidsExhausted
-        | error @ quinn::ConnectionError::TransportError(_)
-        | error @ quinn::ConnectionError::ConnectionClosed(_) => {
+        error @ (quinn::ConnectionError::VersionMismatch
+        | quinn::ConnectionError::Reset
+        | quinn::ConnectionError::LocallyClosed
+        | quinn::ConnectionError::CidsExhausted
+        | quinn::ConnectionError::TransportError(_)
+        | quinn::ConnectionError::ConnectionClosed(_)) => {
             ConnectionErrorIncoming::Undefined(Arc::new(error))
         }
     }
@@ -332,7 +332,7 @@ impl<B: Buf> quic::RecvStream for BidiStream<B> {
     }
 
     fn stop_sending(&mut self, error_code: u64) {
-        self.recv.stop_sending(error_code)
+        self.recv.stop_sending(error_code);
     }
 
     fn recv_id(&self) -> StreamId {
@@ -353,7 +353,7 @@ where
     }
 
     fn reset(&mut self, reset_code: u64) {
-        self.send.reset(reset_code)
+        self.send.reset(reset_code);
     }
 
     fn send_data<D: Into<WriteBuf<B>>>(&mut self, data: D) -> Result<(), StreamErrorIncoming> {
@@ -417,8 +417,8 @@ impl quic::RecvStream for RecvStream {
             self.read_chunk_fut.set(async move {
                 let chunk = stream.read_chunk(usize::MAX, true).await;
                 (stream, chunk)
-            })
-        };
+            });
+        }
 
         let (mut stream, chunk) = ready!(self.read_chunk_fut.poll(cx));
         if let Some(error_code) = self.pending_stop.take() {
@@ -458,9 +458,10 @@ fn convert_read_error_to_stream_error(error: ReadError) -> StreamErrorIncoming {
                 connection_error: convert_connection_error(connection_error),
             }
         }
-        error @ ReadError::ClosedStream => StreamErrorIncoming::Unknown(Box::new(error)),
+        error @ (ReadError::ClosedStream | ReadError::ZeroRttRejected) => {
+            StreamErrorIncoming::Unknown(Box::new(error))
+        }
         ReadError::IllegalOrderedRead => panic!("h3-quinn only performs ordered reads"),
-        error @ ReadError::ZeroRttRejected => StreamErrorIncoming::Unknown(Box::new(error)),
     }
 }
 
@@ -474,7 +475,7 @@ fn convert_write_error_to_stream_error(error: quinn::WriteError) -> StreamErrorI
                 connection_error: convert_connection_error(connection_error),
             }
         }
-        error @ quinn::WriteError::ClosedStream | error @ quinn::WriteError::ZeroRttRejected => {
+        error @ (quinn::WriteError::ClosedStream | quinn::WriteError::ZeroRttRejected) => {
             StreamErrorIncoming::Unknown(Box::new(error))
         }
     }
@@ -492,7 +493,7 @@ impl<B> SendStream<B>
 where
     B: Buf,
 {
-    fn new(stream: quinn::SendStream) -> SendStream<B> {
+    const fn new(stream: quinn::SendStream) -> Self {
         Self {
             stream,
             writing: None,
@@ -573,10 +574,11 @@ where
         cx: &mut task::Context<'_>,
         buf: &mut D,
     ) -> Poll<Result<usize, StreamErrorIncoming>> {
-        if self.writing.is_some() {
-            // This signifies a bug in implementation
-            panic!("poll_send called while send stream is not ready")
-        }
+        // This signifies a bug in implementation
+        assert!(
+            self.writing.is_none(),
+            "poll_send called while send stream is not ready"
+        );
 
         let s = Pin::new(&mut self.stream);
 

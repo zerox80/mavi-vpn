@@ -223,7 +223,7 @@ StartupWMClass=mavi-vpn-gui
 """
 
 def install_icon():
-    """Kopiert das App-Icon ins hicolor-Theme (user-lokal), damit Icon=mavi-vpn-gui aufgelöst wird."""
+    """Copies the app icon to the hicolor theme (user-local) so that Icon=mavi-vpn-gui is resolved."""
     src = ROOT / "gui" / "src-tauri" / "icons" / "128x128.png"
     if not src.exists():
         return
@@ -233,15 +233,15 @@ def install_icon():
     icon_dir = Path.home() / ".local" / "share" / "icons" / "hicolor"
     if shutil.which("gtk-update-icon-cache"):
         subprocess.run(["gtk-update-icon-cache", "-f", "-t", str(icon_dir)], check=False)
-    ok("Icon installiert")
+    ok("Icon installed")
 
 def patch_system_desktop_entry():
-    """Ergänzt Categories/Keywords in der vom Paket installierten .desktop-Datei."""
+    """Updates Categories/Keywords in the .desktop file installed by the package."""
     import glob as _glob
     matches = _glob.glob("/usr/share/applications/*avi*VPN*.desktop") + \
               _glob.glob("/usr/share/applications/*mavi*.desktop")
     if not matches:
-        warn("Keine .desktop-Datei in /usr/share/applications gefunden – übersprungen.")
+        warn("No .desktop file found in /usr/share/applications – skipping.")
         return
     path = matches[0]
     try:
@@ -254,17 +254,17 @@ def patch_system_desktop_entry():
         if "StartupWMClass=" not in text:
             text += "StartupWMClass=mavi-vpn-gui\n"
         open(path, "w").write(text)
-        ok(f".desktop gepatcht: {path}")
+        ok(f".desktop patched: {path}")
     except Exception as e:
-        warn(f".desktop konnte nicht gepatcht werden: {e}")
+        warn(f".desktop could not be patched: {e}")
 
 def refresh_desktop_integration():
-    """Aktualisiert Icon-Cache und Desktop-Datenbank damit GNOME die App sofort findet."""
+    """Updates icon cache and desktop database so that GNOME finds the app immediately."""
     if shutil.which("gtk-update-icon-cache"):
         sudo("gtk-update-icon-cache", "-f", "-t", "/usr/share/icons/hicolor")
     if shutil.which("update-desktop-database"):
         sudo("update-desktop-database", "/usr/share/applications")
-    ok("Desktop-Integration aktualisiert")
+    ok("Desktop integration updated")
 
 def create_desktop_entry(exec_path: str):
     if not ask("Create .desktop entry (app menu shortcut)?"):
@@ -278,29 +278,29 @@ def create_desktop_entry(exec_path: str):
     ok(f".desktop entry: {dest}")
     if shutil.which("update-desktop-database"):
         subprocess.run(["update-desktop-database", str(desktop_dir)], check=False)
-    ok("GNOME-Suche aktualisiert")
+    ok("GNOME search updated")
 
 def ensure_daemon():
-    """Prüft ob Daemon installiert ist, bietet Installation + Start an."""
+    """Checks if the daemon is installed, offers installation + start."""
     step("VPN Daemon")
     if shutil.which("mavi-vpn"):
-        ok("mavi-vpn daemon binary gefunden")
+        ok("mavi-vpn daemon binary found")
     else:
-        warn("mavi-vpn daemon nicht gefunden – GUI zeigt 'Service Offline' ohne ihn.")
+        warn("mavi-vpn daemon not found – GUI will show 'Service Offline' without it.")
         cli_script = ROOT / "install_cli_linux.py"
-        if cli_script.exists() and ask("Daemon jetzt installieren (install_cli_linux.py)?"):
+        if cli_script.exists() and ask("Install daemon now (install_cli_linux.py)?"):
             run([sys.executable, str(cli_script)])
         else:
-            warn("Daemon manuell installieren: python install_cli_linux.py")
+            warn("Install daemon manually: python install_cli_linux.py")
             return
 
     if shutil.which("systemctl"):
         result = run_capture(["systemctl", "is-active", "mavi-vpn"])
         if result.stdout.strip() == "active":
-            ok("mavi-vpn.service läuft bereits")
-        elif ask("Daemon jetzt starten (sudo systemctl start mavi-vpn)?"):
+            ok("mavi-vpn.service is already running")
+        elif ask("Start daemon now (sudo systemctl start mavi-vpn)?"):
             sudo("systemctl", "start", "mavi-vpn")
-            ok("Daemon gestartet")
+            ok("Daemon started")
 
 def post_install_message(binary_path: str = "mavi-vpn-gui"):
     print()

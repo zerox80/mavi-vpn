@@ -2,10 +2,7 @@ use anyhow::{Context, Result};
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 /// Write `contents` to `path` with an owner-only (0o600) permission mask from
 /// the start, so the TLS private key never exists on disk with world- or
@@ -34,7 +31,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        fs::write(path, contents).with_context(|| format!("failed to write {:?}", path))?;
+        fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(())
 }
@@ -52,8 +49,8 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
 /// # Returns
 /// A tuple containing the certificate chain and the private key in `rustls` compatible formats.
 pub fn load_or_generate_certs(
-    cert_path: PathBuf,
-    key_path: PathBuf,
+    cert_path: &Path,
+    key_path: &Path,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     if cert_path.exists() && key_path.exists() {
         tracing::info!("Loading existing certificates from {:?}", cert_path);
@@ -85,26 +82,24 @@ pub fn load_or_generate_certs(
             }
         }
 
-        let cert_chain = fs::read(&cert_path).context("failed to read certificate chain")?;
-        let key = fs::read(&key_path).context("failed to read private key")?;
+        let cert_chain = fs::read(cert_path).context("failed to read certificate chain")?;
+        let key = fs::read(key_path).context("failed to read private key")?;
 
         // Parse PEM formatted certificates and keys
         let certs = rustls_pemfile::certs(&mut &cert_chain[..])
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let keys: Vec<PrivateKeyDer> = rustls_pemfile::pkcs8_private_keys(&mut &key[..])
+        let key = rustls_pemfile::pkcs8_private_keys(&mut &key[..])
             .collect::<std::result::Result<Vec<_>, _>>()?
             .into_iter()
             .map(PrivateKeyDer::Pkcs8)
-            .collect();
-
-        let key = keys
-            .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("No PKCS#8 private key found in {:?}", key_path))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("No PKCS#8 private key found in {}", key_path.display())
+            })?;
 
         // Calculate and log the SHA-256 fingerprint of the end-entity certificate
         if let Some(cert) = certs.first() {
-            write_cert_pin(&cert_path, cert)?;
+            write_cert_pin(cert_path, cert)?;
         }
 
         Ok((certs, key))
@@ -123,23 +118,23 @@ pub fn load_or_generate_certs(
         let cert_pem = cert.cert.pem();
         let key_pem = cert.signing_key.serialize_pem();
 
-        fs::write(&cert_path, &cert_pem).context("failed to write cert file")?;
-        write_private_file(&key_path, key_pem.as_bytes())?;
+        fs::write(cert_path, &cert_pem).context("failed to write cert file")?;
+        write_private_file(key_path, key_pem.as_bytes())?;
 
         // Re-parse the PEMs into rustls-internal DER formats
         let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let keys: Vec<PrivateKeyDer> = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
+        let key = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()?
             .into_iter()
             .map(PrivateKeyDer::Pkcs8)
-            .collect();
-        let key = keys.into_iter().next().ok_or_else(|| {
-            anyhow::anyhow!("No PKCS#8 private key found in generated certificate")
-        })?;
+            .next()
+            .ok_or_else(|| {
+                anyhow::anyhow!("No PKCS#8 private key found in generated certificate")
+            })?;
 
         if let Some(cert) = certs.first() {
-            write_cert_pin(&cert_path, cert)?;
+            write_cert_pin(cert_path, cert)?;
         }
 
         Ok((certs, key))
@@ -147,7 +142,8 @@ pub fn load_or_generate_certs(
 }
 
 /// Computes the SHA-256 fingerprint of the certificate and writes it to `cert_pin.txt`.
-fn write_cert_pin(cert_path: &std::path::Path, cert: &CertificateDer) -> Result<()> {
+#[allow(clippy::unnecessary_wraps)]
+fn write_cert_pin(cert_path: &std::path::Path, cert: &CertificateDer) -> anyhow::Result<()> {
     let mut hasher = Sha256::new();
     hasher.update(cert.as_ref());
     let hash = hasher.finalize();
@@ -181,7 +177,7 @@ mod tests {
         assert!(!cert_path.exists());
         assert!(!key_path.exists());
 
-        let (certs, _key) = load_or_generate_certs(cert_path.clone(), key_path.clone()).unwrap();
+        let (certs, _key) = load_or_generate_certs(&cert_path, &key_path).unwrap();
         assert!(!certs.is_empty());
         assert!(cert_path.exists());
         assert!(key_path.exists());
@@ -193,8 +189,8 @@ mod tests {
         let cert_path = dir.path().join("cert.pem");
         let key_path = dir.path().join("key.pem");
 
-        let (certs1, _key1) = load_or_generate_certs(cert_path.clone(), key_path.clone()).unwrap();
-        let (certs2, _key2) = load_or_generate_certs(cert_path, key_path).unwrap();
+        let (certs1, _key1) = load_or_generate_certs(&cert_path, &key_path).unwrap();
+        let (certs2, _key2) = load_or_generate_certs(&cert_path, &key_path).unwrap();
 
         assert_eq!(certs1.len(), certs2.len());
         assert_eq!(certs1[0].as_ref(), certs2[0].as_ref());
@@ -206,7 +202,7 @@ mod tests {
         let cert_path = dir.path().join("cert.pem");
         let key_path = dir.path().join("key.pem");
 
-        let _ = load_or_generate_certs(cert_path.clone(), key_path).unwrap();
+        let _ = load_or_generate_certs(&cert_path, &key_path).unwrap();
 
         let pin_path = dir.path().join("cert_pin.txt");
         assert!(pin_path.exists());
@@ -221,7 +217,7 @@ mod tests {
         let cert_path = dir.path().join("cert.pem");
         let key_path = dir.path().join("key.pem");
 
-        let _ = load_or_generate_certs(cert_path, key_path.clone()).unwrap();
+        let _ = load_or_generate_certs(&cert_path, &key_path).unwrap();
 
         #[cfg(unix)]
         {
@@ -240,7 +236,7 @@ mod tests {
         std::fs::write(&cert_path, "not a valid PEM").unwrap();
         std::fs::write(&key_path, "not a valid PEM").unwrap();
 
-        let result = load_or_generate_certs(cert_path, key_path);
+        let result = load_or_generate_certs(&cert_path, &key_path);
         assert!(result.is_err());
     }
 
@@ -250,7 +246,7 @@ mod tests {
         let cert_path = dir.path().join("cert.pem");
         let key_path = dir.path().join("key.pem");
 
-        let (certs, key) = load_or_generate_certs(cert_path, key_path).unwrap();
+        let (certs, key) = load_or_generate_certs(&cert_path, &key_path).unwrap();
         assert!(!certs.is_empty());
         // PrivateKeyDer should be non-empty
         assert!(!key.secret_der().is_empty());
@@ -262,10 +258,10 @@ mod tests {
         let dir2 = tempdir().unwrap();
 
         let (certs1, _) =
-            load_or_generate_certs(dir1.path().join("cert.pem"), dir1.path().join("key.pem"))
+            load_or_generate_certs(&dir1.path().join("cert.pem"), &dir1.path().join("key.pem"))
                 .unwrap();
         let (certs2, _) =
-            load_or_generate_certs(dir2.path().join("cert.pem"), dir2.path().join("key.pem"))
+            load_or_generate_certs(&dir2.path().join("cert.pem"), &dir2.path().join("key.pem"))
                 .unwrap();
 
         assert_ne!(certs1[0].as_ref(), certs2[0].as_ref());
@@ -279,7 +275,7 @@ mod tests {
         let cert_path = dir.path().join("cert.pem");
         let key_path = dir.path().join("key.pem");
 
-        let (certs, _) = load_or_generate_certs(cert_path, key_path).unwrap();
+        let (certs, _) = load_or_generate_certs(&cert_path, &key_path).unwrap();
         let cert = &certs[0];
 
         let mut hasher = Sha256::new();

@@ -2,6 +2,16 @@
 name = "mavi-vpn"
 version = "0.1.0"
 edition = "2021"
+description = "Mavi VPN Backend Service"
+license = "MIT"
+repository = "https://github.com/zerox80/mavi-vpn"
+readme = "../README.md"
+keywords = ["vpn", "quic", "privacy"]
+categories = ["network-programming"]
+
+
+[lints]
+workspace = true
 
 [dependencies]
 tokio = { workspace = true }
@@ -44,3 +54,4 @@ tempfile = { workspace = true }
 
 [features]
 tracing = []
+

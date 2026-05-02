@@ -2,6 +2,16 @@
 name = "shared"
 version = "0.1.0"
 edition = "2021"
+description = "Mavi VPN Shared Library"
+license = "MIT"
+repository = "https://github.com/zerox80/mavi-vpn"
+readme = "../README.md"
+keywords = ["vpn", "quic", "privacy"]
+categories = ["network-programming"]
+
+
+[lints]
+workspace = true
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -14,3 +24,4 @@ proptest = { workspace = true }
 
 [features]
 default = []
+

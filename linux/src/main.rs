@@ -1,3 +1,4 @@
+#![allow(clippy::multiple_crate_versions)]
 //! # Mavi VPN - Linux CLI Client
 //!
 //! A full-featured VPN client for Linux that uses QUIC transport.

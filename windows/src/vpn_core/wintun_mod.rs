@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::info;
 use wintun::Adapter;
 
-/// Embedded WinTUN driver binary.
+/// Embedded `WinTUN` driver binary.
 static WINTUN_DLL: &[u8] = include_bytes!("../../wintun.dll");
 
 /// Extracts the embedded `wintun.dll` to a temporary directory so it can be loaded.
@@ -20,7 +20,7 @@ pub fn extract_wintun_dll() -> Result<PathBuf> {
     Ok(dll_path)
 }
 
-/// Helper to ensure the "MaviVPN" adapter exists in Windows.
+/// Helper to ensure the "`MaviVPN`" adapter exists in Windows.
 pub fn get_or_create_adapter(wintun: &wintun::Wintun) -> Result<Arc<Adapter>> {
     if let Ok(adapter) = Adapter::open(wintun, "MaviVPN") {
         if let Ok(index) = adapter.get_adapter_index() {
@@ -41,7 +41,8 @@ pub fn get_or_create_adapter(wintun: &wintun::Wintun) -> Result<Arc<Adapter>> {
     Ok(adapter)
 }
 
-/// Checks if the WinTUN ring buffer is full.
+/// Checks if the `WinTUN` ring buffer is full.
+#[allow(clippy::cast_possible_wrap)]
 pub fn is_wintun_ring_full(err: &wintun::Error) -> bool {
     matches!(err, wintun::Error::Io(io_err) if io_err.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW as i32))
 }

@@ -2,14 +2,22 @@ name: Lint
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, linting ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, linting ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Dependency Audit: cargo-deny ─────────────────────────────────────────────
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   # ── Miscellaneous: Actionlint, Hadolint, Codespell, Ruff ─────────────────────
   misc-lint:
     name: Miscellaneous Lint
@@ -31,13 +39,30 @@ jobs:
       - name: Codespell
         uses: codespell-project/actions-codespell@v2
         with:
-          ignore_words_list: "wintun,tauri"
+          ignore_words_list: "wintun,tauri,Paket,unter,oder,als,manuell,ist,lokales,separater,Wege,Variante,startet,Klick,Manuell,Als,vEw"
           skip: "./.git,./target,./gui/node_modules,./android/app/build"
 
       - name: Ruff (Python)
         uses: astral-sh/ruff-action@v3
         with:
           args: "check ."
+
+      - name: File Length Check (Max 500 lines)
+        run: |
+          MAX_LINES=500
+          FOUND_TOO_LONG=0
+          while read -r file; do
+              lines=$(wc -l < "$file")
+              if [ "$lines" -gt "$MAX_LINES" ]; then
+                  echo "Error: $file has $lines lines (max $MAX_LINES allowed)"
+                  FOUND_TOO_LONG=1
+              fi
+          done < <(find . -type f \( -name "*.rs" -o -name "*.kt" -o -name "*.py" -o -name "*.ts" -o -name "*.tsx" -o -name "*.js" \) \
+              -not -path "*/target/*" -not -path "*/node_modules/*" -not -path "*/android/app/build/*" -not -path "*/.git/*")
+          if [ "$FOUND_TOO_LONG" -eq 1 ]; then
+              echo "Please split the above files into smaller modules."
+              exit 1
+          fi
 
   # ── Rust: cargo fmt + clippy (Matrix) ─────────────────────────────────────────
   rust-lint:

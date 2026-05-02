@@ -1,3 +1,4 @@
+#![allow(clippy::multiple_crate_versions)]
 mod connection;
 mod crypto;
 mod ech_client;

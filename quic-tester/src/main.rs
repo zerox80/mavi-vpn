@@ -1,3 +1,4 @@
+#![allow(clippy::multiple_crate_versions)]
 use quinn::{ClientConfig, Endpoint};
 use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -75,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     endpoint.set_default_client_config(client_config);
 
-    println!("Connecting to Mavi-VPN on {}", server_addr);
+    println!("Connecting to Mavi-VPN on {server_addr}");
 
     // 3. Establish connection
     let connection = endpoint.connect(server_addr, "localhost")?.await?;
@@ -98,18 +99,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match read_result {
         Ok(Ok(response)) => {
             let n = response.len();
-            println!("\nSERVER RESPONSE ({} Bytes):", n);
+            println!("\nSERVER RESPONSE ({n} Bytes):");
             println!("--------------------------------------------------");
 
             print!("Hex (Frames): ");
             for b in &response[..std::cmp::min(n, 20)] {
-                print!("{:02X} ", b);
+                print!("{b:02X} ");
             }
             println!("...");
 
             let text = String::from_utf8_lossy(&response);
             println!("\nText Extract:");
-            println!("{}", text);
+            println!("{text}");
             println!("--------------------------------------------------");
 
             if text.contains("nginx") {
@@ -117,12 +118,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Ok(Err(e)) => match e {
-            quinn::ReadToEndError::Read(quinn::ReadError::ConnectionLost(_))
-            | quinn::ReadToEndError::Read(quinn::ReadError::ClosedStream) => {
+            quinn::ReadToEndError::Read(
+                quinn::ReadError::ConnectionLost(_) | quinn::ReadError::ClosedStream,
+            ) => {
                 // If the stream dropped but we didn't read to end, fallback to a smaller read
                 println!("Stream Error (Connection dropped by server).");
             }
-            _ => println!("Stream Error: {:?}", e),
+            _ => println!("Stream Error: {e:?}"),
         },
         Err(_) => println!("Timeout"),
     }
@@ -144,7 +146,7 @@ mod tests {
             &[],
             &ServerName::try_from("example.com").unwrap(),
             &[],
-            UnixTime::since_unix_epoch(std::time::Duration::from_secs(1000000)),
+            UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_000_000)),
         );
         assert!(result.is_ok());
     }

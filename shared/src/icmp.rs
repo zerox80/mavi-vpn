@@ -247,9 +247,9 @@ mod tests {
                 etherparse::Icmpv4Type::DestinationUnreachable(
                     etherparse::icmpv4::DestUnreachableHeader::FragmentationNeeded { next_hop_mtu },
                 ) => assert_eq!(next_hop_mtu, 1400),
-                other => panic!("Expected FragmentationNeeded, got {:?}", other),
+                other => panic!("Expected FragmentationNeeded, got {other:?}"),
             },
-            other => panic!("Expected ICMPv4 transport, got {:?}", other),
+            other => panic!("Expected ICMPv4 transport, got {other:?}"),
         }
     }
 
@@ -267,9 +267,9 @@ mod tests {
                 etherparse::Icmpv6Type::PacketTooBig { mtu } => {
                     assert_eq!(mtu, 1400);
                 }
-                other => panic!("Expected PacketTooBig, got {:?}", other),
+                other => panic!("Expected PacketTooBig, got {other:?}"),
             },
-            other => panic!("Expected ICMPv6 transport, got {:?}", other),
+            other => panic!("Expected ICMPv6 transport, got {other:?}"),
         }
     }
 
@@ -285,9 +285,9 @@ mod tests {
                 etherparse::Icmpv4Type::DestinationUnreachable(
                     etherparse::icmpv4::DestUnreachableHeader::FragmentationNeeded { next_hop_mtu },
                 ) => assert_eq!(next_hop_mtu, 576),
-                other => panic!("Expected FragmentationNeeded, got {:?}", other),
+                other => panic!("Expected FragmentationNeeded, got {other:?}"),
             },
-            other => panic!("Expected ICMPv4 transport, got {:?}", other),
+            other => panic!("Expected ICMPv4 transport, got {other:?}"),
         }
     }
 

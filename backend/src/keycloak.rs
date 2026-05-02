@@ -56,6 +56,7 @@ impl KeycloakValidator {
         Ok(jwks)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn validate_token(&self, token: &str) -> Result<bool> {
         let header = decode_header(token).context("Invalid JWT header")?;
         let kid = header
@@ -69,8 +70,7 @@ impl KeycloakValidator {
             .read()
             .await
             .as_ref()
-            .map(|(j, _)| j.find(&kid).is_some())
-            .unwrap_or(false);
+            .is_some_and(|(j, _)| j.find(&kid).is_some());
 
         if !kid_found {
             let should_refresh = self
@@ -114,11 +114,11 @@ impl KeycloakValidator {
                     .filter_map(|k| k.common.key_id.as_ref())
                     .collect::<Vec<_>>()
             );
-            anyhow::anyhow!("JWK not found for kid: {}", kid)
+            anyhow::anyhow!("JWK not found for kid: {kid}")
         })?;
-
         let decoding_key =
             DecodingKey::from_jwk(jwk).context("Failed to create decoding key from JWK")?;
+        drop(cache_guard);
 
         let mut validation = Validation::new(Algorithm::RS256);
 
@@ -137,18 +137,17 @@ impl KeycloakValidator {
         match decode::<serde_json::Value>(token, &decoding_key, &validation) {
             Ok(token_data) => {
                 let claims = &token_data.claims;
+                #[allow(clippy::cast_possible_wrap)]
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .context("System clock is before Unix epoch")?
                     .as_secs() as i64;
+                #[allow(clippy::cast_possible_wrap)]
                 let leeway = validation.leeway as i64;
 
-                let exp = match claims.get("exp").and_then(json_number_as_i64) {
-                    Some(v) => v,
-                    None => {
-                        warn!("JWT missing 'exp' claim - rejecting token");
-                        return Ok(false);
-                    }
+                let Some(exp) = claims.get("exp").and_then(json_number_as_i64) else {
+                    warn!("JWT missing 'exp' claim - rejecting token");
+                    return Ok(false);
                 };
 
                 if now > exp + leeway {
@@ -163,12 +162,9 @@ impl KeycloakValidator {
                     }
                 }
 
-                let azp = match claims.get("azp").and_then(|v| v.as_str()) {
-                    Some(v) => v,
-                    None => {
-                        warn!("JWT missing 'azp' claim — rejecting token");
-                        return Ok(false);
-                    }
+                let Some(azp) = claims.get("azp").and_then(|v| v.as_str()) else {
+                    warn!("JWT missing 'azp' claim — rejecting token");
+                    return Ok(false);
                 };
 
                 // Strict check: Only accept tokens that were explicitly issued to THIS client ID.
@@ -192,7 +188,7 @@ impl KeycloakValidator {
                 // Return Err so callers can distinguish "token is invalid" (Ok(false))
                 // from "an error occurred during validation" (Err). Both reject the
                 // connection, but Err propagates the underlying reason up the call stack.
-                Err(anyhow::anyhow!("JWT decode error: {}", e))
+                Err(anyhow::anyhow!("JWT decode error: {e}"))
             }
         }
     }

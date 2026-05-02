@@ -1,3 +1,4 @@
+#![allow(clippy::multiple_crate_versions)]
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -10,14 +11,16 @@ pub mod masque;
 pub mod test_helpers;
 
 /// Fixed overhead budget (in bytes) reserved on top of the inner TUN MTU to
-/// cover QUIC short-header framing + AEAD tag + connection-ID bytes. The outer
-/// QUIC payload MTU is derived as `tun_mtu + QUIC_OVERHEAD_BYTES`, so the inner
-/// MTU remains the single knob operators turn. Server and client must agree on
-/// `tun_mtu`, otherwise the larger side will send packets the smaller side
-/// considers out-of-spec.
+/// cover QUIC short-header framing + AEAD tag + connection-ID bytes.
+///
+/// The outer QUIC payload MTU is derived as `tun_mtu + QUIC_OVERHEAD_BYTES`, so
+/// the inner MTU remains the single knob operators turn. Server and client
+/// must agree on `tun_mtu`, otherwise the larger side will send packets the
+/// smaller side considers out-of-spec.
 pub const QUIC_OVERHEAD_BYTES: u16 = 80;
 
 /// Default inner TUN MTU when the operator has not overridden `VPN_MTU`.
+///
 /// 1280 is the IPv6 minimum (RFC 8200) and is safe on every residential path
 /// we have measured. It yields a QUIC payload MTU of 1360, matching the
 /// pre-knob pinning.
@@ -36,18 +39,25 @@ pub enum TunMtuSource {
     Default,
 }
 
-/// Resolve the inner TUN MTU from an explicit config value, the `VPN_MTU`
-/// environment variable, or the compiled-in default (1280). The explicit
-/// `vpn_mtu` parameter takes highest priority; it must be within the
-/// 1280–1360 range. Invalid or out-of-range values are silently ignored and
-/// fall through to the next source.
+/// Resolve the inner TUN MTU from a config value, environment, or default.
+///
+/// The explicit `vpn_mtu` parameter takes highest priority; it must be within
+/// the 1280–1360 range. Invalid or out-of-range values are silently ignored
+/// and fall through to the next source.
 ///
 /// QUIC Payload MTU is always derived as `tun_mtu + QUIC_OVERHEAD_BYTES`
 /// (i.e. +80) and must never be set independently.
+#[must_use]
 pub fn resolve_tun_mtu(vpn_mtu: Option<u16>) -> u16 {
     resolve_tun_mtu_with_source(vpn_mtu).0
 }
 
+/// Resolve the inner TUN MTU and return the source of the value.
+///
+/// The explicit `vpn_mtu` parameter takes highest priority; it must be within
+/// the 1280–1360 range. Invalid or out-of-range values are silently ignored
+/// and fall through to the next source.
+#[must_use]
 pub fn resolve_tun_mtu_with_source(vpn_mtu: Option<u16>) -> (u16, TunMtuSource) {
     // 1. Explicit config field (highest priority)
     if let Some(v) = vpn_mtu {
@@ -142,7 +152,7 @@ mod tests {
         let decoded = roundtrip(&msg);
         match decoded {
             ControlMessage::Auth { token } => assert_eq!(token, "my-secret-token-123"),
-            other => panic!("Expected Auth, got {:?}", other),
+            other => panic!("Expected Auth, got {other:?}"),
         }
     }
 
@@ -194,7 +204,7 @@ mod tests {
                     Some(vec!["example.com".to_string(), "test.org".to_string()])
                 );
             }
-            other => panic!("Expected Config, got {:?}", other),
+            other => panic!("Expected Config, got {other:?}"),
         }
     }
 
@@ -228,7 +238,7 @@ mod tests {
                 assert!(dns_server_v6.is_none());
                 assert!(whitelist_domains.is_none());
             }
-            other => panic!("Expected Config, got {:?}", other),
+            other => panic!("Expected Config, got {other:?}"),
         }
     }
 
@@ -242,7 +252,7 @@ mod tests {
             ControlMessage::Error { message } => {
                 assert_eq!(message, "Access Denied: Invalid Token");
             }
-            other => panic!("Expected Error, got {:?}", other),
+            other => panic!("Expected Error, got {other:?}"),
         }
     }
 
@@ -271,12 +281,12 @@ mod tests {
     #[test]
     fn test_empty_token_roundtrip() {
         let msg = ControlMessage::Auth {
-            token: "".to_string(),
+            token: String::new(),
         };
         let decoded = roundtrip(&msg);
         match decoded {
             ControlMessage::Auth { token } => assert!(token.is_empty()),
-            other => panic!("Expected Auth, got {:?}", other),
+            other => panic!("Expected Auth, got {other:?}"),
         }
     }
 
@@ -301,19 +311,19 @@ mod tests {
             } => {
                 assert_eq!(whitelist_domains, Some(vec![]));
             }
-            other => panic!("Expected Config, got {:?}", other),
+            other => panic!("Expected Config, got {other:?}"),
         }
     }
 
     #[test]
     fn test_error_empty_message() {
         let msg = ControlMessage::Error {
-            message: "".to_string(),
+            message: String::new(),
         };
         let decoded = roundtrip(&msg);
         match decoded {
             ControlMessage::Error { message } => assert!(message.is_empty()),
-            other => panic!("Expected Error, got {:?}", other),
+            other => panic!("Expected Error, got {other:?}"),
         }
     }
 

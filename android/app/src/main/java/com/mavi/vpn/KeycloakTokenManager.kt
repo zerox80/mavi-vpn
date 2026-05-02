@@ -5,9 +5,18 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 sealed class TokenAcquireResult {
-    data class Usable(val accessToken: String, val refreshed: Boolean) : TokenAcquireResult()
-    data class TemporaryFailure(val message: String) : TokenAcquireResult()
-    data class NeedsLogin(val message: String) : TokenAcquireResult()
+    data class Usable(
+        val accessToken: String,
+        val refreshed: Boolean,
+    ) : TokenAcquireResult()
+
+    data class TemporaryFailure(
+        val message: String,
+    ) : TokenAcquireResult()
+
+    data class NeedsLogin(
+        val message: String,
+    ) : TokenAcquireResult()
 }
 
 interface KeycloakTokenStore {
@@ -19,7 +28,9 @@ interface KeycloakTokenStore {
     val clientId: String
 }
 
-class PrefsKeycloakTokenStore(private val prefs: PrefsManager) : KeycloakTokenStore {
+class PrefsKeycloakTokenStore(
+    private val prefs: PrefsManager,
+) : KeycloakTokenStore {
     override var accessToken: String
         get() = prefs.savedToken
         set(value) {
@@ -71,11 +82,10 @@ class KeycloakTokenManager(
         }
     }
 
-    suspend fun refreshAccessToken(): TokenAcquireResult {
-        return refreshMutex.withLock {
+    suspend fun refreshAccessToken(): TokenAcquireResult =
+        refreshMutex.withLock {
             refreshLocked()
         }
-    }
 
     private suspend fun refreshLocked(): TokenAcquireResult {
         val currentRefreshToken = store.refreshToken
@@ -88,7 +98,8 @@ class KeycloakTokenManager(
         }
 
         return when (
-            val refreshed = refresher(
+            val refreshed =
+                refresher(
                 currentRefreshToken,
                 store.keycloakUrl,
                 store.realm,

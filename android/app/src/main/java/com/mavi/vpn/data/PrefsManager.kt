@@ -3,7 +3,9 @@ package com.mavi.vpn.data
 import android.content.Context
 import android.content.SharedPreferences
 
-class PrefsManager(context: Context) {
+class PrefsManager(
+    context: Context,
+) {
     private val prefs: SharedPreferences = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
 
     var savedIp: String

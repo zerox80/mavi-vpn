@@ -107,19 +107,17 @@ mod tests {
 
     fn generate_test_certs() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
         use rcgen::generate_simple_self_signed;
-        use rustls::pki_types::PrivateKeyDer;
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
         let cert = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         let cert_pem = cert.cert.pem();
         let key_pem = cert.signing_key.serialize_pem();
 
-        let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        let certs = CertificateDer::pem_reader_iter(&mut cert_pem.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        let keys = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
-            .map(|res| res.map(PrivateKeyDer::Pkcs8))
-            .next()
-            .unwrap()
+        let keys = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
             .unwrap();
         (certs, keys)
     }

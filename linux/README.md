@@ -87,25 +87,33 @@ mavi-vpn status
 sudo install -m 755 target/release/mavi-vpn /usr/local/bin/mavi-vpn
 ```
 
-2. Service-Datei kopieren:
+2. Lokale Daemon-Steuerung erlauben:
+```bash
+sudo groupadd --system --force mavivpn
+sudo usermod -aG mavivpn $USER
+```
+
+Danach einmal abmelden und wieder anmelden. Mitglieder von `mavivpn` duerfen den Root-Daemon starten, stoppen, reparieren und den Status lesen.
+
+3. Service-Datei kopieren:
 ```bash
 sudo cp linux/mavi-vpn.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
-3. Service aktivieren und starten:
+4. Service aktivieren und starten:
 ```bash
 sudo systemctl enable mavi-vpn
 sudo systemctl start mavi-vpn
 ```
 
-4. Status prüfen:
+5. Status pruefen:
 ```bash
 systemctl status mavi-vpn
 journalctl -u mavi-vpn -f
 ```
 
-Sobald der Service läuft, kann die GUI oder CLI ohne `sudo` Verbindungen aufbauen und trennen.
+Sobald der Service laeuft, kann die GUI oder CLI fuer Benutzer in `mavivpn` ohne `sudo` Verbindungen aufbauen und trennen.
 
 ---
 

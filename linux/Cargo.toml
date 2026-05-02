@@ -43,7 +43,7 @@ base64 = "0.22"
 constant_time_eq = "0.5"
 url = "2.5"
 libc = "0.2"
-nix = { version = "0.31", features = ["ioctl", "net", "fs"] }
+nix = { version = "0.31", features = ["ioctl", "net", "fs", "user"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -59,7 +59,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun SettingsScreen(
     viewModel: VpnViewModel,
-    onBack: (String, String, Boolean, Boolean, Int) -> Unit
+    onBack: (String, String, Boolean, Boolean, Int) -> Unit,
 ) {
     val context = LocalContext.current
     

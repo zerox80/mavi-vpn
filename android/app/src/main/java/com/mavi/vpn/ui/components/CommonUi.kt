@@ -10,8 +10,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 
 @Composable
 fun MaviTextField(
@@ -21,7 +21,8 @@ fun MaviTextField(
     modifier: Modifier = Modifier,
     placeholder: String = "",
     singleLine: Boolean = true,
-    visualTransformation: androidx.compose.ui.text.input.VisualTransformation = androidx.compose.ui.text.input.VisualTransformation.None
+    visualTransformation: androidx.compose.ui.text.input.VisualTransformation =
+        androidx.compose.ui.text.input.VisualTransformation.None,
 ) {
     OutlinedTextField(
         value = value,
@@ -35,8 +36,8 @@ fun MaviTextField(
             focusedBorderColor = Color(0xFF007AFF),
             unfocusedBorderColor = Color.DarkGray,
             focusedTextColor = Color.White,
-            unfocusedTextColor = Color.White
-        )
+            unfocusedTextColor = Color.White,
+        ),
     )
 }
 

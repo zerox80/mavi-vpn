@@ -60,7 +60,7 @@ fun VpnScreen(
     viewModel: VpnViewModel,
     onConnect: (String, String, String, String) -> Unit,
     onDisconnect: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
 ) {
     val context = LocalContext.current
     val isConnected by viewModel.isConnected.collectAsState()
@@ -99,14 +99,15 @@ fun VpnScreen(
                 .padding(bottom = 88.dp)
         ) {
             when (currentTab) {
-                "home" -> HomeView(
-                    viewModel = viewModel,
-                    isConnected = isConnected,
-                    onConnect = onConnect,
-                    onDisconnect = onDisconnect,
-                    onOpenSettings = onOpenSettings,
-                    onGoToConfig = { currentTab = "config" }
-                )
+                "home" ->
+                    HomeView(
+                        viewModel = viewModel,
+                        isConnected = isConnected,
+                        onConnect = onConnect,
+                        onDisconnect = onDisconnect,
+                        onOpenSettings = onOpenSettings,
+                        onGoToConfig = { currentTab = "config" },
+                    )
                 "config" -> ConfigView(
                     viewModel = viewModel,
                     context = context,
@@ -173,7 +174,7 @@ fun HomeView(
     onConnect: (String, String, String, String) -> Unit,
     onDisconnect: () -> Unit,
     onOpenSettings: () -> Unit,
-    onGoToConfig: () -> Unit
+    onGoToConfig: () -> Unit,
 ) {
     val T = MaviTheme.colors
     val serverIp by viewModel.serverIp.collectAsState()
@@ -342,7 +343,7 @@ fun HomeView(
 fun ConfigView(
     viewModel: VpnViewModel,
     context: Context,
-    isConnected: Boolean
+    isConnected: Boolean,
 ) {
     val T = MaviTheme.colors
     val serverIp by viewModel.serverIp.collectAsState()

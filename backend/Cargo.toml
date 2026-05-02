@@ -17,11 +17,12 @@ workspace = true
 tokio = { workspace = true }
 quinn = { workspace = true, default-features = false, features = ["rustls"] }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
+
 rcgen = { workspace = true }
 tun = { version = "0.8", features = ["async"] }
 anyhow = { workspace = true }
-dotenv = "0.15"
+dotenvy = { workspace = true }
 http = "1"
 h3 = { workspace = true }
 h3-quinn = { workspace = true }

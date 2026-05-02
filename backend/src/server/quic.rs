@@ -117,8 +117,7 @@ mod tests {
         let certs = CertificateDer::pem_reader_iter(&mut cert_pem.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        let keys = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
-            .unwrap();
+        let keys = PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).unwrap();
         (certs, keys)
     }
 

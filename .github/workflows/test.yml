@@ -53,6 +53,45 @@ jobs:
       - name: Test GUI backend
         run: cargo test -p mavi-vpn-gui --verbose
 
+  coverage-rust:
+    name: Rust Coverage
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-
+            ${{ runner.os }}-cargo-
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            cmake \
+            pkg-config \
+            libglib2.0-dev \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
+            libxdo-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - name: Generate Rust coverage summary
+        run: cargo llvm-cov --all-features -p shared -p mavivpn -p mavi-vpn -p linux-vpn -p quic-tester -p mavi-vpn-gui --summary-only
+
   test-windows:
     name: Windows Unit Tests
     runs-on: windows-latest
@@ -93,3 +132,5 @@ jobs:
         run: npm ci
       - name: Run frontend tests
         run: npm test
+      - name: Run frontend coverage
+        run: npm run test:coverage

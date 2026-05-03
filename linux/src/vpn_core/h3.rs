@@ -89,17 +89,9 @@ pub(super) async fn connect_and_handshake_h3(
             anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule");
         }
 
-        while let Some(parts) = masque::read_capsule(&capsule_buf) {
-            let (ctype, payload, consumed) = (parts.0, parts.1.to_vec(), parts.2);
-            capsule_buf.drain(..consumed);
-            if ctype == CAPSULE_MAVI_CONFIG {
-                config = Some(
-                    bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-                        .map(|(v, _)| v)
-                        .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {}", e))?,
-                );
-                break 'read;
-            }
+        if let Some(cfg) = drain_mavi_config_capsule(&mut capsule_buf)? {
+            config = Some(cfg);
+            break 'read;
         }
 
         let chunk = match tokio::time::timeout(remaining, stream.recv_data()).await {
@@ -110,13 +102,7 @@ pub(super) async fn connect_and_handshake_h3(
             Ok(Err(e)) => anyhow::bail!("H3 recv_data failed: {}", e),
             Err(_) => anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule"),
         };
-        capsule_buf.extend_from_slice(chunk.chunk());
-        if capsule_buf.len() > masque::MAX_CAPSULE_BUF {
-            anyhow::bail!(
-                "connect-ip capsule buffer exceeded {} bytes",
-                masque::MAX_CAPSULE_BUF
-            );
-        }
+        append_capsule_chunk(&mut capsule_buf, chunk.chunk())?;
     }
 
     let config =
@@ -129,4 +115,77 @@ pub(super) async fn connect_and_handshake_h3(
             drive_handle,
         },
     ))
+}
+
+fn drain_mavi_config_capsule(capsule_buf: &mut Vec<u8>) -> Result<Option<ControlMessage>> {
+    while let Some(parts) = masque::read_capsule(capsule_buf) {
+        let (ctype, payload, consumed) = (parts.0, parts.1.to_vec(), parts.2);
+        capsule_buf.drain(..consumed);
+        if ctype == CAPSULE_MAVI_CONFIG {
+            return bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+                .map(|(v, _)| Some(v))
+                .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {}", e));
+        }
+    }
+    Ok(None)
+}
+
+fn append_capsule_chunk(capsule_buf: &mut Vec<u8>, chunk: &[u8]) -> Result<()> {
+    capsule_buf.extend_from_slice(chunk);
+    if capsule_buf.len() > masque::MAX_CAPSULE_BUF {
+        anyhow::bail!(
+            "connect-ip capsule buffer exceeded {} bytes",
+            masque::MAX_CAPSULE_BUF
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn config_message() -> ControlMessage {
+        ControlMessage::Config {
+            assigned_ip: Ipv4Addr::new(10, 8, 0, 2),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Ipv4Addr::new(10, 8, 0, 1),
+            dns_server: Ipv4Addr::new(1, 1, 1, 1),
+            mtu: 1280,
+            assigned_ipv6: None,
+            netmask_v6: None,
+            gateway_v6: None,
+            dns_server_v6: None,
+            whitelist_domains: None,
+        }
+    }
+
+    #[test]
+    fn capsule_parser_ignores_non_mavi_until_config_arrives() {
+        let cfg = config_message();
+        let payload = bincode::serde::encode_to_vec(&cfg, bincode::config::standard()).unwrap();
+        let mut buf = Vec::new();
+        masque::encode_capsule(masque::CAPSULE_ADDRESS_ASSIGN, &[0], &mut buf);
+        masque::encode_capsule(CAPSULE_MAVI_CONFIG, &payload, &mut buf);
+
+        let parsed = drain_mavi_config_capsule(&mut buf).unwrap().unwrap();
+
+        assert!(matches!(parsed, ControlMessage::Config { mtu: 1280, .. }));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn capsule_parser_waits_for_complete_capsule() {
+        let mut buf = vec![CAPSULE_MAVI_CONFIG as u8];
+
+        assert!(drain_mavi_config_capsule(&mut buf).unwrap().is_none());
+        assert_eq!(buf, vec![CAPSULE_MAVI_CONFIG as u8]);
+    }
+
+    #[test]
+    fn capsule_buffer_limit_is_enforced() {
+        let mut buf = vec![0u8; masque::MAX_CAPSULE_BUF];
+        assert!(append_capsule_chunk(&mut buf, &[0]).is_err());
+    }
 }

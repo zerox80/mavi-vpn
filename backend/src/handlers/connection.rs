@@ -27,6 +27,76 @@ enum InitialStreams {
     },
 }
 
+const RAW_AUTH_MAX_BYTES: usize = 16_384;
+
+fn validate_raw_auth_len(len: usize) -> Result<()> {
+    if len > RAW_AUTH_MAX_BYTES {
+        anyhow::bail!("Auth message too big");
+    }
+    Ok(())
+}
+
+fn decode_raw_auth_payload(buf: &[u8]) -> Result<String> {
+    let msg: ControlMessage =
+        bincode::serde::decode_from_slice(buf, bincode::config::standard())
+            .map(|(v, _)| v)
+            .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
+
+    match msg {
+        ControlMessage::Auth { token } => Ok(token),
+        _ => anyhow::bail!("Protocol error: Expected Auth"),
+    }
+}
+
+fn encode_control_message_frame(msg: &ControlMessage) -> Result<Vec<u8>> {
+    let encoded = bincode::serde::encode_to_vec(msg, bincode::config::standard())?;
+    let mut framed = Vec::with_capacity(4 + encoded.len());
+    framed.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+    framed.extend_from_slice(&encoded);
+    Ok(framed)
+}
+
+fn unauthorized_control_message(error: &anyhow::Error) -> ControlMessage {
+    ControlMessage::Error {
+        message: format!("Unauthorized: {error}"),
+    }
+}
+
+pub(super) fn build_config_message(
+    state: &AppState,
+    config: &Config,
+    assigned_ip: std::net::Ipv4Addr,
+    assigned_ip6: std::net::Ipv6Addr,
+    ipv6_enabled: bool,
+) -> ControlMessage {
+    ControlMessage::Config {
+        assigned_ip,
+        netmask: state.network.mask(),
+        gateway: state.gateway_ip(),
+        dns_server: config.dns,
+        mtu: config.mtu,
+        assigned_ipv6: if ipv6_enabled {
+            Some(assigned_ip6)
+        } else {
+            None
+        },
+        netmask_v6: if ipv6_enabled { Some(64) } else { None },
+        gateway_v6: if ipv6_enabled {
+            Some(state.gateway_ip_v6())
+        } else {
+            None
+        },
+        dns_server_v6: if ipv6_enabled {
+            Some(config.dns_v6.unwrap_or_else(|| {
+                std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
+            }))
+        } else {
+            None
+        },
+        whitelist_domains: Some(config.whitelist_domains.clone()),
+    }
+}
+
 async fn detect_initial_streams(connection: &quinn::Connection) -> Result<InitialStreams> {
     match negotiated_alpn(connection).as_deref() {
         // ALPN is the authoritative protocol signal. If the peer negotiated h3,
@@ -134,9 +204,7 @@ pub async fn handle_connection(
     let auth_result = async {
         let buf = tokio::time::timeout(Duration::from_secs(5), async {
             let len = recv_stream.read_u32_le().await? as usize;
-            if len > 16384 {
-                anyhow::bail!("Auth message too big");
-            }
+            validate_raw_auth_len(len)?;
 
             let mut buf = vec![0u8; len];
             recv_stream.read_exact(&mut buf).await?;
@@ -145,25 +213,16 @@ pub async fn handle_connection(
         .await
         .map_err(|_| anyhow::anyhow!("Handshake timeout"))??;
 
-        let msg: ControlMessage =
-            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-                .map(|(v, _)| v)
-                .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
-
-        match msg {
-            ControlMessage::Auth { token } => {
-                authenticate_client(
-                    &token,
-                    &state,
-                    &config,
-                    keycloak
-                        .as_deref()
-                        .map(|kc| kc as &dyn crate::handlers::auth::TokenValidator),
-                )
-                .await
-            }
-            _ => anyhow::bail!("Protocol error: Expected Auth"),
-        }
+        let token = decode_raw_auth_payload(&buf)?;
+        authenticate_client(
+            &token,
+            &state,
+            &config,
+            keycloak
+                .as_deref()
+                .map(|kc| kc as &dyn crate::handlers::auth::TokenValidator),
+        )
+        .await
     }
     .await;
 
@@ -179,14 +238,9 @@ pub async fn handle_connection(
                 let _ = emulate_http3(&connection, &mut send_stream).await;
                 return Err(anyhow::anyhow!("HTTP/3 probe response sent: {e}"));
             }
-            let err_payload = ControlMessage::Error {
-                message: error_msg.clone(),
-            };
-            if let Ok(encoded) =
-                bincode::serde::encode_to_vec(&err_payload, bincode::config::standard())
-            {
-                let _ = send_stream.write_u32_le(encoded.len() as u32).await;
-                let _ = send_stream.write_all(&encoded).await;
+            let err_payload = unauthorized_control_message(&e);
+            if let Ok(framed) = encode_control_message_frame(&err_payload) {
+                let _ = send_stream.write_all(&framed).await;
                 let _ = send_stream.finish();
             }
             return Err(anyhow::anyhow!("{error_msg}"));
@@ -199,35 +253,8 @@ pub async fn handle_connection(
         ip6: assigned_ip6,
     };
 
-    let success_msg = ControlMessage::Config {
-        assigned_ip,
-        netmask: state.network.mask(),
-        gateway: state.gateway_ip(),
-        dns_server: config.dns,
-        mtu: config.mtu,
-        assigned_ipv6: if ipv6_enabled {
-            Some(assigned_ip6)
-        } else {
-            None
-        },
-        netmask_v6: if ipv6_enabled { Some(64) } else { None },
-        gateway_v6: if ipv6_enabled {
-            Some(state.gateway_ip_v6())
-        } else {
-            None
-        },
-        dns_server_v6: if ipv6_enabled {
-            Some(config.dns_v6.unwrap_or_else(|| {
-                std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
-            }))
-        } else {
-            None
-        },
-        whitelist_domains: Some(config.whitelist_domains.clone()),
-    };
-
-    let bytes = bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
-    send_stream.write_u32_le(bytes.len() as u32).await?;
+    let success_msg = build_config_message(&state, &config, assigned_ip, assigned_ip6, ipv6_enabled);
+    let bytes = encode_control_message_frame(&success_msg)?;
     send_stream.write_all(&bytes).await?;
     let _ = send_stream.finish();
 
@@ -275,4 +302,152 @@ pub async fn handle_connection(
         false, // is_h3
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn test_config() -> Config {
+        Config::parse_from([
+            "mavi-vpn",
+            "--auth-token",
+            "secret",
+            "--dns",
+            "9.9.9.9",
+            "--dns-v6",
+            "2001:4860:4860::8888",
+            "--whitelist-domains",
+            "example.com,internal.test",
+            "--mtu",
+            "1340",
+        ])
+    }
+
+    fn encode_message(msg: &ControlMessage) -> Vec<u8> {
+        bincode::serde::encode_to_vec(msg, bincode::config::standard()).unwrap()
+    }
+
+    #[test]
+    fn raw_auth_len_accepts_boundary_and_rejects_oversize() {
+        assert!(validate_raw_auth_len(RAW_AUTH_MAX_BYTES).is_ok());
+        assert!(validate_raw_auth_len(RAW_AUTH_MAX_BYTES + 1)
+            .unwrap_err()
+            .to_string()
+            .contains("too big"));
+    }
+
+    #[test]
+    fn raw_auth_payload_extracts_token() {
+        let payload = encode_message(&ControlMessage::Auth {
+            token: "token-123".to_string(),
+        });
+
+        assert_eq!(decode_raw_auth_payload(&payload).unwrap(), "token-123");
+    }
+
+    #[test]
+    fn raw_auth_payload_rejects_non_auth_and_malformed() {
+        let payload = encode_message(&ControlMessage::Error {
+            message: "nope".to_string(),
+        });
+        assert!(decode_raw_auth_payload(&payload)
+            .unwrap_err()
+            .to_string()
+            .contains("Expected Auth"));
+
+        assert!(decode_raw_auth_payload(&[0xde, 0xad, 0xbe, 0xef])
+            .unwrap_err()
+            .to_string()
+            .contains("Protocol error"));
+    }
+
+    #[test]
+    fn unauthorized_response_frame_contains_error_message() {
+        let err = anyhow::anyhow!("Access Denied: Invalid Token");
+        let framed = encode_control_message_frame(&unauthorized_control_message(&err)).unwrap();
+        let len = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;
+        assert_eq!(len, framed.len() - 4);
+
+        let (decoded, _): (ControlMessage, _) =
+            bincode::serde::decode_from_slice(&framed[4..], bincode::config::standard()).unwrap();
+        match decoded {
+            ControlMessage::Error { message } => {
+                assert_eq!(message, "Unauthorized: Access Denied: Invalid Token");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_message_omits_ipv6_when_disabled() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let config = test_config();
+        let msg = build_config_message(
+            &state,
+            &config,
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+            false,
+        );
+
+        match msg {
+            ControlMessage::Config {
+                assigned_ipv6,
+                netmask_v6,
+                gateway_v6,
+                dns_server_v6,
+                whitelist_domains,
+                mtu,
+                ..
+            } => {
+                assert_eq!(mtu, 1340);
+                assert!(assigned_ipv6.is_none());
+                assert!(netmask_v6.is_none());
+                assert!(gateway_v6.is_none());
+                assert!(dns_server_v6.is_none());
+                assert_eq!(
+                    whitelist_domains,
+                    Some(vec!["example.com".to_string(), "internal.test".to_string()])
+                );
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_message_includes_ipv6_and_default_dns_v6() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let mut config = test_config();
+        config.dns_v6 = None;
+        let assigned_ip6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let msg = build_config_message(
+            &state,
+            &config,
+            Ipv4Addr::new(10, 8, 0, 2),
+            assigned_ip6,
+            true,
+        );
+
+        match msg {
+            ControlMessage::Config {
+                assigned_ipv6,
+                netmask_v6,
+                gateway_v6,
+                dns_server_v6,
+                ..
+            } => {
+                assert_eq!(assigned_ipv6, Some(assigned_ip6));
+                assert_eq!(netmask_v6, Some(64));
+                assert_eq!(gateway_v6, Some(state.gateway_ip_v6()));
+                assert_eq!(
+                    dns_server_v6,
+                    Some(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111))
+                );
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
 }

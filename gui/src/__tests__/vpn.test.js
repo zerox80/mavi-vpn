@@ -31,6 +31,7 @@ describe('applyStatus', () => {
       <div id="net-endpoint"></div>
       <div id="net-ip"></div>
       <div id="net-service"></div>
+      <div id="toast"></div>
     `;
   });
 
@@ -60,5 +61,38 @@ describe('applyStatus', () => {
     applyStatus({ service_available: true, state: 'Failed', last_error: 'Auth failed' });
     expect(state.hero).toBe('off');
     expect(state.sessionStart).toBeNull();
+    expect(document.getElementById('toast').textContent).toBe('Auth failed');
+  });
+
+  it('handles missing active connection by disabling connect', () => {
+    state.prefs.active_id = 'missing';
+    state.prefs.connections = [];
+
+    applyStatus({ service_available: true, running: false, state: 'Stopped' });
+
+    expect(document.getElementById('connect-btn').disabled).toBe(true);
+    expect(document.getElementById('connect-btn').title).toBe('Select or add a saved connection first');
+    expect(document.getElementById('hero-title').textContent).toBe('No node selected');
+  });
+
+  it('service offline clears disconnecting state', () => {
+    state.disconnecting = true;
+    state.hero = 'disconnecting';
+
+    applyStatus({ service_available: false, running: false, state: 'Stopping' });
+
+    expect(state.disconnecting).toBe(false);
+    expect(state.hero).toBe('off');
+    expect(document.getElementById('connect-btn').disabled).toBe(true);
+  });
+
+  it('failed state without last_error leaves toast untouched', () => {
+    const toast = document.getElementById('toast');
+    toast.textContent = '';
+
+    applyStatus({ service_available: true, state: 'Failed' });
+
+    expect(state.lastError).toBeNull();
+    expect(toast.textContent).toBe('');
   });
 });

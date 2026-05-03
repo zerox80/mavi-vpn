@@ -54,17 +54,23 @@ struct DaemonState {
     active_config: Option<Config>,
 }
 
+impl DaemonState {
+    fn new() -> Self {
+        Self {
+            vpn_running: Arc::new(AtomicBool::new(false)),
+            vpn_connected: Arc::new(AtomicBool::new(false)),
+            vpn_stopping: Arc::new(AtomicBool::new(false)),
+            last_error: Arc::new(StdMutex::new(None)),
+            assigned_ip: Arc::new(StdMutex::new(None)),
+            vpn_task: None,
+            active_config: None,
+        }
+    }
+}
+
 /// Runs the IPC daemon loop. Accepts commands from CLI/GUI clients.
 pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
-    let state = Arc::new(Mutex::new(DaemonState {
-        vpn_running: Arc::new(AtomicBool::new(false)),
-        vpn_connected: Arc::new(AtomicBool::new(false)),
-        vpn_stopping: Arc::new(AtomicBool::new(false)),
-        last_error: Arc::new(StdMutex::new(None)),
-        assigned_ip: Arc::new(StdMutex::new(None)),
-        vpn_task: None,
-        active_config: None,
-    }));
+    let state = Arc::new(Mutex::new(DaemonState::new()));
 
     let token_bytes: [u8; 32] = rand::random();
     let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
@@ -243,6 +249,15 @@ async fn handle_ipc_client(
 }
 
 async fn dispatch_request(req: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> IpcResponse {
+    dispatch_request_with_hooks(req, state, true, crate::network::cleanup_stale_network_state).await
+}
+
+async fn dispatch_request_with_hooks(
+    req: IpcRequest,
+    state: &Arc<Mutex<DaemonState>>,
+    spawn_vpn_session: bool,
+    cleanup_stale_network_state: fn(),
+) -> IpcResponse {
     let mut guard = state.lock().await;
     match req {
         IpcRequest::Status => {
@@ -300,7 +315,7 @@ async fn dispatch_request(req: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> I
             }
             guard.active_config = None;
             drop(guard);
-            crate::network::cleanup_stale_network_state();
+            cleanup_stale_network_state();
             IpcResponse::Ok
         }
         IpcRequest::Start(config) => {
@@ -319,35 +334,37 @@ async fn dispatch_request(req: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> I
                 if let Ok(mut last) = guard.last_error.lock() {
                     *last = None;
                 }
-                let flag = guard.vpn_running.clone();
-                let connected = guard.vpn_connected.clone();
-                let stopping = guard.vpn_stopping.clone();
-                let last_error = guard.last_error.clone();
-                let assigned_ip = guard.assigned_ip.clone();
+                if spawn_vpn_session {
+                    let flag = guard.vpn_running.clone();
+                    let connected = guard.vpn_connected.clone();
+                    let stopping = guard.vpn_stopping.clone();
+                    let last_error = guard.last_error.clone();
+                    let assigned_ip = guard.assigned_ip.clone();
 
-                guard.vpn_task = Some(tokio::spawn(async move {
-                    if let Err(e) = crate::vpn_core::run_vpn(
-                        config,
-                        flag.clone(),
-                        connected.clone(),
-                        last_error.clone(),
-                        assigned_ip.clone(),
-                    )
-                    .await
-                    {
-                        let msg = e.to_string();
-                        error!("VPN task failed: {}", msg);
-                        if flag.load(Ordering::SeqCst) {
-                            if let Ok(mut last) = last_error.lock() {
-                                *last = Some(msg);
+                    guard.vpn_task = Some(tokio::spawn(async move {
+                        if let Err(e) = crate::vpn_core::run_vpn(
+                            config,
+                            flag.clone(),
+                            connected.clone(),
+                            last_error.clone(),
+                            assigned_ip.clone(),
+                        )
+                        .await
+                        {
+                            let msg = e.to_string();
+                            error!("VPN task failed: {}", msg);
+                            if flag.load(Ordering::SeqCst) {
+                                if let Ok(mut last) = last_error.lock() {
+                                    *last = Some(msg);
+                                }
                             }
                         }
-                    }
-                    crate::network::cleanup_stale_network_state();
-                    flag.store(false, Ordering::SeqCst);
-                    connected.store(false, Ordering::SeqCst);
-                    stopping.store(false, Ordering::SeqCst);
-                }));
+                        cleanup_stale_network_state();
+                        flag.store(false, Ordering::SeqCst);
+                        connected.store(false, Ordering::SeqCst);
+                        stopping.store(false, Ordering::SeqCst);
+                    }));
+                }
                 IpcResponse::Ok
             }
         }
@@ -405,42 +422,4 @@ fn ipc_token_read_error(token_path: &Path, error: io::Error) -> anyhow::Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    fn ipc_token_modes_are_not_world_readable() {
-        assert_eq!(IpcTokenAccess::RootOnly.mode(), 0o600);
-        assert_eq!(IpcTokenAccess::Group(Gid::from_raw(123)).mode(), 0o640);
-        assert_eq!(IpcTokenAccess::RootOnly.mode() & 0o007, 0);
-        assert_eq!(IpcTokenAccess::Group(Gid::from_raw(123)).mode() & 0o007, 0);
-    }
-
-    #[test]
-    fn root_only_token_file_is_created_with_0600() {
-        let dir = tempdir().unwrap();
-        let token_path = dir.path().join("mavi-vpn.token");
-
-        write_ipc_token_with_access(&token_path, "secret", IpcTokenAccess::RootOnly).unwrap();
-
-        let metadata = fs::metadata(&token_path).unwrap();
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-        assert_eq!(fs::read_to_string(&token_path).unwrap(), "secret");
-    }
-
-    #[test]
-    fn existing_token_is_replaced_without_world_readable_bits() {
-        let dir = tempdir().unwrap();
-        let token_path = dir.path().join("mavi-vpn.token");
-        fs::write(&token_path, "old").unwrap();
-        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o644)).unwrap();
-
-        write_ipc_token_with_access(&token_path, "new", IpcTokenAccess::RootOnly).unwrap();
-
-        let metadata = fs::metadata(&token_path).unwrap();
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-        assert_eq!(fs::read_to_string(&token_path).unwrap(), "new");
-    }
-}
+mod tests;

@@ -13,10 +13,80 @@ use shared::ControlMessage;
 
 use crate::config::Config;
 use crate::handlers::auth::authenticate_client;
+use crate::handlers::connection::build_config_message;
 use crate::handlers::tunnel::run_tunnel;
 use crate::handlers::utils::{prefix_len_from_mask, IpGuard};
 use crate::keycloak::KeycloakValidator;
 use crate::state::AppState;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonConnectIpResponse {
+    CamouflageOk,
+    NotFound,
+}
+
+fn non_connect_ip_response(censorship_resistant: bool) -> NonConnectIpResponse {
+    if censorship_resistant {
+        NonConnectIpResponse::CamouflageOk
+    } else {
+        NonConnectIpResponse::NotFound
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_connect_ip_capsules(
+    state: &AppState,
+    config: &Config,
+    assigned_ip: std::net::Ipv4Addr,
+    assigned_ip6: std::net::Ipv6Addr,
+    ipv6_enabled: bool,
+) -> Result<Vec<u8>> {
+    let success_msg = build_config_message(state, config, assigned_ip, assigned_ip6, ipv6_enabled);
+
+    let mut capsule_stream: Vec<u8> = Vec::with_capacity(256);
+
+    let mut address_assigns = vec![AssignedAddress {
+        request_id: 0,
+        ip: IpAddr::V4(assigned_ip),
+        prefix_len: prefix_len_from_mask(state.network.mask()),
+    }];
+    if ipv6_enabled {
+        address_assigns.push(AssignedAddress {
+            request_id: 0,
+            ip: IpAddr::V6(assigned_ip6),
+            prefix_len: 64,
+        });
+    }
+    masque::encode_capsule(
+        CAPSULE_ADDRESS_ASSIGN,
+        &masque::encode_address_assign(&address_assigns),
+        &mut capsule_stream,
+    );
+
+    let mut routes = vec![IpAddressRange {
+        start: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        end: IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
+        ip_protocol: 0,
+    }];
+    if ipv6_enabled {
+        routes.push(IpAddressRange {
+            start: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            end: IpAddr::V6(std::net::Ipv6Addr::from([0xff; 16])),
+            ip_protocol: 0,
+        });
+    }
+    masque::encode_capsule(
+        CAPSULE_ROUTE_ADVERTISEMENT,
+        &masque::encode_route_advertisement(&routes),
+        &mut capsule_stream,
+    );
+
+    let mavi_config_bytes =
+        bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
+    masque::encode_capsule(CAPSULE_MAVI_CONFIG, &mavi_config_bytes, &mut capsule_stream);
+
+    Ok(capsule_stream)
+}
 
 async fn send_h3_camouflage_response<S>(
     req_stream: &mut h3::server::RequestStream<S, bytes::Bytes>,
@@ -97,21 +167,22 @@ pub async fn handle_h3_connection(
             req.method(),
             req.uri()
         );
-        if config.censorship_resistant {
-            send_h3_camouflage_response(&mut req_stream).await?;
-        } else {
-            let response = Response::builder()
-                .status(http::StatusCode::NOT_FOUND)
-                .header("content-type", "text/html; charset=utf-8")
-                .body(())
-                .map_err(|e| anyhow::anyhow!("Response build error: {e}"))?;
-            let _ = req_stream.send_response(response).await;
-            let _ = req_stream
-                .send_data(Bytes::from_static(
-                    b"<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>",
-                ))
-                .await;
-            let _ = req_stream.finish().await;
+        match non_connect_ip_response(config.censorship_resistant) {
+            NonConnectIpResponse::CamouflageOk => send_h3_camouflage_response(&mut req_stream).await?,
+            NonConnectIpResponse::NotFound => {
+                let response = Response::builder()
+                    .status(http::StatusCode::NOT_FOUND)
+                    .header("content-type", "text/html; charset=utf-8")
+                    .body(())
+                    .map_err(|e| anyhow::anyhow!("Response build error: {e}"))?;
+                let _ = req_stream.send_response(response).await;
+                let _ = req_stream
+                    .send_data(Bytes::from_static(
+                        b"<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>",
+                    ))
+                    .await;
+                let _ = req_stream.finish().await;
+            }
         }
         return Ok(());
     }
@@ -160,74 +231,8 @@ pub async fn handle_h3_connection(
         ip6: assigned_ip6,
     };
 
-    let success_msg = ControlMessage::Config {
-        assigned_ip,
-        netmask: state.network.mask(),
-        gateway: state.gateway_ip(),
-        dns_server: config.dns,
-        mtu: config.mtu,
-        assigned_ipv6: if ipv6_enabled {
-            Some(assigned_ip6)
-        } else {
-            None
-        },
-        netmask_v6: if ipv6_enabled { Some(64) } else { None },
-        gateway_v6: if ipv6_enabled {
-            Some(state.gateway_ip_v6())
-        } else {
-            None
-        },
-        dns_server_v6: if ipv6_enabled {
-            Some(config.dns_v6.unwrap_or_else(|| {
-                std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
-            }))
-        } else {
-            None
-        },
-        whitelist_domains: Some(config.whitelist_domains.clone()),
-    };
-
-    let mut capsule_stream: Vec<u8> = Vec::with_capacity(256);
-
-    let mut address_assigns = vec![AssignedAddress {
-        request_id: 0,
-        ip: IpAddr::V4(assigned_ip),
-        prefix_len: prefix_len_from_mask(state.network.mask()),
-    }];
-    if ipv6_enabled {
-        address_assigns.push(AssignedAddress {
-            request_id: 0,
-            ip: IpAddr::V6(assigned_ip6),
-            prefix_len: 64,
-        });
-    }
-    masque::encode_capsule(
-        CAPSULE_ADDRESS_ASSIGN,
-        &masque::encode_address_assign(&address_assigns),
-        &mut capsule_stream,
-    );
-
-    let mut routes = vec![IpAddressRange {
-        start: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        end: IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
-        ip_protocol: 0,
-    }];
-    if ipv6_enabled {
-        routes.push(IpAddressRange {
-            start: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-            end: IpAddr::V6(std::net::Ipv6Addr::from([0xff; 16])),
-            ip_protocol: 0,
-        });
-    }
-    masque::encode_capsule(
-        CAPSULE_ROUTE_ADVERTISEMENT,
-        &masque::encode_route_advertisement(&routes),
-        &mut capsule_stream,
-    );
-
-    let mavi_config_bytes =
-        bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
-    masque::encode_capsule(CAPSULE_MAVI_CONFIG, &mavi_config_bytes, &mut capsule_stream);
+    let capsule_stream =
+        build_connect_ip_capsules(&state, &config, assigned_ip, assigned_ip6, ipv6_enabled)?;
 
     let response = Response::builder()
         .status(http::StatusCode::OK)
@@ -267,4 +272,141 @@ pub async fn handle_h3_connection(
         true, // is_h3
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use shared::masque::{
+        decode_address_assign, decode_route_advertisement, read_capsule, CAPSULE_ADDRESS_ASSIGN,
+        CAPSULE_MAVI_CONFIG, CAPSULE_ROUTE_ADVERTISEMENT,
+    };
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn test_config(args: &[&str]) -> Config {
+        let mut argv = vec!["mavi-vpn", "--auth-token", "secret"];
+        argv.extend_from_slice(args);
+        Config::parse_from(argv)
+    }
+
+    fn collect_capsules(mut bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
+        let mut capsules = Vec::new();
+        while !bytes.is_empty() {
+            let (ctype, payload, consumed) = read_capsule(bytes).expect("complete capsule");
+            capsules.push((ctype, payload.to_vec()));
+            bytes = &bytes[consumed..];
+        }
+        capsules
+    }
+
+    #[test]
+    fn non_connect_ip_response_depends_on_censorship_mode() {
+        assert_eq!(
+            non_connect_ip_response(true),
+            NonConnectIpResponse::CamouflageOk
+        );
+        assert_eq!(non_connect_ip_response(false), NonConnectIpResponse::NotFound);
+    }
+
+    #[test]
+    fn connect_ip_capsules_include_ipv4_only_assign_route_and_config() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let config = test_config(&["--whitelist-domains", "one.test,two.test"]);
+        let capsules = collect_capsules(
+            &build_connect_ip_capsules(
+                &state,
+                &config,
+                Ipv4Addr::new(10, 8, 0, 2),
+                Ipv6Addr::LOCALHOST,
+                false,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            capsules.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            vec![
+                CAPSULE_ADDRESS_ASSIGN,
+                CAPSULE_ROUTE_ADVERTISEMENT,
+                CAPSULE_MAVI_CONFIG
+            ]
+        );
+
+        let assigns = decode_address_assign(&capsules[0].1).unwrap();
+        assert_eq!(assigns.len(), 1);
+        assert_eq!(assigns[0].ip, IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2)));
+        assert_eq!(assigns[0].prefix_len, 24);
+
+        let routes = decode_route_advertisement(&capsules[1].1).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].start, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(routes[0].end, IpAddr::V4(Ipv4Addr::BROADCAST));
+
+        let (cfg, _): (ControlMessage, _) =
+            bincode::serde::decode_from_slice(&capsules[2].1, bincode::config::standard())
+                .unwrap();
+        match cfg {
+            ControlMessage::Config {
+                assigned_ipv6,
+                whitelist_domains,
+                ..
+            } => {
+                assert!(assigned_ipv6.is_none());
+                assert_eq!(
+                    whitelist_domains,
+                    Some(vec!["one.test".to_string(), "two.test".to_string()])
+                );
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_ip_capsules_include_dual_stack_and_default_dns_v6() {
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let config = test_config(&[]);
+        let ip6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let capsules = collect_capsules(
+            &build_connect_ip_capsules(
+                &state,
+                &config,
+                Ipv4Addr::new(10, 8, 0, 2),
+                ip6,
+                true,
+            )
+            .unwrap(),
+        );
+
+        let assigns = decode_address_assign(&capsules[0].1).unwrap();
+        assert_eq!(assigns.len(), 2);
+        assert!(assigns
+            .iter()
+            .any(|a| a.ip == IpAddr::V6(ip6) && a.prefix_len == 64));
+
+        let routes = decode_route_advertisement(&capsules[1].1).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().any(|r| r.start == IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+            && r.end == IpAddr::V6(Ipv6Addr::from([0xff; 16]))));
+
+        let (cfg, _): (ControlMessage, _) =
+            bincode::serde::decode_from_slice(&capsules[2].1, bincode::config::standard())
+                .unwrap();
+        match cfg {
+            ControlMessage::Config {
+                assigned_ipv6,
+                dns_server_v6,
+                netmask_v6,
+                ..
+            } => {
+                assert_eq!(assigned_ipv6, Some(ip6));
+                assert_eq!(netmask_v6, Some(64));
+                assert_eq!(
+                    dns_server_v6,
+                    Some(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111))
+                );
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
 }

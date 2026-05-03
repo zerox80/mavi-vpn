@@ -129,20 +129,7 @@ pub(super) async fn connect_and_handshake(
     // instead of the real server hostname. Cert-pin auth is unaffected.
     let server_name: String = match ech_state.as_ref() {
         Some(ech) => ech.outer_sni.clone(),
-        None => {
-            let raw = if endpoint_str.starts_with('[') {
-                // IPv6 literal: [::1]:443 → ::1
-                endpoint_str
-                    .trim_start_matches('[')
-                    .split(']')
-                    .next()
-                    .unwrap_or(&endpoint_str)
-            } else {
-                // hostname:port or IPv4:port
-                endpoint_str.split(':').next().unwrap_or(&endpoint_str)
-            };
-            raw.to_string()
-        }
+        None => endpoint_host(&endpoint_str),
     };
     info!("Connecting to {} (SNI: {})", addr, server_name);
     let connection = endpoint
@@ -163,19 +150,45 @@ pub(super) async fn connect_and_handshake(
         let _ = send.finish();
 
         let len = recv.read_u32_le().await? as usize;
-        if len > 65536 {
-            anyhow::bail!("Server response too large: {} bytes", len);
-        }
+        validate_raw_response_len(len)?;
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
-        let cfg: ControlMessage =
-            bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
+        let cfg = decode_raw_response_body(&buf)?;
         (cfg, None)
     };
 
     validate_server_mtu(&config, tun_mtu)?;
 
     Ok((connection, config, h3_guard))
+}
+
+fn endpoint_host(endpoint: &str) -> String {
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
+
+    if endpoint.matches(':').count() == 1 {
+        if let Some((host, _)) = endpoint.rsplit_once(':') {
+            return host.to_string();
+        }
+    }
+
+    endpoint.to_string()
+}
+
+fn validate_raw_response_len(len: usize) -> Result<()> {
+    if len > 65_536 {
+        anyhow::bail!("Server response too large: {} bytes", len);
+    }
+    Ok(())
+}
+
+fn decode_raw_response_body(buf: &[u8]) -> Result<ControlMessage> {
+    bincode::serde::decode_from_slice(buf, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(Into::into)
 }
 
 fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()> {
@@ -189,4 +202,67 @@ fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn config_with_mtu(mtu: u16) -> ControlMessage {
+        ControlMessage::Config {
+            assigned_ip: Ipv4Addr::new(10, 8, 0, 2),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Ipv4Addr::new(10, 8, 0, 1),
+            dns_server: Ipv4Addr::new(1, 1, 1, 1),
+            mtu,
+            assigned_ipv6: None,
+            netmask_v6: None,
+            gateway_v6: None,
+            dns_server_v6: None,
+            whitelist_domains: None,
+        }
+    }
+
+    fn encode(msg: &ControlMessage) -> Vec<u8> {
+        bincode::serde::encode_to_vec(msg, bincode::config::standard()).unwrap()
+    }
+
+    #[test]
+    fn endpoint_host_parses_hostname_ipv4_and_ipv6_forms() {
+        assert_eq!(endpoint_host("vpn.example.com:443"), "vpn.example.com");
+        assert_eq!(endpoint_host("203.0.113.10:443"), "203.0.113.10");
+        assert_eq!(endpoint_host("[2001:db8::1]:443"), "2001:db8::1");
+        assert_eq!(endpoint_host("2001:db8::1"), "2001:db8::1");
+        assert_eq!(endpoint_host("vpn.example.com"), "vpn.example.com");
+    }
+
+    #[test]
+    fn raw_response_len_rejects_oversized_server_response() {
+        assert!(validate_raw_response_len(65_536).is_ok());
+        assert!(validate_raw_response_len(65_537).is_err());
+    }
+
+    #[test]
+    fn raw_response_body_decodes_config_and_error() {
+        let config = decode_raw_response_body(&encode(&config_with_mtu(1280))).unwrap();
+        assert!(matches!(config, ControlMessage::Config { mtu: 1280, .. }));
+
+        let error = decode_raw_response_body(&encode(&ControlMessage::Error {
+            message: "denied".to_string(),
+        }))
+        .unwrap();
+        assert!(matches!(error, ControlMessage::Error { message } if message == "denied"));
+    }
+
+    #[test]
+    fn raw_response_body_rejects_malformed_bytes() {
+        assert!(decode_raw_response_body(&[0xde, 0xad, 0xbe, 0xef]).is_err());
+    }
+
+    #[test]
+    fn server_mtu_must_match_linux_client() {
+        assert!(validate_server_mtu(&config_with_mtu(1280), 1280).is_ok());
+        assert!(validate_server_mtu(&config_with_mtu(1340), 1280).is_err());
+    }
 }

@@ -212,14 +212,7 @@ pub async fn connect_and_handshake(
             return Err(anyhow::anyhow!("Handshake read error: {e}"));
         }
 
-        let cfg: ControlMessage =
-            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-                .map(|(v, _)| v)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        if let ControlMessage::Error { message } = &cfg {
-            return Err(anyhow::anyhow!("Server Error: {message}"));
-        }
+        let cfg = decode_raw_server_config(&buf)?;
         (cfg, None)
     };
 
@@ -237,6 +230,17 @@ fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> anyhow::R
         }
     }
     Ok(())
+}
+
+fn decode_raw_server_config(buf: &[u8]) -> anyhow::Result<ControlMessage> {
+    let cfg: ControlMessage = bincode::serde::decode_from_slice(buf, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if let ControlMessage::Error { message } = &cfg {
+        return Err(anyhow::anyhow!("Server Error: {message}"));
+    }
+    Ok(cfg)
 }
 
 async fn connect_and_handshake_h3(
@@ -428,5 +432,25 @@ mod tests {
     fn validate_server_mtu_rejects_mismatch() {
         let err = validate_server_mtu(&config_with_mtu(1360), 1280).unwrap_err();
         assert!(err.to_string().contains("MTU mismatch"));
+    }
+
+    #[test]
+    fn raw_server_config_rejects_server_error() {
+        let bytes = bincode::serde::encode_to_vec(
+            &ControlMessage::Error {
+                message: "denied".to_string(),
+            },
+            bincode::config::standard(),
+        )
+        .unwrap();
+
+        let err = decode_raw_server_config(&bytes).unwrap_err();
+
+        assert!(err.to_string().contains("Server Error: denied"));
+    }
+
+    #[test]
+    fn raw_server_config_rejects_malformed_bytes() {
+        assert!(decode_raw_server_config(&[0xde, 0xad, 0xbe, 0xef]).is_err());
     }
 }

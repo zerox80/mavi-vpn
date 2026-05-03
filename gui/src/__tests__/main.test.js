@@ -153,6 +153,19 @@ describe('toConfig', () => {
     expect(config.vpn_mtu).toBe(1340);
   });
 
+  it('preserves ECH config and valid MTU fields', () => {
+    const config = toConfig({
+      endpoint: 'vpn.example.com:443',
+      token: 'token',
+      cert_pin: 'pin',
+      ech_config: 'abcdef',
+      vpn_mtu: 1280,
+    });
+
+    expect(config.ech_config).toBe('abcdef');
+    expect(config.vpn_mtu).toBe(1280);
+  });
+
   it('includes keycloak fields and leaves runtime token empty', () => {
     const conn = {
       endpoint: 'vpn.example.com:443',

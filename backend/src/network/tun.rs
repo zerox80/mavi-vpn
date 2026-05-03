@@ -4,6 +4,26 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 use tun::AbstractDevice;
 
+fn validate_tun_name(name: &str) -> Result<()> {
+    if name.contains('/') || name.contains('\\') {
+        anyhow::bail!(
+            "VPN_TUN_DEVICE must be a TUN interface name like 'tun0', not a filesystem path: {name}"
+        );
+    }
+    Ok(())
+}
+
+fn ipv6_setup_args(tun_name: &str, gateway_ip6: std::net::Ipv6Addr) -> Vec<String> {
+    vec![
+        "-6".to_string(),
+        "addr".to_string(),
+        "add".to_string(),
+        format!("{gateway_ip6}/64"),
+        "dev".to_string(),
+        tun_name.to_string(),
+    ]
+}
+
 pub fn create_tun_device(config: &Config, state: &AppState) -> Result<(tun::AsyncDevice, bool)> {
     let mut tun_config = tun::Configuration::default();
     let gateway_ip = state.gateway_ip();
@@ -16,11 +36,7 @@ pub fn create_tun_device(config: &Config, state: &AppState) -> Result<(tun::Asyn
         .up();
 
     if let Some(tun_name_override) = &config.tun_device_path {
-        if tun_name_override.contains('/') || tun_name_override.contains('\\') {
-            anyhow::bail!(
-                "VPN_TUN_DEVICE must be a TUN interface name like 'tun0', not a filesystem path: {tun_name_override}"
-            );
-        }
+        validate_tun_name(tun_name_override)?;
         tun_config.tun_name(tun_name_override);
     }
 
@@ -40,15 +56,9 @@ pub fn create_tun_device(config: &Config, state: &AppState) -> Result<(tun::Asyn
 
 fn setup_ipv6(tun_name: &str, state: &AppState) -> bool {
     let gateway_ip6 = state.gateway_ip_v6();
+    let args = ipv6_setup_args(tun_name, gateway_ip6);
     match std::process::Command::new("ip")
-        .args([
-            "-6",
-            "addr",
-            "add",
-            &format!("{gateway_ip6}/64"),
-            "dev",
-            tun_name,
-        ])
+        .args(args.iter().map(String::as_str))
         .output()
     {
         Ok(output) if output.status.success() => {
@@ -66,5 +76,38 @@ fn setup_ipv6(tun_name: &str, state: &AppState) -> bool {
             warn!("FAILED to execute 'ip' command for IPv6 assignment: {}. Ensure 'iproute2' is installed. IPv6 disabled.", e);
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tun_name_rejects_filesystem_paths() {
+        assert!(validate_tun_name("mavi0").is_ok());
+        assert!(validate_tun_name("tun-prod_1").is_ok());
+        assert!(validate_tun_name("/dev/net/tun").is_err());
+        assert!(validate_tun_name("..\\tun").is_err());
+    }
+
+    #[test]
+    fn ipv6_setup_args_assign_gateway_to_interface() {
+        let args = ipv6_setup_args(
+            "mavi0",
+            std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-6",
+                "addr",
+                "add",
+                "fd00::1/64",
+                "dev",
+                "mavi0"
+            ]
+        );
     }
 }

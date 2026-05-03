@@ -22,6 +22,79 @@ struct TunnelStats {
     client_to_server_tun_drops: AtomicU64,
 }
 
+fn server_to_client_datagram(framed: Bytes, is_h3: bool) -> Option<(Bytes, Bytes)> {
+    if framed.len() < masque::DATAGRAM_PREFIX.len() {
+        return None;
+    }
+    let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
+    if is_h3 {
+        Some((framed, packet))
+    } else {
+        Some((packet.clone(), packet))
+    }
+}
+
+fn client_to_server_packet(datagram: Bytes, is_h3: bool) -> Option<Bytes> {
+    if datagram.is_empty() {
+        return None;
+    }
+    if !is_h3 {
+        return Some(datagram);
+    }
+
+    let inner_len = masque::unwrap_datagram(&datagram)?.len();
+    if inner_len == 0 {
+        return None;
+    }
+    let prefix_len = datagram.len() - inner_len;
+    Some(datagram.slice(prefix_len..))
+}
+
+fn packet_source_is_assigned(
+    packet: &[u8],
+    assigned_ip: Ipv4Addr,
+    assigned_ip6: Ipv6Addr,
+) -> bool {
+    if packet.is_empty() {
+        return false;
+    }
+
+    match packet[0] >> 4 {
+        4 => Ipv4HeaderSlice::from_slice(packet)
+            .is_ok_and(|h| h.source_addr() == assigned_ip),
+        6 => Ipv6HeaderSlice::from_slice(packet)
+            .is_ok_and(|h| h.source_addr() == assigned_ip6),
+        _ => false,
+    }
+}
+
+fn packet_too_big_response(
+    packet: &[u8],
+    tunnel_mtu: u16,
+    gv4: Ipv4Addr,
+    gv6: Ipv6Addr,
+) -> Option<Vec<u8>> {
+    if packet.is_empty() {
+        return None;
+    }
+
+    let ver = packet[0] >> 4;
+    let gw = if ver == 4 {
+        Some(IpAddr::V4(gv4))
+    } else if ver == 6 {
+        Some(IpAddr::V6(gv6))
+    } else {
+        None
+    };
+    let reported_mtu = if ver == 6 {
+        tunnel_mtu.max(1280)
+    } else {
+        tunnel_mtu
+    };
+
+    icmp::generate_packet_too_big(packet, reported_mtu, gw)
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::cast_precision_loss)]
@@ -47,15 +120,10 @@ pub async fn run_tunnel(
                 .server_to_client_queue_len
                 .store(rx_client.len() as u64, Ordering::Relaxed);
 
-            let (datagram_to_send, packet_for_icmp) = if is_h3 {
-                // In H3 (connect-ip) mode, send the framed datagram directly.
-                // The packet payload for ICMP generation is without the masque prefix.
-                let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
-                (framed, packet)
-            } else {
-                // In raw mode, strip the masque prefix before sending.
-                let packet = framed.slice(masque::DATAGRAM_PREFIX.len()..);
-                (packet.clone(), packet)
+            let Some((datagram_to_send, packet_for_icmp)) =
+                server_to_client_datagram(framed, is_h3)
+            else {
+                continue;
             };
 
             send_stats
@@ -73,26 +141,8 @@ pub async fn run_tunnel(
                     send_stats
                         .server_to_client_too_large
                         .fetch_add(1, Ordering::Relaxed);
-                    if packet_for_icmp.is_empty() {
-                        continue;
-                    }
-
-                    let ver = packet_for_icmp[0] >> 4;
-                    let gw = if ver == 4 {
-                        Some(IpAddr::V4(gv4))
-                    } else if ver == 6 {
-                        Some(IpAddr::V6(gv6))
-                    } else {
-                        None
-                    };
-                    let reported_mtu = if ver == 6 {
-                        tunnel_mtu.max(1280)
-                    } else {
-                        tunnel_mtu
-                    };
-
                     if let Some(icmp_p) =
-                        icmp::generate_packet_too_big(&packet_for_icmp, reported_mtu, gw)
+                        packet_too_big_response(&packet_for_icmp, tunnel_mtu, gv4, gv6)
                     {
                         let _ = tx_tun_icmp.try_send(Bytes::from(icmp_p));
                     }
@@ -158,45 +208,11 @@ pub async fn run_tunnel(
             Err(e) => break Err(anyhow::anyhow!("Connection lost: {e}")),
         };
 
-        if datagram.is_empty() {
+        let Some(packet) = client_to_server_packet(datagram, is_h3) else {
             continue;
-        }
-
-        let packet = if is_h3 {
-            let inner_len = match masque::unwrap_datagram(&datagram) {
-                Some(slice) => slice.len(),
-                None => continue,
-            };
-            if inner_len == 0 {
-                continue;
-            }
-            let prefix_len = datagram.len() - inner_len;
-            datagram.slice(prefix_len..)
-        } else {
-            datagram
         };
 
-        if packet.is_empty() {
-            continue;
-        }
-
-        let ver = packet[0] >> 4;
-        let mut valid = false;
-        if ver == 4 {
-            if let Ok(h) = Ipv4HeaderSlice::from_slice(&packet) {
-                if h.source_addr() == assigned_ip {
-                    valid = true;
-                }
-            }
-        } else if ver == 6 {
-            if let Ok(h) = Ipv6HeaderSlice::from_slice(&packet) {
-                if h.source_addr() == assigned_ip6 {
-                    valid = true;
-                }
-            }
-        }
-
-        if valid {
+        if packet_source_is_assigned(&packet, assigned_ip, assigned_ip6) {
             tunnel_stats
                 .client_to_server_bytes
                 .fetch_add(packet.len() as u64, Ordering::Relaxed);
@@ -219,4 +235,119 @@ pub async fn run_tunnel(
     tun_to_quic.abort();
     stats_task.abort();
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
+        let mut p = vec![0u8; 20];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&(20u16).to_be_bytes());
+        p[8] = 64;
+        p[9] = 17;
+        p[12..16].copy_from_slice(&src.octets());
+        p[16..20].copy_from_slice(&dst.octets());
+        p
+    }
+
+    fn ipv6_packet(src: Ipv6Addr, dst: Ipv6Addr) -> Vec<u8> {
+        let mut p = vec![0u8; 40];
+        p[0] = 0x60;
+        p[6] = 17;
+        p[7] = 64;
+        p[8..24].copy_from_slice(&src.octets());
+        p[24..40].copy_from_slice(&dst.octets());
+        p
+    }
+
+    #[test]
+    fn raw_mode_strips_masque_prefix_for_server_to_client() {
+        let packet = ipv4_packet(Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(10, 8, 0, 2));
+        let framed = Bytes::from(masque::wrap_datagram(&packet));
+
+        let (datagram, packet_for_icmp) = server_to_client_datagram(framed, false).unwrap();
+
+        assert_eq!(datagram.as_ref(), packet.as_slice());
+        assert_eq!(packet_for_icmp.as_ref(), packet.as_slice());
+    }
+
+    #[test]
+    fn h3_mode_preserves_masque_prefix_for_server_to_client() {
+        let packet = ipv4_packet(Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(10, 8, 0, 2));
+        let framed = Bytes::from(masque::wrap_datagram(&packet));
+
+        let (datagram, packet_for_icmp) = server_to_client_datagram(framed.clone(), true).unwrap();
+
+        assert_eq!(datagram, framed);
+        assert_eq!(packet_for_icmp.as_ref(), packet.as_slice());
+    }
+
+    #[test]
+    fn h3_client_datagrams_unwrap_and_empty_payloads_are_ignored() {
+        let packet = ipv4_packet(Ipv4Addr::new(10, 8, 0, 2), Ipv4Addr::new(1, 1, 1, 1));
+        let framed = Bytes::from(masque::wrap_datagram(&packet));
+
+        assert_eq!(
+            client_to_server_packet(framed, true).unwrap().as_ref(),
+            packet.as_slice()
+        );
+        assert!(client_to_server_packet(Bytes::from_static(&masque::DATAGRAM_PREFIX), true)
+            .is_none());
+        assert!(client_to_server_packet(Bytes::from_static(&[0x40]), true).is_none());
+    }
+
+    #[test]
+    fn client_source_ip_spoofing_is_rejected() {
+        let assigned_v4 = Ipv4Addr::new(10, 8, 0, 2);
+        let assigned_v6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+
+        assert!(packet_source_is_assigned(
+            &ipv4_packet(assigned_v4, Ipv4Addr::new(1, 1, 1, 1)),
+            assigned_v4,
+            assigned_v6
+        ));
+        assert!(!packet_source_is_assigned(
+            &ipv4_packet(Ipv4Addr::new(10, 8, 0, 99), Ipv4Addr::new(1, 1, 1, 1)),
+            assigned_v4,
+            assigned_v6
+        ));
+        assert!(packet_source_is_assigned(
+            &ipv6_packet(assigned_v6, Ipv6Addr::LOCALHOST),
+            assigned_v4,
+            assigned_v6
+        ));
+    }
+
+    #[test]
+    fn invalid_or_truncated_packets_are_dropped() {
+        let assigned_v4 = Ipv4Addr::new(10, 8, 0, 2);
+        let assigned_v6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+
+        assert!(!packet_source_is_assigned(&[], assigned_v4, assigned_v6));
+        assert!(!packet_source_is_assigned(&[0x45, 0x00], assigned_v4, assigned_v6));
+        assert!(!packet_source_is_assigned(&[0x60, 0x00, 0x00], assigned_v4, assigned_v6));
+        assert!(!packet_source_is_assigned(&[0x10, 0x00, 0x00], assigned_v4, assigned_v6));
+    }
+
+    #[test]
+    fn too_large_path_can_generate_icmp_packet_too_big() {
+        let packet = ipv4_packet(Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(10, 8, 0, 2));
+        let ptb = packet_too_big_response(
+            &packet,
+            1280,
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv6Addr::LOCALHOST,
+        );
+
+        assert!(ptb.is_some());
+        assert!(packet_too_big_response(
+            &[],
+            1280,
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv6Addr::LOCALHOST
+        )
+        .is_none());
+    }
 }

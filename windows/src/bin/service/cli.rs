@@ -1,10 +1,9 @@
-use std::ffi::OsString;
-use std::sync::Arc;
+use super::main_loop::run_service_loop;
+use super::utils::run_network_repair_cleanup;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
-use super::utils::run_network_repair_cleanup;
-use super::main_loop::run_service_loop;
 
 pub const SERVICE_NAME: &str = "MaviVPNService";
 

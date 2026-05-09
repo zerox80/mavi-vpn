@@ -1,7 +1,6 @@
+use crate::ipc;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::Mutex;
-use crate::ipc;
 
 pub struct VpnServiceState {
     pub vpn_running: Arc<AtomicBool>,

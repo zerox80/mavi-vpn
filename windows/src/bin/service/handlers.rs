@@ -1,16 +1,15 @@
-use std::sync::Arc;
+use constant_time_eq::constant_time_eq;
 use std::sync::atomic::Ordering;
-use std::sync::Mutex as StdMutex;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
-use constant_time_eq::constant_time_eq;
+use tracing::{error, info};
 
-use crate::ipc;
-use crate::vpn_core;
 use super::state::VpnServiceState;
 use super::utils::{classify_status, run_network_repair_cleanup};
+use crate::ipc;
+use crate::vpn_core;
 
 pub const IPC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 

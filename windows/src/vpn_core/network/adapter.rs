@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::info;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -7,6 +8,10 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 
 use super::utils::{run_cmd, run_powershell_cmd};
+
+const DEFAULT_MAVI_DNS_V4: &str = "1.1.1.1";
+const FALLBACK_MAVI_DNS_V4: &str = "8.8.8.8";
+const DEFAULT_MAVI_DNS_V6: &str = "2606:4700:4700::1111";
 
 pub fn wait_for_adapter_alias(adapter_index: u32, requested_name: &str) -> Result<String> {
     let started = Instant::now();
@@ -94,13 +99,172 @@ pub fn configure_vpn_dns_preference(_adapter_name: &str, adapter_index: u32) {
 
     // 2. Add an NRPT rule to force all DNS queries through the VPN adapter's DNS
     // This is more effective than just metrics on modern Windows 10/11
-    let nrpt_script = "$ErrorActionPreference = 'SilentlyContinue'; \
-         Add-DnsClientNrptRule -Namespace '.' -NameServers '1.1.1.1','8.8.8.8' -Comment 'MaviVPN' -DisplayName 'MaviVPN DNS Force';".to_string();
-    run_powershell_cmd("NRPT DNS Rule", &nrpt_script);
+    persist_dns_servers();
+    let nrpt_script =
+        "$ErrorActionPreference = 'SilentlyContinue'; \
+         Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
+             Where-Object { $_.Comment -eq 'MaviVPN' -or $_.DisplayName -eq 'MaviVPN DNS Force' } | \
+             Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
+         Add-DnsClientNrptRule -Namespace '.' -NameServers '1.1.1.1','8.8.8.8' -Comment 'MaviVPN' -DisplayName 'MaviVPN DNS Force';";
+    run_powershell_cmd("NRPT DNS Rule", nrpt_script);
 }
 
 pub fn remove_nrpt_dns_rule() {
-    let script = "$ErrorActionPreference = 'SilentlyContinue'; \
-                  Get-DnsClientNrptRule | Where-Object { $_.Comment -eq 'MaviVPN' } | Remove-DnsClientNrptRule -ErrorAction SilentlyContinue -Confirm:$false;";
-    run_powershell_cmd("Cleanup NRPT DNS Rule", script);
+    let script = nrpt_cleanup_script();
+    run_powershell_cmd("Cleanup NRPT DNS Rule", &script);
+    clear_persisted_dns_servers();
+}
+
+pub fn cleanup_mavi_adapter_dns_state() {
+    let script = mavi_adapter_dns_cleanup_script();
+    run_powershell_cmd("Cleanup MaviVPN adapter DNS state", script);
+}
+
+fn mavi_adapter_dns_cleanup_script() -> &'static str {
+    "$ErrorActionPreference = 'SilentlyContinue'; \
+     Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | \
+         Where-Object { $_.Name -like 'MaviVPN*' -or $_.InterfaceDescription -like '*Mavi VPN Tunnel*' } | \
+         ForEach-Object { \
+             Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue; \
+             Set-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -InterfaceMetric 9000 -AutomaticMetric Disabled -ErrorAction SilentlyContinue; \
+             Set-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -InterfaceMetric 9000 -AutomaticMetric Disabled -ErrorAction SilentlyContinue; \
+             Set-DnsClient -InterfaceIndex $_.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue; \
+         }; \
+     Clear-DnsClientCache -ErrorAction SilentlyContinue; \
+     Register-DnsClient -ErrorAction SilentlyContinue;"
+}
+
+fn nrpt_cleanup_script() -> String {
+    nrpt_cleanup_script_for_path(&dns_servers_path())
+}
+
+fn nrpt_cleanup_script_for_path(path: &Path) -> String {
+    format!(
+        r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$maviDns = @('{DEFAULT_MAVI_DNS_V4}', '{FALLBACK_MAVI_DNS_V4}', '{DEFAULT_MAVI_DNS_V6}')
+$persistedDnsPath = {persisted_dns_path}
+if (Test-Path $persistedDnsPath) {{
+    $maviDns += Get-Content $persistedDnsPath -ErrorAction SilentlyContinue |
+        Where-Object {{ $_ -and $_.Trim() }} |
+        ForEach-Object {{ $_.Trim() }}
+}}
+$maviDns = @($maviDns | Sort-Object -Unique)
+
+function Test-MaviDnsPolicy {{
+    param($Policy)
+    $comment = "$($Policy.Comment)"
+    $displayName = "$($Policy.DisplayName)"
+    $name = "$($Policy.Name)"
+    $namespace = @($Policy.Namespace)
+    $servers = @($Policy.NameServers) | ForEach-Object {{ "$_" }}
+    if ($comment -eq 'MaviVPN' -or $displayName -eq 'MaviVPN DNS Force') {{ return $true }}
+    $isRootPolicy = ($namespace -contains '.') -or $name -eq '.'
+    if (-not $isRootPolicy) {{ return $false }}
+    foreach ($server in $servers) {{
+        if ($maviDns -contains $server) {{ return $true }}
+    }}
+    return $false
+}}
+
+function Test-MaviDnsPolicyRegistryEntry {{
+    param($Props)
+    $comment = "$($Props.Comment)"
+    $displayName = "$($Props.DisplayName)"
+    $name = "$($Props.Name)"
+    $namespace = "$($Props.Namespace)"
+    $keyName = Split-Path -Leaf $Props.PSPath
+    if ($comment -eq 'MaviVPN' -or $displayName -eq 'MaviVPN DNS Force') {{ return $true }}
+    $isRootPolicy = $namespace -eq '.' -or $name -eq '.' -or $keyName -eq '.'
+    if (-not $isRootPolicy) {{ return $false }}
+    $valueText = ($Props.PSObject.Properties |
+        Where-Object {{ $_.Name -notlike 'PS*' }} |
+        ForEach-Object {{ "$($_.Value)" }}) -join ' '
+    foreach ($server in $maviDns) {{
+        if ($valueText -like "*$server*") {{ return $true }}
+    }}
+    return $false
+}}
+
+Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+    Where-Object {{ Test-MaviDnsPolicy $_ }} |
+    Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue
+
+$policyRoots = @(
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig',
+    'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DNSClient\DnsPolicyConfig',
+    'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig'
+)
+foreach ($root in $policyRoots) {{
+    if (-not (Test-Path $root)) {{ continue }}
+    Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {{
+        $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+        if ($props -and (Test-MaviDnsPolicyRegistryEntry $props)) {{
+            Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+        }}
+    }}
+}}
+Clear-DnsClientCache -ErrorAction SilentlyContinue
+Register-DnsClient -ErrorAction SilentlyContinue
+"#,
+        persisted_dns_path = powershell_single_quoted(&path.to_string_lossy())
+    )
+}
+
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn dns_servers_path() -> PathBuf {
+    let base = std::env::var_os("ProgramData")
+        .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
+    base.join("mavi-vpn").join("last_dns_servers.txt")
+}
+
+fn persist_dns_servers() {
+    let path = dns_servers_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let servers = format!("{DEFAULT_MAVI_DNS_V4}\n{FALLBACK_MAVI_DNS_V4}");
+    let _ = std::fs::write(path, servers);
+}
+
+fn clear_persisted_dns_servers() {
+    let _ = std::fs::remove_file(dns_servers_path());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nrpt_cleanup_removes_tagged_and_fingerprinted_policies() {
+        let script = nrpt_cleanup_script_for_path(Path::new(
+            r"C:\ProgramData\mavi-vpn\last_dns_servers.txt",
+        ));
+
+        assert!(script.contains("Remove-DnsClientNrptRule -Force"));
+        assert!(script.contains("$comment -eq 'MaviVPN'"));
+        assert!(script.contains("$displayName -eq 'MaviVPN DNS Force'"));
+        assert!(script.contains("$namespace -eq '.'"));
+        assert!(script.contains("1.1.1.1"));
+        assert!(script.contains("8.8.8.8"));
+        assert!(script.contains("2606:4700:4700::1111"));
+        assert!(script.contains("last_dns_servers.txt"));
+        assert!(script.contains("DnsPolicyConfig"));
+    }
+
+    #[test]
+    fn adapter_dns_cleanup_only_resets_mavi_adapters() {
+        let script = mavi_adapter_dns_cleanup_script();
+
+        assert!(script.contains("Set-DnsClientServerAddress"));
+        assert!(script.contains("$_.Name -like 'MaviVPN*'"));
+        assert!(script.contains("$_.InterfaceDescription -like '*Mavi VPN Tunnel*'"));
+        assert!(script.contains("RegisterThisConnectionsAddress $false"));
+        assert!(!script.contains("$_.Name -notlike 'MaviVPN*'"));
+        assert!(!script.contains("RegisterThisConnectionsAddress $true"));
+    }
 }

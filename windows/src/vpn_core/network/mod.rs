@@ -14,8 +14,8 @@ use wintun::Adapter;
 
 pub use self::adapter::remove_nrpt_dns_rule;
 use self::adapter::{
-    configure_vpn_dns_preference, powershell_configure_interface_aggressive,
-    wait_for_adapter_alias, win32_set_mtu,
+    cleanup_mavi_adapter_dns_state, configure_vpn_dns_preference,
+    powershell_configure_interface_aggressive, wait_for_adapter_alias, win32_set_mtu,
 };
 pub use self::ip::wait_for_ipv6_address;
 use self::ip::{wait_for_ipv4_address, win32_add_ip, win32_cleanup_all_ips_on_interface};
@@ -255,6 +255,7 @@ pub fn cleanup_routes(host_route: Option<&str>) {
         "Network cleanup completed in {} ms",
         started.elapsed().as_millis()
     );
+    cleanup_mavi_adapter_dns_state();
     clear_persisted_host_route();
 }
 

@@ -121,6 +121,7 @@ class MainActivity : ComponentActivity() {
                 lifecycleScope.launch {
                     val tokens =
                         OAuthHelper.exchangeCodeForToken(
+                            this@MainActivity,
                             code,
                             returnedState,
                             viewModel.kcUrl.value,

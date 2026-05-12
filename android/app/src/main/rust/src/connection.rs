@@ -39,6 +39,14 @@ pub const fn effective_http3_framing(censorship_resistant: bool, http3_framing: 
     http3_framing || censorship_resistant
 }
 
+fn alpn_protocols(effective_http3_framing: bool) -> Vec<Vec<u8>> {
+    if effective_http3_framing {
+        vec![b"h3".to_vec()]
+    } else {
+        vec![b"mavivpn".to_vec()]
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 pub async fn connect_and_handshake(
@@ -71,13 +79,14 @@ pub async fn connect_and_handshake(
     .with_custom_certificate_verifier(verifier)
     .with_no_client_auth();
 
-    // HTTP/3 transport requires h3. Raw mode keeps mavivpn as the preferred ALPN.
+    // Raw and HTTP/3 modes are different wire protocols. Advertise exactly the
+    // protocol the client is going to speak so the server cannot select h3 while
+    // the client sends raw bincode auth bytes.
+    client_crypto.alpn_protocols = alpn_protocols(effective_http3_framing);
     if effective_http3_framing {
-        client_crypto.alpn_protocols = vec![b"h3".to_vec()];
         info!("HTTP/3 transport enabled. ALPN: h3");
     } else {
-        client_crypto.alpn_protocols = vec![b"mavivpn".to_vec(), b"h3".to_vec()];
-        info!("Standard Mode enabled. ALPN: mavivpn, h3");
+        info!("Standard Mode enabled. ALPN: mavivpn");
     }
 
     // Connect & MTU Logic
@@ -216,20 +225,7 @@ pub async fn connect_and_handshake(
         (cfg, None)
     };
 
-    validate_server_mtu(&config, tun_mtu)?;
-
     Ok((connection, config, h3_guard))
-}
-
-fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> anyhow::Result<()> {
-    if let ControlMessage::Config { mtu, .. } = config {
-        if *mtu != local_tun_mtu {
-            anyhow::bail!(
-                "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {mtu}. Configure both sides to the same VPN_MTU."
-            );
-        }
-    }
-    Ok(())
 }
 
 fn decode_raw_server_config(buf: &[u8]) -> anyhow::Result<ControlMessage> {
@@ -289,6 +285,9 @@ async fn connect_and_handshake_h3(
     if resp.status() != http::StatusCode::OK {
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
     }
+    if is_camouflage_h3_response(resp.headers()) {
+        anyhow::bail!("AUTH_FAILED: Server returned camouflage HTML instead of MAVI_CONFIG");
+    }
 
     // Parse capsule stream. The server sends ADDRESS_ASSIGN + ROUTE_ADVERTISEMENT
     // (standard connect-ip) followed by the vendor MAVI_CONFIG capsule carrying
@@ -331,6 +330,9 @@ async fn connect_and_handshake_h3(
             Err(_) => anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule"),
         };
         capsule_buf.extend_from_slice(chunk.chunk());
+        if looks_like_html_response(&capsule_buf) {
+            anyhow::bail!("AUTH_FAILED: Server returned HTML instead of MAVI_CONFIG");
+        }
         if capsule_buf.len() > masque::MAX_CAPSULE_BUF {
             anyhow::bail!(
                 "connect-ip capsule buffer exceeded {} bytes",
@@ -353,6 +355,30 @@ async fn connect_and_handshake_h3(
             drive_handle,
         },
     ))
+}
+
+fn is_camouflage_h3_response(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("text/html"))
+        || headers
+            .get(http::header::SERVER)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("nginx"))
+}
+
+fn looks_like_html_response(buf: &[u8]) -> bool {
+    let trimmed = buf
+        .iter()
+        .copied()
+        .skip_while(u8::is_ascii_whitespace)
+        .take(32)
+        .collect::<Vec<_>>();
+    trimmed.starts_with(b"<!DOCTYPE")
+        || trimmed.starts_with(b"<!doctype")
+        || trimmed.starts_with(b"<html")
+        || trimmed.starts_with(b"<HTML")
 }
 
 fn endpoint_host(endpoint: &str) -> String {
@@ -408,30 +434,36 @@ mod tests {
         assert!(effective_http3_framing(true, true));
     }
 
-    fn config_with_mtu(mtu: u16) -> ControlMessage {
-        ControlMessage::Config {
-            assigned_ip: "10.8.0.2".parse().unwrap(),
-            netmask: "255.255.255.0".parse().unwrap(),
-            gateway: "10.8.0.1".parse().unwrap(),
-            dns_server: "1.1.1.1".parse().unwrap(),
-            mtu,
-            assigned_ipv6: None,
-            netmask_v6: None,
-            gateway_v6: None,
-            dns_server_v6: None,
-            whitelist_domains: None,
-        }
+    #[test]
+    fn raw_mode_advertises_only_mavivpn_alpn() {
+        assert_eq!(alpn_protocols(false), vec![b"mavivpn".to_vec()]);
     }
 
     #[test]
-    fn validate_server_mtu_accepts_match() {
-        assert!(validate_server_mtu(&config_with_mtu(1280), 1280).is_ok());
+    fn h3_mode_advertises_only_h3_alpn() {
+        assert_eq!(alpn_protocols(true), vec![b"h3".to_vec()]);
     }
 
     #[test]
-    fn validate_server_mtu_rejects_mismatch() {
-        let err = validate_server_mtu(&config_with_mtu(1360), 1280).unwrap_err();
-        assert!(err.to_string().contains("MTU mismatch"));
+    fn camouflage_h3_headers_are_auth_failure_signal() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::CONTENT_TYPE, "text/html".parse().unwrap());
+        assert!(is_camouflage_h3_response(&headers));
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::SERVER, "nginx".parse().unwrap());
+        assert!(is_camouflage_h3_response(&headers));
+    }
+
+    #[test]
+    fn html_capsule_payload_is_auth_failure_signal() {
+        assert!(looks_like_html_response(
+            b"<!DOCTYPE html><html><body>Welcome</body></html>"
+        ));
+        assert!(looks_like_html_response(
+            b"  <html><body>Welcome</body></html>"
+        ));
+        assert!(!looks_like_html_response(&[0x40, 0x00, 0x00]));
     }
 
     #[test]

@@ -73,3 +73,12 @@ export function toConfig(conn) {
     vpn_mtu: conn.vpn_mtu ?? null,
   };
 }
+
+export function parseOptionalMtu(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return { valid: true, value: null };
+
+  const mtu = Number(text);
+  const valid = Number.isInteger(mtu) && mtu >= 1280 && mtu <= 1360;
+  return { valid, value: valid ? mtu : null };
+}

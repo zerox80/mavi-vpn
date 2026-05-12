@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mavi.vpn.MainActivity
 import com.mavi.vpn.data.InstalledApp
+import com.mavi.vpn.includeSplitTunnelSelectionIsValid
 import com.mavi.vpn.ui.components.drawableToBitmap
 import com.mavi.vpn.ui.components.toImageBitmap
 import com.mavi.vpn.viewmodel.VpnViewModel
@@ -74,12 +75,12 @@ fun SettingsScreen(
     var http3Framing by remember { mutableStateOf(initialHttp3Framing) }
     var vpnMtuText by remember { mutableStateOf(if (initialVpnMtu > 0) initialVpnMtu.toString() else "") }
 
-    fun parseValidatedMtu(): Int {
+    fun parseValidatedMtu(): Int? {
         if (vpnMtuText.isBlank()) return 0
-        val value = vpnMtuText.toIntOrNull() ?: return 0
+        val value = vpnMtuText.toIntOrNull() ?: return null
         if (value !in 1280..1360) {
             Toast.makeText(context, "VPN MTU must be between 1280 and 1360", Toast.LENGTH_SHORT).show()
-            return 0
+            return null
         }
         return value
     }
@@ -92,6 +93,16 @@ fun SettingsScreen(
     
     var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+
+    fun saveAndBack() {
+        if (!includeSplitTunnelSelectionIsValid(mode, selectedPackages)) {
+            Toast.makeText(context, "Select at least one app for include split tunneling.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val mtu = parseValidatedMtu() ?: return
+        onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, mtu)
+    }
 
     LaunchedEffect(Unit) {
         val appList = withContext(Dispatchers.IO) {
@@ -131,7 +142,7 @@ fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
         ) {
-            IconButton(onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) }) {
+            IconButton(onClick = { saveAndBack() }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
             Text(
@@ -315,7 +326,7 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(16.dp))
         
         Button(
-            onClick = { onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, parseValidatedMtu()) },
+            onClick = { saveAndBack() },
             modifier = Modifier.fillMaxWidth().height(50.dp),
             shape = RoundedCornerShape(12.dp)
         ) {

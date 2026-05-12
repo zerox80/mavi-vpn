@@ -2,6 +2,7 @@ import { state, $ } from './state.js';
 import { savePrefs } from './theme.js';
 import { renderConnectionList, generateConnectionId } from './connections.js';
 import { showToast } from './toast.js';
+import { parseOptionalMtu } from './utils.js';
 
 let _applyHero = null;
 let _editingId = null;
@@ -63,7 +64,11 @@ export async function saveModal() {
     return showToast('Pre-shared key is required unless Keycloak is enabled.', 'error');
   if (!cert_pin) return showToast('Certificate PIN is required.', 'error');
 
-  const mtuVal = parseInt($('m_vpn_mtu').value, 10);
+  const mtu = parseOptionalMtu($('m_vpn_mtu').value);
+  if (!mtu.valid) {
+    return showToast('VPN MTU must be between 1280 and 1360.', 'error');
+  }
+
   const conn = {
     id: _editingId || generateConnectionId(),
     label,
@@ -77,7 +82,7 @@ export async function saveModal() {
     kc_url: kc_auth ? $('m_kc_url').value.trim() || null : null,
     kc_realm: kc_auth ? $('m_kc_realm').value.trim() || null : null,
     kc_client_id: kc_auth ? $('m_kc_client_id').value.trim() || null : null,
-    vpn_mtu: mtuVal >= 1280 && mtuVal <= 1360 ? mtuVal : null,
+    vpn_mtu: mtu.value,
   };
 
   if (_editingId) {

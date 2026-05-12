@@ -77,6 +77,14 @@ class PrefsManager(
         get() = prefs.getInt("saved_vpn_mtu", 0)
         set(value) = prefs.edit().putInt("saved_vpn_mtu", value).apply()
 
+    var savedOauthCodeVerifier: String
+        get() = prefs.getString("saved_oauth_code_verifier", "") ?: ""
+        set(value) = prefs.edit().putString("saved_oauth_code_verifier", value).apply()
+
+    var savedOauthState: String
+        get() = prefs.getString("saved_oauth_state", "") ?: ""
+        set(value) = prefs.edit().putString("saved_oauth_state", value).apply()
+
     var tempSplitMode: String
         get() = prefs.getString("temp_split_mode", "exclude") ?: "exclude"
         set(value) = prefs.edit().putString("temp_split_mode", value).apply()

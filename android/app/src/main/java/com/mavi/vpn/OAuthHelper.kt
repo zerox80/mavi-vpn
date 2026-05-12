@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import androidx.browser.customtabs.CustomTabsIntent
+import com.mavi.vpn.data.PrefsManager
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64 as JavaBase64
@@ -49,6 +50,8 @@ object OAuthHelper {
             .build()
     }
 
+    fun normalizeKeycloakBaseUrl(kcUrl: String): String = kcUrl.trim().trimEnd('/')
+
     private fun generateRandomBase64(): String {
         val sr = SecureRandom()
         val bytes = ByteArray(32)
@@ -69,16 +72,22 @@ object OAuthHelper {
     fun startAuth(context: Context, kcUrl: String, realm: String, clientId: String) {
         val challenge: String
         val state: String
+        val verifier: String
         // Generate PKCE challenge and state atomically so a concurrent startAuth() call
         // cannot overwrite codeVerifier between generatePKCE() and the oauthState assignment.
         synchronized(OAuthHelper) {
             challenge = generatePKCE()
             state = generateRandomBase64()
+            verifier = codeVerifier.orEmpty()
             oauthState = state
+        }
+        PrefsManager(context.applicationContext).also { prefs ->
+            prefs.savedOauthCodeVerifier = verifier
+            prefs.savedOauthState = state
         }
         val redirectUri = "mavivpn://oauth"
 
-        val url = Uri.parse(kcUrl).buildUpon()
+        val url = Uri.parse(normalizeKeycloakBaseUrl(kcUrl)).buildUpon()
             .appendPath("realms")
             .appendPath(realm)
             .appendPath("protocol")
@@ -182,6 +191,7 @@ object OAuthHelper {
     }
 
     suspend fun exchangeCodeForToken(
+        context: Context,
         code: String,
         returnedState: String?,
         kcUrl: String,
@@ -194,8 +204,13 @@ object OAuthHelper {
         val expectedState: String?
         val verifier: String?
         synchronized(OAuthHelper) {
-            expectedState = oauthState
-            verifier = codeVerifier
+            val prefs = PrefsManager(context.applicationContext)
+            val persistedState = prefs.savedOauthState
+            val persistedVerifier = prefs.savedOauthCodeVerifier
+            expectedState = if (persistedState.isNotBlank()) persistedState else oauthState
+            verifier = if (persistedVerifier.isNotBlank()) persistedVerifier else codeVerifier
+            prefs.savedOauthState = ""
+            prefs.savedOauthCodeVerifier = ""
             oauthState = null
             codeVerifier = null
         }
@@ -208,7 +223,7 @@ object OAuthHelper {
         verifier ?: return@withContext null
 
         val redirectUri = "mavivpn://oauth"
-        val tokenUrl = "$kcUrl/realms/$realm/protocol/openid-connect/token"
+        val tokenUrl = "${normalizeKeycloakBaseUrl(kcUrl)}/realms/$realm/protocol/openid-connect/token"
 
         val formBody = FormBody.Builder()
             .add("grant_type", "authorization_code")
@@ -224,18 +239,24 @@ object OAuthHelper {
             .build()
 
         try {
-            val response = httpClient.newCall(request).execute()
-            val body = response.body.string()
-            if (response.isSuccessful) {
-                val tokens = parseTokenResponse(body)
-                if (tokens == null) {
-                    Log.e("OAuthHelper", "Token response missing 'access_token' or 'refresh_token' field")
-                    return@withContext null
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body.string()
+                if (response.isSuccessful) {
+                    val tokens = parseTokenResponse(body)
+                    if (tokens == null) {
+                        Log.e("OAuthHelper", "Token response missing 'access_token' or 'refresh_token' field")
+                        return@withContext null
+                    }
+                    return@withContext tokens
                 }
-                return@withContext tokens
+                Log.e("OAuthHelper", "Token exchange failed with HTTP ${response.code}: $body")
+                null
             }
+<<<<<<< HEAD
             Log.e("OAuthHelper", "Token exchange failed with HTTP ${response.code}; response body redacted")
             null
+=======
+>>>>>>> 4832208 (Fix Android and GUI client bugs)
         } catch (e: Exception) {
             Log.e("OAuthHelper", "Token exchange exception: ${e.message}")
             null
@@ -251,7 +272,7 @@ object OAuthHelper {
         withContext(Dispatchers.IO) {
         if (refreshToken.isBlank()) return@withContext RefreshResult.Error("No refresh token available")
 
-        val tokenUrl = "$kcUrl/realms/$realm/protocol/openid-connect/token"
+        val tokenUrl = "${normalizeKeycloakBaseUrl(kcUrl)}/realms/$realm/protocol/openid-connect/token"
 
         val formBody = FormBody.Builder()
             .add("grant_type", "refresh_token")
@@ -265,21 +286,30 @@ object OAuthHelper {
             .build()
 
         try {
-            val response = httpClient.newCall(request).execute()
-            val body = response.body.string()
-            if (response.isSuccessful) {
-                val tokens = parseTokenResponse(body, fallbackRefreshToken = refreshToken)
-                if (tokens == null) {
-                    Log.e("OAuthHelper", "Refresh response missing access token")
-                    return@withContext RefreshResult.Error("Invalid JSON from Keycloak")
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body.string()
+                if (response.isSuccessful) {
+                    val tokens = parseTokenResponse(body, fallbackRefreshToken = refreshToken)
+                    if (tokens == null) {
+                        Log.e("OAuthHelper", "Refresh response missing access token")
+                        return@withContext RefreshResult.Error("Invalid JSON from Keycloak")
+                    }
+                    return@withContext RefreshResult.Success(tokens)
                 }
-                return@withContext RefreshResult.Success(tokens)
+                if (response.code >= 500) {
+                    return@withContext RefreshResult.NetworkError("Server Error (HTTP ${response.code})")
+                }
+                Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}: $body")
+                return@withContext RefreshResult.Error("Refresh rejected by server (HTTP ${response.code})")
             }
+<<<<<<< HEAD
             if (response.code >= 500) {
                  return@withContext RefreshResult.NetworkError("Server Error (HTTP ${response.code})")
             }
             Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}; response body redacted")
             return@withContext RefreshResult.Error("Refresh rejected by server (HTTP ${response.code})")
+=======
+>>>>>>> 4832208 (Fix Android and GUI client bugs)
         } catch (e: java.io.IOException) {
             Log.w("OAuthHelper", "Refresh token IO exception (Offline?): ${e.message}")
             return@withContext RefreshResult.NetworkError(e.message ?: "Offline or network timeout")

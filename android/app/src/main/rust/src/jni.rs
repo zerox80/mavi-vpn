@@ -44,6 +44,7 @@ fn classify_init_error(message: &str) -> jlong {
         return INIT_FATAL_CERT;
     }
     if msg.contains("server error: unauthorized")
+        || msg.contains("auth_failed")
         || msg.contains("access denied")
         || msg.contains("invalid keycloak token")
         || msg.contains("invalid token")

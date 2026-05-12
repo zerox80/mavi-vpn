@@ -9,6 +9,7 @@ import {
   friendlyError,
   heroFromVpnStatus,
   toConfig,
+  parseOptionalMtu,
 } from '../utils.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -203,6 +204,24 @@ describe('toConfig', () => {
     const config = toConfig({ censorship_resistant: 1, http3_framing: 'yes' });
     expect(config.censorship_resistant).toBe(true);
     expect(config.http3_framing).toBe(true);
+  });
+});
+
+describe('parseOptionalMtu', () => {
+  it('allows blank input as default MTU', () => {
+    expect(parseOptionalMtu('')).toEqual({ valid: true, value: null });
+    expect(parseOptionalMtu('   ')).toEqual({ valid: true, value: null });
+  });
+
+  it('accepts the backend-supported MTU range', () => {
+    expect(parseOptionalMtu('1280')).toEqual({ valid: true, value: 1280 });
+    expect(parseOptionalMtu('1360')).toEqual({ valid: true, value: 1360 });
+  });
+
+  it('rejects non-empty invalid MTU input', () => {
+    expect(parseOptionalMtu('1279')).toEqual({ valid: false, value: null });
+    expect(parseOptionalMtu('1361')).toEqual({ valid: false, value: null });
+    expect(parseOptionalMtu('abc')).toEqual({ valid: false, value: null });
   });
 });
 

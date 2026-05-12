@@ -7,6 +7,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
 import java.util.Base64
 
 class KeycloakTokenManagerTest {
@@ -64,6 +65,41 @@ class KeycloakTokenManagerTest {
         val tokens = OAuthHelper.parseTokenResponse("""{"refresh_token":"refresh"}""")
 
         assertNull(tokens)
+    }
+
+    @Test
+    fun keycloakBaseUrlIsTrimmedAndHasNoTrailingSlash() {
+        assertEquals(
+            "https://auth.example.com",
+            OAuthHelper.normalizeKeycloakBaseUrl("  https://auth.example.com/  "),
+        )
+        assertEquals(
+            "https://auth.example.com",
+            OAuthHelper.normalizeKeycloakBaseUrl("https://auth.example.com"),
+        )
+    }
+
+    @Test
+    fun jsonNullConfigFieldsAreNotTreatedAsPresent() {
+        val config = JSONObject("""{"assigned_ipv6":null,"dns_server_v6":null}""")
+
+        assertFalse(jsonHasNonBlankString(config, "assigned_ipv6"))
+        assertFalse(jsonHasNonBlankString(config, "dns_server_v6"))
+    }
+
+    @Test
+    fun whitelistDomainsAreParsedFromBackendConfig() {
+        val config = JSONObject("""{"whitelist_domains":["one.test","two.test.","one.test",""]}""")
+
+        assertEquals(listOf("one.test", "two.test"), whitelistDomainsFromConfig(config))
+    }
+
+    @Test
+    fun includeSplitTunnelRequiresAtLeastOnePackage() {
+        assertFalse(includeSplitTunnelSelectionIsValid("include", emptyList()))
+        assertFalse(includeSplitTunnelSelectionIsValid("include", listOf(" ")))
+        assertTrue(includeSplitTunnelSelectionIsValid("include", listOf("com.example.app")))
+        assertTrue(includeSplitTunnelSelectionIsValid("exclude", emptyList()))
     }
 
     @Test

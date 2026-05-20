@@ -53,6 +53,13 @@ pub async fn run_vpn(
                 Duration::from_secs(RECONNECT_INITIAL_SECS),
             ),
             Err(e) => {
+                connected.store(false, Ordering::SeqCst);
+                if let Ok(mut ip) = assigned_ip.lock() {
+                    *ip = None;
+                }
+                if let Ok(mut last) = last_error.lock() {
+                    *last = Some(e.to_string());
+                }
                 warn!("Session failed: {:#}. Reconnecting...", e);
                 (
                     backoff,
@@ -144,12 +151,6 @@ async fn run_session(
             _ => return Err(anyhow::anyhow!("Unexpected server response")),
         };
 
-    info!("Handshake successful. Internal IPv4: {}", assigned_ip);
-    connected_flag.store(true, Ordering::SeqCst);
-    if let Ok(mut ip) = assigned_ip_state.lock() {
-        *ip = Some(assigned_ip.to_string());
-    }
-
     // 3. Create TUN device
     let tun = TunDevice::create(TUN_DEVICE_NAME)?;
     let tun_name = tun.name().to_string();
@@ -179,7 +180,23 @@ async fn run_session(
     )?;
 
     // 5. Start async TUN I/O
-    let async_tun = Arc::new(tun.into_async()?);
+    let async_tun = match tun.into_async() {
+        Ok(tun) => Arc::new(tun),
+        Err(err) => {
+            net_config.cleanup();
+            return Err(err);
+        }
+    };
+
+    info!("Handshake successful. Internal IPv4: {}", assigned_ip);
+    connected_flag.store(true, Ordering::SeqCst);
+    if let Ok(mut last) = last_error_state.lock() {
+        *last = None;
+    }
+    if let Ok(mut ip) = assigned_ip_state.lock() {
+        *ip = Some(assigned_ip.to_string());
+    }
+
     let session_alive = Arc::new(AtomicBool::new(true));
     let connection = Arc::new(connection);
 

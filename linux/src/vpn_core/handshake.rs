@@ -1,7 +1,9 @@
 use super::cert_pin::PinnedServerVerifier;
 use super::h3::H3SessionGuard;
 use anyhow::{Context, Result};
-use shared::{resolve_tun_mtu, ControlMessage, QUIC_OVERHEAD_BYTES};
+use shared::{
+    resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -80,14 +82,20 @@ pub(super) async fn connect_and_handshake(
     // QUIC short-header framing + AEAD tag + connection-ID bytes. Server and
     // client MUST be configured with the same `VPN_MTU`, otherwise the larger
     // side will send UDP payloads the smaller side considers out-of-spec.
-    let tun_mtu = resolve_tun_mtu(vpn_mtu);
-    let quic_mtu = tun_mtu + QUIC_OVERHEAD_BYTES;
+    let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
+    let transport_tun_mtu = if matches!(mtu_source, TunMtuSource::Default) {
+        MAX_TUN_MTU
+    } else {
+        local_tun_mtu
+    };
+    let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
     let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20 } else { 40 }, 8);
     info!(
-        "Address family: {}. Setting QUIC MTU: {} (TUN MTU: {}, Target Wire: {})",
+        "Address family: {}. Setting QUIC MTU: {} (TUN MTU budget: {}, source: {:?}, Target Wire: {})",
         if addr.is_ipv4() { "IPv4" } else { "IPv6" },
         quic_mtu,
-        tun_mtu,
+        transport_tun_mtu,
+        mtu_source,
         quic_mtu + ip_overhead + udp_overhead,
     );
 
@@ -157,7 +165,7 @@ pub(super) async fn connect_and_handshake(
         (cfg, None)
     };
 
-    validate_server_mtu(&config, tun_mtu)?;
+    validate_server_mtu(&config, local_tun_mtu, mtu_source)?;
 
     Ok((connection, config, h3_guard))
 }
@@ -191,13 +199,24 @@ fn decode_raw_response_body(buf: &[u8]) -> Result<ControlMessage> {
         .map_err(Into::into)
 }
 
-fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()> {
+fn validate_server_mtu(
+    config: &ControlMessage,
+    local_tun_mtu: u16,
+    mtu_source: TunMtuSource,
+) -> Result<()> {
     if let ControlMessage::Config { mtu, .. } = config {
-        if *mtu != local_tun_mtu {
+        if !(shared::MIN_TUN_MTU..=MAX_TUN_MTU).contains(mtu) {
             anyhow::bail!(
-                "MTU mismatch: local/client VPN MTU is {}, but server pushed {}. Configure both sides to the same VPN_MTU.",
-                local_tun_mtu,
-                mtu
+                "Server pushed unsupported VPN MTU {}. Supported range is {}-{}.",
+                mtu,
+                shared::MIN_TUN_MTU,
+                MAX_TUN_MTU
+            );
+        }
+
+        if mtu_source != TunMtuSource::Default && *mtu != local_tun_mtu {
+            anyhow::bail!(
+                "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {mtu}. Configure both sides to the same VPN_MTU."
             );
         }
     }
@@ -262,7 +281,9 @@ mod tests {
 
     #[test]
     fn server_mtu_must_match_linux_client() {
-        assert!(validate_server_mtu(&config_with_mtu(1280), 1280).is_ok());
-        assert!(validate_server_mtu(&config_with_mtu(1340), 1280).is_err());
+        assert!(validate_server_mtu(&config_with_mtu(1340), 1280, TunMtuSource::Default).is_ok());
+        assert!(validate_server_mtu(&config_with_mtu(1280), 1280, TunMtuSource::Config).is_ok());
+        assert!(validate_server_mtu(&config_with_mtu(1340), 1280, TunMtuSource::Config).is_err());
+        assert!(validate_server_mtu(&config_with_mtu(1400), 1280, TunMtuSource::Default).is_err());
     }
 }

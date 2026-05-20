@@ -54,7 +54,7 @@ fn build_connect_ip_capsules(
         address_assigns.push(AssignedAddress {
             request_id: 0,
             ip: IpAddr::V6(assigned_ip6),
-            prefix_len: 64,
+            prefix_len: state.network_v6.prefix(),
         });
     }
     masque::encode_capsule(
@@ -168,7 +168,9 @@ pub async fn handle_h3_connection(
             req.uri()
         );
         match non_connect_ip_response(config.censorship_resistant) {
-            NonConnectIpResponse::CamouflageOk => send_h3_camouflage_response(&mut req_stream).await?,
+            NonConnectIpResponse::CamouflageOk => {
+                send_h3_camouflage_response(&mut req_stream).await?
+            }
             NonConnectIpResponse::NotFound => {
                 let response = Response::builder()
                     .status(http::StatusCode::NOT_FOUND)
@@ -306,7 +308,10 @@ mod tests {
             non_connect_ip_response(true),
             NonConnectIpResponse::CamouflageOk
         );
-        assert_eq!(non_connect_ip_response(false), NonConnectIpResponse::NotFound);
+        assert_eq!(
+            non_connect_ip_response(false),
+            NonConnectIpResponse::NotFound
+        );
     }
 
     #[test]
@@ -344,8 +349,7 @@ mod tests {
         assert_eq!(routes[0].end, IpAddr::V4(Ipv4Addr::BROADCAST));
 
         let (cfg, _): (ControlMessage, _) =
-            bincode::serde::decode_from_slice(&capsules[2].1, bincode::config::standard())
-                .unwrap();
+            bincode::serde::decode_from_slice(&capsules[2].1, bincode::config::standard()).unwrap();
         match cfg {
             ControlMessage::Config {
                 assigned_ipv6,
@@ -368,14 +372,8 @@ mod tests {
         let config = test_config(&[]);
         let ip6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
         let capsules = collect_capsules(
-            &build_connect_ip_capsules(
-                &state,
-                &config,
-                Ipv4Addr::new(10, 8, 0, 2),
-                ip6,
-                true,
-            )
-            .unwrap(),
+            &build_connect_ip_capsules(&state, &config, Ipv4Addr::new(10, 8, 0, 2), ip6, true)
+                .unwrap(),
         );
 
         let assigns = decode_address_assign(&capsules[0].1).unwrap();
@@ -386,12 +384,13 @@ mod tests {
 
         let routes = decode_route_advertisement(&capsules[1].1).unwrap();
         assert_eq!(routes.len(), 2);
-        assert!(routes.iter().any(|r| r.start == IpAddr::V6(Ipv6Addr::UNSPECIFIED)
-            && r.end == IpAddr::V6(Ipv6Addr::from([0xff; 16]))));
+        assert!(routes
+            .iter()
+            .any(|r| r.start == IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+                && r.end == IpAddr::V6(Ipv6Addr::from([0xff; 16]))));
 
         let (cfg, _): (ControlMessage, _) =
-            bincode::serde::decode_from_slice(&capsules[2].1, bincode::config::standard())
-                .unwrap();
+            bincode::serde::decode_from_slice(&capsules[2].1, bincode::config::standard()).unwrap();
         match cfg {
             ControlMessage::Config {
                 assigned_ipv6,
@@ -405,6 +404,31 @@ mod tests {
                     dns_server_v6,
                     Some(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111))
                 );
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_ip_capsules_use_configured_ipv6_prefix() {
+        let state = AppState::new_with_ipv6("10.8.0.0/24", "fd12:3456::/80").unwrap();
+        let config = test_config(&[]);
+        let ip6 = Ipv6Addr::new(0xfd12, 0x3456, 0, 0, 0, 0, 0, 2);
+        let capsules = collect_capsules(
+            &build_connect_ip_capsules(&state, &config, Ipv4Addr::new(10, 8, 0, 2), ip6, true)
+                .unwrap(),
+        );
+
+        let assigns = decode_address_assign(&capsules[0].1).unwrap();
+        assert!(assigns
+            .iter()
+            .any(|a| a.ip == IpAddr::V6(ip6) && a.prefix_len == 80));
+
+        let (cfg, _): (ControlMessage, _) =
+            bincode::serde::decode_from_slice(&capsules[2].1, bincode::config::standard()).unwrap();
+        match cfg {
+            ControlMessage::Config { netmask_v6, .. } => {
+                assert_eq!(netmask_v6, Some(80));
             }
             other => panic!("expected Config, got {other:?}"),
         }

@@ -163,7 +163,7 @@ async fn send_request(req: IpcRequest) -> Result<()> {
                 println!("Endpoint: {ep}");
             }
             if let Some(ip) = assigned_ip {
-                println!("Public IP: {ip}");
+                println!("Tunnel IP: {ip}");
             }
             if let Some(err) = last_error {
                 println!("Last error: {err}");
@@ -192,7 +192,7 @@ async fn wait_for_connected() -> Result<()> {
                     println!("Endpoint: {ep}");
                 }
                 if let Some(ip) = assigned_ip {
-                    println!("Public IP: {ip}");
+                    println!("Tunnel IP: {ip}");
                 }
                 return Ok(());
             }

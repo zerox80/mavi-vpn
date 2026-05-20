@@ -13,12 +13,12 @@ fn validate_tun_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn ipv6_setup_args(tun_name: &str, gateway_ip6: std::net::Ipv6Addr) -> Vec<String> {
+fn ipv6_setup_args(tun_name: &str, gateway_ip6: std::net::Ipv6Addr, prefix_len: u8) -> Vec<String> {
     vec![
         "-6".to_string(),
         "addr".to_string(),
         "add".to_string(),
-        format!("{gateway_ip6}/64"),
+        format!("{gateway_ip6}/{prefix_len}"),
         "dev".to_string(),
         tun_name.to_string(),
     ]
@@ -56,7 +56,7 @@ pub fn create_tun_device(config: &Config, state: &AppState) -> Result<(tun::Asyn
 
 fn setup_ipv6(tun_name: &str, state: &AppState) -> bool {
     let gateway_ip6 = state.gateway_ip_v6();
-    let args = ipv6_setup_args(tun_name, gateway_ip6);
+    let args = ipv6_setup_args(tun_name, gateway_ip6, state.network_v6.prefix());
     match std::process::Command::new("ip")
         .args(args.iter().map(String::as_str))
         .output()
@@ -96,18 +96,12 @@ mod tests {
         let args = ipv6_setup_args(
             "mavi0",
             std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1),
+            64,
         );
 
         assert_eq!(
             args,
-            vec![
-                "-6",
-                "addr",
-                "add",
-                "fd00::1/64",
-                "dev",
-                "mavi0"
-            ]
+            vec!["-6", "addr", "add", "fd00::1/64", "dev", "mavi0"]
         );
     }
 }

@@ -30,15 +30,22 @@ pub struct Config {
     #[arg(long, env = "VPN_BIND_ADDR", default_value = "0.0.0.0:4433")]
     pub bind_addr: SocketAddr,
 
-    /// Pre-shared authentication token. Clients must provide this exact string
-    /// during the handshake to gain access. Use a long, random string for security.
+    /// Pre-shared authentication token. Required unless Keycloak authentication
+    /// is enabled. Clients must provide this exact string during the handshake
+    /// to gain access. Use a long, random string for security.
     #[arg(long, env = "VPN_AUTH_TOKEN")]
-    pub auth_token: String,
+    pub auth_token: Option<String>,
 
     /// The virtual internal network range managed by the VPN.
     /// Example: `10.8.0.0/24`. All clients will receive IPs from this range.
     #[arg(long, env = "VPN_NETWORK", default_value = "10.8.0.0/24")]
     pub network_cidr: String,
+
+    /// The virtual internal IPv6 network range managed by the VPN.
+    /// Example: `fd00::/64`. All dual-stack clients receive IPv6 addresses
+    /// from this range when IPv6 setup succeeds.
+    #[arg(long, env = "VPN_NETWORK_V6", default_value = "fd00::/64")]
+    pub network_cidr_v6: String,
 
     /// Optional explicit TUN interface name.
     /// If not provided, the server will create one (usually `tun0`).
@@ -150,7 +157,24 @@ pub struct Config {
 pub fn load() -> Config {
     // Load .env file if it exists
     dotenvy::dotenv().ok();
-    Config::parse()
+    let config = Config::parse();
+    if let Err(err) = config.validate() {
+        eprintln!("{err}");
+        std::process::exit(2);
+    }
+    config
+}
+
+impl Config {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.keycloak_enabled && self.auth_token.as_deref().is_none_or(str::is_empty) {
+            return Err(
+                "VPN_AUTH_TOKEN / --auth-token is required when Keycloak auth is disabled"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -162,10 +186,12 @@ mod tests {
         let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret123"]);
         assert_eq!(config.mtu, 1280);
         assert_eq!(config.network_cidr, "10.8.0.0/24");
+        assert_eq!(config.network_cidr_v6, "fd00::/64");
         assert_eq!(config.dns, std::net::Ipv4Addr::new(1, 1, 1, 1));
-        assert_eq!(config.auth_token, "secret123");
+        assert_eq!(config.auth_token.as_deref(), Some("secret123"));
         assert!(!config.censorship_resistant);
         assert!(!config.mss_clamping);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -204,7 +230,7 @@ mod tests {
             "--censorship-resistant",
             "--mss-clamping",
         ]);
-        assert_eq!(config.auth_token, "super_secret");
+        assert_eq!(config.auth_token.as_deref(), Some("super_secret"));
         assert_eq!(config.network_cidr, "192.168.10.0/24");
         assert_eq!(config.dns, std::net::Ipv4Addr::new(8, 8, 8, 8));
         assert!(config.censorship_resistant);
@@ -253,6 +279,39 @@ mod tests {
         assert!(config.keycloak_url.is_none());
         assert_eq!(config.keycloak_realm, "mavi-vpn");
         assert_eq!(config.keycloak_client_id, "mavi-client");
+    }
+
+    #[test]
+    fn test_keycloak_does_not_require_static_token() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--keycloak-enabled",
+            "--keycloak-url",
+            "https://auth.example.com",
+        ]);
+        assert!(config.keycloak_enabled);
+        assert!(config.auth_token.is_none());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_static_auth_requires_token() {
+        let config = Config::parse_from(["mavi-vpn"]);
+        assert!(!config.keycloak_enabled);
+        assert!(config.auth_token.is_none());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_ipv6_network_flag() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--auth-token",
+            "secret",
+            "--network-cidr-v6",
+            "fd12:3456::/64",
+        ]);
+        assert_eq!(config.network_cidr_v6, "fd12:3456::/64");
     }
 
     #[test]

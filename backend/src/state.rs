@@ -43,13 +43,28 @@ impl AppState {
     /// # Arguments
     /// - `cidr` - The IPv4 network specification (e.g., "10.8.0.0/24").
     pub fn new(cidr: &str) -> Result<Self> {
+        Self::new_with_ipv6(cidr, "fd00::/64")
+    }
+
+    /// Initialises the application state with explicit IPv4 and IPv6 networks.
+    ///
+    /// # Arguments
+    /// - `cidr` - The IPv4 network specification (e.g., "10.8.0.0/24").
+    /// - `cidr_v6` - The IPv6 network specification (e.g., "fd00::/64").
+    pub fn new_with_ipv6(cidr: &str, cidr_v6: &str) -> Result<Self> {
         let network: Ipv4Network = cidr
             .parse()
             .map_err(|_| anyhow!("Invalid CIDR format: {cidr}"))?;
-        // Internal IPv6 network (ULA range)
-        let network_v6: Ipv6Network = "fd00::/64"
+        let network_v6: Ipv6Network = cidr_v6
             .parse()
-            .expect("Invalid hardcoded IPv6 CIDR 'fd00::/64'");
+            .map_err(|_| anyhow!("Invalid IPv6 CIDR format: {cidr_v6}"))?;
+        if network_v6.prefix() > 126 {
+            return Err(anyhow!(
+                "IPv6 CIDR '{}' network is too small (/{} prefix leaves no client address after gateway)",
+                cidr_v6,
+                network_v6.prefix()
+            ));
+        }
 
         // --- Populate IPv4 pool ---
         if network.prefix() > 30 {
@@ -438,6 +453,25 @@ mod tests {
             state.gateway_ip_v6(),
             Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)
         );
+    }
+
+    #[test]
+    fn custom_ipv6_network_is_used_for_gateway_and_assignments() {
+        let state = AppState::new_with_ipv6("10.8.0.0/24", "fd12:3456::/64").unwrap();
+        assert_eq!(
+            state.gateway_ip_v6(),
+            Ipv6Addr::new(0xfd12, 0x3456, 0, 0, 0, 0, 0, 1)
+        );
+        assert_eq!(
+            state.assign_ipv6().unwrap(),
+            Ipv6Addr::new(0xfd12, 0x3456, 0, 0, 0, 0, 0, 2)
+        );
+    }
+
+    #[test]
+    fn ipv6_network_must_have_client_space() {
+        assert!(AppState::new_with_ipv6("10.8.0.0/24", "fd00::/127").is_err());
+        assert!(AppState::new_with_ipv6("10.8.0.0/24", "not-a-cidr").is_err());
     }
 
     #[test]

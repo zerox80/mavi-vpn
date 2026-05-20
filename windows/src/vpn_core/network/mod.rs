@@ -264,9 +264,22 @@ pub fn cleanup_stale_network_state() {
     remove_nrpt_dns_rule();
 }
 
-fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
+fn resolve_endpoint_ip(endpoint: &str) -> Option<IpAddr> {
     let (host, _) = split_endpoint(endpoint);
-    let host_ip = host.parse::<IpAddr>().ok()?;
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        Some(ip)
+    } else {
+        use std::net::ToSocketAddrs;
+        if let Ok(mut addrs) = (host, 0).to_socket_addrs() {
+            addrs.next().map(|addr| addr.ip())
+        } else {
+            None
+        }
+    }
+}
+
+fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
+    let host_ip = resolve_endpoint_ip(endpoint)?;
 
     let (prefix, default_prefix) = match host_ip {
         IpAddr::V4(_) => (format!("{host_ip}/32"), "0.0.0.0/0"),
@@ -323,4 +336,34 @@ fn load_persisted_host_route() -> Option<String> {
 
 fn clear_persisted_host_route() {
     let _ = std::fs::remove_file(host_route_path());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_endpoint_ip_literal_ipv4() {
+        let ip = resolve_endpoint_ip("192.168.1.1:443");
+        assert_eq!(ip, Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1))));
+    }
+
+    #[test]
+    fn test_resolve_endpoint_ip_literal_ipv6() {
+        let ip = resolve_endpoint_ip("[2001:db8::1]:443");
+        assert_eq!(ip, Some(IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))));
+    }
+
+    #[test]
+    fn test_resolve_endpoint_ip_domain() {
+        // localhost is guaranteed to resolve on any standard OS environment
+        let ip = resolve_endpoint_ip("localhost:8080");
+        assert!(ip.is_some());
+    }
+
+    #[test]
+    fn test_resolve_endpoint_ip_invalid_domain() {
+        let ip = resolve_endpoint_ip("invalid-domain-that-does-not-exist.invalid:8080");
+        assert!(ip.is_none());
+    }
 }

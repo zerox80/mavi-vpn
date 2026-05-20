@@ -7,15 +7,20 @@ use wintun::Adapter;
 /// Embedded `WinTUN` driver binary.
 static WINTUN_DLL: &[u8] = include_bytes!("../../wintun.dll");
 
-/// Extracts the embedded `wintun.dll` to a temporary directory so it can be loaded.
+/// Extracts the embedded `wintun.dll` to a secure directory so it can be loaded.
 pub fn extract_wintun_dll() -> Result<PathBuf> {
-    let temp_dir = std::env::temp_dir();
-    let dll_path = temp_dir.join("mavi_wintun.dll");
+    let base = std::env::var_os("ProgramData")
+        .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
+    let vpn_dir = base.join("mavi-vpn");
+    let dll_path = vpn_dir.join("mavi_wintun.dll");
+
+    std::fs::create_dir_all(&vpn_dir)
+        .context("Failed to create wintun.dll extraction directory")?;
 
     if !dll_path.exists() {
         info!("Extracting wintun.dll to {}...", dll_path.display());
         std::fs::write(&dll_path, WINTUN_DLL)
-            .context("Failed to extract wintun.dll to temp directory")?;
+            .context("Failed to extract wintun.dll to ProgramData directory")?;
     }
     Ok(dll_path)
 }

@@ -27,6 +27,23 @@ use self::route::{
 pub use self::utils::split_endpoint;
 use self::utils::{run_cmd, run_powershell_cmd};
 
+trait CommandRunner {
+    fn run_cmd(&self, program: &str, args: &[&str]) -> bool;
+    fn run_powershell_cmd(&self, label: &str, script: &str) -> bool;
+}
+
+struct SystemCommandRunner;
+
+impl CommandRunner for SystemCommandRunner {
+    fn run_cmd(&self, program: &str, args: &[&str]) -> bool {
+        run_cmd(program, args)
+    }
+
+    fn run_powershell_cmd(&self, label: &str, script: &str) -> bool {
+        run_powershell_cmd(label, script)
+    }
+}
+
 pub struct SessionRouteGuard {
     host_route: Option<String>,
 }
@@ -158,7 +175,11 @@ pub fn set_adapter_network_config(
 }
 
 fn configure_dns(adapter_name: &str) {
-    run_cmd(
+    configure_dns_with_runner(&SystemCommandRunner, adapter_name);
+}
+
+fn configure_dns_with_runner(runner: &dyn CommandRunner, adapter_name: &str) {
+    runner.run_cmd(
         "netsh",
         &[
             "interface",
@@ -172,7 +193,7 @@ fn configure_dns(adapter_name: &str) {
             "validate=no",
         ],
     );
-    run_cmd(
+    runner.run_cmd(
         "netsh",
         &[
             "interface",
@@ -265,6 +286,14 @@ pub fn cleanup_stale_network_state() {
 }
 
 fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
+    add_host_route_exception_fixed_with_runner(&SystemCommandRunner, endpoint, true)
+}
+
+fn add_host_route_exception_fixed_with_runner(
+    runner: &dyn CommandRunner,
+    endpoint: &str,
+    persist: bool,
+) -> Option<String> {
     let (host, _) = split_endpoint(endpoint);
     let host_ip = host.parse::<IpAddr>().ok()?;
 
@@ -292,8 +321,10 @@ fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
          }} else {{ throw 'No physical gateway for {default_prefix}' }}"
     );
 
-    if run_powershell_cmd(&format!("Add host exception for {prefix}"), &script) {
-        persist_host_route(&prefix);
+    if runner.run_powershell_cmd(&format!("Add host exception for {prefix}"), &script) {
+        if persist {
+            persist_host_route(&prefix);
+        }
         Some(prefix)
     } else {
         None
@@ -323,4 +354,156 @@ fn load_persisted_host_route() -> Option<String> {
 
 fn clear_persisted_host_route() {
     let _ = std::fs::remove_file(host_route_path());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RecordedCommand {
+        Cmd { program: String, args: Vec<String> },
+        PowerShell { label: String, script: String },
+    }
+
+    struct RecordingRunner {
+        commands: RefCell<Vec<RecordedCommand>>,
+        succeeds: bool,
+    }
+
+    impl RecordingRunner {
+        fn new(succeeds: bool) -> Self {
+            Self {
+                commands: RefCell::new(Vec::new()),
+                succeeds,
+            }
+        }
+
+        fn commands(&self) -> Vec<RecordedCommand> {
+            self.commands.borrow().to_vec()
+        }
+    }
+
+    impl Clone for RecordedCommand {
+        fn clone(&self) -> Self {
+            match self {
+                Self::Cmd { program, args } => Self::Cmd {
+                    program: program.clone(),
+                    args: args.clone(),
+                },
+                Self::PowerShell { label, script } => Self::PowerShell {
+                    label: label.clone(),
+                    script: script.clone(),
+                },
+            }
+        }
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run_cmd(&self, program: &str, args: &[&str]) -> bool {
+            self.commands.borrow_mut().push(RecordedCommand::Cmd {
+                program: program.to_string(),
+                args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            });
+            self.succeeds
+        }
+
+        fn run_powershell_cmd(&self, label: &str, script: &str) -> bool {
+            self.commands.borrow_mut().push(RecordedCommand::PowerShell {
+                label: label.to_string(),
+                script: script.to_string(),
+            });
+            self.succeeds
+        }
+    }
+
+    #[test]
+    fn dns_configuration_uses_expected_netsh_commands() {
+        let runner = RecordingRunner::new(true);
+
+        configure_dns_with_runner(&runner, "MaviVPN");
+
+        assert_eq!(
+            runner.commands(),
+            vec![
+                RecordedCommand::Cmd {
+                    program: "netsh".to_string(),
+                    args: vec![
+                        "interface",
+                        "ipv4",
+                        "set",
+                        "dnsservers",
+                        "MaviVPN",
+                        "static",
+                        "1.1.1.1",
+                        "primary",
+                        "validate=no",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                },
+                RecordedCommand::Cmd {
+                    program: "netsh".to_string(),
+                    args: vec![
+                        "interface",
+                        "ipv4",
+                        "add",
+                        "dnsservers",
+                        "MaviVPN",
+                        "8.8.8.8",
+                        "index=2",
+                        "validate=no",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn host_route_exception_builds_ipv4_power_shell_plan() {
+        let runner = RecordingRunner::new(true);
+
+        let prefix =
+            add_host_route_exception_fixed_with_runner(&runner, "203.0.113.10:443", false);
+
+        assert_eq!(prefix.as_deref(), Some("203.0.113.10/32"));
+        let commands = runner.commands();
+        assert_eq!(commands.len(), 1);
+        let RecordedCommand::PowerShell { label, script } = &commands[0] else {
+            panic!("expected PowerShell command");
+        };
+        assert!(label.contains("203.0.113.10/32"));
+        assert!(script.contains("DestinationPrefix = '203.0.113.10/32'"));
+        assert!(script.contains("Get-NetRoute -DestinationPrefix '0.0.0.0/0'"));
+        assert!(script.contains("New-NetRoute @args"));
+    }
+
+    #[test]
+    fn host_route_exception_builds_ipv6_power_shell_plan() {
+        let runner = RecordingRunner::new(true);
+
+        let prefix = add_host_route_exception_fixed_with_runner(&runner, "[2001:db8::10]:443", false);
+
+        assert_eq!(prefix.as_deref(), Some("2001:db8::10/128"));
+        let commands = runner.commands();
+        let RecordedCommand::PowerShell { script, .. } = &commands[0] else {
+            panic!("expected PowerShell command");
+        };
+        assert!(script.contains("DestinationPrefix = '2001:db8::10/128'"));
+        assert!(script.contains("Get-NetRoute -DestinationPrefix '::/0'"));
+    }
+
+    #[test]
+    fn host_route_exception_returns_none_when_runner_fails() {
+        let runner = RecordingRunner::new(false);
+
+        let prefix = add_host_route_exception_fixed_with_runner(&runner, "203.0.113.10:443", false);
+
+        assert!(prefix.is_none());
+    }
 }

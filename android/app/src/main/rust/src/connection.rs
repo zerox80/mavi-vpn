@@ -3,7 +3,7 @@ use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
     masque::{self, CAPSULE_MAVI_CONFIG},
-    resolve_tun_mtu, ControlMessage, QUIC_OVERHEAD_BYTES,
+    resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -107,12 +107,18 @@ pub async fn connect_and_handshake(
     // via vpn_mtu, env VPN_MTU, or default 1280) + 80-byte QUIC/AEAD overhead.
     // Server and client MUST agree on the TUN MTU, otherwise the larger side
     // will send UDP payloads the smaller side considers out-of-spec.
-    let tun_mtu = resolve_tun_mtu(vpn_mtu);
-    let quic_mtu = tun_mtu + QUIC_OVERHEAD_BYTES;
+    let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
+    let transport_tun_mtu = if matches!(mtu_source, TunMtuSource::Default) {
+        MAX_TUN_MTU
+    } else {
+        local_tun_mtu
+    };
+    let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
     info!(
-        "Setting QUIC MTU: {} (TUN MTU: {}, Target Wire: {} IPv4 / {} IPv6)",
+        "Setting QUIC MTU: {} (TUN MTU budget: {}, source: {:?}, Target Wire: {} IPv4 / {} IPv6)",
         quic_mtu,
-        tun_mtu,
+        transport_tun_mtu,
+        mtu_source,
         quic_mtu + 20 + 8,
         quic_mtu + 40 + 8,
     );
@@ -216,14 +222,27 @@ pub async fn connect_and_handshake(
         (cfg, None)
     };
 
-    validate_server_mtu(&config, tun_mtu)?;
+    validate_server_mtu(&config, local_tun_mtu, mtu_source)?;
 
     Ok((connection, config, h3_guard))
 }
 
-fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> anyhow::Result<()> {
+fn validate_server_mtu(
+    config: &ControlMessage,
+    local_tun_mtu: u16,
+    mtu_source: TunMtuSource,
+) -> anyhow::Result<()> {
     if let ControlMessage::Config { mtu, .. } = config {
-        if *mtu != local_tun_mtu {
+        if !(shared::MIN_TUN_MTU..=MAX_TUN_MTU).contains(mtu) {
+            anyhow::bail!(
+                "Server pushed unsupported VPN MTU {}. Supported range is {}-{}.",
+                mtu,
+                shared::MIN_TUN_MTU,
+                MAX_TUN_MTU
+            );
+        }
+
+        if mtu_source != TunMtuSource::Default && *mtu != local_tun_mtu {
             anyhow::bail!(
                 "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {mtu}. Configure both sides to the same VPN_MTU."
             );
@@ -425,13 +444,22 @@ mod tests {
 
     #[test]
     fn validate_server_mtu_accepts_match() {
-        assert!(validate_server_mtu(&config_with_mtu(1280), 1280).is_ok());
+        assert!(validate_server_mtu(&config_with_mtu(1280), 1280, TunMtuSource::Config).is_ok());
+        assert!(validate_server_mtu(&config_with_mtu(1360), 1280, TunMtuSource::Default).is_ok());
     }
 
     #[test]
     fn validate_server_mtu_rejects_mismatch() {
-        let err = validate_server_mtu(&config_with_mtu(1360), 1280).unwrap_err();
+        let err =
+            validate_server_mtu(&config_with_mtu(1360), 1280, TunMtuSource::Config).unwrap_err();
         assert!(err.to_string().contains("MTU mismatch"));
+    }
+
+    #[test]
+    fn validate_server_mtu_rejects_unsupported_value() {
+        let err =
+            validate_server_mtu(&config_with_mtu(1400), 1280, TunMtuSource::Default).unwrap_err();
+        assert!(err.to_string().contains("unsupported VPN MTU"));
     }
 
     #[test]

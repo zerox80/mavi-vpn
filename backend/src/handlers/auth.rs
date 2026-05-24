@@ -29,8 +29,13 @@ pub async fn authenticate_client(
         if !kc.validate_token(token).await? {
             anyhow::bail!("Access Denied: Invalid Keycloak Token");
         }
-    } else if !constant_time_eq(token.as_bytes(), config.auth_token.as_bytes()) {
-        anyhow::bail!("Access Denied: Invalid Token");
+    } else {
+        let Some(auth_token) = config.auth_token.as_deref().filter(|t| !t.is_empty()) else {
+            anyhow::bail!("Static auth is enabled but VPN_AUTH_TOKEN is not configured");
+        };
+        if !constant_time_eq(token.as_bytes(), auth_token.as_bytes()) {
+            anyhow::bail!("Access Denied: Invalid Token");
+        }
     }
 
     state.assign_ip_pair()

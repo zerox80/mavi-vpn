@@ -7,6 +7,7 @@
 mod oauth;
 
 use shared::ipc::{Config, IpcRequest, IpcResponse, VpnState, LOCAL_IPC_ADDR};
+use std::path::Path;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -112,24 +113,7 @@ struct VpnStatus {
 
 #[tauri::command]
 async fn vpn_connect(mut config: Config) -> Result<String, String> {
-    if config.kc_auth.unwrap_or(false) {
-        let kc_url = config.kc_url.as_deref().unwrap_or("").to_string();
-        let realm = config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into());
-        let client_id = config
-            .kc_client_id
-            .clone()
-            .unwrap_or_else(|| "mavi-client".into());
-
-        if kc_url.is_empty() {
-            return Err("Keycloak URL is not configured.".into());
-        }
-
-        let token = oauth::start_oauth_flow(&kc_url, &realm, &client_id)
-            .await
-            .map_err(|e| format!("Keycloak login failed: {e}"))?;
-
-        config.token = token;
-    }
+    prepare_keycloak_config(&mut config).await?;
     config.normalize_transport();
 
     match send_ipc_request(&IpcRequest::Start(config)).await? {
@@ -137,6 +121,30 @@ async fn vpn_connect(mut config: Config) -> Result<String, String> {
         IpcResponse::Error(e) => Err(e),
         IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
     }
+}
+
+async fn prepare_keycloak_config(config: &mut Config) -> Result<(), String> {
+    if !config.kc_auth.unwrap_or(false) {
+        return Ok(());
+    }
+
+    let kc_url = config.kc_url.as_deref().unwrap_or("").to_string();
+    let realm = config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into());
+    let client_id = config
+        .kc_client_id
+        .clone()
+        .unwrap_or_else(|| "mavi-client".into());
+
+    if kc_url.is_empty() {
+        return Err("Keycloak URL is not configured.".into());
+    }
+
+    let token = oauth::start_oauth_flow(&kc_url, &realm, &client_id)
+        .await
+        .map_err(|e| format!("Keycloak login failed: {e}"))?;
+
+    config.token = token;
+    Ok(())
 }
 
 #[tauri::command]
@@ -190,17 +198,25 @@ async fn vpn_status() -> Result<VpnStatus, String> {
 #[tauri::command]
 async fn save_config(app: AppHandle, mut config: Config) -> Result<(), String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    let config_path = config_dir.join("config.json");
-    config.normalize_transport();
-    let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    std::fs::write(&config_path, content).map_err(|e| e.to_string())?;
-    Ok(())
+    save_config_to_dir(&config_dir, &mut config)
 }
 
 #[tauri::command]
 async fn load_config(app: AppHandle) -> Result<Option<Config>, String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    load_config_from_dir(&config_dir)
+}
+
+fn save_config_to_dir(config_dir: &Path, config: &mut Config) -> Result<(), String> {
+    std::fs::create_dir_all(config_dir).map_err(|e| e.to_string())?;
+    let config_path = config_dir.join("config.json");
+    config.normalize_transport();
+    let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    std::fs::write(&config_path, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn load_config_from_dir(config_dir: &Path) -> Result<Option<Config>, String> {
     let config_path = config_dir.join("config.json");
     if !config_path.exists() {
         return Ok(None);
@@ -293,6 +309,16 @@ fn default_accent() -> String {
 #[tauri::command]
 async fn load_prefs(app: AppHandle) -> Result<Prefs, String> {
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    load_prefs_from_dir(&config_dir)
+}
+
+#[tauri::command]
+async fn save_prefs(app: AppHandle, mut prefs: Prefs) -> Result<(), String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    save_prefs_to_dir(&config_dir, &mut prefs)
+}
+
+fn load_prefs_from_dir(config_dir: &Path) -> Result<Prefs, String> {
     let prefs_path = config_dir.join("prefs.json");
     if !prefs_path.exists() {
         return Ok(Prefs::default());
@@ -303,13 +329,11 @@ async fn load_prefs(app: AppHandle) -> Result<Prefs, String> {
     Ok(prefs)
 }
 
-#[tauri::command]
-async fn save_prefs(app: AppHandle, mut prefs: Prefs) -> Result<(), String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+fn save_prefs_to_dir(config_dir: &Path, prefs: &mut Prefs) -> Result<(), String> {
+    std::fs::create_dir_all(config_dir).map_err(|e| e.to_string())?;
     let prefs_path = config_dir.join("prefs.json");
     prefs.normalize_transport();
-    let content = serde_json::to_string_pretty(&prefs).map_err(|e| e.to_string())?;
+    let content = serde_json::to_string_pretty(prefs).map_err(|e| e.to_string())?;
     std::fs::write(&prefs_path, content).map_err(|e| e.to_string())?;
     Ok(())
 }

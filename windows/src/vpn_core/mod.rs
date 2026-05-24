@@ -224,9 +224,9 @@ async fn run_session(
             .map_or_else(|| v6.to_string(), |v4| v4.to_string()),
     };
 
-    // Store the server's public IP in shared state for the GUI
+    // Store the tunnel IP in shared state for CLI/GUI status.
     if let Ok(mut ip) = assigned_ip_state.lock() {
-        *ip = Some(endpoint_ip_str.clone());
+        *ip = Some(assigned_ip.to_string());
     }
 
     let adapter_config_started = Instant::now();

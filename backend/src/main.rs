@@ -68,7 +68,10 @@ async fn main() -> Result<()> {
         quic_payload_mtu + wire_overhead_ipv6,
     );
 
-    let state = Arc::new(AppState::new(&config.network_cidr)?);
+    let state = Arc::new(AppState::new_with_ipv6(
+        &config.network_cidr,
+        &config.network_cidr_v6,
+    )?);
 
     // Load or generate certificates
     let cert_path = config.cert_path.clone();

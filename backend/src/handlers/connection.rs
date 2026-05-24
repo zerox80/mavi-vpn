@@ -2,7 +2,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
 use shared::ControlMessage;
@@ -37,10 +37,9 @@ fn validate_raw_auth_len(len: usize) -> Result<()> {
 }
 
 fn decode_raw_auth_payload(buf: &[u8]) -> Result<String> {
-    let msg: ControlMessage =
-        bincode::serde::decode_from_slice(buf, bincode::config::standard())
-            .map(|(v, _)| v)
-            .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
+    let msg: ControlMessage = bincode::serde::decode_from_slice(buf, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
 
     match msg {
         ControlMessage::Auth { token } => Ok(token),
@@ -80,7 +79,11 @@ pub(super) fn build_config_message(
         } else {
             None
         },
-        netmask_v6: if ipv6_enabled { Some(64) } else { None },
+        netmask_v6: if ipv6_enabled {
+            Some(state.network_v6.prefix())
+        } else {
+            None
+        },
         gateway_v6: if ipv6_enabled {
             Some(state.gateway_ip_v6())
         } else {
@@ -253,7 +256,8 @@ pub async fn handle_connection(
         ip6: assigned_ip6,
     };
 
-    let success_msg = build_config_message(&state, &config, assigned_ip, assigned_ip6, ipv6_enabled);
+    let success_msg =
+        build_config_message(&state, &config, assigned_ip, assigned_ip6, ipv6_enabled);
     let bytes = encode_control_message_frame(&success_msg)?;
     send_stream.write_all(&bytes).await?;
     let _ = send_stream.finish();
@@ -446,6 +450,26 @@ mod tests {
                     dns_server_v6,
                     Some(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111))
                 );
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_message_uses_configured_ipv6_prefix() {
+        let state = AppState::new_with_ipv6("10.8.0.0/24", "fd12:3456::/80").unwrap();
+        let config = test_config();
+        let msg = build_config_message(
+            &state,
+            &config,
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv6Addr::new(0xfd12, 0x3456, 0, 0, 0, 0, 0, 2),
+            true,
+        );
+
+        match msg {
+            ControlMessage::Config { netmask_v6, .. } => {
+                assert_eq!(netmask_v6, Some(80));
             }
             other => panic!("expected Config, got {other:?}"),
         }

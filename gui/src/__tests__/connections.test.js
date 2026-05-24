@@ -3,7 +3,10 @@ import { state } from '../state.js';
 import {
   connectionFromLegacyConfig,
   migrateLegacyConfig,
+  renderConnectionList,
+  selectConnection,
   validMtu,
+  wireSidebarSearch,
 } from '../connections.js';
 import { savePrefs } from '../theme.js';
 
@@ -132,5 +135,83 @@ describe('migrateLegacyConfig', () => {
 
     expect(state.prefs.connections).toEqual([]);
     expect(savePrefs).not.toHaveBeenCalled();
+  });
+});
+
+describe('connection list rendering and selection', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    document.body.innerHTML = `
+      <input id="search" />
+      <button id="add-conn-btn"></button>
+      <div id="connection-list"></div>
+    `;
+    state.search = '';
+    state.hero = 'off';
+    state.prefs.active_id = 'one';
+    state.prefs.connections = [
+      { id: 'one', label: 'Primary Node', endpoint: 'one.example:443' },
+      { id: 'two', label: 'Backup Node', endpoint: 'two.example:443' },
+    ];
+  });
+
+  it('renders saved connections and selected state', () => {
+    renderConnectionList();
+
+    const rows = document.querySelectorAll('.conn-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].classList.contains('selected')).toBe(true);
+    expect(rows[0].textContent).toContain('Primary Node');
+  });
+
+  it('renders empty and no-match states', () => {
+    state.prefs.connections = [];
+    renderConnectionList();
+    expect(document.getElementById('connection-list').textContent).toContain(
+      'No saved connections yet'
+    );
+
+    state.prefs.connections = [{ id: 'one', label: 'Primary', endpoint: 'one.example:443' }];
+    state.search = 'missing';
+    renderConnectionList();
+    expect(document.getElementById('connection-list').textContent).toContain('No matches.');
+  });
+
+  it('selects a connection, persists prefs, and rerenders', async () => {
+    const applyHeroForSelection = vi.fn();
+    wireSidebarSearch({ openModal: vi.fn(), applyHeroForSelection });
+
+    await selectConnection('two');
+
+    expect(state.prefs.active_id).toBe('two');
+    expect(savePrefs).toHaveBeenCalledOnce();
+    expect(applyHeroForSelection).toHaveBeenCalledOnce();
+  });
+
+  it('wires search and add connection interactions', () => {
+    const openModal = vi.fn();
+    wireSidebarSearch({ openModal, applyHeroForSelection: vi.fn() });
+
+    const search = document.getElementById('search');
+    search.value = 'backup';
+    search.dispatchEvent(new Event('input'));
+    document.getElementById('add-conn-btn').click();
+
+    expect(state.search).toBe('backup');
+    expect(document.querySelectorAll('.conn-row')).toHaveLength(1);
+    expect(openModal).toHaveBeenCalledWith(null);
+  });
+
+  it('opens editor on double click and context menu', () => {
+    const openModal = vi.fn();
+    wireSidebarSearch({ openModal, applyHeroForSelection: vi.fn() });
+    renderConnectionList();
+
+    const row = document.querySelector('.conn-row');
+    row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+    expect(openModal).toHaveBeenCalledWith('one');
+    expect(openModal).toHaveBeenCalledTimes(2);
   });
 });

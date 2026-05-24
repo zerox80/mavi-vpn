@@ -425,3 +425,112 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running Mavi VPN GUI");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            endpoint: "vpn.example.com:443".to_string(),
+            token: "token".to_string(),
+            cert_pin: "pin".to_string(),
+            censorship_resistant: false,
+            http3_framing: false,
+            kc_auth: None,
+            kc_url: None,
+            kc_realm: None,
+            kc_client_id: None,
+            ech_config: None,
+            vpn_mtu: None,
+        }
+    }
+
+    #[test]
+    fn ipc_token_permission_denied_message_is_specific() {
+        let message = ipc_token_read_error(
+            std::path::Path::new("/tmp/mavi.token"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+
+        assert!(message.contains("permission denied"));
+        assert!(message.contains("/tmp/mavi.token"));
+    }
+
+    #[test]
+    fn missing_config_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let config = load_config_from_dir(dir.path()).unwrap();
+
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn config_roundtrip_normalizes_transport_before_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.censorship_resistant = true;
+        config.http3_framing = false;
+
+        save_config_to_dir(dir.path(), &mut config).unwrap();
+        let loaded = load_config_from_dir(dir.path()).unwrap().unwrap();
+
+        assert!(loaded.http3_framing);
+    }
+
+    #[test]
+    fn corrupt_config_json_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), "{not-json").unwrap();
+
+        let result = load_config_from_dir(dir.path());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_prefs_returns_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let prefs = load_prefs_from_dir(dir.path()).unwrap();
+
+        assert_eq!(prefs.theme, "light");
+        assert_eq!(prefs.accent, "#2B44FF");
+        assert!(prefs.connections.is_empty());
+    }
+
+    #[test]
+    fn prefs_roundtrip_normalizes_connection_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut prefs = Prefs {
+            connections: vec![SavedConn {
+                id: "one".to_string(),
+                label: "One".to_string(),
+                endpoint: "vpn.example.com:443".to_string(),
+                token: Some("token".to_string()),
+                cert_pin: "pin".to_string(),
+                censorship_resistant: true,
+                http3_framing: false,
+                ..SavedConn::default()
+            }],
+            ..Prefs::default()
+        };
+
+        save_prefs_to_dir(dir.path(), &mut prefs).unwrap();
+        let loaded = load_prefs_from_dir(dir.path()).unwrap();
+
+        assert!(loaded.connections[0].http3_framing);
+    }
+
+    #[tokio::test]
+    async fn keycloak_config_requires_url() {
+        let mut config = test_config();
+        config.kc_auth = Some(true);
+        config.kc_url = Some(String::new());
+
+        let result = prepare_keycloak_config(&mut config).await;
+
+        assert_eq!(result.unwrap_err(), "Keycloak URL is not configured.");
+    }
+}

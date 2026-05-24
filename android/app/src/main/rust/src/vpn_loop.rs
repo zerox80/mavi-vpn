@@ -528,7 +528,7 @@ mod tests {
     fn tun_payload_preserves_masque_prefix_for_h3() {
         let framed = masque::wrap_datagram(&bytes::Bytes::from_static(b"abc"));
 
-        let payload = tun_payload_for_quic(framed.clone(), true);
+        let payload = tun_payload_for_quic(framed.clone().into(), true);
 
         assert_eq!(payload, framed);
         assert!(payload.starts_with(&masque::DATAGRAM_PREFIX));
@@ -538,7 +538,7 @@ mod tests {
     fn tun_payload_strips_masque_prefix_for_raw_quic() {
         let framed = masque::wrap_datagram(&bytes::Bytes::from_static(b"abc"));
 
-        let payload = tun_payload_for_quic(framed, false);
+        let payload = tun_payload_for_quic(framed.into(), false);
 
         assert_eq!(&payload[..], b"abc");
     }
@@ -547,7 +547,7 @@ mod tests {
     fn quic_datagram_unwraps_h3_and_drops_invalid_packets() {
         let framed = masque::wrap_datagram(&bytes::Bytes::from_static(b"abc"));
 
-        let packet = quic_datagram_to_tun_packet(framed, true).unwrap();
+        let packet = quic_datagram_to_tun_packet(framed.into(), true).unwrap();
         let invalid = quic_datagram_to_tun_packet(bytes::Bytes::from_static(b"abc"), true);
 
         assert_eq!(&packet[..], b"abc");
@@ -561,12 +561,8 @@ mod tests {
 
     #[test]
     fn too_large_ipv4_packet_generates_feedback() {
-        let feedback = packet_too_big_feedback(
-            &ipv4_packet(),
-            1280,
-            Ipv4Addr::new(10, 0, 0, 1),
-            None,
-        );
+        let feedback =
+            packet_too_big_feedback(&ipv4_packet(), 1280, Ipv4Addr::new(10, 0, 0, 1), None);
 
         assert!(feedback.is_some());
     }

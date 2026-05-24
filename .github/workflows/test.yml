@@ -90,7 +90,15 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
       - name: Generate Rust coverage summary
-        run: cargo llvm-cov --all-features -p shared -p mavivpn -p mavi-vpn -p linux-vpn -p quic-tester -p mavi-vpn-gui --summary-only
+        run: |
+          mkdir -p target/coverage
+          cargo llvm-cov --all-features -p shared -p mavivpn -p mavi-vpn -p linux-vpn -p quic-tester -p mavi-vpn-gui --summary-only --fail-under-lines 70
+          cargo llvm-cov --all-features -p shared -p mavivpn -p mavi-vpn -p linux-vpn -p quic-tester -p mavi-vpn-gui --lcov --output-path target/coverage/lcov.info
+      - name: Upload Rust coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: target/coverage/lcov.info
 
   test-windows:
     name: Windows Unit Tests
@@ -134,3 +142,31 @@ jobs:
         run: npm test
       - name: Run frontend coverage
         run: npm run test:coverage
+      - name: Upload frontend coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: gui/coverage/
+
+  test-android-jvm:
+    name: Android JVM Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run Android JVM tests
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest jacocoDebugUnitTestReport
+      - name: Upload Android JVM coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-jvm-coverage
+          path: android/app/build/reports/jacoco/

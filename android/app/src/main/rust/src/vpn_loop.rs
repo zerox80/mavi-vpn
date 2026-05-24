@@ -1,6 +1,6 @@
 use jni::sys::jint;
 use log::error;
-use shared::ControlMessage;
+use shared::{masque, ControlMessage};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -10,8 +10,6 @@ use bytes::BufMut;
 use futures_util::future::FutureExt;
 #[cfg(target_os = "android")]
 use log::{info, warn};
-#[cfg(target_os = "android")]
-use shared::masque;
 #[cfg(target_os = "android")]
 use std::sync::atomic::Ordering;
 
@@ -28,6 +26,55 @@ use stats::AndroidTunnelStats;
 #[cfg(not(target_os = "android"))]
 #[allow(dead_code)]
 pub type RawFd = std::os::raw::c_int;
+
+pub(crate) fn tun_payload_for_quic(framed: bytes::Bytes, http3_framing: bool) -> bytes::Bytes {
+    if http3_framing {
+        framed
+    } else {
+        framed.slice(masque::DATAGRAM_PREFIX.len()..)
+    }
+}
+
+pub(crate) fn quic_datagram_to_tun_packet(
+    datagram: bytes::Bytes,
+    http3_framing: bool,
+) -> Option<bytes::Bytes> {
+    if http3_framing {
+        masque::unwrap_datagram(&datagram).map(|inner| {
+            let prefix = datagram.len() - inner.len();
+            datagram.slice(prefix..)
+        })
+    } else if datagram.is_empty() {
+        None
+    } else {
+        Some(datagram)
+    }
+}
+
+pub(crate) fn packet_too_big_feedback(
+    packet: &[u8],
+    tunnel_mtu: u16,
+    gateway_v4: std::net::Ipv4Addr,
+    gateway_v6: Option<std::net::Ipv6Addr>,
+) -> Option<Vec<u8>> {
+    if packet.is_empty() {
+        return None;
+    }
+
+    let version = (packet[0] >> 4) & 0xF;
+    let gateway = match version {
+        4 => Some(std::net::IpAddr::V4(gateway_v4)),
+        6 => gateway_v6.map(std::net::IpAddr::V6),
+        _ => None,
+    };
+    let reported_mtu = if version == 6 {
+        tunnel_mtu.max(1280)
+    } else {
+        tunnel_mtu
+    };
+
+    shared::icmp::generate_packet_too_big(packet, reported_mtu, gateway)
+}
 
 #[cfg(target_os = "android")]
 pub async fn run_vpn_loop(
@@ -168,11 +215,7 @@ pub async fn run_vpn_loop(
                 .tun_to_quic_packets
                 .fetch_add(1, Ordering::Relaxed);
 
-            let payload = if http3_framing {
-                framed
-            } else {
-                packet.clone()
-            };
+            let payload = tun_payload_for_quic(framed, http3_framing);
 
             // Send to QUIC
             if let Err(e) = conn_upload.send_datagram(payload) {
@@ -190,26 +233,8 @@ pub async fn run_vpn_loop(
                             packet_len, current_limit
                         );
 
-                        if packet.is_empty() {
-                            continue;
-                        }
-
-                        let version = (packet[0] >> 4) & 0xF;
-                        let gw = if version == 4 {
-                            Some(std::net::IpAddr::V4(gateway_v4))
-                        } else if version == 6 {
-                            gateway_v6_opt.map(std::net::IpAddr::V6)
-                        } else {
-                            None
-                        };
-                        let reported_mtu = if version == 6 {
-                            tunnel_mtu.max(1280)
-                        } else {
-                            tunnel_mtu
-                        };
-
                         if let Some(icmp_packet) =
-                            shared::icmp::generate_packet_too_big(&packet, reported_mtu, gw)
+                            packet_too_big_feedback(&packet, tunnel_mtu, gateway_v4, gateway_v6_opt)
                         {
                             let _ = tx_feedback.try_send(icmp_packet);
                         }
@@ -241,24 +266,14 @@ pub async fn run_vpn_loop(
             match conn_download.read_datagram().await {
                 Ok(first_packet) => {
                     let mut batch = Vec::with_capacity(64);
-                    if http3_framing {
-                        if let Some(inner) = masque::unwrap_datagram(&first_packet) {
-                            let prefix = first_packet.len() - inner.len();
-                            batch.push(first_packet.slice(prefix..));
-                        }
-                    } else {
-                        batch.push(first_packet);
+                    if let Some(packet) = quic_datagram_to_tun_packet(first_packet, http3_framing) {
+                        batch.push(packet);
                     }
 
                     for _ in 0..63 {
                         if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
-                            if http3_framing {
-                                if let Some(inner) = masque::unwrap_datagram(&pkt) {
-                                    let prefix = pkt.len() - inner.len();
-                                    batch.push(pkt.slice(prefix..));
-                                }
-                            } else {
-                                batch.push(pkt);
+                            if let Some(packet) = quic_datagram_to_tun_packet(pkt, http3_framing) {
+                                batch.push(packet);
                             }
                         } else {
                             break;
@@ -470,4 +485,109 @@ pub async fn run_vpn_loop(
     _http3_framing: bool,
 ) {
     error!("VPN Loop not supported on this platform");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use etherparse::{Ipv4Header, Ipv6Header};
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn ipv4_packet() -> Vec<u8> {
+        let header = Ipv4Header::new(
+            8,
+            64,
+            etherparse::IpNumber::TCP,
+            Ipv4Addr::new(10, 0, 0, 2).octets(),
+            Ipv4Addr::new(8, 8, 8, 8).octets(),
+        )
+        .unwrap();
+        let mut packet = Vec::new();
+        header.write(&mut packet).unwrap();
+        packet.extend_from_slice(b"payload!");
+        packet
+    }
+
+    fn ipv6_packet() -> Vec<u8> {
+        let header = Ipv6Header {
+            traffic_class: 0,
+            flow_label: etherparse::Ipv6FlowLabel::ZERO,
+            payload_length: 8,
+            next_header: etherparse::IpNumber::TCP,
+            hop_limit: 64,
+            source: Ipv6Addr::LOCALHOST.octets(),
+            destination: Ipv6Addr::LOCALHOST.octets(),
+        };
+        let mut packet = Vec::new();
+        header.write(&mut packet).unwrap();
+        packet.extend_from_slice(b"payload!");
+        packet
+    }
+
+    #[test]
+    fn tun_payload_preserves_masque_prefix_for_h3() {
+        let framed = masque::wrap_datagram(&bytes::Bytes::from_static(b"abc"));
+
+        let payload = tun_payload_for_quic(framed.clone(), true);
+
+        assert_eq!(payload, framed);
+        assert!(payload.starts_with(&masque::DATAGRAM_PREFIX));
+    }
+
+    #[test]
+    fn tun_payload_strips_masque_prefix_for_raw_quic() {
+        let framed = masque::wrap_datagram(&bytes::Bytes::from_static(b"abc"));
+
+        let payload = tun_payload_for_quic(framed, false);
+
+        assert_eq!(&payload[..], b"abc");
+    }
+
+    #[test]
+    fn quic_datagram_unwraps_h3_and_drops_invalid_packets() {
+        let framed = masque::wrap_datagram(&bytes::Bytes::from_static(b"abc"));
+
+        let packet = quic_datagram_to_tun_packet(framed, true).unwrap();
+        let invalid = quic_datagram_to_tun_packet(bytes::Bytes::from_static(b"abc"), true);
+
+        assert_eq!(&packet[..], b"abc");
+        assert!(invalid.is_none());
+    }
+
+    #[test]
+    fn quic_datagram_drops_empty_raw_packet() {
+        assert!(quic_datagram_to_tun_packet(bytes::Bytes::new(), false).is_none());
+    }
+
+    #[test]
+    fn too_large_ipv4_packet_generates_feedback() {
+        let feedback = packet_too_big_feedback(
+            &ipv4_packet(),
+            1280,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+        );
+
+        assert!(feedback.is_some());
+    }
+
+    #[test]
+    fn too_large_ipv6_packet_reports_minimum_ipv6_mtu() {
+        let feedback = packet_too_big_feedback(
+            &ipv6_packet(),
+            1200,
+            Ipv4Addr::new(10, 0, 0, 1),
+            Some(Ipv6Addr::LOCALHOST),
+        )
+        .unwrap();
+
+        assert!(feedback.len() >= 48);
+    }
+
+    #[test]
+    fn too_large_feedback_ignores_empty_packet() {
+        let feedback = packet_too_big_feedback(&[], 1280, Ipv4Addr::new(10, 0, 0, 1), None);
+
+        assert!(feedback.is_none());
+    }
 }

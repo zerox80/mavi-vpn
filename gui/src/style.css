@@ -465,6 +465,12 @@ input::placeholder {
   color: var(--ink);
 }
 
+.panel-divider {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 12px 0;
+}
+
 /* Forms */
 .field {
   margin-bottom: 12px;

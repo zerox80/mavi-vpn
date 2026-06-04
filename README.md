@@ -253,7 +253,7 @@ Full enterprise SSO with Keycloak:
 | QUIC Payload | **1360** | Fits within 1460-MTU networks (e.g. Vodafone) without fragmentation |
 | Congestion Control | **BBR** | Bandwidth-based, not loss-based — optimal for mobile/high-latency |
 | UDP Socket Buffers | **4 MB** | Prevents kernel drops during GSO bursts |
-| Allocator | **mimalloc** | Reduces memory allocation latency on the server |
+| Allocator | **system default** | Avoids an unused native allocator dependency in test and build paths |
 | Release Profile | `lto=true, codegen-units=1, strip=true` | Maximally optimized binary |
 
 ## Configuration Reference
@@ -279,7 +279,13 @@ All server settings can be configured via environment variables or CLI flags:
 ## Testing
 
 ```bash
-# Run unit tests (shared crate + backend)
+# Run the portable Rust core without Tauri/WebView or OS service deps
+cargo test-core-workspace --verbose
+
+# Run the Tauri Rust backend separately when WebView/Tauri deps are installed
+cargo test-gui-backend --verbose
+
+# Focused core checks
 cargo test -p shared --verbose
 cargo test -p mavi-vpn --verbose
 ```

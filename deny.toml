@@ -39,6 +39,7 @@ allow = [
   "OpenSSL",
   "MPL-2.0",
   "Unicode-DFS-2016",
+  "Unicode-3.0",
   "BSL-1.0",
   "Unlicense",
 ]

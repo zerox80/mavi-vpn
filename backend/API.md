@@ -83,6 +83,9 @@ VPN_KEYCLOAK_ENABLED=true
 VPN_KEYCLOAK_URL="https://auth.example.com"
 VPN_KEYCLOAK_REALM="mavi-vpn"
 VPN_KEYCLOAK_CLIENT_ID="mavi-client"
+# Optional fail-closed authorization policy:
+VPN_KEYCLOAK_REQUIRED_ROLE="vpn-user"
+VPN_KEYCLOAK_REQUIRED_SCOPE="vpn:connect"
 ```
 
 Startup behavior:
@@ -90,6 +93,7 @@ Startup behavior:
 - The server fetches the Keycloak JWKS during startup.
 - It retries with exponential backoff.
 - If JWKS loading fails, startup aborts instead of falling back to the static token.
+- If `VPN_KEYCLOAK_REQUIRED_ROLE` or `VPN_KEYCLOAK_REQUIRED_SCOPE` is set, tokens must contain that role or scope in addition to the existing issuer, expiry, `nbf`, and `azp` checks.
 
 Authentication failures return protocol-specific responses. In censorship-resistant mode, unauthorized or invalid HTTP/3-looking traffic is camouflaged as a normal web response.
 
@@ -572,6 +576,8 @@ For IPv6, the reported MTU is never below 1280.
 | `--keycloak-url` | `VPN_KEYCLOAK_URL` | unset | Keycloak base URL |
 | `--keycloak-realm` | `VPN_KEYCLOAK_REALM` | `mavi-vpn` | Keycloak realm |
 | `--keycloak-client-id` | `VPN_KEYCLOAK_CLIENT_ID` | `mavi-client` | Keycloak client ID |
+| `--keycloak-required-role` | `VPN_KEYCLOAK_REQUIRED_ROLE` | unset | Optional realm/client role required on accepted JWTs |
+| `--keycloak-required-scope` | `VPN_KEYCLOAK_REQUIRED_SCOPE` | unset | Optional OAuth scope required on accepted JWTs |
 | `--ech-public-name` | `VPN_ECH_PUBLIC_NAME` | `cloudflare-ech.com` | Cover SNI for ECH/camouflage mode |
 | `--ech-config-path` | `VPN_ECH_CONFIG` | `data/ech_config.bin` | ECHConfigList path |
 | `--ech-key-path` | `VPN_ECH_KEY` | `data/ech_key.bin` | ECH private key path |

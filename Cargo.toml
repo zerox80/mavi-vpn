@@ -43,15 +43,15 @@ http = "1"
 async-trait = "0.1"
 
 [patch.crates-io]
-quinn = { git = "https://github.com/zerox80/quinn", branch = "main" }
-quinn-proto = { git = "https://github.com/zerox80/quinn", branch = "main" }
-quinn-udp = { git = "https://github.com/zerox80/quinn", branch = "main" }
+quinn = { git = "https://github.com/zerox80/quinn", rev = "760ba55d0192cc2b3da86f184d7a9f3874738515" }
+quinn-proto = { git = "https://github.com/zerox80/quinn", rev = "760ba55d0192cc2b3da86f184d7a9f3874738515" }
+quinn-udp = { git = "https://github.com/zerox80/quinn", rev = "760ba55d0192cc2b3da86f184d7a9f3874738515" }
 # Use our h3 fork so h3-quinn resolves to Quinn 0.12. This prevents a second
 # crates.io Quinn 0.11 dependency from being pulled in alongside the fork.
-h3 = { git = "https://github.com/zerox80/h3", branch = "main" }
-h3-quinn = { git = "https://github.com/zerox80/h3", branch = "main" }
-h3-datagram = { git = "https://github.com/zerox80/h3", branch = "main" }
-time = { git = "https://github.com/time-rs/time", tag = "v0.3.36" }
+h3 = { git = "https://github.com/zerox80/h3", rev = "99533cd3f198cd9b548d5264cd7bff07e7d08cc0" }
+h3-quinn = { git = "https://github.com/zerox80/h3", rev = "99533cd3f198cd9b548d5264cd7bff07e7d08cc0" }
+h3-datagram = { git = "https://github.com/zerox80/h3", rev = "99533cd3f198cd9b548d5264cd7bff07e7d08cc0" }
+time = { git = "https://github.com/time-rs/time", rev = "3c3c546a661ac59e1a586a4edc65adff04fd1335" }
 
 [profile.release]
 lto = true

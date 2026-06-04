@@ -58,9 +58,16 @@ Use this if you already run Nginx/Apache on Port 443.
 ### Step 3: Start the Server
 
 ```bash
-docker-compose down
-docker-compose up -d --build --force-recreate
+docker compose pull --ignore-buildable
+docker compose build --pull --no-cache vpn-server
+docker compose up -d --force-recreate
 ```
+
+`docker compose pull` only updates registry images such as Traefik and Keycloak.
+The VPN server is built locally from Rust sources, and the Quinn/H3 forks are
+Git dependencies resolved during the Docker build. Use `--no-cache` when those
+forks have new commits so Cargo fetches the current branch heads instead of
+reusing Docker's cached dependency layer.
 
 > **⏳ Important:** Keycloak is a large Java application. Once you run the command above, give the server **1 to 2 minutes** to initialize the database and UI. If you access `auth.yourdomain.com` too early, you will see a `502 Bad Gateway` error. Just wait and refresh!
 

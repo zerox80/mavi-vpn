@@ -121,6 +121,8 @@ async fn main() -> Result<()> {
             url.clone(),
             config.keycloak_realm.clone(),
             config.keycloak_client_id.clone(),
+            config.keycloak_required_role.clone(),
+            config.keycloak_required_scope.clone(),
         );
 
         info!("Initializing Keycloak validator for {}...", url);

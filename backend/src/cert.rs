@@ -5,12 +5,44 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
 
+/// Tighten an existing private file to owner-only permissions.
+pub(crate) fn harden_private_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("failed to stat private file {}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("refusing to use symlinked private file {}", path.display());
+        }
+
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to set 0600 on {}", path.display()))?;
+            tracing::info!(
+                "Tightened permissions on existing private file {:?} from {:o} to 0600",
+                path,
+                mode
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Write `contents` to `path` with an owner-only (0o600) permission mask from
 /// the start, so the TLS private key never exists on disk with world- or
 /// group-readable bits — even briefly. On Unix, we use `O_CREAT | O_EXCL`
 /// with `mode(0o600)` and `O_NOFOLLOW` to avoid clobbering a symlink-attacked
 /// target. On other platforms, fall back to `fs::write`.
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     // Remove any stale file so previously-created world-readable keys from
     // older builds cannot persist with their old mode.
     let _ = fs::remove_file(path);
@@ -60,28 +92,7 @@ pub fn load_or_generate_certs(
         // which honoured the process umask and typically left the file
         // world-readable (0o644). On upgrade, tighten the permissions to 0o600
         // so an already-generated key does not stay exposed on disk.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = fs::metadata(&key_path) {
-                let mode = meta.permissions().mode() & 0o777;
-                if mode != 0o600 {
-                    match fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)) {
-                        Ok(()) => tracing::info!(
-                            "Tightened permissions on existing key file {:?} from {:o} to 0600",
-                            key_path,
-                            mode
-                        ),
-                        Err(e) => tracing::warn!(
-                            "Failed to tighten permissions on {:?} (current mode {:o}): {}",
-                            key_path,
-                            mode,
-                            e
-                        ),
-                    }
-                }
-            }
-        }
+        harden_private_file_permissions(key_path)?;
 
         let cert_chain = fs::read(cert_path).context("failed to read certificate chain")?;
         let key = fs::read(key_path).context("failed to read private key")?;

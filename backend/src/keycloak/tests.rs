@@ -9,20 +9,21 @@ struct MockFetcher {
     should_fail: Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[async_trait::async_trait]
 impl JwksFetcher for MockFetcher {
-    async fn fetch_jwks(&self, _url: &str) -> Result<JwkSet> {
-        self.fetch_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if self.should_fail.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("Mock fetcher failure");
-        }
-        Ok(self
-            .jwks
-            .read()
-            .await
-            .clone()
-            .unwrap_or_else(|| JwkSet { keys: vec![] }))
+    fn fetch_jwks<'a>(&'a self, _url: &'a str) -> JwksFetchFuture<'a> {
+        Box::pin(async move {
+            self.fetch_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.should_fail.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("Mock fetcher failure");
+            }
+            Ok(self
+                .jwks
+                .read()
+                .await
+                .clone()
+                .unwrap_or_else(|| JwkSet { keys: vec![] }))
+        })
     }
 }
 
@@ -103,6 +104,8 @@ fn validator_new_sets_fields() {
         "https://auth.example.com".to_string(),
         "my-realm".to_string(),
         "my-client".to_string(),
+        None,
+        None,
     );
     assert_eq!(v.client_id, "my-client");
 }
@@ -378,5 +381,103 @@ fn test_validate_claims() {
     });
     assert!(!KeycloakValidator::validate_claims(
         &claims, client_id, now, leeway
+    ));
+}
+
+#[test]
+fn validate_claims_accepts_required_realm_role() {
+    let claims = serde_json::json!({
+        "exp": 1100,
+        "azp": "my-client",
+        "realm_access": {
+            "roles": ["vpn-user"]
+        }
+    });
+
+    assert!(KeycloakValidator::validate_claims_with_policy(
+        &claims,
+        "my-client",
+        1000,
+        30,
+        Some("vpn-user"),
+        None
+    ));
+}
+
+#[test]
+fn validate_claims_accepts_required_client_role() {
+    let claims = serde_json::json!({
+        "exp": 1100,
+        "azp": "my-client",
+        "resource_access": {
+            "my-client": {
+                "roles": ["vpn-user"]
+            }
+        }
+    });
+
+    assert!(KeycloakValidator::validate_claims_with_policy(
+        &claims,
+        "my-client",
+        1000,
+        30,
+        Some("vpn-user"),
+        None
+    ));
+}
+
+#[test]
+fn validate_claims_rejects_missing_required_role() {
+    let claims = serde_json::json!({
+        "exp": 1100,
+        "azp": "my-client",
+        "realm_access": {
+            "roles": ["other-role"]
+        }
+    });
+
+    assert!(!KeycloakValidator::validate_claims_with_policy(
+        &claims,
+        "my-client",
+        1000,
+        30,
+        Some("vpn-user"),
+        None
+    ));
+}
+
+#[test]
+fn validate_claims_accepts_required_scope() {
+    let claims = serde_json::json!({
+        "exp": 1100,
+        "azp": "my-client",
+        "scope": "openid profile vpn:connect"
+    });
+
+    assert!(KeycloakValidator::validate_claims_with_policy(
+        &claims,
+        "my-client",
+        1000,
+        30,
+        None,
+        Some("vpn:connect")
+    ));
+}
+
+#[test]
+fn validate_claims_rejects_missing_required_scope() {
+    let claims = serde_json::json!({
+        "exp": 1100,
+        "azp": "my-client",
+        "scope": "openid profile"
+    });
+
+    assert!(!KeycloakValidator::validate_claims_with_policy(
+        &claims,
+        "my-client",
+        1000,
+        30,
+        None,
+        Some("vpn:connect")
     ));
 }

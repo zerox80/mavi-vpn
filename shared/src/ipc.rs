@@ -22,7 +22,7 @@ pub fn ipc_token_path() -> std::path::PathBuf {
 
 #[cfg(unix)]
 pub fn ipc_token_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("/var/run/mavi-vpn.token")
+    std::path::PathBuf::from("/run/mavi-vpn/ipc.token")
 }
 
 /// Configuration required to establish a VPN session.
@@ -269,5 +269,14 @@ mod tests {
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
 
         assert_eq!(req, decoded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_ipc_token_lives_under_runtime_directory() {
+        assert_eq!(
+            ipc_token_path(),
+            std::path::PathBuf::from("/run/mavi-vpn/ipc.token")
+        );
     }
 }

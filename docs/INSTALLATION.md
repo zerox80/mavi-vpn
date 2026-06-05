@@ -26,12 +26,15 @@ nano .env
 Depending on your needs, configure the `.env` file exactly as follows:
 
 **1. Basic Settings (Required for all modes)**
-* `VPN_AUTH_TOKEN`: A secure, long password.
+* `VPN_AUTH_TOKEN`: A secure, long password. Required unless `VPN_KEYCLOAK_ENABLED=true`; the server refuses empty or example/default values in static-token mode.
 * `VPN_PORT`: e.g. `10433`.
 
 **2. Enterprise Mode (Keycloak + Traefik)**
-If you want the web-based Admin UI and user management, you **must** configure these four variables to avoid startup errors:
+If you want the web-based Admin UI and user management, you **must** configure these variables to avoid startup errors:
 * `DOMAIN_NAME=yourdomain.com` *(Crucial! Traefik uses this to build routes like `auth.yourdomain.com`)*
+* `VPN_KEYCLOAK_URL=https://auth.yourdomain.com` *(Must be reachable by VPN clients)*
+* `KEYCLOAK_DB_PASSWORD=<long-random-database-password>`
+* `KEYCLOAK_ADMIN_PASS=<long-random-admin-password>`
 * `COMPOSE_FILE=docker-compose.yml:keycloak/docker-compose.yml` *(Uncomment this to load Keycloak)*
 * `COMPOSE_PROFILES=traefik,keycloak` *(Crucial! Instructs Docker to actually start these services)*
 
@@ -58,16 +61,23 @@ Use this if you already run Nginx/Apache on Port 443.
 ### Step 3: Start the Server
 
 ```bash
-docker-compose down
-docker-compose up -d --build --force-recreate
+docker compose pull --ignore-buildable
+docker compose build --pull --no-cache vpn-server
+docker compose up -d --force-recreate
 ```
+
+`docker compose pull` only updates registry images such as Traefik and Keycloak.
+The VPN server is built locally from Rust sources, and the Quinn/H3 forks are
+Git dependencies resolved during the Docker build. Use `--no-cache` when those
+forks have new commits so Cargo fetches the current branch heads instead of
+reusing Docker's cached dependency layer.
 
 > **⏳ Important:** Keycloak is a large Java application. Once you run the command above, give the server **1 to 2 minutes** to initialize the database and UI. If you access `auth.yourdomain.com` too early, you will see a `502 Bad Gateway` error. Just wait and refresh!
 
 ### Step 4: Configure Keycloak (Enterprise Mode Only)
 If you enabled Keycloak, it starts completely empty. You must create the Realm and Client before connecting:
 1. Open your browser and navigate to `https://auth.yourdomain.com/`.
-2. Click **Administration Console** and log in (Default: `admin` / `admin`).
+2. Click **Administration Console** and log in with `admin` and the `KEYCLOAK_ADMIN_PASS` value from your `.env`.
 3. In the top-left dropdown (under the Keycloak logo), click **Create Realm**.
    - Name it exactly: **`mavi-vpn`** and click Create.
 4. On the left menu, click **Clients** -> **Create client**.

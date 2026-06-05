@@ -60,6 +60,8 @@ pub fn load_or_generate(
             ech_config_path,
             ech_key_path
         );
+        crate::cert::harden_private_file_permissions(ech_key_path)
+            .context("failed to harden existing ECH private key permissions")?;
         let config_list_bytes =
             fs::read(ech_config_path).context("failed to read ECH config list")?;
         let key_bytes = fs::read(ech_key_path).context("failed to read ECH private key")?;
@@ -118,7 +120,7 @@ pub fn load_or_generate(
     if let Some(parent) = ech_config_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    fs::write(ech_key_path, private_key.secret_bytes())
+    crate::cert::write_private_file(ech_key_path, private_key.secret_bytes())
         .context("failed to write ECH private key")?;
     fs::write(ech_config_path, &config_list_bytes).context("failed to write ECH config list")?;
 
@@ -204,6 +206,40 @@ mod tests {
         assert!(hex_path.exists());
         let hex_content = std::fs::read_to_string(&hex_path).unwrap();
         assert!(hex_content.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generated_ech_key_file_permissions() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("ech_config.bin");
+        let key_path = dir.path().join("ech_key.bin");
+
+        let _ = load_or_generate(&config_path, &key_path, "cover.example.com").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn existing_ech_key_permissions_are_hardened() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("ech_config.bin");
+        let key_path = dir.path().join("ech_key.bin");
+
+        let _ = load_or_generate(&config_path, &key_path, "cover.example.com").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let _ = load_or_generate(&config_path, &key_path, "cover.example.com").unwrap();
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 
     #[test]

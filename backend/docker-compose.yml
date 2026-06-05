@@ -11,6 +11,7 @@ services:
     cap_add:
       - NET_ADMIN # Required for TUN device creation & iptables
       - NET_RAW # Required by some kernels for ICMP/packet handling
+      - NET_BIND_SERVICE # Required when binding directly to privileged ports like 443
     devices:
       - /dev/net/tun:/dev/net/tun
     security_opt:

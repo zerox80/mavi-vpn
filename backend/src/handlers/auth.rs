@@ -1,21 +1,23 @@
 use anyhow::Result;
 use constant_time_eq::constant_time_eq;
+use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::config::Config;
 use crate::keycloak::KeycloakValidator;
 use crate::state::AppState;
 
-#[async_trait::async_trait]
+pub type TokenValidationFuture<'a> = Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>;
+
 pub trait TokenValidator: Send + Sync {
-    async fn validate_token(&self, token: &str) -> Result<bool>;
+    fn validate_token<'a>(&'a self, token: &'a str) -> TokenValidationFuture<'a>;
 }
 
-#[async_trait::async_trait]
 impl TokenValidator for KeycloakValidator {
-    async fn validate_token(&self, token: &str) -> Result<bool> {
-        KeycloakValidator::validate_token(self, token).await
+    fn validate_token<'a>(&'a self, token: &'a str) -> TokenValidationFuture<'a> {
+        Box::pin(async move { KeycloakValidator::validate_token(self, token).await })
     }
 }
 
@@ -112,12 +114,13 @@ mod tests {
         calls: AtomicUsize,
     }
 
-    #[async_trait::async_trait]
     impl TokenValidator for MockValidator {
-        async fn validate_token(&self, token: &str) -> Result<bool> {
-            assert_eq!(token, "kc-token");
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.result.map_err(anyhow::Error::msg)
+        fn validate_token<'a>(&'a self, token: &'a str) -> TokenValidationFuture<'a> {
+            Box::pin(async move {
+                assert_eq!(token, "kc-token");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.result.map_err(anyhow::Error::msg)
+            })
         }
     }
 

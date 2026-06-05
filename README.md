@@ -142,7 +142,14 @@ mavi-vpn/
 cd backend
 cp .env.example .env
 nano .env                    # Set VPN_AUTH_TOKEN, VPN_PORT, etc.
-docker-compose up -d --build
+docker compose up -d --build
+```
+
+To force-refresh the forked Rust Git dependencies during deployment:
+```bash
+docker compose pull --ignore-buildable
+docker compose build --pull --no-cache vpn-server
+docker compose up -d --force-recreate
 ```
 
 Retrieve the certificate PIN for clients:

@@ -7,6 +7,7 @@ class PrefsManager(
     context: Context,
 ) {
     private val prefs: SharedPreferences = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
+    private val secrets = SecureStringPreferences(prefs)
 
     var savedIp: String
         get() = prefs.getString("saved_ip", "") ?: ""
@@ -17,12 +18,12 @@ class PrefsManager(
         set(value) = prefs.edit().putString("saved_port", value).apply()
 
     var savedToken: String
-        get() = prefs.getString("saved_token", "") ?: ""
-        set(value) = prefs.edit().putString("saved_token", value).apply()
+        get() = secrets.getString("saved_token")
+        set(value) = secrets.setString("saved_token", value)
 
     var savedRefreshToken: String
-        get() = prefs.getString("saved_refresh_token", "") ?: ""
-        set(value) = prefs.edit().putString("saved_refresh_token", value).apply()
+        get() = secrets.getString("saved_refresh_token")
+        set(value) = secrets.setString("saved_refresh_token", value)
 
     var savedKeycloakSessionInvalid: Boolean
         get() = prefs.getBoolean("saved_keycloak_session_invalid", false)
@@ -69,8 +70,8 @@ class PrefsManager(
         set(value) = prefs.edit().putString("saved_kc_client_id", value).apply()
 
     var savedPresharedKey: String
-        get() = prefs.getString("saved_preshared_key", "") ?: ""
-        set(value) = prefs.edit().putString("saved_preshared_key", value).apply()
+        get() = secrets.getString("saved_preshared_key")
+        set(value) = secrets.setString("saved_preshared_key", value)
 
     var savedVpnMtu: Int
         get() = prefs.getInt("saved_vpn_mtu", 0)

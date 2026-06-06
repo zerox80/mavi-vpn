@@ -93,16 +93,17 @@ jobs:
         run: |
           mkdir -p target/coverage
 
-          NON_UI_RUST_PACKAGES="-p shared -p mavivpn -p mavi-vpn -p linux-vpn -p quic-tester"
+          ALL_RUST_PACKAGES="-p shared -p mavivpn -p mavi-vpn -p linux-vpn -p quic-tester -p mavi-vpn-gui"
+          COVERAGE_GATE="--fail-under-lines 90 --fail-under-functions 90 --fail-under-regions 90 --fail-under-file-lines 90"
 
-          cargo llvm-cov --all-features -p shared --summary-only --fail-under-lines 90
-          cargo llvm-cov --all-features -p mavivpn --summary-only --fail-under-lines 90
-          cargo llvm-cov --all-features -p mavi-vpn --summary-only --fail-under-lines 90
-          cargo llvm-cov --all-features -p linux-vpn --summary-only --fail-under-lines 90
-          cargo llvm-cov --all-features -p quic-tester --summary-only --fail-under-lines 90
+          cargo llvm-cov --all-features -p shared --summary-only $COVERAGE_GATE
+          cargo llvm-cov --all-features -p mavivpn --summary-only $COVERAGE_GATE
+          cargo llvm-cov --all-features -p mavi-vpn --summary-only $COVERAGE_GATE
+          cargo llvm-cov --all-features -p linux-vpn --summary-only $COVERAGE_GATE
+          cargo llvm-cov --all-features -p quic-tester --summary-only $COVERAGE_GATE
+          cargo llvm-cov --all-features -p mavi-vpn-gui --summary-only $COVERAGE_GATE
 
-          # Keep GUI/Tauri UI outside the required coverage gate.
-          cargo llvm-cov --all-features $NON_UI_RUST_PACKAGES --lcov --output-path target/coverage/lcov.info
+          cargo llvm-cov --all-features $ALL_RUST_PACKAGES --lcov --output-path target/coverage/lcov.info
       - name: Upload Rust coverage
         uses: actions/upload-artifact@v4
         with:
@@ -158,7 +159,7 @@ jobs:
       - name: Generate Windows Rust coverage summary
         run: |
           New-Item -ItemType Directory -Force -Path target/coverage | Out-Null
-          cargo llvm-cov --all-features -p windows-vpn --summary-only --fail-under-lines 90
+          cargo llvm-cov --all-features -p windows-vpn --summary-only --fail-under-lines 90 --fail-under-functions 90 --fail-under-regions 90 --fail-under-file-lines 90
           cargo llvm-cov --all-features -p windows-vpn --lcov --output-path target/coverage/windows-lcov.info
       - name: Upload Windows Rust coverage
         uses: actions/upload-artifact@v4

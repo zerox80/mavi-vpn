@@ -275,6 +275,15 @@ describe('heroFromVpnStatus', () => {
       'disconnecting'
     );
   });
+
+  it('keeps unknown backend state disconnecting only during local disconnect flow', () => {
+    expect(heroFromVpnStatus({ service_available: true, state: 'Unknown' }, 'disconnecting')).toBe(
+      'disconnecting'
+    );
+    expect(heroFromVpnStatus({ service_available: true, state: 'Unknown' }, 'connecting')).toBe(
+      'off'
+    );
+  });
 });
 
 describe('index.html', () => {

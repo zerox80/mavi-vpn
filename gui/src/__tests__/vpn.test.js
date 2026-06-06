@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { applyStatus } from '../vpn.js';
+import { applyStatus, setHero } from '../vpn.js';
 import { state } from '../state.js';
 
 // Mocking the $ function from state.js is tricky because it's exported.
@@ -56,6 +56,26 @@ describe('applyStatus', () => {
     expect(document.getElementById('ip-readout').textContent).toBe('10.8.0.2');
   });
 
+  it('keeps existing session start when already connected', () => {
+    state.hero = 'on';
+    state.sessionStart = 12345;
+
+    applyStatus({ service_available: true, running: true, state: 'Connected' });
+
+    expect(state.sessionStart).toBe(12345);
+  });
+
+  it('shows connecting and disconnecting status from backend state', () => {
+    applyStatus({ service_available: true, running: false, state: 'Starting' });
+    expect(state.hero).toBe('connecting');
+    expect(document.getElementById('connect-btn').textContent).toBe('CONNECTING...');
+
+    state.disconnecting = true;
+    applyStatus({ service_available: true, running: false, state: 'Stopping' });
+    expect(state.hero).toBe('disconnecting');
+    expect(document.getElementById('connect-btn').title).toBe('Disconnecting...');
+  });
+
   it('clears session and shows error on Failed state', () => {
     state.sessionStart = 12345;
     applyStatus({ service_available: true, state: 'Failed', last_error: 'Auth failed' });
@@ -94,5 +114,19 @@ describe('applyStatus', () => {
 
     expect(state.lastError).toBeNull();
     expect(toast.textContent).toBe('');
+  });
+
+  it('returns early when the connect button is not mounted', () => {
+    document.getElementById('connect-btn').remove();
+
+    expect(() => applyStatus({ service_available: true, running: true })).not.toThrow();
+    expect(state.running).toBe(true);
+  });
+
+  it('setHero returns early when the connect button is not mounted', () => {
+    document.getElementById('connect-btn').remove();
+
+    expect(() => setHero('on')).not.toThrow();
+    expect(document.documentElement.getAttribute('data-state')).toBe('on');
   });
 });

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { invoke } from '../api.js';
-import { applyTheme, savePrefs, wireThemeToggle } from '../theme.js';
+import { applyTheme, normalizePrefs, savePrefs, wireThemeToggle } from '../theme.js';
 
 vi.mock('../api.js', () => ({
   invoke: vi.fn(() => Promise.resolve()),
@@ -35,7 +35,7 @@ describe('theme workflows', () => {
     expect(document.getElementById('theme-icon').innerHTML).toContain('circle');
 
     document.getElementById('theme-icon').remove();
-    applyTheme('dark');
+    expect(() => applyTheme('dark')).not.toThrow();
 
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
   });
@@ -63,5 +63,30 @@ describe('theme workflows', () => {
     await expect(savePrefs()).resolves.toBeUndefined();
 
     expect(warn).toHaveBeenCalledWith('save_prefs failed:', expect.any(Error));
+  });
+
+  it('normalizes missing and malformed prefs', () => {
+    expect(normalizePrefs()).toEqual({
+      theme: 'light',
+      accent: '#2B44FF',
+      connections: [],
+      active_id: null,
+      legacy_config_migrated: false,
+    });
+    expect(
+      normalizePrefs({
+        theme: 'dark',
+        accent: '#ff00aa',
+        connections: 'nope',
+        active_id: 0,
+        legacy_config_migrated: 1,
+      })
+    ).toMatchObject({
+      theme: 'dark',
+      accent: '#ff00aa',
+      connections: [],
+      active_id: 0,
+      legacy_config_migrated: true,
+    });
   });
 });

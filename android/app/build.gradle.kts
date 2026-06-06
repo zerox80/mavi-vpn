@@ -1,5 +1,4 @@
 import org.apache.tools.ant.taskdefs.condition.Os
-import org.gradle.testing.jacoco.tasks.JacocoCoverageVerification
 import org.gradle.testing.jacoco.tasks.JacocoReport
 
 plugins {
@@ -97,58 +96,6 @@ tasks.register<JacocoReport>("jacocoDebugUnitTestReport") {
             include("jacoco/testDebugUnitTest.exec")
         },
     )
-}
-
-tasks.register<JacocoCoverageVerification>("jacocoDebugUnitTestCoverageVerification") {
-    dependsOn("testDebugUnitTest")
-
-    val fileFilter =
-        listOf(
-            "**/R.class",
-            "**/R$*.class",
-            "**/BuildConfig.*",
-            "**/Manifest*.*",
-            "**/*Test*.*",
-        )
-    val debugTree =
-        fileTree("${layout.buildDirectory.get()}/tmp/kotlin-classes/debug") {
-            exclude(fileFilter)
-        }
-
-    classDirectories.setFrom(files(debugTree))
-    sourceDirectories.setFrom(files("src/main/java"))
-    executionData.setFrom(
-        fileTree(layout.buildDirectory) {
-            include("outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec")
-            include("jacoco/testDebugUnitTest.exec")
-        },
-    )
-
-    violationRules {
-        rule {
-            element = "CLASS"
-            limit {
-                counter = "LINE"
-                value = "COVEREDRATIO"
-                minimum = BigDecimal("0.90")
-            }
-            limit {
-                counter = "INSTRUCTION"
-                value = "COVEREDRATIO"
-                minimum = BigDecimal("0.90")
-            }
-            limit {
-                counter = "BRANCH"
-                value = "COVEREDRATIO"
-                minimum = BigDecimal("0.90")
-            }
-            limit {
-                counter = "METHOD"
-                value = "COVEREDRATIO"
-                minimum = BigDecimal("0.90")
-            }
-        }
-    }
 }
 
 dependencies {

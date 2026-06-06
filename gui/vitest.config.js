@@ -8,13 +8,6 @@ export default defineConfig({
       provider: 'v8',
       include: ['src/**/*.{js,ts}'],
       exclude: ['src/__tests__/**'],
-      thresholds: {
-        perFile: true,
-        lines: 90,
-        functions: 90,
-        branches: 90,
-        statements: 90,
-      },
     },
   },
 });

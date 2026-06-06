@@ -1,9 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 describe('Tauri API bootstrap', () => {
   beforeEach(() => {
     vi.resetModules();
     delete window.__TAURI__;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('throws before bootstrap installs invoke and listen', async () => {
@@ -29,5 +34,17 @@ describe('Tauri API bootstrap', () => {
 
     expect(coreInvoke).toHaveBeenCalledWith('vpn_status', { a: 1 });
     expect(eventListen).toHaveBeenCalledWith('vpn-status-update', expect.any(Function));
+  });
+
+  it('returns false when Tauri never becomes available', async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { bootstrapTauri } = await import('../api.js');
+
+    const result = bootstrapTauri();
+    await vi.runAllTimersAsync();
+
+    await expect(result).resolves.toBe(false);
+    expect(error).toHaveBeenCalledWith('Tauri API not available â€” running in browser preview');
   });
 });

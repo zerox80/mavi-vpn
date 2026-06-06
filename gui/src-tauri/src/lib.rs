@@ -7,6 +7,7 @@
 mod commands;
 mod ipc;
 mod oauth;
+mod secret_store;
 mod storage;
 mod tray;
 

@@ -99,7 +99,7 @@ jobs:
 
           # Gate the unit-testable Rust core. Platform clients, FFI boundaries,
           # binaries, and runtime glue remain visible in the full LCOV report.
-          cargo llvm-cov --all-features $CORE_COVERAGE_PACKAGES --ignore-filename-regex "$CORE_COVERAGE_IGNORE" --summary-only --fail-under-lines 70
+          cargo llvm-cov --all-features $CORE_COVERAGE_PACKAGES --ignore-filename-regex "$CORE_COVERAGE_IGNORE" --summary-only --fail-under-lines 90
           cargo llvm-cov --all-features $ALL_RUST_PACKAGES --lcov --output-path target/coverage/lcov.info
       - name: Upload Rust coverage
         uses: actions/upload-artifact@v4
@@ -171,7 +171,7 @@ jobs:
       - name: Run Android JVM tests
         run: |
           chmod +x gradlew
-          ./gradlew testDebugUnitTest jacocoDebugUnitTestReport
+          ./gradlew testDebugUnitTest jacocoDebugUnitTestReport jacocoDebugUnitTestCoverageVerification
       - name: Upload Android JVM coverage
         uses: actions/upload-artifact@v4
         with:

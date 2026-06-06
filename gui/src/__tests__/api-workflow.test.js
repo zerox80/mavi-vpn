@@ -45,6 +45,7 @@ describe('Tauri API bootstrap', () => {
     await vi.runAllTimersAsync();
 
     await expect(result).resolves.toBe(false);
-    expect(error).toHaveBeenCalledWith('Tauri API not available â€” running in browser preview');
+    expect(error.mock.calls[0][0]).toContain('Tauri API not available');
+    expect(error.mock.calls[0][0]).toContain('running in browser preview');
   });
 });

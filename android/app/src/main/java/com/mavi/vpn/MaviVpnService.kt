@@ -3,7 +3,6 @@ package com.mavi.vpn
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
-import android.net.IpPrefix
 import android.net.Network
 import android.net.VpnService
 import android.os.Build
@@ -13,8 +12,6 @@ import android.util.Log
 import com.mavi.vpn.data.PrefsManager
 import com.mavi.vpn.nativelib.NativeLib
 import com.mavi.vpn.service.NotificationHelper
-import java.net.Inet4Address
-import java.net.InetAddress
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -277,7 +274,12 @@ class MaviVpnService : VpnService() {
                                 }
                             }
 
-                            applyWhitelistDomainExclusions(builder, whitelistDomains, hasIpv6)
+                            applyWhitelistDomainExclusions(
+                                builder,
+                                whitelistDomains,
+                                hasIpv6,
+                                notificationHelper,
+                            )
 
                             if (splitMode == "include" || splitMode == "exclude") {
                                 val packages =
@@ -488,67 +490,4 @@ class MaviVpnService : VpnService() {
             normalized.contains("invalid keycloak token")
     }
 
-    private fun applyWhitelistDomainExclusions(
-        builder: VpnService.Builder,
-        domains: List<String>,
-        ipv6Enabled: Boolean,
-    ) {
-        if (domains.isEmpty()) {
-            return
-        }
-
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            val message = "Domain whitelist requires Android 13+ route exclusions; ignoring ${domains.size} domains."
-            Log.w("MaviVPN", message)
-            notificationHelper.updateNotification(1, "Mavi VPN", message)
-            return
-        }
-
-        val addresses = linkedSetOf<InetAddress>()
-        for (domain in domains) {
-            try {
-                InetAddress.getAllByName(domain).forEach { address ->
-                    if (address is Inet4Address || ipv6Enabled) {
-                        addresses.add(address)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w("MaviVPN", "Failed to resolve whitelist domain '$domain': ${e.message}")
-            }
-        }
-
-        if (addresses.isEmpty()) {
-            Log.w("MaviVPN", "No whitelist domains resolved to IP addresses; no route exclusions applied.")
-            return
-        }
-
-        for (address in addresses) {
-            val prefixLength = if (address is Inet4Address) 32 else 128
-            try {
-                builder.excludeRoute(IpPrefix(address, prefixLength))
-                Log.i("MaviVPN", "Excluded whitelist route ${address.hostAddress}/$prefixLength")
-            } catch (e: Exception) {
-                Log.w("MaviVPN", "Failed to exclude whitelist route ${address.hostAddress}: ${e.message}")
-            }
-        }
-    }
-
-    private fun netmaskToPrefixLength(netmask: String): Int {
-        return try {
-            val parts = netmask.split(".")
-            if (parts.size != 4) return 24
-            val mask = parts.fold(0L) { acc, part ->
-                val octet = part.toInt()
-                if (octet < 0 || octet > 255) return 24
-                (acc shl 8) or octet.toLong()
-            }
-            // Use Long.bitCount to avoid truncating the upper 32 bits with toInt().
-            val prefix = java.lang.Long.bitCount(mask)
-            val expected = if (prefix == 0) 0L else (0xFFFFFFFFL shl (32 - prefix)) and 0xFFFFFFFFL
-            if (mask != expected) return 24
-            prefix
-        } catch (e: Exception) {
-            24
-        }
-    }
 }

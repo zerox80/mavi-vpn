@@ -249,14 +249,9 @@ object OAuthHelper {
                     }
                     return@withContext tokens
                 }
-                Log.e("OAuthHelper", "Token exchange failed with HTTP ${response.code}: $body")
+                Log.e("OAuthHelper", "Token exchange failed with HTTP ${response.code}; response body redacted")
                 null
             }
-<<<<<<< HEAD
-            Log.e("OAuthHelper", "Token exchange failed with HTTP ${response.code}; response body redacted")
-            null
-=======
->>>>>>> 4832208 (Fix Android and GUI client bugs)
         } catch (e: Exception) {
             Log.e("OAuthHelper", "Token exchange exception: ${e.message}")
             null
@@ -299,17 +294,9 @@ object OAuthHelper {
                 if (response.code >= 500) {
                     return@withContext RefreshResult.NetworkError("Server Error (HTTP ${response.code})")
                 }
-                Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}: $body")
+                Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}; response body redacted")
                 return@withContext RefreshResult.Error("Refresh rejected by server (HTTP ${response.code})")
             }
-<<<<<<< HEAD
-            if (response.code >= 500) {
-                 return@withContext RefreshResult.NetworkError("Server Error (HTTP ${response.code})")
-            }
-            Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}; response body redacted")
-            return@withContext RefreshResult.Error("Refresh rejected by server (HTTP ${response.code})")
-=======
->>>>>>> 4832208 (Fix Android and GUI client bugs)
         } catch (e: java.io.IOException) {
             Log.w("OAuthHelper", "Refresh token IO exception (Offline?): ${e.message}")
             return@withContext RefreshResult.NetworkError(e.message ?: "Offline or network timeout")

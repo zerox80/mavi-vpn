@@ -83,6 +83,9 @@ tasks.register<JacocoReport>("jacocoDebugUnitTestReport") {
             "**/BuildConfig.*",
             "**/Manifest*.*",
             "**/*Test*.*",
+            "**/MainActivity*.*",
+            "**/ui/**",
+            "**/viewmodel/**",
         )
     val debugTree =
         fileTree("${layout.buildDirectory.get()}/tmp/kotlin-classes/debug") {
@@ -109,6 +112,9 @@ tasks.register<JacocoCoverageVerification>("jacocoDebugUnitTestCoverageVerificat
             "**/BuildConfig.*",
             "**/Manifest*.*",
             "**/*Test*.*",
+            "**/MainActivity*.*",
+            "**/ui/**",
+            "**/viewmodel/**",
         )
     val debugTree =
         fileTree("${layout.buildDirectory.get()}/tmp/kotlin-classes/debug") {

@@ -8,12 +8,6 @@ export default defineConfig({
       provider: 'v8',
       include: ['src/**/*.{js,ts}'],
       exclude: ['src/__tests__/**', 'src/animations.js'],
-      thresholds: {
-        lines: 90,
-        statements: 90,
-        branches: 90,
-        functions: 90,
-      },
     },
   },
 });

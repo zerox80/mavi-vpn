@@ -58,6 +58,11 @@ describe('modal workflows', () => {
 
     expect(document.getElementById('m-kc-fields').classList.contains('hidden')).toBe(false);
     expect(document.getElementById('m-token-field').classList.contains('hidden')).toBe(true);
+
+    document.getElementById('m_kc_auth').checked = false;
+    updateModalAuthFields();
+    expect(document.getElementById('m-kc-fields').classList.contains('hidden')).toBe(true);
+    expect(document.getElementById('m-token-field').classList.contains('hidden')).toBe(false);
   });
 
   it('saves a new connection and selects it', async () => {
@@ -107,6 +112,25 @@ describe('modal workflows', () => {
     await saveModal();
     expect(showToast).toHaveBeenLastCalledWith('VPN MTU must be between 1280 and 1360.', 'error');
     expect(savePrefs).not.toHaveBeenCalled();
+  });
+
+  it('saves a Keycloak connection with optional fields normalized', async () => {
+    document.getElementById('m_label').value = 'SSO Node';
+    document.getElementById('m_endpoint').value = 'vpn.example.com:443';
+    document.getElementById('m_token').value = 'ignored';
+    document.getElementById('m_cert_pin').value = 'pin';
+    document.getElementById('m_kc_auth').checked = true;
+    document.getElementById('m_kc_url').value = ' https://auth.example.com ';
+
+    await saveModal();
+
+    expect(state.prefs.connections[0]).toMatchObject({
+      token: null,
+      kc_auth: true,
+      kc_url: 'https://auth.example.com',
+      kc_realm: null,
+      kc_client_id: null,
+    });
   });
 
   it('edits an existing Keycloak connection and applies hero refresh', async () => {

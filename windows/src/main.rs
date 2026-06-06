@@ -7,7 +7,9 @@ use tokio::net::TcpStream;
 
 mod ipc;
 mod oauth;
+mod secrets;
 use ipc::{Config, IpcRequest, IpcResponse};
+use secrets::{config_token_account, KeyringSecretStore, SecretStore};
 
 const CONFIG_FILE: &str = "config.json";
 
@@ -223,22 +225,48 @@ fn config_path() -> PathBuf {
     dir.join(CONFIG_FILE)
 }
 
-fn load_config() -> Option<Config> {
-    let path = config_path();
+fn load_config() -> Result<Option<Config>> {
+    load_config_from_path(&config_path(), &KeyringSecretStore)
+}
+
+fn load_config_from_path(
+    path: &std::path::Path,
+    store: &dyn SecretStore,
+) -> Result<Option<Config>> {
     if path.exists() {
-        let content = std::fs::read_to_string(&path).ok()?;
-        let mut config: Config = serde_json::from_str(&content).ok()?;
+        let content = std::fs::read_to_string(path)?;
+        let mut config: Config = serde_json::from_str(&content)?;
         config.normalize_transport();
-        Some(config)
+        if config.token.is_empty() {
+            if let Some(secret) = store.get_secret(config_token_account())? {
+                config.token = secret;
+            }
+        } else {
+            save_config_to_path(path, &config, store)?;
+        }
+        Ok(Some(config))
     } else {
-        None
+        Ok(None)
     }
 }
 
 fn save_config(config: &Config) -> Result<()> {
-    let path = config_path();
+    save_config_to_path(&config_path(), config, &KeyringSecretStore)
+}
+
+fn save_config_to_path(
+    path: &std::path::Path,
+    config: &Config,
+    store: &dyn SecretStore,
+) -> Result<()> {
     let mut config = config.clone();
     config.normalize_transport();
+    if !config.token.is_empty() {
+        store.set_secret(config_token_account(), &config.token)?;
+        config.token.clear();
+    } else {
+        store.delete_secret(config_token_account())?;
+    }
     let content = serde_json::to_string_pretty(&config)?;
     std::fs::write(&path, content)?;
     println!("Config saved to {}", path.display());
@@ -246,7 +274,7 @@ fn save_config(config: &Config) -> Result<()> {
 }
 
 async fn load_or_prompt_config() -> Result<Config> {
-    if let Some(mut saved) = load_config() {
+    if let Some(mut saved) = load_config()? {
         println!("Saved configuration found:");
         println!("  Endpoint: {}", saved.endpoint);
         if saved.kc_auth.unwrap_or(false) {
@@ -427,4 +455,98 @@ fn read_line() -> Result<String> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::tests::MemorySecretStore;
+
+    fn test_config() -> Config {
+        Config {
+            endpoint: "vpn.example.com:443".to_string(),
+            token: "token".to_string(),
+            cert_pin: "pin".to_string(),
+            censorship_resistant: false,
+            http3_framing: false,
+            kc_auth: None,
+            kc_url: None,
+            kc_realm: None,
+            kc_client_id: None,
+            ech_config: None,
+            vpn_mtu: None,
+        }
+    }
+
+    #[test]
+    fn save_config_redacts_token_and_load_merges_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = MemorySecretStore::default();
+
+        save_config_to_path(&path, &test_config(), &store).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("\"token\": \"token\""));
+        assert_eq!(
+            store.secret(config_token_account()).as_deref(),
+            Some("token")
+        );
+
+        let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+        assert_eq!(loaded.token, "token");
+    }
+
+    #[test]
+    fn load_config_migrates_legacy_plaintext_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "endpoint": "vpn.example.com:443",
+  "token": "legacy-token",
+  "cert_pin": "pin",
+  "censorship_resistant": false,
+  "http3_framing": false,
+  "kc_auth": null,
+  "kc_url": null,
+  "kc_realm": null,
+  "kc_client_id": null,
+  "ech_config": null
+}"#,
+        )
+        .unwrap();
+        let store = MemorySecretStore::default();
+
+        let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+
+        assert_eq!(loaded.token, "legacy-token");
+        assert_eq!(
+            store.secret(config_token_account()).as_deref(),
+            Some("legacy-token")
+        );
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("legacy-token"));
+    }
+
+    #[test]
+    fn save_config_deletes_empty_token_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = MemorySecretStore::default();
+        store
+            .set_secret(config_token_account(), "stale-token")
+            .unwrap();
+        let mut config = test_config();
+        config.token.clear();
+
+        save_config_to_path(&path, &config, &store).unwrap();
+        let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+
+        assert!(loaded.token.is_empty());
+        assert!(store
+            .deleted()
+            .contains(&config_token_account().to_string()));
+    }
 }

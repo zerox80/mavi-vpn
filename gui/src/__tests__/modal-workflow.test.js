@@ -3,6 +3,7 @@ import { state } from '../state.js';
 import { deleteModal, openModal, saveModal, updateModalAuthFields, wireModal } from '../modal.js';
 import { savePrefs } from '../theme.js';
 import { renderConnectionList } from '../connections.js';
+import { showToast } from '../toast.js';
 
 vi.mock('../theme.js', () => ({
   savePrefs: vi.fn(() => Promise.resolve()),
@@ -82,6 +83,86 @@ describe('modal workflows', () => {
     expect(renderConnectionList).toHaveBeenCalledOnce();
   });
 
+  it('validates required modal fields and MTU range', async () => {
+    await saveModal();
+    expect(showToast).toHaveBeenLastCalledWith('Label is required.', 'error');
+
+    document.getElementById('m_label').value = 'Primary';
+    await saveModal();
+    expect(showToast).toHaveBeenLastCalledWith('Endpoint is required.', 'error');
+
+    document.getElementById('m_endpoint').value = 'vpn.example.com:443';
+    await saveModal();
+    expect(showToast).toHaveBeenLastCalledWith(
+      'Pre-shared key is required unless Keycloak is enabled.',
+      'error'
+    );
+
+    document.getElementById('m_token').value = 'secret';
+    await saveModal();
+    expect(showToast).toHaveBeenLastCalledWith('Certificate PIN is required.', 'error');
+
+    document.getElementById('m_cert_pin').value = 'pin';
+    document.getElementById('m_vpn_mtu').value = '1500';
+    await saveModal();
+    expect(showToast).toHaveBeenLastCalledWith('VPN MTU must be between 1280 and 1360.', 'error');
+    expect(savePrefs).not.toHaveBeenCalled();
+  });
+
+  it('edits an existing Keycloak connection and applies hero refresh', async () => {
+    const applyHeroForSelection = vi.fn();
+    wireModal({ applyHeroForSelection });
+    state.prefs.connections = [
+      {
+        id: 'conn-1',
+        label: 'Primary',
+        endpoint: 'old.example.com:443',
+        token: 'old-secret',
+        cert_pin: 'old-pin',
+        ech_config: 'old-ech',
+        censorship_resistant: false,
+        http3_framing: false,
+        kc_auth: false,
+        vpn_mtu: null,
+      },
+    ];
+
+    openModal('conn-1');
+    document.getElementById('m_label').value = 'Updated';
+    document.getElementById('m_endpoint').value = 'vpn.example.com:443';
+    document.getElementById('m_token').value = 'stale';
+    document.getElementById('m_cert_pin').value = 'pin';
+    document.getElementById('m_ech_config').value = 'ech';
+    document.getElementById('m_cr_mode').checked = true;
+    document.getElementById('m_h3_framing').checked = true;
+    document.getElementById('m_kc_auth').checked = true;
+    document.getElementById('m_kc_url').value = 'https://auth.example.com';
+    document.getElementById('m_kc_realm').value = 'realm';
+    document.getElementById('m_kc_client_id').value = 'client';
+    document.getElementById('m_vpn_mtu').value = '';
+
+    await saveModal();
+
+    expect(state.prefs.connections).toEqual([
+      {
+        id: 'conn-1',
+        label: 'Updated',
+        endpoint: 'vpn.example.com:443',
+        token: null,
+        cert_pin: 'pin',
+        ech_config: 'ech',
+        censorship_resistant: true,
+        http3_framing: true,
+        kc_auth: true,
+        kc_url: 'https://auth.example.com',
+        kc_realm: 'realm',
+        kc_client_id: 'client',
+        vpn_mtu: null,
+      },
+    ]);
+    expect(applyHeroForSelection).toHaveBeenCalled();
+  });
+
   it('deleting the active connection clears active_id', async () => {
     state.prefs.connections = [
       {
@@ -99,6 +180,42 @@ describe('modal workflows', () => {
 
     expect(state.prefs.connections).toEqual([]);
     expect(state.prefs.active_id).toBeNull();
+    expect(savePrefs).toHaveBeenCalledOnce();
+  });
+
+  it('wires cancel, backdrop, auth change, save, and delete interactions', async () => {
+    state.prefs.connections = [
+      {
+        id: 'conn-1',
+        label: 'Primary',
+        endpoint: 'vpn.example.com:443',
+        token: 'secret',
+        cert_pin: 'pin',
+      },
+    ];
+
+    openModal('conn-1');
+    expect(document.getElementById('modal-backdrop').classList.contains('visible')).toBe(true);
+
+    document.getElementById('modal-cancel').click();
+    expect(document.getElementById('modal-backdrop').classList.contains('visible')).toBe(false);
+
+    openModal('conn-1');
+    document
+      .getElementById('modal-backdrop')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(document.getElementById('modal-backdrop').classList.contains('visible')).toBe(false);
+
+    openModal('conn-1');
+    document.getElementById('m_kc_auth').checked = true;
+    document.getElementById('m_kc_auth').dispatchEvent(new Event('change'));
+    expect(document.getElementById('m-token-field').classList.contains('hidden')).toBe(true);
+
+    document.getElementById('modal-delete').click();
+    await Promise.resolve();
+    expect(state.prefs.connections).toEqual([]);
+
+    await deleteModal();
     expect(savePrefs).toHaveBeenCalledOnce();
   });
 });

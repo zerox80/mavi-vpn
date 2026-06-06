@@ -1,0 +1,3 @@
+[alias]
+test-core-workspace = "test -p shared -p mavivpn -p mavi-vpn -p quic-tester"
+test-gui-backend = "test -p mavi-vpn-gui"

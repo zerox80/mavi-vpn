@@ -19,9 +19,7 @@ export const listen = (event, handler) => {
 export async function bootstrapTauri() {
   let attempts = 0;
   while (
-    (!window.__TAURI__ ||
-      !window.__TAURI__.core?.invoke ||
-      !window.__TAURI__.event?.listen) &&
+    (!window.__TAURI__ || !window.__TAURI__.core?.invoke || !window.__TAURI__.event?.listen) &&
     attempts < 20
   ) {
     await new Promise((r) => setTimeout(r, 50));

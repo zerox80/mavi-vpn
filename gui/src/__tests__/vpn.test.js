@@ -50,7 +50,12 @@ describe('applyStatus', () => {
   });
 
   it('sets hero to on when connected', () => {
-    applyStatus({ service_available: true, running: true, state: 'Connected', assigned_ip: '10.8.0.2' });
+    applyStatus({
+      service_available: true,
+      running: true,
+      state: 'Connected',
+      assigned_ip: '10.8.0.2',
+    });
     expect(state.hero).toBe('on');
     expect(document.getElementById('connect-btn').textContent).toBe('DISCONNECT');
     expect(document.getElementById('ip-readout').textContent).toBe('10.8.0.2');
@@ -91,7 +96,9 @@ describe('applyStatus', () => {
     applyStatus({ service_available: true, running: false, state: 'Stopped' });
 
     expect(document.getElementById('connect-btn').disabled).toBe(true);
-    expect(document.getElementById('connect-btn').title).toBe('Select or add a saved connection first');
+    expect(document.getElementById('connect-btn').title).toBe(
+      'Select or add a saved connection first'
+    );
     expect(document.getElementById('hero-title').textContent).toBe('No node selected');
   });
 

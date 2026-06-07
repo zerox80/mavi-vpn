@@ -102,7 +102,7 @@ jobs:
           cargo llvm-cov --all-features -p quic-tester --summary-only
           cargo llvm-cov --all-features -p mavi-vpn-gui --summary-only
 
-          cargo llvm-cov --all-features $ALL_RUST_PACKAGES --lcov --output-path target/coverage/lcov.info
+          cargo llvm-cov --all-features $ALL_RUST_PACKAGES --fail-under-file-lines 50 --lcov --output-path target/coverage/lcov.info
       - name: Upload Rust coverage
         uses: actions/upload-artifact@v4
         with:
@@ -159,7 +159,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path target/coverage | Out-Null
           cargo llvm-cov --all-features -p windows-vpn --summary-only
-          cargo llvm-cov --all-features -p windows-vpn --lcov --output-path target/coverage/windows-lcov.info
+          cargo llvm-cov --all-features -p windows-vpn --fail-under-file-lines 50 --lcov --output-path target/coverage/windows-lcov.info
       - name: Upload Windows Rust coverage
         uses: actions/upload-artifact@v4
         with:
@@ -208,7 +208,7 @@ jobs:
       - name: Run Android JVM tests
         run: |
           chmod +x gradlew
-          ./gradlew testDebugUnitTest jacocoDebugUnitTestReport
+          ./gradlew testDebugUnitTest jacocoDebugUnitTestReport jacocoDebugUnitTestVerification
       - name: Upload Android JVM coverage
         uses: actions/upload-artifact@v4
         with:

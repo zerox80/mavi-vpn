@@ -286,4 +286,68 @@ mod tests {
         assert!(validate_server_mtu(&config_with_mtu(1340), 1280, TunMtuSource::Config).is_err());
         assert!(validate_server_mtu(&config_with_mtu(1400), 1280, TunMtuSource::Default).is_err());
     }
+
+    #[test]
+    fn raw_response_len_accepts_zero_and_boundary() {
+        assert!(validate_raw_response_len(0).is_ok());
+        assert!(validate_raw_response_len(1).is_ok());
+        assert!(validate_raw_response_len(65_536).is_ok());
+    }
+
+    #[test]
+    fn raw_response_len_rejects_far_above_limit() {
+        assert!(validate_raw_response_len(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn raw_response_body_rejects_empty_buffer() {
+        assert!(decode_raw_response_body(&[]).is_err());
+    }
+
+    #[test]
+    fn server_mtu_ignores_non_config_messages() {
+        let auth = ControlMessage::Auth {
+            token: "tok".to_string(),
+        };
+        assert!(validate_server_mtu(&auth, 1280, TunMtuSource::Default).is_ok());
+
+        let err = ControlMessage::Error {
+            message: "bad".to_string(),
+        };
+        assert!(validate_server_mtu(&err, 1280, TunMtuSource::Default).is_ok());
+    }
+
+    #[test]
+    fn server_mtu_boundary_values() {
+        assert!(
+            validate_server_mtu(&config_with_mtu(shared::MIN_TUN_MTU), shared::MIN_TUN_MTU, TunMtuSource::Default).is_ok()
+        );
+        assert!(
+            validate_server_mtu(&config_with_mtu(shared::MAX_TUN_MTU), shared::MAX_TUN_MTU, TunMtuSource::Default).is_ok()
+        );
+        assert!(
+            validate_server_mtu(&config_with_mtu(shared::MIN_TUN_MTU - 1), 1280, TunMtuSource::Default).is_err()
+        );
+        assert!(
+            validate_server_mtu(&config_with_mtu(shared::MAX_TUN_MTU + 1), 1280, TunMtuSource::Default).is_err()
+        );
+    }
+
+    #[test]
+    fn server_mtu_env_source_requires_match() {
+        assert!(validate_server_mtu(&config_with_mtu(1300), 1300, TunMtuSource::Env).is_ok());
+        assert!(validate_server_mtu(&config_with_mtu(1300), 1280, TunMtuSource::Env).is_err());
+    }
+
+    #[test]
+    fn endpoint_host_handles_empty_and_port_only() {
+        assert_eq!(endpoint_host(""), "");
+        assert_eq!(endpoint_host(":443"), "");
+    }
+
+    #[test]
+    fn endpoint_host_bare_ipv6_without_brackets() {
+        assert_eq!(endpoint_host("::1"), "::1");
+        assert_eq!(endpoint_host("fe80::1"), "fe80::1");
+    }
 }

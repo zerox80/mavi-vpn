@@ -227,14 +227,7 @@ pub async fn connect_and_handshake(
         let _ = send.finish(); // properly close the send side of the auth stream
 
         let len = recv.read_u32_le().await? as usize;
-        if len > 65536 {
-            anyhow::bail!("Server response too large: {len} bytes");
-        }
-        if len == 0x1901 {
-            // This magic length happens when the server sends the HTTP/3 spoof payload
-            // [0x01, 0x19, 0x00, 0x00] in censorship_resistant mode due to Auth Failure.
-            anyhow::bail!("AUTH_FAILED: Server rejected authentication token");
-        }
+        validate_raw_response_len(len)?;
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
         let cfg: ControlMessage =
@@ -262,6 +255,16 @@ pub fn order_resolved_addrs(addrs: &mut [SocketAddr], endpoint: &str) {
     }
 
     addrs.sort_by_key(|addr| i32::from(!addr.is_ipv4()));
+}
+
+fn validate_raw_response_len(len: usize) -> Result<()> {
+    if len > 65_536 {
+        anyhow::bail!("Server response too large: {len} bytes");
+    }
+    if len == 0x1901 {
+        anyhow::bail!("AUTH_FAILED: Server rejected authentication token");
+    }
+    Ok(())
 }
 
 fn validate_server_mtu(

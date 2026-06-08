@@ -231,7 +231,6 @@ pub async fn connect_and_handshake(
         (cfg, None)
     };
 
-<<<<<<< HEAD
     validate_server_mtu(&config, local_tun_mtu, mtu_source)?;
 
     Ok((connection, config, h3_guard))
@@ -261,11 +260,6 @@ fn validate_server_mtu(
     Ok(())
 }
 
-=======
-    Ok((connection, config, h3_guard))
-}
-
->>>>>>> 4832208 (Fix Android and GUI client bugs)
 fn decode_raw_server_config(buf: &[u8]) -> anyhow::Result<ControlMessage> {
     let cfg: ControlMessage = bincode::serde::decode_from_slice(buf, bincode::config::standard())
         .map(|(v, _)| v)
@@ -438,6 +432,22 @@ fn endpoint_host(endpoint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+
+    fn config_with_mtu(mtu: u16) -> ControlMessage {
+        ControlMessage::Config {
+            assigned_ip: Ipv4Addr::new(10, 8, 0, 2),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Ipv4Addr::new(10, 8, 0, 1),
+            dns_server: Ipv4Addr::new(1, 1, 1, 1),
+            mtu,
+            assigned_ipv6: None,
+            netmask_v6: None,
+            gateway_v6: None,
+            dns_server_v6: None,
+            whitelist_domains: None,
+        }
+    }
 
     #[test]
     fn endpoint_host_simple() {
@@ -478,7 +488,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn validate_server_mtu_accepts_match() {
         assert!(validate_server_mtu(&config_with_mtu(1280), 1280, TunMtuSource::Config).is_ok());
         assert!(validate_server_mtu(&config_with_mtu(1360), 1280, TunMtuSource::Default).is_ok());
@@ -489,7 +498,9 @@ mod tests {
         let err =
             validate_server_mtu(&config_with_mtu(1360), 1280, TunMtuSource::Config).unwrap_err();
         assert!(err.to_string().contains("MTU mismatch"));
-=======
+    }
+
+    #[test]
     fn h3_mode_advertises_only_h3_alpn() {
         assert_eq!(alpn_protocols(true), vec![b"h3".to_vec()]);
     }
@@ -514,7 +525,6 @@ mod tests {
             b"  <html><body>Welcome</body></html>"
         ));
         assert!(!looks_like_html_response(&[0x40, 0x00, 0x00]));
->>>>>>> 4832208 (Fix Android and GUI client bugs)
     }
 
     #[test]

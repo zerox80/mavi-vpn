@@ -56,6 +56,20 @@ describe('applyStatus', () => {
     expect(document.getElementById('ip-readout').textContent).toBe('10.8.0.2');
   });
 
+  it('clears stale tunnel IP when a later status has no assigned IP', () => {
+    applyStatus({ service_available: true, running: true, state: 'Connected', assigned_ip: '10.8.0.2' });
+    applyStatus({ service_available: true, running: false, state: 'Failed', last_error: 'Auth failed' });
+    expect(document.getElementById('ip-readout').textContent).toBe('—');
+
+    applyStatus({ service_available: true, running: true, state: 'Connected', assigned_ip: '10.8.0.3' });
+    applyStatus({ service_available: true, running: false, state: 'Stopped' });
+    expect(document.getElementById('ip-readout').textContent).toBe('—');
+
+    applyStatus({ service_available: true, running: true, state: 'Connected', assigned_ip: '10.8.0.4' });
+    applyStatus({ service_available: false, running: false, state: 'Stopped' });
+    expect(document.getElementById('ip-readout').textContent).toBe('—');
+  });
+
   it('clears session and shows error on Failed state', () => {
     state.sessionStart = 12345;
     applyStatus({ service_available: true, state: 'Failed', last_error: 'Auth failed' });

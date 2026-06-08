@@ -88,6 +88,8 @@ export function applyStatus(status) {
   const btn = $('connect-btn');
   if (!btn) return;
 
+  $('ip-readout').textContent = status.assigned_ip || '—';
+
   if (!state.serviceAvailable) {
     state.disconnecting = false;
     setHero('off');
@@ -130,9 +132,6 @@ export function applyStatus(status) {
     btn.disabled = !activeConn();
     btn.title = activeConn() ? '' : 'Select or add a saved connection first';
     hideToast('hint');
-  }
-  if (status.assigned_ip) {
-    $('ip-readout').textContent = status.assigned_ip;
   }
   updateNetworkPanel();
 }

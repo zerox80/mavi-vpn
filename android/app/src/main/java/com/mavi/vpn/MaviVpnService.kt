@@ -262,19 +262,15 @@ class MaviVpnService : VpnService() {
                             val dns = config.optString("dns_server", "8.8.8.8")
                             builder.addDnsServer(dns)
 
-                            val hasIpv6 = jsonHasNonBlankString(config, "assigned_ipv6")
-                            if (hasIpv6) {
-                                val v6 = config.getString("assigned_ipv6")
-                                val v6Prefix = config.optInt("netmask_v6", 64)
-                                try {
-                                    builder.addAddress(v6, v6Prefix)
-                                    builder.addRoute("::", 0)
-                                    if (!config.isNull("dns_server_v6")) {
-                                        builder.addDnsServer(config.getString("dns_server_v6"))
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w("MaviVPN", "Failed to add IPv6: ${e.message}")
-                                }
+                            val hasIpv6 = try {
+                                applyAssignedIpv6Config(config, AndroidVpnBuilderAdapter(builder))
+                            } catch (e: Exception) {
+                                val message = "Failed to configure IPv6 tunnel: ${e.message}"
+                                Log.e("MaviVPN", message, e)
+                                isConnected.value = false
+                                isRunning = false
+                                notificationHelper.updateNotification(1, "Mavi VPN", "IPv6 VPN setup failed. Disconnecting.")
+                                throw IllegalStateException(message, e)
                             }
 
                             applyWhitelistDomainExclusions(builder, whitelistDomains, hasIpv6)
@@ -385,7 +381,7 @@ class MaviVpnService : VpnService() {
                     }
                 }
             }
-            if (vpnSessionGeneration == workerGeneration && isRunning) {
+            if (vpnSessionGeneration == workerGeneration) {
                 stopSelf()
             }
         }.also { it.start() }

@@ -90,23 +90,18 @@ pub fn set_adapter_network_config(
         anyhow::anyhow!("Failed to install host route exception for VPN endpoint")
     })?;
 
-    let _ = win32_add_route(
-        adapter_index,
-        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        1,
-        Some(IpAddr::V4(gateway)),
-        1,
-    );
-    let _ = win32_add_route(
-        adapter_index,
-        IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
-        1,
-        Some(IpAddr::V4(gateway)),
-        1,
-    );
+    let route_result = (|| -> Result<()> {
+        install_ipv4_split_routes(adapter_index, gateway)?;
 
-    if gateway_v6.is_some() {
-        install_ipv6_split_routes(adapter_index)?;
+        if gateway_v6.is_some() {
+            install_ipv6_split_routes(adapter_index)?;
+        }
+
+        Ok(())
+    })();
+    if let Err(err) = route_result {
+        cleanup_routes(Some(&endpoint_route));
+        return Err(err);
     }
 
     info!(
@@ -121,6 +116,39 @@ pub fn set_adapter_network_config(
         endpoint_route
     );
     Ok(Some(endpoint_route))
+}
+
+fn install_ipv4_split_routes(adapter_index: u32, gateway: Ipv4Addr) -> Result<()> {
+    install_ipv4_split_routes_with(adapter_index, gateway, win32_add_route)
+}
+
+fn install_ipv4_split_routes_with<F>(
+    adapter_index: u32,
+    gateway: Ipv4Addr,
+    mut add_route: F,
+) -> Result<()>
+where
+    F: FnMut(u32, IpAddr, u8, Option<IpAddr>, u32) -> Result<()>,
+{
+    add_route(
+        adapter_index,
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        1,
+        Some(IpAddr::V4(gateway)),
+        1,
+    )
+    .context("Failed to install IPv4 split route 0.0.0.0/1")?;
+
+    add_route(
+        adapter_index,
+        IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
+        1,
+        Some(IpAddr::V4(gateway)),
+        1,
+    )
+    .context("Failed to install IPv4 split route 128.0.0.0/1")?;
+
+    Ok(())
 }
 
 fn install_ipv6_split_routes(adapter_index: u32) -> Result<()> {
@@ -138,4 +166,67 @@ fn install_ipv6_split_routes(adapter_index: u32) -> Result<()> {
 
     info!("IPv6 On-Link split routes installed via Win32");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv4_split_routes_install_both_halves() {
+        let gateway = Ipv4Addr::new(10, 8, 0, 1);
+        let mut calls = Vec::new();
+
+        install_ipv4_split_routes_with(
+            7,
+            gateway,
+            |adapter_index, destination, prefix, hop, metric| {
+                calls.push((adapter_index, destination, prefix, hop, metric));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    7,
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    1,
+                    Some(IpAddr::V4(gateway)),
+                    1
+                ),
+                (
+                    7,
+                    IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
+                    1,
+                    Some(IpAddr::V4(gateway)),
+                    1
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ipv4_split_route_failure_is_reported() {
+        let gateway = Ipv4Addr::new(10, 8, 0, 1);
+        let mut calls = Vec::new();
+
+        let err = install_ipv4_split_routes_with(
+            7,
+            gateway,
+            |adapter_index, destination, prefix, hop, metric| {
+                calls.push((adapter_index, destination, prefix, hop, metric));
+                if destination == IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)) {
+                    anyhow::bail!("route denied");
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(calls.len(), 2);
+        assert!(err.to_string().contains("128.0.0.0/1"));
+    }
 }

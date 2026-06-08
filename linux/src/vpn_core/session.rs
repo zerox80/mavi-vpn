@@ -53,12 +53,21 @@ pub async fn run_vpn(
                 Duration::from_secs(RECONNECT_INITIAL_SECS),
             ),
             Err(e) => {
+                let err_str = e.to_string();
                 connected.store(false, Ordering::SeqCst);
                 if let Ok(mut ip) = assigned_ip.lock() {
                     *ip = None;
                 }
                 if let Ok(mut last) = last_error.lock() {
-                    *last = Some(e.to_string());
+                    *last = Some(err_str.clone());
+                }
+                if is_permanent_setup_error(&err_str) {
+                    warn!(
+                        "Permanent VPN setup failure: {}. Stopping VPN loop.",
+                        err_str
+                    );
+                    running.store(false, Ordering::Relaxed);
+                    break;
                 }
                 warn!("Session failed: {:#}. Reconnecting...", e);
                 (
@@ -74,6 +83,18 @@ pub async fn run_vpn(
 
     info!("VPN stopped.");
     Ok(())
+}
+
+fn is_permanent_setup_error(message: &str) -> bool {
+    message.contains("AUTH_FAILED")
+        || message.contains("Server rejected connection")
+        || message.contains("MTU mismatch")
+        || message.contains("unsupported VPN MTU")
+        || message.contains("Failed to open /dev/net/tun")
+        || message.contains("Failed to create TUN device")
+        || message.contains("Failed to install IPv6 split route")
+        || message.contains("Failed to execute: ip ")
+        || message.contains("ip failed:")
 }
 
 enum SessionEnd {
@@ -352,5 +373,34 @@ async fn run_session(
         Ok(SessionEnd::ConnectionLost)
     } else {
         Ok(SessionEnd::UserStopped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_permanent_setup_error;
+
+    #[test]
+    fn permanent_setup_errors_stop_reconnect_loop() {
+        for message in [
+            "AUTH_FAILED: Server returned HTTP 401",
+            "Server rejected connection: denied",
+            "MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360",
+            "Server pushed unsupported VPN MTU 1400",
+            "Failed to open /dev/net/tun: permission denied",
+            "Failed to install IPv6 split route ::/1",
+            "Failed to execute: ip route add 0.0.0.0/1",
+            "ip failed: RTNETLINK answers: Operation not permitted",
+        ] {
+            assert!(is_permanent_setup_error(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn transient_transport_errors_keep_reconnect_loop() {
+        assert!(!is_permanent_setup_error("connection lost"));
+        assert!(!is_permanent_setup_error(
+            "timed out while reading datagram"
+        ));
     }
 }

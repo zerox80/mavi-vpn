@@ -298,6 +298,26 @@ fn raw_response_len_accepts_near_magic_length() {
 }
 
 #[test]
+fn raw_response_len_accepts_exact_max() {
+    assert!(validate_raw_response_len(65_536).is_ok());
+}
+
+#[test]
+fn raw_response_len_rejects_one_over_max() {
+    assert!(validate_raw_response_len(65_537).is_err());
+}
+
+#[test]
+fn raw_response_len_accepts_just_below_magic() {
+    assert!(validate_raw_response_len(0x1900).is_ok());
+}
+
+#[test]
+fn raw_response_len_accepts_just_above_magic() {
+    assert!(validate_raw_response_len(0x1902).is_ok());
+}
+
+#[test]
 fn validate_server_mtu_ignores_auth_message() {
     let auth = ControlMessage::Auth {
         token: "secret".to_string(),
@@ -311,4 +331,96 @@ fn validate_server_mtu_ignores_error_message() {
         message: "server error".to_string(),
     };
     assert!(validate_server_mtu(&err, 1280, TunMtuSource::Config).is_ok());
+}
+
+// --- compute_quic_mtu_config tests ---
+
+#[test]
+fn quic_mtu_config_default_uses_max_tun_mtu_ipv4() {
+    let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
+    let cfg = compute_quic_mtu_config(None, &addr);
+    assert_eq!(cfg.transport_tun_mtu, shared::MAX_TUN_MTU);
+    assert_eq!(cfg.quic_mtu, shared::MAX_TUN_MTU + shared::QUIC_OVERHEAD_BYTES);
+    assert!(matches!(cfg.mtu_source, TunMtuSource::Default));
+    assert_eq!(cfg.local_tun_mtu, shared::DEFAULT_TUN_MTU);
+    assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 20 + 8);
+}
+
+#[test]
+fn quic_mtu_config_default_uses_max_tun_mtu_ipv6() {
+    let addr: SocketAddr = "[::1]:443".parse().unwrap();
+    let cfg = compute_quic_mtu_config(None, &addr);
+    assert_eq!(cfg.transport_tun_mtu, shared::MAX_TUN_MTU);
+    assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 40 + 8);
+}
+
+#[test]
+fn quic_mtu_config_explicit_mtu_uses_provided_value() {
+    let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
+    let cfg = compute_quic_mtu_config(Some(1340), &addr);
+    assert_eq!(cfg.transport_tun_mtu, 1340);
+    assert_eq!(cfg.local_tun_mtu, 1340);
+    assert_eq!(cfg.quic_mtu, 1340 + shared::QUIC_OVERHEAD_BYTES);
+    assert!(matches!(cfg.mtu_source, TunMtuSource::Config));
+}
+
+#[test]
+fn quic_mtu_config_minimum_explicit_mtu() {
+    let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
+    let cfg = compute_quic_mtu_config(Some(shared::MIN_TUN_MTU), &addr);
+    assert_eq!(cfg.transport_tun_mtu, shared::MIN_TUN_MTU);
+    assert_eq!(cfg.quic_mtu, shared::MIN_TUN_MTU + shared::QUIC_OVERHEAD_BYTES);
+}
+
+#[test]
+fn quic_mtu_config_ipv4_wire_mtu_includes_ip_and_udp_headers() {
+    let addr: SocketAddr = "10.0.0.1:443".parse().unwrap();
+    let cfg = compute_quic_mtu_config(Some(1280), &addr);
+    assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 28);
+}
+
+#[test]
+fn quic_mtu_config_ipv6_wire_mtu_includes_larger_ip_header() {
+    let addr: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+    let cfg = compute_quic_mtu_config(Some(1280), &addr);
+    assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 48);
+}
+
+// --- resolve_server_name tests ---
+
+#[test]
+fn resolve_server_name_extracts_host_from_endpoint() {
+    let name = resolve_server_name("vpn.example.com:4433", None).unwrap();
+    assert_eq!(name, "vpn.example.com");
+}
+
+#[test]
+fn resolve_server_name_uses_ech_outer_sni_when_provided() {
+    let name = resolve_server_name("vpn.example.com:4433", Some("cover.example.com")).unwrap();
+    assert_eq!(name, "cover.example.com");
+}
+
+#[test]
+fn resolve_server_name_rejects_empty_host() {
+    let result = resolve_server_name(":4433", None);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Endpoint host missing"));
+}
+
+#[test]
+fn resolve_server_name_rejects_empty_ech_sni() {
+    let result = resolve_server_name("vpn.example.com:4433", Some(""));
+    assert!(result.is_err());
+}
+
+#[test]
+fn resolve_server_name_ipv6_endpoint() {
+    let name = resolve_server_name("[2001:db8::1]:443", None).unwrap();
+    assert_eq!(name, "2001:db8::1");
+}
+
+#[test]
+fn resolve_server_name_endpoint_without_port() {
+    let name = resolve_server_name("vpn.example.com", None).unwrap();
+    assert_eq!(name, "vpn.example.com");
 }

@@ -32,6 +32,47 @@ pub fn cleanup_stale_network_state() {
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
 
+#[derive(Debug)]
+enum SessionEnd {
+    UserStopped,
+    ConnectionLost,
+}
+
+#[derive(Debug)]
+enum ReconnectDecision {
+    Break,
+    Reconnect { delay: Duration, next_backoff: Duration },
+    PermanentFailure { error: String },
+}
+
+fn compute_reconnect_delay(
+    outcome: Result<SessionEnd>,
+    backoff: Duration,
+) -> ReconnectDecision {
+    match outcome {
+        Ok(SessionEnd::UserStopped) => ReconnectDecision::Break,
+        Ok(SessionEnd::ConnectionLost) => ReconnectDecision::Reconnect {
+            delay: Duration::from_secs(RECONNECT_INITIAL_SECS),
+            next_backoff: Duration::from_secs(RECONNECT_INITIAL_SECS),
+        },
+        Err(e) => {
+            let err_str = e.to_string();
+            if err_str.contains("AUTH_FAILED")
+                || err_str.contains("Server rejected connection")
+                || err_str.contains("MTU mismatch")
+                || err_str.contains("was not applied to adapter")
+            {
+                ReconnectDecision::PermanentFailure { error: err_str }
+            } else {
+                ReconnectDecision::Reconnect {
+                    delay: backoff,
+                    next_backoff: (backoff * 2).min(Duration::from_secs(RECONNECT_MAX_SECS)),
+                }
+            }
+        }
+    }
+}
+
 use std::sync::OnceLock;
 
 static WINTUN_ADAPTER: OnceLock<(wintun::Wintun, Arc<Adapter>)> = OnceLock::new();
@@ -91,39 +132,31 @@ pub async fn run_vpn(
             break;
         }
 
-        let (reconnect_delay, next_backoff) = match outcome {
-            Ok(SessionEnd::UserStopped) => break,
-            Ok(SessionEnd::ConnectionLost) => (
-                Duration::from_secs(RECONNECT_INITIAL_SECS),
-                Duration::from_secs(RECONNECT_INITIAL_SECS),
-            ),
-            Err(e) => {
-                let err_str = e.to_string();
-                if let Ok(mut last) = last_error.lock() {
-                    *last = Some(err_str.clone());
-                }
-                if err_str.contains("AUTH_FAILED")
-                    || err_str.contains("Server rejected connection")
-                    || err_str.contains("MTU mismatch")
-                    || err_str.contains("was not applied to adapter")
-                {
-                    warn!(
-                        "Permanent VPN setup failure: {}. Stopping VPN loop.",
-                        err_str
-                    );
-                    running.store(false, Ordering::Relaxed);
-                    break;
-                }
-                warn!("Session failed: {:#}. Reconnecting...", e);
-                (
-                    backoff,
-                    (backoff * 2).min(Duration::from_secs(RECONNECT_MAX_SECS)),
-                )
+        let err_opt = outcome.as_ref().err().map(|e| e.to_string());
+        if let Some(ref err_str) = err_opt {
+            if let Ok(mut last) = last_error.lock() {
+                *last = Some(err_str.clone());
             }
-        };
+        }
 
-        tokio::time::sleep(reconnect_delay).await;
-        backoff = next_backoff;
+        match compute_reconnect_delay(outcome, backoff) {
+            ReconnectDecision::Break => break,
+            ReconnectDecision::PermanentFailure { error } => {
+                warn!(
+                    "Permanent VPN setup failure: {}. Stopping VPN loop.",
+                    error
+                );
+                running.store(false, Ordering::Relaxed);
+                break;
+            }
+            ReconnectDecision::Reconnect { delay, next_backoff } => {
+                if let Some(ref err_str) = err_opt {
+                    warn!("Session failed: {err_str}. Reconnecting...");
+                }
+                tokio::time::sleep(delay).await;
+                backoff = next_backoff;
+            }
+        }
     }
 
     // 4. Cleanup – routes first, then DNS/NRPT
@@ -135,11 +168,6 @@ pub async fn run_vpn(
     }
     info!("VPN Service Stopped.");
     Ok(())
-}
-
-enum SessionEnd {
-    UserStopped,
-    ConnectionLost,
 }
 
 /// Manages a single active VPN session (handshake + packet pumping).
@@ -466,5 +494,90 @@ async fn run_session(
         Ok(SessionEnd::ConnectionLost)
     } else {
         Ok(SessionEnd::UserStopped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_stopped_breaks() {
+        let decision = compute_reconnect_delay(Ok(SessionEnd::UserStopped), Duration::from_secs(5));
+        assert!(matches!(decision, ReconnectDecision::Break));
+    }
+
+    #[test]
+    fn connection_lost_resets_backoff() {
+        match compute_reconnect_delay(Ok(SessionEnd::ConnectionLost), Duration::from_secs(10)) {
+            ReconnectDecision::Reconnect { delay, next_backoff } => {
+                assert_eq!(delay, Duration::from_secs(1));
+                assert_eq!(next_backoff, Duration::from_secs(1));
+            }
+            other => panic!("Expected Reconnect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transient_error_backoffs() {
+        let err = anyhow::anyhow!("network timeout");
+        match compute_reconnect_delay(Err(err), Duration::from_secs(2)) {
+            ReconnectDecision::Reconnect { delay, next_backoff } => {
+                assert_eq!(delay, Duration::from_secs(2));
+                assert_eq!(next_backoff, Duration::from_secs(4));
+            }
+            other => panic!("Expected Reconnect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transient_error_caps_at_max() {
+        let err = anyhow::anyhow!("network timeout");
+        let backoff = Duration::from_secs(25);
+        match compute_reconnect_delay(Err(err), backoff) {
+            ReconnectDecision::Reconnect { delay, next_backoff } => {
+                assert_eq!(delay, Duration::from_secs(25));
+                assert_eq!(next_backoff, Duration::from_secs(30));
+            }
+            other => panic!("Expected Reconnect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permanent_auth_failed_stops() {
+        let err = anyhow::anyhow!("AUTH_FAILED");
+        match compute_reconnect_delay(Err(err), Duration::from_secs(5)) {
+            ReconnectDecision::PermanentFailure { error } => {
+                assert!(error.contains("AUTH_FAILED"));
+            }
+            other => panic!("Expected PermanentFailure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permanent_server_rejected_stops() {
+        let err = anyhow::anyhow!("Server rejected connection: bad token");
+        assert!(matches!(
+            compute_reconnect_delay(Err(err), Duration::from_secs(5)),
+            ReconnectDecision::PermanentFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn permanent_mtu_mismatch_stops() {
+        let err = anyhow::anyhow!("MTU mismatch");
+        assert!(matches!(
+            compute_reconnect_delay(Err(err), Duration::from_secs(5)),
+            ReconnectDecision::PermanentFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn permanent_adapter_error_stops() {
+        let err = anyhow::anyhow!("IP was not applied to adapter");
+        assert!(matches!(
+            compute_reconnect_delay(Err(err), Duration::from_secs(5)),
+            ReconnectDecision::PermanentFailure { .. }
+        ));
     }
 }

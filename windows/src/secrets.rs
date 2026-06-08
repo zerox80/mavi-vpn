@@ -73,9 +73,39 @@ pub mod tests {
         }
 
         fn delete_secret(&self, account: &str) -> Result<()> {
-            self.secrets.borrow_mut().remove(account);
-            self.deleted.borrow_mut().push(account.to_string());
+            if self.secrets.borrow_mut().remove(account).is_some() {
+                self.deleted.borrow_mut().push(account.to_string());
+            }
             Ok(())
         }
+    }
+
+    #[test]
+    fn memory_store_basic_operations() {
+        let store = MemorySecretStore::default();
+        assert_eq!(store.get_secret("missing").unwrap(), None);
+
+        store.set_secret("acc", "val").unwrap();
+        assert_eq!(store.secret("acc"), Some("val".to_string()));
+        assert_eq!(store.get_secret("acc").unwrap(), Some("val".to_string()));
+
+        store.delete_secret("acc").unwrap();
+        assert_eq!(store.secret("acc"), None);
+        assert!(store.deleted().contains(&"acc".to_string()));
+    }
+
+    #[test]
+    fn memory_store_overwrite() {
+        let store = MemorySecretStore::default();
+        store.set_secret("acc", "first").unwrap();
+        store.set_secret("acc", "second").unwrap();
+        assert_eq!(store.secret("acc"), Some("second".to_string()));
+    }
+
+    #[test]
+    fn memory_store_delete_nonexistent() {
+        let store = MemorySecretStore::default();
+        assert!(store.delete_secret("nope").is_ok());
+        assert!(!store.deleted().contains(&"nope".to_string()));
     }
 }

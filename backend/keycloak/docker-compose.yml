@@ -2,10 +2,10 @@ services:
   # Extends the vpn-server defined in the main docker-compose.yml
   vpn-server:
     environment:
-      - KEYCLOAK_ENABLED=true
-      - KEYCLOAK_URL=${KEYCLOAK_URL:-https://auth.${DOMAIN_NAME}}
-      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-mavi-vpn}
-      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-mavi-client}
+      VPN_KEYCLOAK_ENABLED: "true"
+      VPN_KEYCLOAK_URL: ${VPN_KEYCLOAK_URL:?VPN_KEYCLOAK_URL is required when Keycloak compose is enabled}
+      VPN_KEYCLOAK_REALM: ${VPN_KEYCLOAK_REALM:-mavi-vpn}
+      VPN_KEYCLOAK_CLIENT_ID: ${VPN_KEYCLOAK_CLIENT_ID:-mavi-client}
 
   keycloak-db:
     image: postgres:15
@@ -16,7 +16,7 @@ services:
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-mavi_keycloak_secret_change_me!123}
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD is required}
 
   keycloak:
     image: quay.io/keycloak/keycloak:24.0.1
@@ -27,11 +27,10 @@ services:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
       KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-mavi_keycloak_secret_change_me!123}
-      # Keycloak Administrator Credentials - change these!
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD is required}
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASS:-admin}
-      KC_HOSTNAME: auth.${DOMAIN_NAME}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASS:?KEYCLOAK_ADMIN_PASS is required}
+      KC_HOSTNAME: auth.${DOMAIN_NAME:?DOMAIN_NAME is required for Keycloak}
       KC_PROXY: edge
       KC_PROXY_HEADERS: xforwarded
     # Uncomment the following to expose Keycloak internally if using external Nginx manually:

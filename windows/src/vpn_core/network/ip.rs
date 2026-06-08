@@ -176,3 +176,22 @@ pub fn win32_cleanup_all_ips_on_interface(adapter_index: u32) {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // NOTE: Functions in this module directly invoke Win32 APIs
+    // (GetUnicastIpAddressTable, CreateUnicastIpAddressEntry, etc.)
+    // and are therefore not suitable for automated unit tests.
+    // They must be validated through integration / manual testing
+    // on a real Windows host with an active network adapter.
+
+    #[test]
+    #[ignore = "Requires Windows host with live network adapter"]
+    fn win32_ip_functions_smoke_test() {
+        // Manual verification checklist:
+        // 1. win32_add_ip adds an IP to a test adapter.
+        // 2. wait_for_ipv4_address returns true after the IP appears.
+        // 3. win32_cleanup_all_ips_on_interface removes all IPs.
+        // 4. wait_for_ipv6_address (async) returns true for a valid IPv6.
+    }
+}

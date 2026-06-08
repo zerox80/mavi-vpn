@@ -72,6 +72,43 @@ fn my_service_main(arguments: Vec<OsString>) {
     }
 }
 
+pub(crate) fn handle_service_control(
+    control_event: ServiceControl,
+    stop_signal: &Arc<AtomicBool>,
+    reharden_signal: &Arc<AtomicBool>,
+) -> (ServiceControlHandlerResult, bool) {
+    let mut did_stop = false;
+    let result = match control_event {
+        event @ (ServiceControl::Stop
+        | ServiceControl::Preshutdown
+        | ServiceControl::Shutdown) => {
+            info!("Received {:?} signal from Service Control Manager", event);
+            stop_signal.store(true, Ordering::SeqCst);
+            did_stop = true;
+            ServiceControlHandlerResult::NoError
+        }
+        ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+        ServiceControl::SessionChange(param) => {
+            if matches!(
+                param.reason,
+                SessionChangeReason::SessionLogon
+                    | SessionChangeReason::ConsoleConnect
+                    | SessionChangeReason::RemoteConnect
+                    | SessionChangeReason::SessionUnlock
+            ) {
+                info!(
+                    "Session change ({:?}) for session {} — queuing IPC token ACL re-harden",
+                    param.reason, param.notification.session_id
+                );
+                reharden_signal.store(true, Ordering::SeqCst);
+            }
+            ServiceControlHandlerResult::NoError
+        }
+        _ => ServiceControlHandlerResult::NotImplemented,
+    };
+    (result, did_stop)
+}
+
 fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
     let stop_signal = Arc::new(AtomicBool::new(false));
     let stop_signal_handler = stop_signal.clone();
@@ -79,34 +116,12 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
     let reharden_signal_handler = reharden_signal.clone();
 
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
-        match control_event {
-            event @ (ServiceControl::Stop
-            | ServiceControl::Preshutdown
-            | ServiceControl::Shutdown) => {
-                info!("Received {:?} signal from Service Control Manager", event);
-                stop_signal_handler.store(true, Ordering::SeqCst);
-                utils::run_network_repair_cleanup();
-                ServiceControlHandlerResult::NoError
-            }
-            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            ServiceControl::SessionChange(param) => {
-                if matches!(
-                    param.reason,
-                    SessionChangeReason::SessionLogon
-                        | SessionChangeReason::ConsoleConnect
-                        | SessionChangeReason::RemoteConnect
-                        | SessionChangeReason::SessionUnlock
-                ) {
-                    info!(
-                        "Session change ({:?}) for session {} — queuing IPC token ACL re-harden",
-                        param.reason, param.notification.session_id
-                    );
-                    reharden_signal_handler.store(true, Ordering::SeqCst);
-                }
-                ServiceControlHandlerResult::NoError
-            }
-            _ => ServiceControlHandlerResult::NotImplemented,
+        let (result, did_stop) =
+            handle_service_control(control_event, &stop_signal_handler, &reharden_signal_handler);
+        if did_stop {
+            utils::run_network_repair_cleanup();
         }
+        result
     };
 
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;

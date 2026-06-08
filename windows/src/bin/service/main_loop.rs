@@ -15,6 +15,12 @@ use crate::ipc;
 
 pub const MAX_CONCURRENT_IPC_CLIENTS: usize = 32;
 
+pub fn build_auth_token() -> (String, [u8; 32]) {
+    let token_bytes: [u8; 32] = rand::random();
+    let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
+    (auth_token, token_bytes)
+}
+
 pub async fn run_service_loop(
     stop_signal: Arc<AtomicBool>,
     reharden_signal: Arc<AtomicBool>,
@@ -24,8 +30,7 @@ pub async fn run_service_loop(
     run_network_repair_cleanup();
 
     // Generate secure token for IPC and save it securely BEFORE binding listener.
-    let token_bytes: [u8; 32] = rand::random();
-    let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
+    let (auth_token, _token_bytes) = build_auth_token();
 
     let token_path = ipc::ipc_token_path();
     prepare_ipc_auth_token(&token_path, &auth_token)?;
@@ -127,5 +132,35 @@ mod tests {
     #[test]
     fn max_concurrent_ipc_clients_is_power_of_two() {
         assert!(MAX_CONCURRENT_IPC_CLIENTS.is_power_of_two());
+    }
+
+    #[test]
+    fn build_auth_token_returns_non_empty_base64() {
+        let (token, raw_bytes) = build_auth_token();
+        assert!(!token.is_empty());
+        assert_eq!(raw_bytes.len(), 32);
+    }
+
+    #[test]
+    fn build_auth_token_is_valid_base64() {
+        let (token, _) = build_auth_token();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&token)
+            .expect("token should be valid base64");
+        assert_eq!(decoded.len(), 32);
+    }
+
+    #[test]
+    fn build_auth_token_produces_unique_tokens() {
+        let (token1, _) = build_auth_token();
+        let (token2, _) = build_auth_token();
+        assert_ne!(token1, token2);
+    }
+
+    #[test]
+    fn build_auth_token_raw_bytes_differ_across_calls() {
+        let (_, bytes1) = build_auth_token();
+        let (_, bytes2) = build_auth_token();
+        assert_ne!(bytes1, bytes2);
     }
 }

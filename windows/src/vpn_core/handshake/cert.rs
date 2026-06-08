@@ -65,3 +65,58 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
         self.supported.supported_schemes()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_hex_empty_string() {
+        assert_eq!(decode_hex(""), Some(vec![]));
+    }
+
+    #[test]
+    fn decode_hex_valid_lowercase() {
+        assert_eq!(decode_hex("deadbeef"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn decode_hex_valid_uppercase() {
+        assert_eq!(decode_hex("DEADBEEF"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn decode_hex_valid_mixed_case() {
+        assert_eq!(decode_hex("DeAdBeEf"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn decode_hex_odd_length_returns_none() {
+        assert_eq!(decode_hex("abc"), None);
+        assert_eq!(decode_hex("1"), None);
+        assert_eq!(decode_hex("deadbee"), None);
+    }
+
+    #[test]
+    fn decode_hex_invalid_chars_returns_none() {
+        assert_eq!(decode_hex("gg"), None);
+        assert_eq!(decode_hex("zzzz"), None);
+        assert_eq!(decode_hex("12abXX"), None);
+    }
+
+    #[test]
+    fn decode_hex_single_byte() {
+        assert_eq!(decode_hex("ff"), Some(vec![0xff]));
+        assert_eq!(decode_hex("00"), Some(vec![0x00]));
+    }
+
+    #[test]
+    fn decode_hex_all_zeros() {
+        assert_eq!(decode_hex("00000000"), Some(vec![0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn decode_hex_all_ff() {
+        assert_eq!(decode_hex("ffffffff"), Some(vec![0xff, 0xff, 0xff, 0xff]));
+    }
+}

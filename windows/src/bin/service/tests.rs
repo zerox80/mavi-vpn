@@ -1,4 +1,4 @@
-use crate::handlers::dispatch_request;
+use crate::handlers::{dispatch_request, handle_start_request};
 use crate::ipc;
 use crate::state::VpnServiceState;
 use std::sync::atomic::Ordering;
@@ -98,5 +98,108 @@ async fn start_request_is_rejected_while_stopping() {
             assert_eq!(msg, "VPN is stopping; retry shortly");
         }
         other => panic!("Expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn start_request_is_rejected_when_already_running() {
+    let state = test_state();
+    let sleeper = tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    });
+    {
+        let mut guard = state.lock().await;
+        guard.vpn_running.store(true, Ordering::SeqCst);
+        guard.vpn_task = Some(sleeper);
+    }
+
+    match dispatch_request(ipc::IpcRequest::Start(test_config()), &state).await {
+        ipc::IpcResponse::Error(msg) => {
+            assert_eq!(msg, "VPN is already running");
+        }
+        other => panic!("Expected Error, got {other:?}"),
+    }
+
+    let task = {
+        let mut guard = state.lock().await;
+        guard.vpn_task.take()
+    };
+    if let Some(task) = task {
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn start_request_succeeds_when_idle() {
+    let state = test_state();
+    {
+        let guard = state.lock().await;
+        assert!(!guard.vpn_running.load(Ordering::SeqCst));
+        assert!(guard.vpn_task.is_none());
+    }
+
+    let result = dispatch_request(ipc::IpcRequest::Start(test_config()), &state).await;
+    assert!(matches!(result, ipc::IpcResponse::Ok));
+
+    let mut guard = state.lock().await;
+    assert!(guard.vpn_running.load(Ordering::SeqCst));
+    assert!(guard.active_config.is_some());
+    assert!(guard.vpn_task.is_some());
+
+    let task = guard.vpn_task.take();
+    if let Some(task) = task {
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn handle_start_request_sets_config_and_flags() {
+    let mut state = VpnServiceState::new();
+    let config = test_config();
+
+    let result = handle_start_request(config.clone(), &mut state);
+    assert!(matches!(result, ipc::IpcResponse::Ok));
+    assert!(state.vpn_running.load(Ordering::SeqCst));
+    assert!(!state.vpn_connected.load(Ordering::SeqCst));
+    assert!(!state.vpn_stopping.load(Ordering::SeqCst));
+    assert_eq!(state.active_config.as_ref().unwrap().endpoint, config.endpoint);
+    assert!(state.vpn_task.is_some());
+
+    if let Some(task) = state.vpn_task.take() {
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn handle_start_request_clears_last_error() {
+    let mut state = VpnServiceState::new();
+    *state.last_error.lock().unwrap() = Some("previous error".to_string());
+
+    let result = handle_start_request(test_config(), &mut state);
+    assert!(matches!(result, ipc::IpcResponse::Ok));
+    assert!(state.last_error.lock().unwrap().is_none());
+
+    if let Some(task) = state.vpn_task.take() {
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn status_request_returns_current_state() {
+    let state = test_state();
+    {
+        let mut guard = state.lock().await;
+        guard.vpn_running.store(true, Ordering::SeqCst);
+        guard.vpn_connected.store(true, Ordering::SeqCst);
+        guard.active_config = Some(test_config());
+        *guard.assigned_ip.lock().unwrap() = Some("10.8.0.2".to_string());
+    }
+
+    match dispatch_request(ipc::IpcRequest::Status, &state).await {
+        ipc::IpcResponse::Status { running, assigned_ip, .. } => {
+            assert!(running);
+            assert_eq!(assigned_ip, Some("10.8.0.2".to_string()));
+        }
+        other => panic!("Expected Status, got {other:?}"),
     }
 }

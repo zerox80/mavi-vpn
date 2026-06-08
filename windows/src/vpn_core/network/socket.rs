@@ -20,3 +20,23 @@ pub fn create_udp_socket() -> Result<std::net::UdpSocket> {
 
     Ok(socket2_sock.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_udp_socket_succeeds() {
+        let socket = create_udp_socket().unwrap();
+        let local_addr = socket.local_addr().unwrap();
+        assert_eq!(local_addr.ip(), std::net::Ipv6Addr::UNSPECIFIED);
+        assert_ne!(local_addr.port(), 0);
+    }
+
+    #[test]
+    fn create_udp_socket_is_dual_stack() {
+        let socket = create_udp_socket().unwrap();
+        let local_addr = socket.local_addr().unwrap();
+        assert!(local_addr.is_ipv6());
+    }
+}

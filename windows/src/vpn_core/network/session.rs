@@ -229,4 +229,74 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert!(err.to_string().contains("128.0.0.0/1"));
     }
+
+    #[test]
+    fn session_route_guard_stores_host_route() {
+        let guard = SessionRouteGuard::new(Some("10.0.0.0/32".to_string()));
+        assert_eq!(guard.host_route.as_deref(), Some("10.0.0.0/32"));
+    }
+
+    #[test]
+    fn session_route_guard_none_host_route() {
+        let guard = SessionRouteGuard::new(None);
+        assert!(guard.host_route.is_none());
+    }
+
+    #[test]
+    fn ipv4_split_routes_first_route_failure_is_reported() {
+        let gateway = Ipv4Addr::new(10, 8, 0, 1);
+        let mut calls = Vec::new();
+
+        let err = install_ipv4_split_routes_with(
+            7,
+            gateway,
+            |adapter_index, destination, prefix, hop, metric| {
+                calls.push((adapter_index, destination, prefix, hop, metric));
+                if destination == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
+                    anyhow::bail!("route denied");
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(calls.len(), 1);
+        assert!(err.to_string().contains("0.0.0.0/1"));
+    }
+
+    #[test]
+    fn ipv4_split_routes_use_correct_adapter_index() {
+        let gateway = Ipv4Addr::new(10, 8, 0, 1);
+        let mut calls = Vec::new();
+
+        install_ipv4_split_routes_with(
+            42,
+            gateway,
+            |adapter_index, destination, prefix, hop, metric| {
+                calls.push((adapter_index, destination, prefix, hop, metric));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(calls.iter().all(|(idx, _, _, _, _)| *idx == 42));
+    }
+
+    #[test]
+    fn ipv4_split_routes_use_metric_one() {
+        let gateway = Ipv4Addr::new(10, 8, 0, 1);
+        let mut calls = Vec::new();
+
+        install_ipv4_split_routes_with(
+            7,
+            gateway,
+            |adapter_index, destination, prefix, hop, metric| {
+                calls.push((adapter_index, destination, prefix, hop, metric));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(calls.iter().all(|(_, _, _, _, m)| *m == 1));
+    }
 }

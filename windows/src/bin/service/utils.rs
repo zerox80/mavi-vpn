@@ -327,4 +327,68 @@ mod tests {
             .contains("Failed to harden IPC token permissions"));
         assert_eq!(std::fs::read_to_string(&token_path).unwrap(), "secret");
     }
+
+    #[test]
+    fn classify_connected_state() {
+        assert_eq!(
+            classify_status(true, false, false, None),
+            ipc::VpnState::Connected
+        );
+    }
+
+    #[test]
+    fn classify_stopped_state() {
+        assert_eq!(
+            classify_status(false, false, false, None),
+            ipc::VpnState::Stopped
+        );
+    }
+
+    #[test]
+    fn classify_failed_state_with_error() {
+        assert_eq!(
+            classify_status(false, false, false, Some("error")),
+            ipc::VpnState::Failed
+        );
+    }
+
+    #[test]
+    fn classify_stopping_state() {
+        assert_eq!(
+            classify_status(false, true, false, None),
+            ipc::VpnState::Stopping
+        );
+    }
+
+    #[test]
+    fn classify_starting_state() {
+        assert_eq!(
+            classify_status(false, false, true, None),
+            ipc::VpnState::Starting
+        );
+    }
+
+    #[test]
+    fn classify_connected_takes_priority_over_error() {
+        assert_eq!(
+            classify_status(true, false, false, Some("error")),
+            ipc::VpnState::Connected
+        );
+    }
+
+    #[test]
+    fn classify_error_takes_priority_over_stopping() {
+        assert_eq!(
+            classify_status(false, true, false, Some("error")),
+            ipc::VpnState::Failed
+        );
+    }
+
+    #[test]
+    fn classify_stopping_takes_priority_over_starting() {
+        assert_eq!(
+            classify_status(false, true, true, None),
+            ipc::VpnState::Stopping
+        );
+    }
 }

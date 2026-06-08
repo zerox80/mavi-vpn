@@ -269,3 +269,46 @@ fn endpoint_host_is_not_ipv6_for_ipv4() {
     assert!(!endpoint_host_is_explicit_ipv6("192.168.1.1"));
     assert!(!endpoint_host_is_explicit_ipv6("10.0.0.1:443"));
 }
+
+#[test]
+fn raw_response_len_accepts_valid_sizes() {
+    assert!(validate_raw_response_len(0).is_ok());
+    assert!(validate_raw_response_len(1).is_ok());
+    assert!(validate_raw_response_len(1024).is_ok());
+    assert!(validate_raw_response_len(65_536).is_ok());
+}
+
+#[test]
+fn raw_response_len_rejects_oversized() {
+    assert!(validate_raw_response_len(65_537).is_err());
+    assert!(validate_raw_response_len(100_000).is_err());
+    assert!(validate_raw_response_len(usize::MAX).is_err());
+}
+
+#[test]
+fn raw_response_len_rejects_auth_failed_magic_length() {
+    let err = validate_raw_response_len(0x1901).unwrap_err();
+    assert!(err.to_string().contains("AUTH_FAILED"));
+}
+
+#[test]
+fn raw_response_len_accepts_near_magic_length() {
+    assert!(validate_raw_response_len(0x1900).is_ok());
+    assert!(validate_raw_response_len(0x1902).is_ok());
+}
+
+#[test]
+fn validate_server_mtu_ignores_auth_message() {
+    let auth = ControlMessage::Auth {
+        token: "secret".to_string(),
+    };
+    assert!(validate_server_mtu(&auth, 1280, TunMtuSource::Config).is_ok());
+}
+
+#[test]
+fn validate_server_mtu_ignores_error_message() {
+    let err = ControlMessage::Error {
+        message: "server error".to_string(),
+    };
+    assert!(validate_server_mtu(&err, 1280, TunMtuSource::Config).is_ok());
+}

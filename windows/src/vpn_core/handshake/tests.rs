@@ -168,3 +168,104 @@ fn endpoint_host_is_not_ipv6_for_hostname() {
     assert!(!endpoint_host_is_explicit_ipv6("vpn.example.com"));
     assert!(!endpoint_host_is_explicit_ipv6("localhost:443"));
 }
+
+#[test]
+fn order_resolved_addrs_single_ipv4() {
+    let mut addrs: Vec<SocketAddr> = vec!["1.2.3.4:443".parse().unwrap()];
+    order_resolved_addrs(&mut addrs, "vpn.example.com:443");
+    assert!(addrs[0].is_ipv4());
+}
+
+#[test]
+fn order_resolved_addrs_single_ipv6() {
+    let mut addrs: Vec<SocketAddr> = vec!["[2001:db8::1]:443".parse().unwrap()];
+    order_resolved_addrs(&mut addrs, "vpn.example.com:443");
+    assert!(addrs[0].is_ipv6());
+}
+
+#[test]
+fn order_resolved_addrs_mixed_with_duplicates() {
+    let mut addrs: Vec<SocketAddr> = vec![
+        "1.2.3.4:443".parse().unwrap(),
+        "[2001:db8::1]:443".parse().unwrap(),
+        "1.2.3.4:443".parse().unwrap(),
+        "[2001:db8::2]:443".parse().unwrap(),
+    ];
+    order_resolved_addrs(&mut addrs, "vpn.example.com:443");
+    assert!(addrs[0].is_ipv4());
+    assert!(addrs[1].is_ipv4());
+    assert!(addrs[2].is_ipv6());
+    assert!(addrs[3].is_ipv6());
+}
+
+#[test]
+fn validate_server_mtu_accepts_exact_match_with_config_source() {
+    let cfg = config_with_mtu(1300);
+    assert!(validate_server_mtu(&cfg, 1300, TunMtuSource::Config).is_ok());
+}
+
+#[test]
+fn validate_server_mtu_rejects_mtu_below_minimum_with_config_source() {
+    let cfg = config_with_mtu(shared::MIN_TUN_MTU - 1);
+    assert!(validate_server_mtu(&cfg, shared::MIN_TUN_MTU - 1, TunMtuSource::Config).is_err());
+}
+
+#[test]
+fn validate_server_mtu_rejects_mtu_above_maximum_with_config_source() {
+    let cfg = config_with_mtu(shared::MAX_TUN_MTU + 1);
+    assert!(validate_server_mtu(&cfg, shared::MAX_TUN_MTU + 1, TunMtuSource::Config).is_err());
+}
+
+#[test]
+fn validate_server_mtu_env_source_exact_match() {
+    let cfg = config_with_mtu(1320);
+    assert!(validate_server_mtu(&cfg, 1320, TunMtuSource::Env).is_ok());
+}
+
+#[test]
+fn validate_server_mtu_env_source_mismatch() {
+    let cfg = config_with_mtu(1320);
+    assert!(validate_server_mtu(&cfg, 1300, TunMtuSource::Env).is_err());
+}
+
+#[test]
+fn order_resolved_addrs_preserves_ipv4_order() {
+    let mut addrs: Vec<SocketAddr> = vec![
+        "10.0.0.1:443".parse().unwrap(),
+        "10.0.0.2:443".parse().unwrap(),
+        "10.0.0.3:443".parse().unwrap(),
+    ];
+    let original = addrs.clone();
+    order_resolved_addrs(&mut addrs, "vpn.example.com:443");
+    assert_eq!(addrs, original);
+}
+
+#[test]
+fn order_resolved_addrs_preserves_ipv6_order() {
+    let mut addrs: Vec<SocketAddr> = vec![
+        "[2001:db8::1]:443".parse().unwrap(),
+        "[2001:db8::2]:443".parse().unwrap(),
+        "[2001:db8::3]:443".parse().unwrap(),
+    ];
+    let original = addrs.clone();
+    order_resolved_addrs(&mut addrs, "vpn.example.com:443");
+    assert_eq!(addrs, original);
+}
+
+#[test]
+fn endpoint_host_is_explicit_ipv6_ipv4_mapped() {
+    assert!(endpoint_host_is_explicit_ipv6("[::ffff:192.168.1.1]:443"));
+}
+
+#[test]
+fn endpoint_host_is_explicit_ipv6_unspecified() {
+    assert!(endpoint_host_is_explicit_ipv6("[::]:443"));
+    assert!(endpoint_host_is_explicit_ipv6("::"));
+}
+
+#[test]
+fn endpoint_host_is_not_ipv6_for_ipv4() {
+    assert!(!endpoint_host_is_explicit_ipv6("192.168.1.1:443"));
+    assert!(!endpoint_host_is_explicit_ipv6("192.168.1.1"));
+    assert!(!endpoint_host_is_explicit_ipv6("10.0.0.1:443"));
+}

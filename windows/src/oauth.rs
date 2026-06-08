@@ -213,4 +213,58 @@ mod tests {
     fn html_escape_consecutive_special_chars() {
         assert_eq!(html_escape("<<<>>>"), "&lt;&lt;&lt;&gt;&gt;&gt;");
     }
+
+    #[test]
+    fn html_escape_only_ampersands() {
+        assert_eq!(html_escape("&&&"), "&amp;&amp;&amp;");
+    }
+
+    #[test]
+    fn html_escape_only_angle_brackets() {
+        assert_eq!(html_escape("<><>"), "&lt;&gt;&lt;&gt;");
+    }
+
+    #[test]
+    fn html_escape_only_quotes() {
+        assert_eq!(html_escape("\"\"\""), "&quot;&quot;&quot;");
+    }
+
+    #[test]
+    fn html_escape_newlines_with_special_chars() {
+        assert_eq!(
+            html_escape("line1\n<line2>\n&line3"),
+            "line1\n&lt;line2&gt;\n&amp;line3"
+        );
+    }
+
+    #[test]
+    fn html_escape_tabs_with_special_chars() {
+        assert_eq!(
+            html_escape("col1\t<col2>\t&col3"),
+            "col1\t&lt;col2&gt;\t&amp;col3"
+        );
+    }
+
+    #[test]
+    fn html_escape_long_string() {
+        let long_input = "a".repeat(10000);
+        let result = html_escape(&long_input);
+        assert_eq!(result.len(), 10000);
+        assert_eq!(result, long_input);
+    }
+
+    #[test]
+    fn html_escape_long_string_with_special_chars() {
+        let long_input = "<a>".repeat(1000);
+        let result = html_escape(&long_input);
+        assert_eq!(result, "&lt;a&gt;".repeat(1000));
+    }
+
+    #[test]
+    fn html_escape_mixed_whitespace_and_special() {
+        assert_eq!(
+            html_escape("  <tag>  &  \"value\"  "),
+            "  &lt;tag&gt;  &amp;  &quot;value&quot;  "
+        );
+    }
 }

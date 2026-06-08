@@ -110,6 +110,9 @@ pub async fn dispatch_request(
             if let Ok(mut last_error) = guard.last_error.lock() {
                 *last_error = None;
             }
+            if let Ok(mut assigned_ip) = guard.assigned_ip.lock() {
+                *assigned_ip = None;
+            }
             guard.active_config = None;
             drop(guard);
             run_network_repair_cleanup();

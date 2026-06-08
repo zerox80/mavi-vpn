@@ -176,3 +176,114 @@ fn save_and_load_config_preserves_ech_config() {
 
     assert_eq!(loaded.ech_config.as_deref(), Some("deadbeef"));
 }
+
+#[test]
+fn config_path_contains_mavi_vpn_directory() {
+    let path = config_path();
+    let path_str = path.to_string_lossy();
+    assert!(path_str.contains("MaviVPN"));
+}
+
+#[test]
+fn config_path_ends_with_config_json() {
+    let path = config_path();
+    assert_eq!(path.file_name().unwrap(), "config.json");
+}
+
+#[test]
+fn load_config_handles_invalid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, "not valid json {{{").unwrap();
+    let store = MemorySecretStore::default();
+
+    let result = load_config_from_path(&path, &store);
+    assert!(result.is_err());
+}
+
+#[test]
+fn load_config_empty_token_without_secret_returns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{
+  "endpoint": "vpn.example.com:443",
+  "token": "",
+  "cert_pin": "pin",
+  "censorship_resistant": false,
+  "http3_framing": false,
+  "kc_auth": null,
+  "kc_url": null,
+  "kc_realm": null,
+  "kc_client_id": null,
+  "ech_config": null
+}"#,
+    )
+    .unwrap();
+    let store = MemorySecretStore::default();
+
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+    assert!(loaded.token.is_empty());
+}
+
+#[test]
+fn save_and_load_config_preserves_vpn_mtu_boundary_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let store = MemorySecretStore::default();
+
+    let mut config = test_config();
+    config.vpn_mtu = Some(1280);
+    save_config_to_path(&path, &config, &store).unwrap();
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+    assert_eq!(loaded.vpn_mtu, Some(1280));
+
+    config.vpn_mtu = Some(1360);
+    save_config_to_path(&path, &config, &store).unwrap();
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+    assert_eq!(loaded.vpn_mtu, Some(1360));
+}
+
+#[test]
+fn save_config_normalizes_transport_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let store = MemorySecretStore::default();
+    let mut config = test_config();
+    config.censorship_resistant = true;
+    config.http3_framing = false;
+
+    save_config_to_path(&path, &config, &store).unwrap();
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+
+    assert!(loaded.censorship_resistant);
+    assert!(loaded.http3_framing);
+}
+
+#[test]
+fn load_config_normalizes_transport_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{
+  "endpoint": "vpn.example.com:443",
+  "token": "token",
+  "cert_pin": "pin",
+  "censorship_resistant": true,
+  "http3_framing": false,
+  "kc_auth": null,
+  "kc_url": null,
+  "kc_realm": null,
+  "kc_client_id": null,
+  "ech_config": null
+}"#,
+    )
+    .unwrap();
+    let store = MemorySecretStore::default();
+
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+    assert!(loaded.censorship_resistant);
+    assert!(loaded.http3_framing);
+}

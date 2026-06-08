@@ -139,7 +139,7 @@ async fn dispatch_stop_clears_active_config_error_and_state() {
 async fn dispatch_failed_idle_state_accepts_new_start() {
     let state = test_state();
     {
-        let guard = state.lock().await;
+        let mut guard = state.lock().await;
         guard.vpn_running.store(false, Ordering::SeqCst);
         guard.vpn_connected.store(false, Ordering::SeqCst);
         guard.active_config = Some(test_config());

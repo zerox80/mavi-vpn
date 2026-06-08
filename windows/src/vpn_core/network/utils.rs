@@ -89,3 +89,51 @@ pub fn split_endpoint(endpoint: &str) -> (&str, Option<&str>) {
 
     (endpoint, None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_endpoint_hostname_with_port() {
+        assert_eq!(split_endpoint("vpn.example.com:4433"), ("vpn.example.com", Some("4433")));
+    }
+
+    #[test]
+    fn split_endpoint_hostname_without_port() {
+        assert_eq!(split_endpoint("vpn.example.com"), ("vpn.example.com", None));
+    }
+
+    #[test]
+    fn split_endpoint_ipv4_with_port() {
+        assert_eq!(split_endpoint("192.168.1.1:4433"), ("192.168.1.1", Some("4433")));
+    }
+
+    #[test]
+    fn split_endpoint_ipv4_without_port() {
+        assert_eq!(split_endpoint("192.168.1.1"), ("192.168.1.1", None));
+    }
+
+    #[test]
+    fn split_endpoint_ipv6_bracketed_with_port() {
+        assert_eq!(split_endpoint("[::1]:4433"), ("::1", Some("4433")));
+        assert_eq!(split_endpoint("[2001:db8::1]:443"), ("2001:db8::1", Some("443")));
+    }
+
+    #[test]
+    fn split_endpoint_ipv6_bracketed_without_port() {
+        assert_eq!(split_endpoint("[::1]"), ("::1", None));
+        assert_eq!(split_endpoint("[2001:db8::1]"), ("2001:db8::1", None));
+    }
+
+    #[test]
+    fn split_endpoint_ipv6_no_brackets() {
+        assert_eq!(split_endpoint("::1"), ("::1", None));
+        assert_eq!(split_endpoint("2001:db8::1"), ("2001:db8::1", None));
+    }
+
+    #[test]
+    fn split_endpoint_empty_string() {
+        assert_eq!(split_endpoint(""), ("", None));
+    }
+}

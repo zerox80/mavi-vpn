@@ -267,4 +267,50 @@ mod tests {
         assert!(!script.contains("$_.Name -notlike 'MaviVPN*'"));
         assert!(!script.contains("RegisterThisConnectionsAddress $true"));
     }
+
+    #[test]
+    fn powershell_single_quoted_wraps_value() {
+        assert_eq!(powershell_single_quoted("hello"), "'hello'");
+    }
+
+    #[test]
+    fn powershell_single_quoted_escapes_single_quotes() {
+        assert_eq!(
+            powershell_single_quoted("it's a test"),
+            "'it''s a test'"
+        );
+    }
+
+    #[test]
+    fn powershell_single_quoted_empty_string() {
+        assert_eq!(powershell_single_quoted(""), "''");
+    }
+
+    #[test]
+    fn powershell_single_quoted_multiple_quotes() {
+        assert_eq!(
+            powershell_single_quoted("a'b'c"),
+            "'a''b''c'"
+        );
+    }
+
+    #[test]
+    fn dns_servers_path_uses_programdata() {
+        let path = dns_servers_path();
+        assert!(path.to_string_lossy().contains("mavi-vpn"));
+        assert!(path.to_string_lossy().contains("last_dns_servers.txt"));
+    }
+
+    #[test]
+    fn nrpt_cleanup_script_includes_persisted_path() {
+        let script = nrpt_cleanup_script_for_path(Path::new(r"C:\custom\path\dns.txt"));
+        assert!(script.contains(r"C:\custom\path\dns.txt"));
+        assert!(script.contains("Test-Path"));
+    }
+
+    #[test]
+    fn nrpt_cleanup_script_handles_path_with_quotes() {
+        let script = nrpt_cleanup_script_for_path(Path::new(r"C:\path with 'quotes'\dns.txt"));
+        assert!(script.contains("''"));
+    }
 }

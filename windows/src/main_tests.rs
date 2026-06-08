@@ -88,3 +88,91 @@ fn save_config_deletes_empty_token_secret() {
         .deleted()
         .contains(&config_token_account().to_string()));
 }
+
+#[test]
+fn load_config_returns_none_when_file_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nonexistent.json");
+    let store = MemorySecretStore::default();
+
+    let result = load_config_from_path(&path, &store).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn save_and_load_config_preserves_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let store = MemorySecretStore::default();
+    let config = test_config();
+
+    save_config_to_path(&path, &config, &store).unwrap();
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+
+    assert_eq!(loaded.endpoint, "vpn.example.com:443");
+    assert_eq!(loaded.cert_pin, "pin");
+}
+
+#[test]
+fn save_and_load_config_preserves_boolean_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let store = MemorySecretStore::default();
+    let mut config = test_config();
+    config.censorship_resistant = true;
+    config.http3_framing = true;
+
+    save_config_to_path(&path, &config, &store).unwrap();
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+
+    assert!(loaded.censorship_resistant);
+    assert!(loaded.http3_framing);
+}
+
+#[test]
+fn save_and_load_config_preserves_keycloak_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let store = MemorySecretStore::default();
+    let mut config = test_config();
+    config.kc_auth = Some(true);
+    config.kc_url = Some("https://auth.example.com".to_string());
+    config.kc_realm = Some("test-realm".to_string());
+    config.kc_client_id = Some("test-client".to_string());
+
+    save_config_to_path(&path, &config, &store).unwrap();
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+
+    assert_eq!(loaded.kc_auth, Some(true));
+    assert_eq!(loaded.kc_url.as_deref(), Some("https://auth.example.com"));
+    assert_eq!(loaded.kc_realm.as_deref(), Some("test-realm"));
+    assert_eq!(loaded.kc_client_id.as_deref(), Some("test-client"));
+}
+
+#[test]
+fn save_and_load_config_preserves_vpn_mtu() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let store = MemorySecretStore::default();
+    let mut config = test_config();
+    config.vpn_mtu = Some(1340);
+
+    save_config_to_path(&path, &config, &store).unwrap();
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+
+    assert_eq!(loaded.vpn_mtu, Some(1340));
+}
+
+#[test]
+fn save_and_load_config_preserves_ech_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let store = MemorySecretStore::default();
+    let mut config = test_config();
+    config.ech_config = Some("deadbeef".to_string());
+
+    save_config_to_path(&path, &config, &store).unwrap();
+    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
+
+    assert_eq!(loaded.ech_config.as_deref(), Some("deadbeef"));
+}

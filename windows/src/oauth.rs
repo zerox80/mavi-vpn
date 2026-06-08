@@ -185,4 +185,32 @@ mod tests {
     fn html_escape_quotes() {
         assert_eq!(html_escape("say \"hello\""), "say &quot;hello&quot;");
     }
+
+    #[test]
+    fn html_escape_all_special_chars_combined() {
+        assert_eq!(
+            html_escape("<a href=\"x\" & b='y'>"),
+            "&lt;a href=&quot;x&quot; &amp; b='y'&gt;"
+        );
+    }
+
+    #[test]
+    fn html_escape_preserves_whitespace() {
+        assert_eq!(html_escape("  hello\nworld\t"), "  hello\nworld\t");
+    }
+
+    #[test]
+    fn html_escape_unicode_passthrough() {
+        assert_eq!(html_escape("Hello 世界 🌍"), "Hello 世界 🌍");
+    }
+
+    #[test]
+    fn html_escape_single_quote_not_escaped() {
+        assert_eq!(html_escape("it's fine"), "it's fine");
+    }
+
+    #[test]
+    fn html_escape_consecutive_special_chars() {
+        assert_eq!(html_escape("<<<>>>"), "&lt;&lt;&lt;&gt;&gt;&gt;");
+    }
 }

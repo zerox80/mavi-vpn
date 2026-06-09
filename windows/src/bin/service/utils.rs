@@ -99,58 +99,78 @@ pub fn harden_ipc_token_permissions(token_path: &Path) -> Result<()> {
 }
 
 pub fn harden_ipc_permissions(path: &Path, target: IpcAclTarget) -> Result<()> {
-    let user_sid = active_console_user_sid();
+    let user_sid = active_console_user_sid().filter(|sid| is_valid_sid(sid));
     if user_sid.is_none() {
         warn!("No interactive user detected while hardening IPC ACLs; local clients may need to run elevated until the service is restarted after login");
     }
 
-    let args = ipc_acl_args(path, target, user_sid.as_deref());
+    let script = ipc_acl_script(path, target, user_sid.as_deref());
 
-    run_icacls(&args)
+    run_powershell_script(&script)
         .with_context(|| format!("Failed to harden IPC permissions at {}", path.display()))?;
     info!("Locked down IPC permissions at {:?}", path);
     Ok(())
 }
 
-fn ipc_acl_args(path: &Path, target: IpcAclTarget, user_sid: Option<&str>) -> Vec<String> {
-    let mut args = vec![
-        path.to_string_lossy().to_string(),
-        "/inheritance:r".to_string(),
-        "/remove:g".to_string(),
-        "*S-1-1-0".to_string(),
-        "*S-1-5-11".to_string(),
-        "*S-1-5-32-545".to_string(),
-        "/grant:r".to_string(),
-        admin_acl("S-1-5-18", target),
-        admin_acl("S-1-5-32-544", target),
-    ];
+/// Builds a protected (`P`) DACL in SDDL form with the complete ACE list:
+/// SYSTEM and Administrators get full control, the active console user gets
+/// read (token file) or read+traverse (directory) access. Because the DACL is
+/// fully specified, applying it removes any ACEs left behind for previous
+/// console users — `icacls /grant` only replaces rights of the SIDs it names,
+/// so a user granted in an earlier session would otherwise keep access to the
+/// token across fast-user-switching and service restarts.
+fn ipc_acl_sddl(target: IpcAclTarget, user_sid: Option<&str>) -> String {
+    let (inherit, user_rights) = match target {
+        IpcAclTarget::Directory => ("OICI", "FRFX"),
+        IpcAclTarget::TokenFile => ("", "FR"),
+    };
 
+    let mut sddl = String::from("D:P");
+    for admin_sid in ["SY", "BA"] {
+        sddl.push_str(&format!("(A;{inherit};FA;;;{admin_sid})"));
+    }
     if let Some(user_sid) = user_sid {
-        args.push(user_acl(user_sid, target));
+        sddl.push_str(&format!("(A;{inherit};{user_rights};;;{user_sid})"));
     }
-
-    args
+    sddl
 }
 
-fn admin_acl(sid: &str, target: IpcAclTarget) -> String {
-    match target {
-        IpcAclTarget::Directory => format!("*{sid}:(OI)(CI)(F)"),
-        IpcAclTarget::TokenFile => format!("*{sid}:(F)"),
-    }
+/// PowerShell script that replaces the DACL of `path` with the fully
+/// specified SDDL in a single `Set-Acl` write (no transiently permissive
+/// state, unlike an `icacls /reset` + re-grant sequence). Owner and group are
+/// preserved by restricting `SetSecurityDescriptorSddlForm` to the `Access`
+/// section.
+fn ipc_acl_script(path: &Path, target: IpcAclTarget, user_sid: Option<&str>) -> String {
+    let quoted_path = escape_powershell_single_quoted(&path.to_string_lossy());
+    let sddl = ipc_acl_sddl(target, user_sid);
+    format!(
+        "$ErrorActionPreference = 'Stop'; \
+         $acl = Get-Acl -LiteralPath '{quoted_path}'; \
+         $acl.SetSecurityDescriptorSddlForm('{sddl}', 'Access'); \
+         Set-Acl -LiteralPath '{quoted_path}' -AclObject $acl"
+    )
 }
 
-fn user_acl(sid: &str, target: IpcAclTarget) -> String {
-    match target {
-        IpcAclTarget::Directory => format!("*{sid}:(OI)(CI)(RX)"),
-        IpcAclTarget::TokenFile => format!("*{sid}:(R)"),
-    }
+fn escape_powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
-fn run_icacls(args: &[String]) -> Result<()> {
-    let out = std::process::Command::new("icacls")
-        .args(args)
+/// Accepts only canonical `S-…` SID strings (digits separated by dashes) so
+/// the value can be embedded into the SDDL string without escaping concerns.
+fn is_valid_sid(sid: &str) -> bool {
+    sid.strip_prefix("S-").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .split('-')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+fn run_powershell_script(script: &str) -> Result<()> {
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
-        .context("Failed to execute icacls for IPC ACL hardening")?;
+        .context("Failed to execute powershell for IPC ACL hardening")?;
 
     if !out.status.success() {
         anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
@@ -185,42 +205,134 @@ mod tests {
     use std::rc::Rc;
 
     #[test]
-    fn token_file_acl_args_grant_only_system_admins_and_user_read() {
-        let args = ipc_acl_args(
+    fn token_file_sddl_grants_only_system_admins_and_user_read() {
+        let sddl = ipc_acl_sddl(IpcAclTarget::TokenFile, Some("S-1-5-21-1000"));
+
+        assert_eq!(
+            sddl,
+            "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;S-1-5-21-1000)"
+        );
+    }
+
+    #[test]
+    fn directory_sddl_allows_user_traverse_and_read_only() {
+        let sddl = ipc_acl_sddl(IpcAclTarget::Directory, Some("S-1-5-21-1000"));
+
+        assert_eq!(
+            sddl,
+            "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;S-1-5-21-1000)"
+        );
+    }
+
+    #[test]
+    fn sddl_without_user_grants_only_system_and_admins() {
+        let sddl = ipc_acl_sddl(IpcAclTarget::TokenFile, None);
+
+        assert_eq!(sddl, "D:P(A;;FA;;;SY)(A;;FA;;;BA)");
+    }
+
+    #[test]
+    fn acl_script_replaces_dacl_atomically_and_preserves_owner() {
+        let script = ipc_acl_script(
             Path::new(r"C:\ProgramData\mavi-vpn\ipc.token"),
             IpcAclTarget::TokenFile,
             Some("S-1-5-21-1000"),
         );
 
-        assert!(args.contains(&"/inheritance:r".to_string()));
-        assert!(args.contains(&"*S-1-5-18:(F)".to_string()));
-        assert!(args.contains(&"*S-1-5-32-544:(F)".to_string()));
-        assert!(args.contains(&"*S-1-5-21-1000:(R)".to_string()));
-        assert!(args.contains(&"/remove:g".to_string()));
-        assert!(args.contains(&"*S-1-1-0".to_string()));
-        assert!(args.contains(&"*S-1-5-11".to_string()));
-        assert!(args.contains(&"*S-1-5-32-545".to_string()));
-        assert!(!args.iter().any(|arg| arg.contains("S-1-1-0:")));
-        assert!(!args.iter().any(|arg| arg.contains("S-1-5-32-545:")));
+        assert!(script.contains("Get-Acl -LiteralPath 'C:\\ProgramData\\mavi-vpn\\ipc.token'"));
+        // Only the Access (DACL) section is replaced, so owner/group survive.
+        assert!(script.contains("SetSecurityDescriptorSddlForm('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;S-1-5-21-1000)', 'Access')"));
+        assert!(script.contains("Set-Acl -LiteralPath 'C:\\ProgramData\\mavi-vpn\\ipc.token'"));
     }
 
     #[test]
-    fn directory_acl_args_allow_user_traverse_and_read_only() {
-        let args = ipc_acl_args(
-            Path::new(r"C:\ProgramData\mavi-vpn"),
-            IpcAclTarget::Directory,
-            Some("S-1-5-21-1000"),
+    fn acl_script_escapes_single_quotes_in_path() {
+        let script = ipc_acl_script(
+            Path::new(r"C:\pro'gram\ipc.token"),
+            IpcAclTarget::TokenFile,
+            None,
         );
 
-        assert!(args.contains(&"*S-1-5-18:(OI)(CI)(F)".to_string()));
-        assert!(args.contains(&"*S-1-5-32-544:(OI)(CI)(F)".to_string()));
-        assert!(args.contains(&"*S-1-5-21-1000:(OI)(CI)(RX)".to_string()));
-        assert!(args.contains(&"/remove:g".to_string()));
-        assert!(args.contains(&"*S-1-1-0".to_string()));
-        assert!(args.contains(&"*S-1-5-11".to_string()));
-        assert!(args.contains(&"*S-1-5-32-545".to_string()));
-        assert!(!args.iter().any(|arg| arg.contains("S-1-1-0:")));
-        assert!(!args.iter().any(|arg| arg.contains("S-1-5-32-545:")));
+        assert!(script.contains(r"'C:\pro''gram\ipc.token'"));
+    }
+
+    #[test]
+    fn valid_sids_are_accepted() {
+        assert!(is_valid_sid("S-1-5-18"));
+        assert!(is_valid_sid("S-1-5-21-3623811015-3361044348-30300820-1013"));
+    }
+
+    #[test]
+    fn malformed_sids_are_rejected() {
+        assert!(!is_valid_sid(""));
+        assert!(!is_valid_sid("S-"));
+        assert!(!is_valid_sid("S-1-5-"));
+        assert!(!is_valid_sid("Everyone"));
+        assert!(!is_valid_sid("S-1-5-21abc"));
+        // SDDL/script metacharacters must never pass.
+        assert!(!is_valid_sid("S-1-5-18)';"));
+    }
+
+    /// End-to-end check on a real file: a stale ACE for another principal
+    /// (here: Everyone) must be gone after the hardening script runs, which is
+    /// exactly the residue the old additive `icacls /grant` flow left behind.
+    #[cfg(windows)]
+    #[test]
+    fn hardening_script_removes_stale_aces() {
+        let current_user_sid = {
+            let out = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+                ])
+                .output()
+                .expect("query current user SID");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert!(is_valid_sid(&current_user_sid), "got SID {current_user_sid:?}");
+
+        let temp = tempfile::tempdir().unwrap();
+        let token_path = temp.path().join("ipc.token");
+        std::fs::write(&token_path, "secret").unwrap();
+
+        // Plant a stale ACE for Everyone (S-1-1-0), as if granted by an
+        // earlier service run for a different principal.
+        let plant = std::process::Command::new("icacls")
+            .args([token_path.to_str().unwrap(), "/grant", "*S-1-1-0:R"])
+            .output()
+            .expect("run icacls");
+        assert!(plant.status.success(), "icacls grant failed");
+
+        let script = ipc_acl_script(
+            &token_path,
+            IpcAclTarget::TokenFile,
+            Some(&current_user_sid),
+        );
+        run_powershell_script(&script).expect("hardening script must succeed");
+
+        let sddl_out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "(Get-Acl -LiteralPath '{}').Sddl",
+                    token_path.to_str().unwrap().replace('\'', "''")
+                ),
+            ])
+            .output()
+            .expect("read back SDDL");
+        let sddl = String::from_utf8_lossy(&sddl_out.stdout).trim().to_string();
+
+        assert!(!sddl.contains(";;;WD)"), "Everyone ACE must be removed: {sddl}");
+        assert!(sddl.contains("(A;;FA;;;SY)"), "SYSTEM full control expected: {sddl}");
+        assert!(sddl.contains("(A;;FA;;;BA)"), "Admins full control expected: {sddl}");
+        assert!(
+            sddl.contains(&format!(";;;{current_user_sid})")),
+            "current user read expected: {sddl}"
+        );
     }
 
     #[test]

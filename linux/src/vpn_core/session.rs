@@ -318,6 +318,7 @@ async fn run_session(
     let run_quic = global_running.clone();
     let is_h3_framing_dl = config.effective_http3_framing();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
+    let conn_clone = connection.clone();
     let quic_to_tun = tokio::spawn(async move {
         loop {
             if !run_quic.load(Ordering::Relaxed) || !alive_quic.load(Ordering::Relaxed) {
@@ -329,7 +330,7 @@ async fn run_session(
             let datagram = tokio::select! {
                 biased;
                 _ = shutdown_rx.changed() => { break; }
-                result = connection.read_datagram() => { result }
+                result = conn_clone.read_datagram() => { result }
             };
             match datagram {
                 Ok(mut data) => {

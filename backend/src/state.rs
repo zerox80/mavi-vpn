@@ -158,25 +158,25 @@ impl AppState {
     /// Returns the leasable IPs to the pool and removes the peer registration.
     ///
     /// This is typically called by the `IpGuard` when a client disconnects.
+    /// Guarded against double-release: only returns IPs to the pool if they
+    /// were actually registered in the peer map.
     pub fn release_ips(&self, ip4: Ipv4Addr, ip6: Ipv6Addr) {
-        // Remove from peer registry FIRST to prevent race conditions
-        self.peers.remove(&ip4);
-        self.peers_v6.remove(&ip6);
+        // Remove from peer registry FIRST to prevent race conditions.
+        // Only return to pools if the peer was actually registered.
+        let had_v4 = self.peers.remove(&ip4).is_some();
+        let had_v6 = self.peers_v6.remove(&ip6).is_some();
 
-        // Then return to pools
-        {
-            let mut free = self
-                .free_ips
+        if had_v4 {
+            self.free_ips
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            free.push(ip4);
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ip4);
         }
-        {
-            let mut free = self
-                .free_ips_v6
+        if had_v6 {
+            self.free_ips_v6
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            free.push(ip6);
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ip6);
         }
     }
 
@@ -307,6 +307,10 @@ mod tests {
         let second_v4 = state.assign_ip().unwrap();
         assert_eq!(second_v4, Ipv4Addr::new(10, 8, 0, 3));
 
+        // Register client before release (peers must exist for release_ips to return to pool)
+        let (tx, _rx) = mpsc::channel::<bytes::Bytes>(16);
+        state.register_client(ip4, ip6, tx);
+
         // Release first IP
         state.release_ips(ip4, ip6);
 
@@ -373,6 +377,10 @@ mod tests {
         // Advance the counter so the next fresh allocation would be ::4
         let _ = state.assign_ipv6().unwrap(); // ::3
         let _ = state.assign_ipv6().unwrap(); // ::4 consumed
+
+        // Register client before release
+        let (tx, _rx) = mpsc::channel::<bytes::Bytes>(16);
+        state.register_client(ip4, ip6, tx);
 
         // Release the first pair – the IPv6 address goes back onto the recycle stack
         state.release_ips(ip4, ip6);
@@ -478,9 +486,28 @@ mod tests {
     fn assign_ip_pair_release_and_reassign_cycle() {
         let state = AppState::new("10.0.0.0/30").unwrap();
         let (v4, v6) = state.assign_ip_pair().unwrap();
+        let (tx, _rx) = mpsc::channel::<bytes::Bytes>(16);
+        state.register_client(v4, v6, tx);
         state.release_ips(v4, v6);
         let (v4_2, v6_2) = state.assign_ip_pair().unwrap();
         assert_eq!(v4, v4_2);
         assert_eq!(v6, v6_2);
+    }
+
+    #[test]
+    fn double_release_does_not_corrupt_pool() {
+        let state = AppState::new("10.0.0.0/30").unwrap();
+        let (v4, v6) = state.assign_ip_pair().unwrap();
+        let pool_size_before = state.free_ips.lock().unwrap().len();
+
+        let (tx, _rx) = mpsc::channel::<bytes::Bytes>(16);
+        state.register_client(v4, v6, tx);
+        state.release_ips(v4, v6);
+
+        // Second release is a no-op because the peer was already removed
+        state.release_ips(v4, v6);
+
+        let pool_size_after = state.free_ips.lock().unwrap().len();
+        assert_eq!(pool_size_before, pool_size_after);
     }
 }

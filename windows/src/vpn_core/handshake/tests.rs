@@ -332,21 +332,21 @@ fn validate_server_mtu_ignores_error_message() {
 // --- compute_quic_mtu_config tests ---
 
 #[test]
-fn quic_mtu_config_default_uses_max_tun_mtu_ipv4() {
+fn quic_mtu_config_default_uses_default_tun_mtu_ipv4() {
     let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
     let cfg = compute_quic_mtu_config(None, &addr);
-    assert_eq!(cfg.transport_tun_mtu, shared::MAX_TUN_MTU);
-    assert_eq!(cfg.quic_mtu, shared::MAX_TUN_MTU + shared::QUIC_OVERHEAD_BYTES);
+    assert_eq!(cfg.transport_tun_mtu, shared::DEFAULT_TUN_MTU);
+    assert_eq!(cfg.quic_mtu, shared::DEFAULT_TUN_MTU + shared::QUIC_OVERHEAD_BYTES);
     assert!(matches!(cfg.mtu_source, TunMtuSource::Default));
     assert_eq!(cfg.local_tun_mtu, shared::DEFAULT_TUN_MTU);
     assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 20 + 8);
 }
 
 #[test]
-fn quic_mtu_config_default_uses_max_tun_mtu_ipv6() {
+fn quic_mtu_config_default_uses_default_tun_mtu_ipv6() {
     let addr: SocketAddr = "[::1]:443".parse().unwrap();
     let cfg = compute_quic_mtu_config(None, &addr);
-    assert_eq!(cfg.transport_tun_mtu, shared::MAX_TUN_MTU);
+    assert_eq!(cfg.transport_tun_mtu, shared::DEFAULT_TUN_MTU);
     assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 40 + 8);
 }
 

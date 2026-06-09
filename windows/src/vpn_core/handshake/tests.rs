@@ -286,15 +286,11 @@ fn raw_response_len_rejects_oversized() {
 }
 
 #[test]
-fn raw_response_len_rejects_auth_failed_magic_length() {
-    let err = validate_raw_response_len(0x1901).unwrap_err();
-    assert!(err.to_string().contains("AUTH_FAILED"));
-}
-
-#[test]
-fn raw_response_len_accepts_near_magic_length() {
-    assert!(validate_raw_response_len(0x1900).is_ok());
-    assert!(validate_raw_response_len(0x1902).is_ok());
+fn raw_response_len_accepts_formerly_magic_length() {
+    // 0x1901 was the magic auth-failure length. Now handled by
+    // looks_like_html_response() on content. validate_raw_response_len
+    // only checks the size bound.
+    assert!(validate_raw_response_len(0x1901).is_ok());
 }
 
 #[test]

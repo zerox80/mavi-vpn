@@ -317,12 +317,21 @@ async fn run_session(
     let alive_quic = session_alive.clone();
     let run_quic = global_running.clone();
     let is_h3_framing_dl = config.effective_http3_framing();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
     let quic_to_tun = tokio::spawn(async move {
         loop {
             if !run_quic.load(Ordering::Relaxed) || !alive_quic.load(Ordering::Relaxed) {
                 break;
             }
-            match connection.read_datagram().await {
+            // Use select! to race read_datagram against a shutdown signal.
+            // Without this, a Stop command blocks for up to 60s (QUIC idle
+            // timeout) because read_datagram holds the .await indefinitely.
+            let datagram = tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => { break; }
+                result = connection.read_datagram() => { result }
+            };
+            match datagram {
                 Ok(mut data) => {
                     // Strip [Quarter Stream ID] [Context ID] for connect-ip.
                     if is_h3_framing_dl {
@@ -357,6 +366,11 @@ async fn run_session(
     while global_running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    // Signal shutdown to the QUIC->TUN task (unblocks read_datagram)
+    drop(shutdown_tx);
+    // Close the QUIC connection to unblock any remaining awaits
+    connection.close(0u32.into(), b"session ending");
 
     tun_to_quic.abort();
     quic_to_tun.abort();

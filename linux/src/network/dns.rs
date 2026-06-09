@@ -93,7 +93,7 @@ pub(super) fn configure_dns(
         content.push_str(&format!("nameserver {}\n", v6));
     }
 
-    std::fs::write(RESOLV_CONF_PATH, &content)
+    atomic_write_resolv_conf(content.as_bytes())
         .context("Failed to write /etc/resolv.conf. Are you running as root?")?;
 
     Ok((backup, false))
@@ -133,7 +133,7 @@ pub(super) fn restore_dns(backup: &Option<Vec<u8>>, used_resolvconf: bool) {
 }
 
 fn write_resolv_conf(data: &[u8], source_label: &str) -> bool {
-    match std::fs::write(RESOLV_CONF_PATH, data) {
+    match atomic_write_resolv_conf(data) {
         Ok(()) => {
             info!("Restored /etc/resolv.conf from {}", source_label);
             true
@@ -146,6 +146,14 @@ fn write_resolv_conf(data: &[u8], source_label: &str) -> bool {
             false
         }
     }
+}
+
+/// Atomically writes data to /etc/resolv.conf via write-to-temp + rename.
+/// This prevents a truncated resolv.conf if the process is killed mid-write.
+fn atomic_write_resolv_conf(data: &[u8]) -> std::io::Result<()> {
+    let tmp_path = format!("{RESOLV_CONF_PATH}.mavi-tmp");
+    std::fs::write(&tmp_path, data)?;
+    std::fs::rename(&tmp_path, RESOLV_CONF_PATH)
 }
 
 /// Writes the pre-VPN resolv.conf to a durable location that survives crashes.

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bytes::Buf;
 use h3_quinn::Connection as H3QuinnConnection;
-use shared::{masque, masque::CAPSULE_MAVI_CONFIG, ControlMessage};
+use shared::{looks_like_html_response, masque, masque::CAPSULE_MAVI_CONFIG, ControlMessage};
 use std::time::Duration;
 
 /// Holds the h3 `SendRequest` + driver task for the lifetime of the VPN session.
@@ -103,6 +103,14 @@ pub(super) async fn connect_and_handshake_h3(
             Err(_) => anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule"),
         };
         append_capsule_chunk(&mut capsule_buf, chunk.chunk())?;
+        // In CR mode the server sends a fake nginx HTML page on auth failure.
+        // Detect this early instead of waiting for the full 10s timeout.
+        if looks_like_html_response(&capsule_buf) {
+            anyhow::bail!(
+                "AUTH_FAILED: Server returned HTML instead of MAVI_CONFIG capsule. \
+                 Check token validity or Keycloak configuration."
+            );
+        }
     }
 
     let config =

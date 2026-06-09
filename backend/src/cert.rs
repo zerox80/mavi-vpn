@@ -7,7 +7,7 @@ use std::{fs, path::Path};
 
 /// Tighten an existing private file to owner-only permissions.
 pub(crate) fn harden_private_file_permissions(path: &Path) -> Result<()> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
     }
@@ -34,7 +34,67 @@ pub(crate) fn harden_private_file_permissions(path: &Path) -> Result<()> {
         }
     }
 
+    #[cfg(windows)]
+    {
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("failed to stat private file {}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("refusing to use symlinked private file {}", path.display());
+        }
+
+        harden_windows_private_file(path)?;
+    }
+
     Ok(())
+}
+
+/// Restricts an on-disk private key to SYSTEM, Administrators and the current
+/// account on Windows. Default NTFS inheritance under most data directories
+/// grants BUILTIN\Users read access, which would expose the TLS key.
+#[cfg(windows)]
+fn harden_windows_private_file(path: &Path) -> Result<()> {
+    let args = windows_key_acl_args(path, current_windows_account().as_deref());
+    let out = std::process::Command::new("icacls")
+        .args(&args)
+        .output()
+        .context("failed to execute icacls for private key hardening")?;
+
+    if !out.status.success() {
+        anyhow::bail!(
+            "icacls failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// icacls argument list that disables inheritance and grants full control to
+/// SYSTEM, Administrators and (when known) the current account only. The
+/// current-account grant keeps the key readable when the server runs under a
+/// dedicated non-admin service account.
+#[cfg(any(windows, test))]
+fn windows_key_acl_args(path: &Path, account: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        path.to_string_lossy().into_owned(),
+        "/inheritance:r".to_string(),
+        "/grant:r".to_string(),
+        "*S-1-5-18:(F)".to_string(),
+        "*S-1-5-32-544:(F)".to_string(),
+    ];
+    if let Some(account) = account {
+        args.push(format!("{account}:(F)"));
+    }
+    args
+}
+
+#[cfg(windows)]
+fn current_windows_account() -> Option<String> {
+    let user = std::env::var("USERNAME").ok().filter(|u| !u.is_empty())?;
+    match std::env::var("USERDOMAIN").ok().filter(|d| !d.is_empty()) {
+        Some(domain) => Some(format!("{domain}\\{user}")),
+        None => Some(user),
+    }
 }
 
 /// Write `contents` to `path` with an owner-only (0o600) permission mask from
@@ -62,7 +122,24 @@ pub(crate) fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
         f.write_all(contents)
             .with_context(|| format!("failed to write {:?}", path))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("failed to create {path:?}"))?;
+        f.write_all(contents)
+            .with_context(|| format!("failed to write {path:?}"))?;
+        drop(f);
+
+        // The freshly created file inherits the parent directory's ACL, which
+        // typically grants BUILTIN\Users read. Lock it down immediately.
+        harden_windows_private_file(path)?;
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
     }
@@ -225,6 +302,67 @@ mod tests {
             let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+
+        #[cfg(windows)]
+        {
+            let sddl = windows_file_sddl(&key_path);
+            // Inheritance disabled, full control for SYSTEM and Administrators,
+            // and no ACE for BUILTIN\Users (BU) or Everyone (WD).
+            assert!(sddl.contains("D:P"), "DACL must be protected: {sddl}");
+            assert!(sddl.contains("(A;;FA;;;SY)"), "SYSTEM grant expected: {sddl}");
+            assert!(sddl.contains("(A;;FA;;;BA)"), "Admins grant expected: {sddl}");
+            assert!(!sddl.contains(";;;BU)"), "Users must have no access: {sddl}");
+            assert!(!sddl.contains(";;;WD)"), "Everyone must have no access: {sddl}");
+        }
+    }
+
+    #[cfg(windows)]
+    fn windows_file_sddl(path: &std::path::Path) -> String {
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "(Get-Acl -LiteralPath '{}').Sddl",
+                    path.to_str().unwrap().replace('\'', "''")
+                ),
+            ])
+            .output()
+            .expect("read back SDDL");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn windows_key_acl_args_grant_only_system_admins_and_account() {
+        let args = windows_key_acl_args(
+            std::path::Path::new(r"C:\data\key.pem"),
+            Some(r"VM\backend-svc"),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                r"C:\data\key.pem".to_string(),
+                "/inheritance:r".to_string(),
+                "/grant:r".to_string(),
+                "*S-1-5-18:(F)".to_string(),
+                "*S-1-5-32-544:(F)".to_string(),
+                r"VM\backend-svc:(F)".to_string(),
+            ]
+        );
+        assert!(!args.iter().any(|a| a.contains("S-1-1-0")));
+        assert!(!args.iter().any(|a| a.contains("S-1-5-32-545")));
+    }
+
+    #[test]
+    fn windows_key_acl_args_without_account_grants_system_and_admins_only() {
+        let args = windows_key_acl_args(std::path::Path::new(r"C:\data\key.pem"), None);
+
+        assert_eq!(args.len(), 5);
+        assert!(args.contains(&"/inheritance:r".to_string()));
+        assert!(args.contains(&"*S-1-5-18:(F)".to_string()));
+        assert!(args.contains(&"*S-1-5-32-544:(F)".to_string()));
     }
 
     #[test]

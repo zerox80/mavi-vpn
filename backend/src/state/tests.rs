@@ -293,9 +293,9 @@ fn assign_ip_pair_release_and_reassign_cycle() {
 #[test]
 fn double_release_does_not_corrupt_pool() {
     let state = AppState::new("10.0.0.0/30").unwrap();
-    let (v4, v6) = state.assign_ip_pair().unwrap();
     let pool_size_before = state.free_ips.lock().unwrap().len();
 
+    let (v4, v6) = state.assign_ip_pair().unwrap();
     let (tx, _rx) = mpsc::channel::<bytes::Bytes>(16);
     state.register_client(v4, v6, tx);
     state.release_ips(v4, v6);

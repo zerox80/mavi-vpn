@@ -126,6 +126,9 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
         }
     }
 
+    // Clean up the IPC auth token file on shutdown
+    let _ = std::fs::remove_file(ipc::ipc_token_path());
+
     Ok(())
 }
 

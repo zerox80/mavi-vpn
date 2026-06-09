@@ -84,11 +84,12 @@ pub(super) async fn connect_and_handshake(
     // client MUST be configured with the same `VPN_MTU`, otherwise the larger
     // side will send UDP payloads the smaller side considers out-of-spec.
     let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
-    let transport_tun_mtu = if matches!(mtu_source, TunMtuSource::Default) {
-        MAX_TUN_MTU
-    } else {
-        local_tun_mtu
-    };
+    // When no explicit MTU is configured, use DEFAULT_TUN_MTU (1280) for the
+    // transport budget so client and server agree on packet size. Previously
+    // MAX_TUN_MTU (1360) was used, causing the client to send larger QUIC
+    // packets than the server, leading to silent packet loss on constrained
+    // network paths (PPPoE, carrier-grade NAT).
+    let transport_tun_mtu = local_tun_mtu;
     let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
     let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20 } else { 40 }, 8);
     info!(

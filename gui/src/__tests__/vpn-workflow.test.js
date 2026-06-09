@@ -68,7 +68,10 @@ describe('vpn workflows', () => {
   });
 
   it('connect saves config before starting the VPN', async () => {
-    invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce('Connected');
+    invoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce('Connected')
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Starting' });
 
     await connect();
 
@@ -163,7 +166,10 @@ describe('vpn workflows', () => {
     expect(invoke).not.toHaveBeenCalled();
 
     state.hero = 'off';
-    invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined);
+    invoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Starting' });
     await toggleConnection();
     expect(invoke).toHaveBeenCalledWith('vpn_connect', expect.any(Object));
 

@@ -38,13 +38,32 @@
             Some("S-1-5-21-1000"),
         );
 
-        // The Security module is imported explicitly so Get-Acl/Set-Acl resolve
-        // even when PowerShell module auto-loading is disabled on the host.
-        assert!(script.contains("Import-Module Microsoft.PowerShell.Security"));
-        assert!(script.contains("Get-Acl -LiteralPath 'C:\\ProgramData\\mavi-vpn\\ipc.token'"));
+        // The .NET File ACL APIs are used (not the Get-Acl/Set-Acl cmdlets) so
+        // the hardening does not depend on the Microsoft.PowerShell.Security
+        // module, which is unreliable on some hosts.
+        assert!(!script.contains("Get-Acl"));
+        assert!(!script.contains("Set-Acl"));
+        assert!(!script.contains("Import-Module"));
+        assert!(script
+            .contains("[System.IO.File]::GetAccessControl('C:\\ProgramData\\mavi-vpn\\ipc.token')"));
         // Only the Access (DACL) section is replaced, so owner/group survive.
         assert!(script.contains("SetSecurityDescriptorSddlForm('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;S-1-5-21-1000)', 'Access')"));
-        assert!(script.contains("Set-Acl -LiteralPath 'C:\\ProgramData\\mavi-vpn\\ipc.token'"));
+        assert!(script
+            .contains("[System.IO.File]::SetAccessControl('C:\\ProgramData\\mavi-vpn\\ipc.token', $acl)"));
+    }
+
+    #[test]
+    fn acl_script_uses_directory_apis_for_directory_target() {
+        let script = ipc_acl_script(
+            Path::new(r"C:\ProgramData\mavi-vpn"),
+            IpcAclTarget::Directory,
+            Some("S-1-5-21-1000"),
+        );
+
+        assert!(script.contains("[System.IO.Directory]::GetAccessControl('C:\\ProgramData\\mavi-vpn')"));
+        assert!(script.contains("[System.IO.Directory]::SetAccessControl('C:\\ProgramData\\mavi-vpn', $acl)"));
+        // Inheritable directory ACEs (OICI) with traverse+read for the user.
+        assert!(script.contains("SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;S-1-5-21-1000)', 'Access')"));
     }
 
     #[test]
@@ -114,13 +133,16 @@
         );
         run_powershell_script(&script).expect("hardening script must succeed");
 
+        // Read the DACL back via the .NET API for the same reason the script
+        // does: the Get-Acl cmdlet's Microsoft.PowerShell.Security module is
+        // unreliable on CI runners.
         let sddl_out = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
                 &format!(
-                    "Import-Module Microsoft.PowerShell.Security; (Get-Acl -LiteralPath '{}').Sddl",
+                    "[System.IO.File]::GetAccessControl('{}').GetSecurityDescriptorSddlForm('Access')",
                     token_path.to_str().unwrap().replace('\'', "''")
                 ),
             ])

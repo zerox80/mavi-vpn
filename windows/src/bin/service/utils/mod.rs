@@ -136,26 +136,33 @@ fn ipc_acl_sddl(target: IpcAclTarget, user_sid: Option<&str>) -> String {
 }
 
 /// PowerShell script that replaces the DACL of `path` with the fully
-/// specified SDDL in a single `Set-Acl` write (no transiently permissive
-/// state, unlike an `icacls /reset` + re-grant sequence). Owner and group are
-/// preserved by restricting `SetSecurityDescriptorSddlForm` to the `Access`
-/// section.
+/// specified SDDL in a single `SetAccessControl` write (no transiently
+/// permissive state, unlike an `icacls /reset` + re-grant sequence). Owner and
+/// group are preserved by restricting `SetSecurityDescriptorSddlForm` to the
+/// `Access` section.
 ///
-/// `Get-Acl`/`Set-Acl` live in the `Microsoft.PowerShell.Security` module.
-/// Module auto-loading can be disabled (`$PSModuleAutoLoadingPreference`) or
-/// otherwise unavailable on hardened/constrained hosts, in which case both
-/// cmdlets resolve to "command was found ... but the module could not be
-/// loaded". Importing the module explicitly makes the hardening deterministic
-/// instead of depending on the caller's session configuration.
+/// We deliberately call the .NET `System.IO.File`/`System.IO.Directory`
+/// `GetAccessControl`/`SetAccessControl` methods instead of the `Get-Acl`/
+/// `Set-Acl` cmdlets. Those cmdlets live in the `Microsoft.PowerShell.Security`
+/// module, which is unreliable on some hosts: where module auto-loading is
+/// disabled the cmdlets resolve to "command was found ... but the module could
+/// not be loaded", and where its type data is already partially registered an
+/// explicit `Import-Module` fails with "the member ... is already present".
+/// The .NET types live in `System.dll`, are always loaded, and never trigger
+/// module auto-loading, so the hardening is deterministic regardless of the
+/// caller's PowerShell session state.
 fn ipc_acl_script(path: &Path, target: IpcAclTarget, user_sid: Option<&str>) -> String {
     let quoted_path = escape_powershell_single_quoted(&path.to_string_lossy());
     let sddl = ipc_acl_sddl(target, user_sid);
+    let dotnet_class = match target {
+        IpcAclTarget::Directory => "System.IO.Directory",
+        IpcAclTarget::TokenFile => "System.IO.File",
+    };
     format!(
         "$ErrorActionPreference = 'Stop'; \
-         Import-Module Microsoft.PowerShell.Security; \
-         $acl = Get-Acl -LiteralPath '{quoted_path}'; \
+         $acl = [{dotnet_class}]::GetAccessControl('{quoted_path}'); \
          $acl.SetSecurityDescriptorSddlForm('{sddl}', 'Access'); \
-         Set-Acl -LiteralPath '{quoted_path}' -AclObject $acl"
+         [{dotnet_class}]::SetAccessControl('{quoted_path}', $acl)"
     )
 }
 

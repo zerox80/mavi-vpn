@@ -357,12 +357,13 @@ async fn run_session(
                                 reported_mtu,
                                 source_ip,
                             ) {
-                                #[allow(clippy::cast_possible_truncation)]
-                                if let Ok(mut reply) =
-                                    session_tun.allocate_send_packet(icmp_packet.len() as u16)
-                                {
-                                    reply.bytes_mut().copy_from_slice(&icmp_packet);
-                                    session_tun.send_packet(reply);
+                                if let Ok(len) = u16::try_from(icmp_packet.len()) {
+                                    if let Ok(mut reply) =
+                                        session_tun.allocate_send_packet(len)
+                                    {
+                                        reply.bytes_mut().copy_from_slice(&icmp_packet);
+                                        session_tun.send_packet(reply);
+                                    }
                                 }
                             }
                         } else if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) {

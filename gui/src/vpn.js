@@ -36,6 +36,10 @@ export async function connect() {
   try {
     await invoke('save_config', { config });
     await invoke('vpn_connect', { config });
+    // Immediately fetch the real status instead of waiting up to 2s for
+    // the next poller tick. This prevents the UI from showing "Connecting..."
+    // when the service has already transitioned to Connected (or Failed).
+    await refreshStatus();
   } catch (e) {
     showToast(friendlyError(e), 'error');
     setHero('off');

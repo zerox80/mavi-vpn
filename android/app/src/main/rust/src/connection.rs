@@ -2,6 +2,7 @@ use bytes::{Buf, Bytes};
 use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
+    looks_like_html_response,
     masque::{self, CAPSULE_MAVI_CONFIG},
     resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
 };
@@ -223,11 +224,15 @@ pub async fn connect_and_handshake(
             return Err(anyhow::anyhow!("Server response too large: {len} bytes"));
         }
         let mut buf = vec![0u8; len];
-        if let Err(e) = recv_stream.read_exact(&mut buf).await {
-            if len == 6401 && censorship_resistant {
-                return Err(anyhow::anyhow!("Access Denied: Server rejected the token. Check Keycloak logs or token validity."));
-            }
-            return Err(anyhow::anyhow!("Handshake read error: {e}"));
+        recv_stream.read_exact(&mut buf).await?;
+
+        // In censorship-resistant mode the server returns a fake nginx HTML
+        // page on auth failure. Detect by content, not a magic length.
+        if looks_like_html_response(&buf) {
+            return Err(anyhow::anyhow!(
+                "AUTH_FAILED: Server returned HTML (camouflage response). \
+                 Check token validity or Keycloak configuration."
+            ));
         }
 
         let cfg = decode_raw_server_config(&buf)?;
@@ -377,19 +382,6 @@ fn is_camouflage_h3_response(headers: &http::HeaderMap) -> bool {
             .get(http::header::SERVER)
             .and_then(|h| h.to_str().ok())
             .is_some_and(|v| v.eq_ignore_ascii_case("nginx"))
-}
-
-fn looks_like_html_response(buf: &[u8]) -> bool {
-    let trimmed = buf
-        .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .take(32)
-        .collect::<Vec<_>>();
-    trimmed.starts_with(b"<!DOCTYPE")
-        || trimmed.starts_with(b"<!doctype")
-        || trimmed.starts_with(b"<html")
-        || trimmed.starts_with(b"<HTML")
 }
 
 fn endpoint_host(endpoint: &str) -> String {

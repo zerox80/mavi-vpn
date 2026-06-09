@@ -42,7 +42,7 @@ pub fn set_adapter_network_config(
     assigned_ipv6: Option<Ipv6Addr>,
     netmask_v6: Option<u8>,
     gateway_v6: Option<Ipv6Addr>,
-    _dns_v6: Option<Ipv6Addr>,
+    dns_v6: Option<Ipv6Addr>,
 ) -> Result<Option<String>> {
     let requested_adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let adapter_index = adapter.get_adapter_index()?;
@@ -109,7 +109,7 @@ pub fn set_adapter_network_config(
         route_started.elapsed().as_millis()
     );
 
-    configure_vpn_dns_preference(&adapter_name, adapter_index);
+    configure_vpn_dns_preference(&adapter_name, adapter_index, dns, dns_v6);
 
     info!(
         "Network config complete: endpoint_exception={}",

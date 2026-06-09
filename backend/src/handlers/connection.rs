@@ -29,6 +29,13 @@ enum InitialStreams {
 
 const RAW_AUTH_MAX_BYTES: usize = 16_384;
 
+/// Upper bound on how long a freshly accepted connection may take to open its
+/// initial control stream (and, for H3, to send its request). Without it, a peer
+/// that completes the handshake but never opens a stream would pin a bounded
+/// connection-handler slot until the 60s idle timeout — cheap, unauthenticated
+/// connection-slot exhaustion. Bounding the pre-auth phase releases stalled slots.
+pub(crate) const PREAUTH_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn validate_raw_auth_len(len: usize) -> Result<()> {
     if len > RAW_AUTH_MAX_BYTES {
         anyhow::bail!("Auth message too big");
@@ -178,7 +185,13 @@ pub async fn handle_connection(
         );
     }
 
-    let (pre_bi, pre_uni) = match detect_initial_streams(&connection).await? {
+    let initial_streams = tokio::time::timeout(
+        PREAUTH_PHASE_TIMEOUT,
+        detect_initial_streams(&connection),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Pre-auth handshake timeout from {remote_addr}"))??;
+    let (pre_bi, pre_uni) = match initial_streams {
         InitialStreams::Raw {
             send_stream,
             recv_stream,
@@ -332,6 +345,13 @@ mod tests {
 
     fn encode_message(msg: &ControlMessage) -> Vec<u8> {
         bincode::serde::encode_to_vec(msg, bincode::config::standard()).unwrap()
+    }
+
+    #[test]
+    fn preauth_phase_timeout_is_bounded_and_nonzero() {
+        // Long enough for a slow handshake, short enough to free a stalled slot well before idle timeout.
+        assert!(PREAUTH_PHASE_TIMEOUT > Duration::from_secs(0));
+        assert!(PREAUTH_PHASE_TIMEOUT <= Duration::from_secs(30));
     }
 
     #[test]

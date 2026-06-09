@@ -142,14 +142,18 @@ pub async fn handle_h3_connection(
         .await
         .map_err(|e| anyhow::anyhow!("H3 build failed: {e}"))?;
 
-    let resolver = h3_conn
-        .accept()
+    // Bound the wait for the client's first request so an H3 peer that opens the
+    // control stream but never sends a request cannot pin a connection slot until
+    // the idle timeout (connection-slot exhaustion DoS).
+    let preauth_timeout = crate::handlers::connection::PREAUTH_PHASE_TIMEOUT;
+    let resolver = tokio::time::timeout(preauth_timeout, h3_conn.accept())
         .await
+        .map_err(|_| anyhow::anyhow!("H3 accept timeout from {remote_addr}"))?
         .map_err(|e| anyhow::anyhow!("H3 accept error: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("Expected H3 request"))?;
-    let (req, mut req_stream) = resolver
-        .resolve_request()
+    let (req, mut req_stream) = tokio::time::timeout(preauth_timeout, resolver.resolve_request())
         .await
+        .map_err(|_| anyhow::anyhow!("H3 resolve timeout from {remote_addr}"))?
         .map_err(|e| anyhow::anyhow!("H3 resolve error: {e}"))?;
     let connect_ip_requested =
         req.extensions().get::<h3::ext::Protocol>().copied() == Some(h3::ext::Protocol::CONNECT_IP);

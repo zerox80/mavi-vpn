@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::info;
@@ -72,7 +73,12 @@ pub fn powershell_configure_interface_aggressive(adapter_index: u32) -> bool {
     run_powershell_cmd("Aggressive interface configuration", &script)
 }
 
-pub fn configure_vpn_dns_preference(_adapter_name: &str, adapter_index: u32) {
+pub fn configure_vpn_dns_preference(
+    _adapter_name: &str,
+    adapter_index: u32,
+    dns_v4: Ipv4Addr,
+    dns_v6: Option<Ipv6Addr>,
+) {
     // 1. Force the interface metric to 1 (highest priority) for both IPv4 and IPv6
     run_cmd(
         "netsh",
@@ -100,13 +106,26 @@ pub fn configure_vpn_dns_preference(_adapter_name: &str, adapter_index: u32) {
     // 2. Add an NRPT rule to force all DNS queries through the VPN adapter's DNS
     // This is more effective than just metrics on modern Windows 10/11
     persist_dns_servers();
-    let nrpt_script =
-        "$ErrorActionPreference = 'SilentlyContinue'; \
-         Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
-             Where-Object { $_.Comment -eq 'MaviVPN' -or $_.DisplayName -eq 'MaviVPN DNS Force' } | \
-             Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
-         Add-DnsClientNrptRule -Namespace '.' -NameServers '1.1.1.1','8.8.8.8' -Comment 'MaviVPN' -DisplayName 'MaviVPN DNS Force';";
-    run_powershell_cmd("NRPT DNS Rule", nrpt_script);
+    let dns_v4_str = dns_v4.to_string();
+    let dns_v6_str = dns_v6.map(|v| v.to_string()).unwrap_or_default();
+    let nrpt_script = if dns_v6.is_some() {
+        format!(
+            "$ErrorActionPreference = 'SilentlyContinue'; \
+             Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
+                 Where-Object {{ $_.Comment -eq 'MaviVPN' -or $_.DisplayName -eq 'MaviVPN DNS Force' }} | \
+                 Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
+             Add-DnsClientNrptRule -Namespace '.' -NameServers '{dns_v4_str}','{dns_v6_str}' -Comment 'MaviVPN' -DisplayName 'MaviVPN DNS Force';"
+        )
+    } else {
+        format!(
+            "$ErrorActionPreference = 'SilentlyContinue'; \
+             Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
+                 Where-Object {{ $_.Comment -eq 'MaviVPN' -or $_.DisplayName -eq 'MaviVPN DNS Force' }} | \
+                 Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
+             Add-DnsClientNrptRule -Namespace '.' -NameServers '{dns_v4_str}' -Comment 'MaviVPN' -DisplayName 'MaviVPN DNS Force';"
+        )
+    };
+    run_powershell_cmd("NRPT DNS Rule", &nrpt_script);
 }
 
 pub fn remove_nrpt_dns_rule() {

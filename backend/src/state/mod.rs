@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
 use ipnetwork::{Ipv4Network, Ipv6Network};
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 use tokio::sync::mpsc;
@@ -35,6 +36,14 @@ pub struct AppState {
 
     /// Next IPv6 host suffix to lease when no recycled address is available.
     next_ipv6_host: Mutex<u64>,
+
+    /// Addresses currently leased to a connection. Reclaim is keyed on this set
+    /// rather than on `peers` membership, so a lease is returned to the pool even
+    /// when the connection died between assignment and `register_client` (or when
+    /// the TUN reader removed the peer first). Membership also makes release
+    /// idempotent: a second `release_ips` for the same address is a no-op.
+    leased_ips: Mutex<HashSet<Ipv4Addr>>,
+    leased_ips_v6: Mutex<HashSet<Ipv6Addr>>,
 }
 
 impl AppState {
@@ -96,6 +105,8 @@ impl AppState {
             free_ips: Mutex::new(free_ips),
             free_ips_v6: Mutex::new(Vec::new()),
             next_ipv6_host: Mutex::new(2),
+            leased_ips: Mutex::new(HashSet::new()),
+            leased_ips_v6: Mutex::new(HashSet::new()),
         })
     }
 
@@ -104,15 +115,31 @@ impl AppState {
     /// # Errors
     /// Returns an error if the pool is exhausted.
     pub fn assign_ip(&self) -> Result<Ipv4Addr> {
-        let mut free = self
-            .free_ips
+        let ip = {
+            let mut free = self
+                .free_ips
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            free.pop().ok_or_else(|| anyhow!("VPN IPv4 pool exhausted"))?
+        };
+        self.leased_ips
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        free.pop().ok_or_else(|| anyhow!("VPN IPv4 pool exhausted"))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ip);
+        Ok(ip)
     }
 
     /// Leases a free IPv6 address from the pool.
     pub fn assign_ipv6(&self) -> Result<Ipv6Addr> {
+        let ip = self.lease_ipv6_address()?;
+        self.leased_ips_v6
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ip);
+        Ok(ip)
+    }
+
+    fn lease_ipv6_address(&self) -> Result<Ipv6Addr> {
         let mut free = self
             .free_ips_v6
             .lock()
@@ -146,38 +173,57 @@ impl AppState {
         match self.assign_ipv6() {
             Ok(ip6) => Ok((ip4, ip6)),
             Err(err) => {
-                self.free_ips
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(ip4);
+                self.reclaim_ipv4(ip4);
                 Err(err)
             }
         }
     }
 
-    /// Returns the leasable IPs to the pool and removes the peer registration.
-    ///
-    /// This is typically called by the `IpGuard` when a client disconnects.
-    /// Guarded against double-release: only returns IPs to the pool if they
-    /// were actually registered in the peer map.
-    pub fn release_ips(&self, ip4: Ipv4Addr, ip6: Ipv6Addr) {
-        // Remove from peer registry FIRST to prevent race conditions.
-        // Only return to pools if the peer was actually registered.
-        let had_v4 = self.peers.remove(&ip4).is_some();
-        let had_v6 = self.peers_v6.remove(&ip6).is_some();
-
-        if had_v4 {
+    /// Returns a leased IPv4 address to the pool exactly once. A no-op if the
+    /// address is not currently leased (already released).
+    fn reclaim_ipv4(&self, ip4: Ipv4Addr) {
+        let was_leased = self
+            .leased_ips
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&ip4);
+        if was_leased {
             self.free_ips
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(ip4);
         }
-        if had_v6 {
+    }
+
+    /// Returns a leased IPv6 address to the pool exactly once. A no-op if the
+    /// address is not currently leased (already released).
+    fn reclaim_ipv6(&self, ip6: Ipv6Addr) {
+        let was_leased = self
+            .leased_ips_v6
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&ip6);
+        if was_leased {
             self.free_ips_v6
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(ip6);
         }
+    }
+
+    /// Returns the leased IPs to the pool and removes any peer registration.
+    ///
+    /// Typically called by the `IpGuard` when a client disconnects. Reclaim is
+    /// keyed on the lease set, so an address assigned but never registered (the
+    /// connection dropped before `register_client`, or the TUN reader removed the
+    /// peer first) is still returned to the pool. Releasing the same address
+    /// twice is a no-op, so this cannot corrupt the pool with duplicates.
+    pub fn release_ips(&self, ip4: Ipv4Addr, ip6: Ipv6Addr) {
+        // Best-effort routing cleanup; reclaim no longer depends on its result.
+        self.peers.remove(&ip4);
+        self.peers_v6.remove(&ip6);
+        self.reclaim_ipv4(ip4);
+        self.reclaim_ipv6(ip6);
     }
 
     /// Associates an IPv4/IPv6 pair with an async sender channel for a connected client.

@@ -1,7 +1,8 @@
 use super::network::split_endpoint;
 use anyhow::{Context, Result};
 use shared::{
-    resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
+    looks_like_html_response, resolve_tun_mtu_with_source, ControlMessage, TunMtuSource,
+    MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
 };
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -214,6 +215,16 @@ pub async fn connect_and_handshake(
         validate_raw_response_len(len)?;
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
+
+        // In censorship-resistant mode the server returns a fake nginx HTML
+        // page on auth failure. Detect by content, not magic length.
+        if looks_like_html_response(&buf) {
+            anyhow::bail!(
+                "AUTH_FAILED: Server returned HTML (camouflage response). \
+                 Check token validity or Keycloak configuration."
+            );
+        }
+
         let cfg: ControlMessage =
             bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
         info!(
@@ -285,9 +296,6 @@ pub fn compute_quic_mtu_config(vpn_mtu: Option<u16>, addr: &SocketAddr) -> QuicM
 fn validate_raw_response_len(len: usize) -> Result<()> {
     if len > 65_536 {
         anyhow::bail!("Server response too large: {len} bytes");
-    }
-    if len == 0x1901 {
-        anyhow::bail!("AUTH_FAILED: Server rejected authentication token");
     }
     Ok(())
 }

@@ -2,7 +2,8 @@ use super::cert_pin::PinnedServerVerifier;
 use super::h3::H3SessionGuard;
 use anyhow::{Context, Result};
 use shared::{
-    resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
+    looks_like_html_response, resolve_tun_mtu_with_source, ControlMessage, TunMtuSource,
+    MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -194,6 +195,15 @@ fn validate_raw_response_len(len: usize) -> Result<()> {
 }
 
 fn decode_raw_response_body(buf: &[u8]) -> Result<ControlMessage> {
+    // In censorship-resistant mode the server returns a fake nginx HTML page
+    // on auth failure instead of a bincode ControlMessage. Detect this
+    // reliably by checking the content, not a magic length.
+    if looks_like_html_response(buf) {
+        anyhow::bail!(
+            "AUTH_FAILED: Server returned HTML (camouflage response). \
+             Check token validity or Keycloak configuration."
+        );
+    }
     bincode::serde::decode_from_slice(buf, bincode::config::standard())
         .map(|(v, _)| v)
         .map_err(Into::into)

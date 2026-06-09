@@ -133,6 +133,26 @@ pub enum ControlMessage {
     Error { message: String },
 }
 
+/// Checks whether a raw byte buffer looks like an HTML response.
+///
+/// Used by clients to detect the server's camouflage/nginx response when
+/// authentication fails in censorship-resistant mode. This replaces the
+/// fragile magic-number length check (`0x1901`) that was previously used
+/// on Windows and Android.
+#[must_use]
+pub fn looks_like_html_response(buf: &[u8]) -> bool {
+    let trimmed: Vec<u8> = buf
+        .iter()
+        .copied()
+        .skip_while(u8::is_ascii_whitespace)
+        .take(32)
+        .collect();
+    trimmed.starts_with(b"<!DOCTYPE")
+        || trimmed.starts_with(b"<!doctype")
+        || trimmed.starts_with(b"<html")
+        || trimmed.starts_with(b"<HTML")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +408,36 @@ mod tests {
         } else {
             std::env::remove_var("VPN_MTU");
         }
+    }
+
+    #[test]
+    fn html_detection_doctype() {
+        assert!(looks_like_html_response(b"<!DOCTYPE html><html>"));
+        assert!(looks_like_html_response(b"  \n<!doctype html>"));
+    }
+
+    #[test]
+    fn html_detection_html_tag() {
+        assert!(looks_like_html_response(b"<html><body>"));
+        assert!(looks_like_html_response(b"<HTML><HEAD>"));
+    }
+
+    #[test]
+    fn html_detection_rejects_bincode() {
+        // Typical bincode output: starts with enum variant index, not HTML
+        assert!(!looks_like_html_response(&[0x01, 0x00, 0x00, 0x00]));
+    }
+
+    #[test]
+    fn html_detection_rejects_empty() {
+        assert!(!looks_like_html_response(&[]));
+    }
+
+    #[test]
+    fn html_detection_rejects_ip_packet() {
+        // IPv4 packet header
+        let mut pkt = vec![0u8; 20];
+        pkt[0] = 0x45;
+        assert!(!looks_like_html_response(&pkt));
     }
 }

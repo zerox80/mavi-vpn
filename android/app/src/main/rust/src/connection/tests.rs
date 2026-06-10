@@ -40,13 +40,14 @@ fn raw_mode_advertises_only_mavivpn_alpn() {
 
 #[test]
 fn validate_server_mtu_accepts_match() {
-    assert!(validate_server_mtu(&config_with_mtu(1280), 1280, TunMtuSource::Config).is_ok());
-    assert!(validate_server_mtu(&config_with_mtu(1360), 1280, TunMtuSource::Default).is_ok());
+    assert!(validate_server_mtu(&config_with_mtu(1280), 1280).is_ok());
+    assert!(validate_server_mtu(&config_with_mtu(1360), 1360).is_ok());
 }
 
 #[test]
 fn validate_server_mtu_rejects_mismatch() {
-    let err = validate_server_mtu(&config_with_mtu(1360), 1280, TunMtuSource::Config).unwrap_err();
+    // Strict equality even when the local MTU is the compiled-in default.
+    let err = validate_server_mtu(&config_with_mtu(1360), 1280).unwrap_err();
     assert!(err.to_string().contains("MTU mismatch"));
 }
 
@@ -79,7 +80,7 @@ fn html_capsule_payload_is_auth_failure_signal() {
 
 #[test]
 fn validate_server_mtu_rejects_unsupported_value() {
-    let err = validate_server_mtu(&config_with_mtu(1400), 1280, TunMtuSource::Default).unwrap_err();
+    let err = validate_server_mtu(&config_with_mtu(1400), 1280).unwrap_err();
     assert!(err.to_string().contains("unsupported VPN MTU"));
 }
 

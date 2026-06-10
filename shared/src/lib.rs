@@ -6,6 +6,9 @@ pub mod hex;
 pub mod icmp;
 pub mod ipc;
 pub mod masque;
+pub mod mtu;
+
+pub use mtu::{check_server_mtu, effective_ptb_mtu};
 
 #[cfg(test)]
 pub mod test_helpers;

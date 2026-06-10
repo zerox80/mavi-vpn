@@ -296,11 +296,17 @@ async fn run_session(
                             } else {
                                 None
                             };
-                            let reported_mtu = if version == 6 {
-                                tun_mtu_for_ptb.max(1280)
+                            let h3_prefix = if is_h3_framing {
+                                masque::DATAGRAM_PREFIX.len()
                             } else {
-                                tun_mtu_for_ptb
+                                0
                             };
+                            let reported_mtu = shared::effective_ptb_mtu(
+                                tun_mtu_for_ptb,
+                                conn_sender.max_datagram_size(),
+                                h3_prefix,
+                                version == 6,
+                            );
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(
                                 &scratch[..n],
                                 reported_mtu,

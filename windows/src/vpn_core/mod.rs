@@ -22,7 +22,7 @@ use self::network::{
     cleanup_routes, create_udp_socket, remove_nrpt_dns_rule, set_adapter_network_config,
     SessionRouteGuard,
 };
-use self::reconnect::{compute_reconnect_delay, ReconnectDecision, SessionEnd,
+use self::reconnect::{compute_reconnect_delay, sleep_unless_stopped, ReconnectDecision, SessionEnd,
     RECONNECT_INITIAL_SECS,
 };
 use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter, is_wintun_ring_full};
@@ -112,7 +112,7 @@ pub async fn run_vpn(
                 if let Some(ref err_str) = err_opt {
                     warn!("Session failed: {err_str}. Reconnecting...");
                 }
-                tokio::time::sleep(delay).await;
+                sleep_unless_stopped(delay, &running).await;
                 backoff = next_backoff;
             }
         }

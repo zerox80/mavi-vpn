@@ -4,15 +4,10 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
 
 use crate::config::Config;
+use shared::QUIC_OVERHEAD_BYTES;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
-
-/// Fixed overhead budget reserved on top of the inner TUN MTU to account for
-/// QUIC short-header framing + AEAD tag + connection-ID bytes. The outer QUIC
-/// payload MTU is derived as `config.mtu + QUIC_OVERHEAD_BYTES`, so the inner
-/// MTU remains the single knob operators turn.
-const QUIC_OVERHEAD_BYTES: u16 = 80;
 
 pub fn create_quic_endpoint(
     config: &Config,
@@ -162,7 +157,7 @@ mod tests {
 
     #[test]
     fn quic_overhead_constant() {
-        assert_eq!(QUIC_OVERHEAD_BYTES, 80);
+        assert_eq!(shared::QUIC_OVERHEAD_BYTES, 80);
     }
 
     #[tokio::test]

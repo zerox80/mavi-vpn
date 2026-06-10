@@ -264,14 +264,18 @@ async fn run_session(
             .context("Failed to get adapter index for IPv6 verification")?;
 
         // 1. Wait for IPv6 address confirmation (DAD, etc)
+        // Marked IPV6_SETUP_FAILED so the reconnect classifier treats a
+        // deterministic local IPv6 stack failure (e.g. IPv6 disabled, DAD
+        // failure) as permanent instead of looping forever — matching Linux,
+        // which already classifies IPv6 split-route failures as permanent.
         if !network::wait_for_ipv6_address(idx, ipv6).await {
-            bail!("IPv6 address {ipv6} failed verification (possibly duplicate or stack error)");
+            bail!("IPV6_SETUP_FAILED: IPv6 address {ipv6} failed verification (possibly duplicate or stack error)");
         }
         info!("IPv6 address {} verified", ipv6);
 
         // 2. Verify On-Link split routes exist
         if !network::verify_ipv6_split_routes(idx)? {
-            bail!("IPv6 split routes (::/1, 8000::/1) not found in routing table");
+            bail!("IPV6_SETUP_FAILED: IPv6 split routes (::/1, 8000::/1) not found in routing table");
         }
         info!("IPv6 split routes verified as On-Link");
     }

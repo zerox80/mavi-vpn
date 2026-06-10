@@ -34,6 +34,7 @@ pub(crate) fn compute_reconnect_delay(
                 || err_str.contains("Server rejected connection")
                 || err_str.contains("MTU mismatch")
                 || err_str.contains("was not applied to adapter")
+                || err_str.contains("IPV6_SETUP_FAILED")
             {
                 ReconnectDecision::PermanentFailure { error: err_str }
             } else {
@@ -127,6 +128,38 @@ mod tests {
         assert!(matches!(
             compute_reconnect_delay(Err(err), Duration::from_secs(5)),
             ReconnectDecision::PermanentFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn permanent_ipv6_address_failure_stops() {
+        let err = anyhow::anyhow!(
+            "IPV6_SETUP_FAILED: IPv6 address fd00::2 failed verification (possibly duplicate or stack error)"
+        );
+        assert!(matches!(
+            compute_reconnect_delay(Err(err), Duration::from_secs(5)),
+            ReconnectDecision::PermanentFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn permanent_ipv6_split_routes_failure_stops() {
+        let err = anyhow::anyhow!(
+            "IPV6_SETUP_FAILED: IPv6 split routes (::/1, 8000::/1) not found in routing table"
+        );
+        assert!(matches!(
+            compute_reconnect_delay(Err(err), Duration::from_secs(5)),
+            ReconnectDecision::PermanentFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn transient_ipv6_like_error_without_marker_still_retries() {
+        // A generic IPv6-mentioning transient error (no marker) must NOT be permanent.
+        let err = anyhow::anyhow!("temporary IPv6 route table read glitch");
+        assert!(matches!(
+            compute_reconnect_delay(Err(err), Duration::from_secs(2)),
+            ReconnectDecision::Reconnect { .. }
         ));
     }
 }

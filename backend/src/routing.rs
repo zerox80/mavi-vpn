@@ -1,12 +1,31 @@
-use crate::state::AppState;
+use crate::state::{AppState, ClientTx};
 use bytes::Bytes;
+use dashmap::DashMap;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
 use shared::masque::DATAGRAM_PREFIX;
 use std::fmt::Display;
+use std::hash::Hash;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{error, info, warn};
+
+/// Removes a peer registration only if the entry still holds the exact channel
+/// whose closure we observed.
+///
+/// The TUN reader clones the sender out of the map before `try_send`. By the
+/// time it sees `Closed`, the client may already have disconnected *and* a new
+/// client may have leased the same virtual IP and registered its own channel
+/// (`release_ips` removes the peer before returning the IP to the pool). A blind
+/// `peers.remove(&dest_ip)` would then delete the new client's registration and
+/// black-hole all server→client traffic for it. `same_channel` guards against
+/// that: we only remove the entry when it is still the dead channel.
+fn remove_peer_if_same<K>(peers: &DashMap<K, ClientTx>, key: &K, observed: &ClientTx)
+where
+    K: Hash + Eq,
+{
+    peers.remove_if(key, |_, tx| tx.same_channel(observed));
+}
 
 #[derive(Default)]
 struct TunReaderStats {
@@ -161,7 +180,7 @@ pub fn spawn_tun_reader(
                                             }
                                             Err(TrySendError::Closed(_)) => {
                                                 stats.channel_closed += 1;
-                                                state_reader.peers.remove(&dest_ip);
+                                                remove_peer_if_same(&state_reader.peers, &dest_ip, &tx_client);
                                             }
                                         }
                                     } else {
@@ -188,7 +207,7 @@ pub fn spawn_tun_reader(
                                             }
                                             Err(TrySendError::Closed(_)) => {
                                                 stats.channel_closed += 1;
-                                                state_reader.peers_v6.remove(&dest_ip);
+                                                remove_peer_if_same(&state_reader.peers_v6, &dest_ip, &tx_client);
                                             }
                                         }
                                     } else {
@@ -307,5 +326,47 @@ mod tests {
         let data = Bytes::from_static(b"hello");
         assert!(tx.try_send(data.clone()).is_ok());
         assert!(tx.try_send(data).is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_closed_channel_does_not_evict_reused_ip() {
+        // Reproduces H1: client A disconnects and client B leases the same IP.
+        // The TUN reader, still holding A's (now closed) sender, must NOT remove
+        // B's fresh registration.
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let (v4, v6) = state.assign_ip_pair().unwrap();
+
+        // A registers, then its receiver is dropped (channel closed).
+        let (tx_a, rx_a) = tokio::sync::mpsc::channel::<Bytes>(1);
+        state.register_client(v4, v6, tx_a.clone());
+        drop(rx_a);
+
+        // B leases the same IP and overwrites the registration with its channel.
+        let (tx_b, _rx_b) = tokio::sync::mpsc::channel::<Bytes>(1);
+        state.register_client(v4, v6, tx_b.clone());
+
+        // Reader observed A's closed sender -> must be a no-op for B's entry.
+        remove_peer_if_same(&state.peers, &v4, &tx_a);
+        remove_peer_if_same(&state.peers_v6, &v6, &tx_a);
+        assert!(state.peers.contains_key(&v4), "B's v4 registration survives");
+        assert!(state.peers_v6.contains_key(&v6), "B's v6 registration survives");
+
+        // Observing B's own sender DOES remove the entry.
+        remove_peer_if_same(&state.peers, &v4, &tx_b);
+        remove_peer_if_same(&state.peers_v6, &v6, &tx_b);
+        assert!(!state.peers.contains_key(&v4));
+        assert!(!state.peers_v6.contains_key(&v6));
+    }
+
+    #[tokio::test]
+    async fn remove_peer_if_same_removes_matching_clone() {
+        // A clone of the same sender shares the channel, so it matches.
+        let state = AppState::new("10.8.0.0/24").unwrap();
+        let (v4, v6) = state.assign_ip_pair().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+        state.register_client(v4, v6, tx.clone());
+
+        remove_peer_if_same(&state.peers, &v4, &tx);
+        assert!(!state.peers.contains_key(&v4));
     }
 }

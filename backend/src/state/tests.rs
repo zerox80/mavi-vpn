@@ -103,7 +103,6 @@ fn release_and_reassign() {
     let second_v4 = state.assign_ip().unwrap();
     assert_eq!(second_v4, Ipv4Addr::new(10, 8, 0, 3));
 
-    // Register client before release (peers must exist for release_ips to return to pool)
     let (tx, _rx) = mpsc::channel::<bytes::Bytes>(16);
     state.register_client(ip4, ip6, tx);
 
@@ -113,6 +112,23 @@ fn release_and_reassign() {
     // Next assignment should return the released IP (pushed onto stack)
     let reassigned = state.assign_ip().unwrap();
     assert_eq!(reassigned, Ipv4Addr::new(10, 8, 0, 2));
+}
+
+#[test]
+fn release_reclaims_lease_even_without_registration() {
+    // Reproduces the pool leak: a connection that authenticates (assigns a pair)
+    // but drops before `register_client` must still return its lease to the pool.
+    let state = AppState::new("10.0.0.0/30").unwrap(); // exactly one usable pair
+    let (v4, v6) = state.assign_ip_pair().unwrap();
+    assert!(!state.peers.contains_key(&v4)); // never registered
+
+    // Pool is now exhausted while the lease is held.
+    assert!(state.assign_ip_pair().is_err());
+
+    // Releasing the unregistered lease must return it to the pool.
+    state.release_ips(v4, v6);
+    let (v4_again, _v6_again) = state.assign_ip_pair().unwrap();
+    assert_eq!(v4_again, v4);
 }
 
 #[test]

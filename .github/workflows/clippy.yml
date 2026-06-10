@@ -46,7 +46,9 @@ jobs:
             librsvg2-dev
 
       - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # windows-vpn does not compile on Linux (wintun, windows-sys, stdcall
+        # ABI); it gets its own job on windows-latest below.
+        run: cargo clippy --workspace --exclude windows-vpn --all-targets -- -D warnings
 
   clippy-windows:
     name: Clippy (Windows)

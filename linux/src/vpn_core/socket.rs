@@ -25,8 +25,10 @@ pub(super) fn create_udp_socket() -> Result<std::net::UdpSocket> {
     }
 
     // Disable PMTU discovery on the UDP socket to let QUIC handle it
-    // (prevents the kernel from dropping packets that exceed path MTU)
+    // (prevents the kernel from dropping packets that exceed path MTU).
+    // Raw setsockopt is required; socket2 has no wrapper for IP_MTU_DISCOVER.
     #[cfg(target_os = "linux")]
+    #[allow(unsafe_code)]
     {
         use std::os::fd::AsRawFd;
         let fd = socket.as_raw_fd();

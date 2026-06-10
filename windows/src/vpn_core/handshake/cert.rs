@@ -1,14 +1,7 @@
 use sha2::{Digest, Sha256};
 
-pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
-}
+pub use shared::hex::decode_hex;
+
 /// Custom certificate verifier that trusts only a specific SHA-256 fingerprint.
 #[derive(Debug)]
 pub(super) struct PinnedServerVerifier {
@@ -102,6 +95,12 @@ mod tests {
         assert_eq!(decode_hex("gg"), None);
         assert_eq!(decode_hex("zzzz"), None);
         assert_eq!(decode_hex("12abXX"), None);
+    }
+
+    #[test]
+    fn decode_hex_non_ascii_returns_none_instead_of_panicking() {
+        assert_eq!(decode_hex("€€"), None);
+        assert_eq!(decode_hex("aaé"), None);
     }
 
     #[test]

@@ -2,7 +2,9 @@
 /// Returns `None` if the string has an odd length or contains non-hex characters.
 #[must_use]
 pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    // The byte-offset slicing below panics on non-char-boundaries, so reject
+    // any non-ASCII input up front (it cannot be valid hex anyway).
+    if !s.is_ascii() || !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -35,6 +37,16 @@ mod tests {
     #[test]
     fn decode_hex_invalid_chars() {
         assert_eq!(decode_hex("zz"), None);
+    }
+
+    #[test]
+    fn decode_hex_non_ascii_returns_none_instead_of_panicking() {
+        // Multi-byte UTF-8 with an even byte length used to panic on a
+        // non-char-boundary slice (`&s[i..i+2]`).
+        assert_eq!(decode_hex("€€"), None); // 6 bytes
+        assert_eq!(decode_hex("aé"), None); // 3 bytes, odd
+        assert_eq!(decode_hex("aaé"), None); // 4 bytes, boundary splits 'é'
+        assert_eq!(decode_hex("ÿÿ"), None); // 4 bytes, all non-ASCII
     }
 
     #[test]

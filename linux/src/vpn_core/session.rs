@@ -16,6 +16,19 @@ const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
 const TUN_DEVICE_NAME: &str = "mavi0";
 
+/// Sleeps up to `delay`, but returns as soon as `running` is cleared.
+///
+/// A Stop command only flips the `running` flag; without this, the reconnect
+/// backoff (`tokio::time::sleep`, up to 30s) would block the loop so a disconnect
+/// appears to hang and `vpn_stopping` stays set, rejecting fresh Start requests.
+/// Polling in 100ms steps makes Stop take effect within ~100ms in any backoff.
+async fn sleep_unless_stopped(delay: Duration, running: &Arc<AtomicBool>) {
+    let deadline = std::time::Instant::now() + delay;
+    while running.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Entry point for the VPN runner. Manages the reconnection loop and TUN lifecycle.
 pub async fn run_vpn(
     mut config: Config,
@@ -77,7 +90,7 @@ pub async fn run_vpn(
             }
         };
 
-        tokio::time::sleep(reconnect_delay).await;
+        sleep_unless_stopped(reconnect_delay, &running).await;
         backoff = next_backoff;
     }
 
@@ -393,7 +406,37 @@ async fn run_session(
 
 #[cfg(test)]
 mod tests {
-    use super::is_permanent_setup_error;
+    use super::{is_permanent_setup_error, sleep_unless_stopped};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn backoff_sleep_returns_promptly_when_stopped() {
+        let running = Arc::new(AtomicBool::new(true));
+        let stopper = running.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            stopper.store(false, Ordering::Relaxed);
+        });
+
+        let started = Instant::now();
+        // A long backoff that must be cut short by the Stop above.
+        sleep_unless_stopped(Duration::from_secs(30), &running).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "Stop during backoff must return within ~1s, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn backoff_sleep_completes_full_delay_when_running() {
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+        sleep_unless_stopped(Duration::from_millis(250), &running).await;
+        assert!(started.elapsed() >= Duration::from_millis(200));
+    }
 
     #[test]
     fn permanent_setup_errors_stop_reconnect_loop() {

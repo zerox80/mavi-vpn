@@ -135,27 +135,49 @@
 
         // Read the DACL back via the .NET API for the same reason the script
         // does: the Get-Acl cmdlet's Microsoft.PowerShell.Security module is
-        // unreliable on CI runners.
-        let sddl_out = std::process::Command::new("powershell")
+        // unreliable on CI runners. Enumerate the access rules with explicit
+        // SecurityIdentifier identities rather than reading the SDDL string,
+        // because SDDL abbreviates well-known accounts to aliases (e.g. the
+        // built-in Administrator becomes `LA`), which a raw-SID substring
+        // check would miss.
+        let aces_out = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
                 &format!(
-                    "[System.IO.File]::GetAccessControl('{}').GetSecurityDescriptorSddlForm('Access')",
+                    "$acl = [System.IO.File]::GetAccessControl('{}'); \
+                     $acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | \
+                     ForEach-Object {{ \"$($_.AccessControlType):$($_.IdentityReference.Value):$($_.FileSystemRights)\" }}",
                     token_path.to_str().unwrap().replace('\'', "''")
                 ),
             ])
             .output()
-            .expect("read back SDDL");
-        let sddl = String::from_utf8_lossy(&sddl_out.stdout).trim().to_string();
+            .expect("read back ACEs");
+        let aces = String::from_utf8_lossy(&aces_out.stdout);
+        let allow_with = |sid: &str, right: &str| {
+            aces.lines().any(|line| {
+                line.starts_with("Allow:")
+                    && line.contains(&format!(":{sid}:"))
+                    && line.contains(right)
+            })
+        };
 
-        assert!(!sddl.contains(";;;WD)"), "Everyone ACE must be removed: {sddl}");
-        assert!(sddl.contains("(A;;FA;;;SY)"), "SYSTEM full control expected: {sddl}");
-        assert!(sddl.contains("(A;;FA;;;BA)"), "Admins full control expected: {sddl}");
         assert!(
-            sddl.contains(&format!(";;;{current_user_sid})")),
-            "current user read expected: {sddl}"
+            !aces.contains("S-1-1-0"),
+            "Everyone ACE must be removed: {aces}"
+        );
+        assert!(
+            allow_with("S-1-5-18", "FullControl"),
+            "SYSTEM full control expected: {aces}"
+        );
+        assert!(
+            allow_with("S-1-5-32-544", "FullControl"),
+            "Admins full control expected: {aces}"
+        );
+        assert!(
+            allow_with(&current_user_sid, "Read"),
+            "current user read expected: {aces}"
         );
     }
 

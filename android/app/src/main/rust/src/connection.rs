@@ -4,7 +4,7 @@ use log::info;
 use shared::{
     looks_like_html_response,
     masque::{self, CAPSULE_MAVI_CONFIG},
-    resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, QUIC_OVERHEAD_BYTES,
+    resolve_tun_mtu_with_source, ControlMessage, QUIC_OVERHEAD_BYTES,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -240,7 +240,7 @@ pub async fn connect_and_handshake(
         (cfg, None)
     };
 
-    validate_server_mtu(&config, local_tun_mtu, mtu_source)?;
+    validate_server_mtu(&config, local_tun_mtu)?;
 
     Ok((connection, config, h3_guard))
 }

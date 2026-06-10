@@ -2,7 +2,7 @@ use super::network::split_endpoint;
 use anyhow::{Context, Result};
 use shared::{
     looks_like_html_response, resolve_tun_mtu_with_source, ControlMessage, TunMtuSource,
-    MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
+    QUIC_OVERHEAD_BYTES,
 };
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -102,9 +102,9 @@ pub async fn connect_and_handshake(
     // instead of the real server hostname. Cert-pin auth is unaffected.
     let server_name = resolve_server_name(&endpoint_str, ech_state.as_ref().map(|e| e.outer_sni.as_str()))?;
 
-    // When the client has no operator-configured MTU, reserve enough QUIC
-    // payload budget for any server-pushed MTU in the supported range. The
-    // server config remains authoritative for the actual Windows adapter MTU.
+    // The client pins its QUIC payload budget to the local TUN MTU before the
+    // handshake (MTU discovery is disabled), so the server-pushed MTU must
+    // match it exactly — see `validate_server_mtu` / `shared::check_server_mtu`.
     let mtu_cfg = compute_quic_mtu_config(vpn_mtu, &addr);
     info!(
         "Address family: {}. Setting QUIC MTU: {} (TUN MTU budget: {}, source: {:?}, Target Wire: {})",
@@ -234,7 +234,7 @@ pub async fn connect_and_handshake(
         (cfg, None)
     };
 
-    validate_server_mtu(&config, mtu_cfg.local_tun_mtu, mtu_cfg.mtu_source)?;
+    validate_server_mtu(&config, mtu_cfg.local_tun_mtu)?;
 
     Ok((connection, config, h3_guard))
 }
@@ -301,33 +301,9 @@ fn validate_raw_response_len(len: usize) -> Result<()> {
     Ok(())
 }
 
-fn validate_server_mtu(
-    config: &ControlMessage,
-    local_tun_mtu: u16,
-    mtu_source: TunMtuSource,
-) -> Result<()> {
+fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()> {
     if let ControlMessage::Config { mtu, .. } = config {
-        if !(shared::MIN_TUN_MTU..=MAX_TUN_MTU).contains(mtu) {
-            anyhow::bail!(
-                "Server pushed unsupported VPN MTU {}. Supported range is {}-{}.",
-                mtu,
-                shared::MIN_TUN_MTU,
-                MAX_TUN_MTU
-            );
-        }
-
-        if mtu_source != TunMtuSource::Default && *mtu != local_tun_mtu {
-            anyhow::bail!(
-                "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {mtu}. Configure both sides to the same VPN_MTU."
-            );
-        }
-
-        if mtu_source == TunMtuSource::Default && *mtu != local_tun_mtu {
-            info!(
-                "Using server-pushed VPN MTU {} because client MTU is unset (default would be {})",
-                mtu, local_tun_mtu
-            );
-        }
+        shared::check_server_mtu(*mtu, local_tun_mtu).map_err(|e| anyhow::anyhow!(e))?;
     }
     Ok(())
 }

@@ -71,6 +71,8 @@ fn packet_source_is_assigned(
 fn packet_too_big_response(
     packet: &[u8],
     tunnel_mtu: u16,
+    max_datagram: Option<usize>,
+    h3_prefix: usize,
     gv4: Ipv4Addr,
     gv6: Ipv6Addr,
 ) -> Option<Vec<u8>> {
@@ -86,11 +88,10 @@ fn packet_too_big_response(
     } else {
         None
     };
-    let reported_mtu = if ver == 6 {
-        tunnel_mtu.max(1280)
-    } else {
-        tunnel_mtu
-    };
+    // Report the MTU the QUIC datagram path can actually carry (max_datagram
+    // minus any H3 prefix), not the configured TUN MTU — otherwise PMTUD never
+    // shrinks below the QUIC limit and full-size packets keep getting dropped.
+    let reported_mtu = shared::effective_ptb_mtu(tunnel_mtu, max_datagram, h3_prefix, ver == 6);
 
     icmp::generate_packet_too_big(packet, reported_mtu, gw)
 }
@@ -141,9 +142,15 @@ pub async fn run_tunnel(
                     send_stats
                         .server_to_client_too_large
                         .fetch_add(1, Ordering::Relaxed);
-                    if let Some(icmp_p) =
-                        packet_too_big_response(&packet_for_icmp, tunnel_mtu, gv4, gv6)
-                    {
+                    let h3_prefix = if is_h3 { masque::DATAGRAM_PREFIX.len() } else { 0 };
+                    if let Some(icmp_p) = packet_too_big_response(
+                        &packet_for_icmp,
+                        tunnel_mtu,
+                        conn_send.max_datagram_size(),
+                        h3_prefix,
+                        gv4,
+                        gv6,
+                    ) {
                         let _ = tx_tun_icmp.try_send(Bytes::from(icmp_p));
                     }
                 }
@@ -337,6 +344,8 @@ mod tests {
         let ptb = packet_too_big_response(
             &packet,
             1280,
+            Some(1330),
+            0,
             Ipv4Addr::new(10, 8, 0, 1),
             Ipv6Addr::LOCALHOST,
         );
@@ -345,6 +354,8 @@ mod tests {
         assert!(packet_too_big_response(
             &[],
             1280,
+            Some(1330),
+            0,
             Ipv4Addr::new(10, 8, 0, 1),
             Ipv6Addr::LOCALHOST
         )

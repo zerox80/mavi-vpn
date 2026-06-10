@@ -55,26 +55,28 @@ fn detects_explicit_ipv6_host() {
 }
 
 #[test]
-fn server_mtu_is_accepted_when_client_uses_default() {
+fn server_mtu_mismatch_rejected_even_for_default_source() {
+    // Strict equality: a server MTU that differs from the pinned local budget
+    // is rejected regardless of how the local MTU was sourced.
     let cfg = config_with_mtu(1340);
 
-    assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Default).is_ok());
+    assert!(validate_server_mtu(&cfg, 1280).is_err());
+    assert!(validate_server_mtu(&cfg, 1340).is_ok());
 }
 
 #[test]
 fn explicit_client_mtu_must_match_server_mtu() {
     let cfg = config_with_mtu(1340);
 
-    assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Config).is_err());
-    assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Env).is_err());
-    assert!(validate_server_mtu(&cfg, 1340, TunMtuSource::Config).is_ok());
+    assert!(validate_server_mtu(&cfg, 1280).is_err());
+    assert!(validate_server_mtu(&cfg, 1340).is_ok());
 }
 
 #[test]
 fn server_mtu_must_be_supported() {
     let cfg = config_with_mtu(1500);
 
-    assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Default).is_err());
+    assert!(validate_server_mtu(&cfg, 1280).is_err());
 }
 
 #[test]
@@ -82,43 +84,45 @@ fn validate_server_mtu_ignores_non_config_messages() {
     let auth = ControlMessage::Auth {
         token: "tok".to_string(),
     };
-    assert!(validate_server_mtu(&auth, 1280, TunMtuSource::Default).is_ok());
+    assert!(validate_server_mtu(&auth, 1280).is_ok());
 
     let err = ControlMessage::Error {
         message: "bad".to_string(),
     };
-    assert!(validate_server_mtu(&err, 1280, TunMtuSource::Default).is_ok());
+    assert!(validate_server_mtu(&err, 1280).is_ok());
 }
 
 #[test]
 fn validate_server_mtu_accepts_minimum_boundary() {
     let cfg = config_with_mtu(shared::MIN_TUN_MTU);
-    assert!(validate_server_mtu(&cfg, shared::MIN_TUN_MTU, TunMtuSource::Default).is_ok());
+    assert!(validate_server_mtu(&cfg, shared::MIN_TUN_MTU).is_ok());
 }
 
 #[test]
 fn validate_server_mtu_accepts_maximum_boundary() {
     let cfg = config_with_mtu(shared::MAX_TUN_MTU);
-    assert!(validate_server_mtu(&cfg, shared::MAX_TUN_MTU, TunMtuSource::Default).is_ok());
+    assert!(validate_server_mtu(&cfg, shared::MAX_TUN_MTU).is_ok());
 }
 
 #[test]
 fn validate_server_mtu_rejects_below_minimum() {
     let cfg = config_with_mtu(shared::MIN_TUN_MTU - 1);
-    assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Default).is_err());
+    assert!(validate_server_mtu(&cfg, 1280).is_err());
 }
 
 #[test]
-fn validate_server_mtu_default_source_logs_server_pushed_difference() {
+fn validate_server_mtu_rejects_server_pushed_difference() {
+    // Previously the default source accepted a differing server MTU; now it is
+    // a hard mismatch error (the client cannot adopt a different transport MTU).
     let cfg = config_with_mtu(1340);
-    assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Default).is_ok());
+    assert!(validate_server_mtu(&cfg, 1280).is_err());
 }
 
 #[test]
-fn validate_server_mtu_env_source_requires_match() {
+fn validate_server_mtu_requires_match() {
     let cfg = config_with_mtu(1300);
-    assert!(validate_server_mtu(&cfg, 1300, TunMtuSource::Env).is_ok());
-    assert!(validate_server_mtu(&cfg, 1280, TunMtuSource::Env).is_err());
+    assert!(validate_server_mtu(&cfg, 1300).is_ok());
+    assert!(validate_server_mtu(&cfg, 1280).is_err());
 }
 
 #[test]
@@ -199,33 +203,33 @@ fn order_resolved_addrs_mixed_with_duplicates() {
 }
 
 #[test]
-fn validate_server_mtu_accepts_exact_match_with_config_source() {
+fn validate_server_mtu_accepts_exact_match() {
     let cfg = config_with_mtu(1300);
-    assert!(validate_server_mtu(&cfg, 1300, TunMtuSource::Config).is_ok());
+    assert!(validate_server_mtu(&cfg, 1300).is_ok());
 }
 
 #[test]
-fn validate_server_mtu_rejects_mtu_below_minimum_with_config_source() {
+fn validate_server_mtu_rejects_mtu_below_minimum() {
     let cfg = config_with_mtu(shared::MIN_TUN_MTU - 1);
-    assert!(validate_server_mtu(&cfg, shared::MIN_TUN_MTU - 1, TunMtuSource::Config).is_err());
+    assert!(validate_server_mtu(&cfg, shared::MIN_TUN_MTU - 1).is_err());
 }
 
 #[test]
-fn validate_server_mtu_rejects_mtu_above_maximum_with_config_source() {
+fn validate_server_mtu_rejects_mtu_above_maximum() {
     let cfg = config_with_mtu(shared::MAX_TUN_MTU + 1);
-    assert!(validate_server_mtu(&cfg, shared::MAX_TUN_MTU + 1, TunMtuSource::Config).is_err());
+    assert!(validate_server_mtu(&cfg, shared::MAX_TUN_MTU + 1).is_err());
 }
 
 #[test]
-fn validate_server_mtu_env_source_exact_match() {
+fn validate_server_mtu_exact_match_ok() {
     let cfg = config_with_mtu(1320);
-    assert!(validate_server_mtu(&cfg, 1320, TunMtuSource::Env).is_ok());
+    assert!(validate_server_mtu(&cfg, 1320).is_ok());
 }
 
 #[test]
-fn validate_server_mtu_env_source_mismatch() {
+fn validate_server_mtu_mismatch_err() {
     let cfg = config_with_mtu(1320);
-    assert!(validate_server_mtu(&cfg, 1300, TunMtuSource::Env).is_err());
+    assert!(validate_server_mtu(&cfg, 1300).is_err());
 }
 
 #[test]
@@ -318,7 +322,7 @@ fn validate_server_mtu_ignores_auth_message() {
     let auth = ControlMessage::Auth {
         token: "secret".to_string(),
     };
-    assert!(validate_server_mtu(&auth, 1280, TunMtuSource::Config).is_ok());
+    assert!(validate_server_mtu(&auth, 1280).is_ok());
 }
 
 #[test]
@@ -326,7 +330,7 @@ fn validate_server_mtu_ignores_error_message() {
     let err = ControlMessage::Error {
         message: "server error".to_string(),
     };
-    assert!(validate_server_mtu(&err, 1280, TunMtuSource::Config).is_ok());
+    assert!(validate_server_mtu(&err, 1280).is_ok());
 }
 
 // --- compute_quic_mtu_config tests ---

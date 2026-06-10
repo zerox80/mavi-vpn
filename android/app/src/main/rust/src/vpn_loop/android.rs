@@ -157,9 +157,19 @@ pub async fn run_vpn_loop(
                             packet_len, current_limit
                         );
 
-                        if let Some(icmp_packet) =
-                            packet_too_big_feedback(&packet, tunnel_mtu, gateway_v4, gateway_v6_opt)
-                        {
+                        let h3_prefix = if http3_framing {
+                            masque::DATAGRAM_PREFIX.len()
+                        } else {
+                            0
+                        };
+                        if let Some(icmp_packet) = packet_too_big_feedback(
+                            &packet,
+                            tunnel_mtu,
+                            conn_upload.max_datagram_size(),
+                            h3_prefix,
+                            gateway_v4,
+                            gateway_v6_opt,
+                        ) {
                             let _ = tx_feedback.try_send(icmp_packet);
                         }
                     }

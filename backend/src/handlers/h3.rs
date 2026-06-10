@@ -9,7 +9,6 @@ use shared::masque::{
     self, AssignedAddress, IpAddressRange, CAPSULE_ADDRESS_ASSIGN, CAPSULE_MAVI_CONFIG,
     CAPSULE_ROUTE_ADVERTISEMENT,
 };
-use shared::ControlMessage;
 
 use crate::config::Config;
 use crate::handlers::auth::authenticate_client;
@@ -283,6 +282,7 @@ pub async fn handle_h3_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::ControlMessage;
     use clap::Parser;
     use shared::masque::{
         decode_address_assign, decode_route_advertisement, read_capsule, CAPSULE_ADDRESS_ASSIGN,

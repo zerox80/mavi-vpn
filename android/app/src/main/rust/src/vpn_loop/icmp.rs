@@ -1,3 +1,6 @@
+// Called only from the cfg(target_os = "android") vpn loop; on other hosts it
+// is exercised solely by the unit tests below.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn packet_too_big_feedback(
     packet: &[u8],
     tunnel_mtu: u16,

@@ -51,6 +51,10 @@ impl AppState {
     ///
     /// # Arguments
     /// - `cidr` - The IPv4 network specification (e.g., "10.8.0.0/24").
+    ///
+    /// Production code always supplies an explicit IPv6 network via
+    /// `new_with_ipv6`; this convenience constructor is test-only.
+    #[cfg(test)]
     pub fn new(cidr: &str) -> Result<Self> {
         Self::new_with_ipv6(cidr, "fd00::/64")
     }

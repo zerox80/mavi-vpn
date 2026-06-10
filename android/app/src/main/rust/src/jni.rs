@@ -1,3 +1,8 @@
+// JNI inherently requires `unsafe` (raw env pointers, #[no_mangle] exports,
+// session handles round-tripped through jlong). Same precedent as the Windows
+// service entry point, which also allows unsafe_code at module level.
+#![allow(unsafe_code)]
+
 use android_logger::Config;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jint, jlong};

@@ -119,12 +119,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn max_concurrent_ipc_clients_is_reasonable() {
         assert!(MAX_CONCURRENT_IPC_CLIENTS > 0);
         assert!(MAX_CONCURRENT_IPC_CLIENTS <= 1000);
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn max_concurrent_ipc_clients_is_at_least_10() {
         assert!(MAX_CONCURRENT_IPC_CLIENTS >= 10);
     }

@@ -40,7 +40,10 @@ pub fn create_quic_endpoint(
     let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
     let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
 
+    // Disabling kernel PMTU discovery needs a raw setsockopt; socket2 has no
+    // safe wrapper for IP_MTU_DISCOVER / IPV6_MTU_DISCOVER.
     #[cfg(target_os = "linux")]
+    #[allow(unsafe_code)]
     {
         let fd = socket2_sock.as_raw_fd();
         unsafe {

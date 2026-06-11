@@ -268,7 +268,7 @@ fn save_config_to_path(
         store.delete_secret(config_token_account())?;
     }
     let content = serde_json::to_string_pretty(&config)?;
-    std::fs::write(&path, content)?;
+    std::fs::write(path, content)?;
     println!("Config saved to {}", path.display());
     Ok(())
 }

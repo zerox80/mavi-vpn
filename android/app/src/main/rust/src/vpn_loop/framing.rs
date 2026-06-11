@@ -1,5 +1,8 @@
 use shared::masque;
 
+// Only the cfg(target_os = "android") vpn loop calls these on the hot path;
+// on other hosts they are exercised solely by the unit tests below.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn tun_payload_for_quic(framed: bytes::Bytes, http3_framing: bool) -> bytes::Bytes {
     if http3_framing {
         framed
@@ -8,6 +11,7 @@ pub(crate) fn tun_payload_for_quic(framed: bytes::Bytes, http3_framing: bool) ->
     }
 }
 
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn quic_datagram_to_tun_packet(
     datagram: bytes::Bytes,
     http3_framing: bool,

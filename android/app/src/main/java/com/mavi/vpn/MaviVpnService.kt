@@ -25,13 +25,13 @@ class MaviVpnService : VpnService() {
 
     @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    @Volatile private var vpnSessionHandle: Long = 0
-
-    @Volatile private var vpnSessionGeneration: Long = 0
-
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val vpnLock = Any()
+
+    /** Single source of truth for the active native session handle + generation.
+     *  Shares [vpnLock] so compound session operations stay atomic. */
+    private val handleRegistry = SessionHandleRegistry(vpnLock)
 
     private lateinit var prefs: PrefsManager
     private lateinit var notificationHelper: NotificationHelper
@@ -99,13 +99,7 @@ class MaviVpnService : VpnService() {
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     Log.d("MaviVPN", "Network available: $network")
-                    val handle = synchronized(vpnLock) {
-                        if (vpnSessionHandle != 0L && vpnSessionGeneration == sessionGeneration) {
-                            vpnSessionHandle
-                        } else {
-                            0L
-                        }
-                    }
+                    val handle = handleRegistry.handleIfCurrent(sessionGeneration)
                     if (handle != 0L) {
                         NativeLib.networkChanged(handle)
                     }
@@ -133,11 +127,15 @@ class MaviVpnService : VpnService() {
             var forcedRefreshCount = 0
             val workerGeneration = sessionGeneration
 
-            fun isCurrentSessionActive(): Boolean = isRunning && vpnSessionGeneration == workerGeneration
+            fun isCurrentSessionActive(): Boolean = isRunning && handleRegistry.isCurrent(workerGeneration)
 
             while (isCurrentSessionActive()) {
                 try {
                     var retryCount = 0
+                    // Handle adopted by THIS worker for the current attempt. Kept
+                    // in a local so we never read back a foreign generation's
+                    // handle from the shared registry.
+                    var acquiredHandle = 0L
                     val crMode = prefs.savedCensorshipResistant
 
                     while (isCurrentSessionActive()) {
@@ -229,14 +227,33 @@ class MaviVpnService : VpnService() {
 
                         retryCount = 0
                         forcedRefreshCount = 0
-                        synchronized(vpnLock) {
-                            vpnSessionHandle = handle
+                        // Adopt the handle only if this worker is still the
+                        // current session. If a stop/restart bumped the
+                        // generation while init was blocking on the network,
+                        // this handle is an orphan: stop+free it so its QUIC
+                        // connection (and the server-side IP lease) is released
+                        // instead of leaking, then let the loop unwind.
+                        if (handleRegistry.tryAdopt(handle, workerGeneration)) {
+                            acquiredHandle = handle
+                        } else {
+                            Log.w("MaviVPN", "Discarding orphaned session handle from superseded start")
+                            NativeLib.stop(handle)
+                            NativeLib.free(handle)
                         }
                         break
                     }
 
-                    if (!isCurrentSessionActive()) continue
-                    val handle = vpnSessionHandle
+                    if (!isCurrentSessionActive()) {
+                        // Superseded after a successful adopt but before the loop
+                        // started: free our own handle so it does not leak.
+                        if (acquiredHandle != 0L) {
+                            handleRegistry.clearIfMatches(acquiredHandle)
+                            NativeLib.stop(acquiredHandle)
+                            NativeLib.free(acquiredHandle)
+                        }
+                        continue
+                    }
+                    val handle = acquiredHandle
 
                     try {
                         val configJson = NativeLib.getConfig(handle)
@@ -319,7 +336,7 @@ class MaviVpnService : VpnService() {
                                 val refreshTicker = startKeycloakRefreshTicker(
                                     prefs = prefs,
                                     tokenManager = tokenManager,
-                                    isSessionActive = { isRunning && vpnSessionGeneration == workerGeneration },
+                                    isSessionActive = { isRunning && handleRegistry.isCurrent(workerGeneration) },
                                     onSessionExpired = {
                                         isRunning = false
                                         isConnected.value = false
@@ -357,13 +374,11 @@ class MaviVpnService : VpnService() {
                         Log.e("MaviVPN", "Error during VPN session: ${e.message}")
                         e.printStackTrace()
                     } finally {
-                        synchronized(vpnLock) {
-                             if (vpnSessionHandle == handle) {
-                                  NativeLib.free(handle)
-                                  vpnSessionHandle = 0
-                             } else if (handle != 0L) {
-                                  NativeLib.free(handle)
-                             }
+                        // Free our own handle exactly once and detach it from the
+                        // registry if it is still the current one.
+                        if (handle != 0L) {
+                            handleRegistry.clearIfMatches(handle)
+                            NativeLib.free(handle)
                         }
                     }
                 } catch (e: Exception) {
@@ -383,7 +398,7 @@ class MaviVpnService : VpnService() {
                     }
                 }
             }
-            if (vpnSessionGeneration == workerGeneration) {
+            if (handleRegistry.isCurrent(workerGeneration)) {
                 stopSelf()
             }
         }.also { it.start() }
@@ -407,17 +422,16 @@ class MaviVpnService : VpnService() {
 
     private fun invalidateCurrentSession(): SessionCleanup {
         synchronized(vpnLock) {
-            vpnSessionGeneration += 1
+            val invalidation = handleRegistry.invalidate()
             isRunning = false
             isConnected.value = false
             val cleanup = SessionCleanup(
-                handle = vpnSessionHandle,
+                handle = invalidation.previousHandle,
                 workerThread = thread,
                 callback = networkCallback,
                 vpnInterface = vpnInterface,
-                generation = vpnSessionGeneration,
+                generation = invalidation.generation,
             )
-            vpnSessionHandle = 0L
             thread = null
             networkCallback = null
             vpnInterface = null

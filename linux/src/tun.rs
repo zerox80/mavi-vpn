@@ -3,6 +3,10 @@
 //! Creates and manages a TUN device via the kernel's `/dev/net/tun` interface.
 //! Provides both synchronous and async (tokio) I/O for the packet pump.
 
+// Raw fd / ioctl work on /dev/net/tun inherently requires unsafe libc calls;
+// same precedent as the Windows service entry point and the Android JNI layer.
+#![allow(unsafe_code)]
+
 use anyhow::{Context, Result};
 use std::ffi::CStr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};

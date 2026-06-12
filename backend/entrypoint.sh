@@ -71,11 +71,38 @@ iptables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null |
     iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 if [ "${VPN_MSS_CLAMPING:-false}" = "true" ]; then
-    echo "Enabling TCP MSS clamping..."
-    iptables -t mangle -C FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || \
-        iptables -t mangle -I FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
-    ip6tables -t mangle -C FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || \
-        ip6tables -t mangle -I FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    # Derive the MSS from the tunnel MTU instead of hardcoding values for the
+    # default MTU 1280: MSS = MTU - IP header - TCP header (40 for IPv4, 60 for IPv6).
+    VPN_MTU=${VPN_MTU:-1280}
+    case "$VPN_MTU" in
+        *[!0-9]*|"")
+            echo "Error: Refusing non-numeric VPN_MTU value: $VPN_MTU" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$VPN_MTU" -lt 1280 ] || [ "$VPN_MTU" -gt 1360 ]; then
+        echo "Error: VPN_MTU must be between 1280 and 1360, got: $VPN_MTU" >&2
+        exit 1
+    fi
+    MSS_V4=$((VPN_MTU - 40))
+    MSS_V6=$((VPN_MTU - 60))
+    echo "Enabling TCP MSS clamping (MTU $VPN_MTU -> MSS $MSS_V4/$MSS_V6)..."
+    iptables -t mangle -C FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V4" 2>/dev/null || \
+        iptables -t mangle -I FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V4"
+    ip6tables -t mangle -C FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V6" 2>/dev/null || \
+        ip6tables -t mangle -I FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V6" 2>/dev/null || true
+fi
+
+# Client isolation: by default, VPN clients must not be able to reach each
+# other. Client-to-client packets re-enter the kernel via the TUN device and
+# are routed back out of it, so a tun+ -> tun+ FORWARD drop blocks them.
+# Inserted last so it ends up at the top of the chain, ahead of the ACCEPTs.
+if [ "${VPN_ALLOW_CLIENT_TO_CLIENT:-false}" != "true" ]; then
+    echo "Blocking client-to-client traffic (set VPN_ALLOW_CLIENT_TO_CLIENT=true to allow)..."
+    iptables -C FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null || \
+        iptables -I FORWARD -i tun+ -o tun+ -j DROP
+    ip6tables -C FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null || \
+        ip6tables -I FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null || true
 fi
 
 # IPv6 Support

@@ -126,18 +126,24 @@ pub(crate) fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     {
         use std::io::Write;
 
-        let mut f = fs::OpenOptions::new()
+        // The freshly created file inherits the parent directory's ACL, which
+        // typically grants BUILTIN\Users read. Create it empty, lock the ACL
+        // down first, and only then write the key bytes — so the secret never
+        // exists on disk while the permissive inherited ACL is in effect.
+        let f = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
             .with_context(|| format!("failed to create {path:?}"))?;
+        drop(f);
+        harden_windows_private_file(path)?;
+
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .with_context(|| format!("failed to reopen {path:?} after hardening"))?;
         f.write_all(contents)
             .with_context(|| format!("failed to write {path:?}"))?;
-        drop(f);
-
-        // The freshly created file inherits the parent directory's ACL, which
-        // typically grants BUILTIN\Users read. Lock it down immediately.
-        harden_windows_private_file(path)?;
     }
     #[cfg(not(any(unix, windows)))]
     {

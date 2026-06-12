@@ -9,9 +9,11 @@ use crate::config::Config;
 use crate::keycloak::KeycloakValidator;
 use crate::state::AppState;
 
-pub type TokenValidationFuture<'a> = Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>;
+pub type TokenValidationFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<i64>>> + Send + 'a>>;
 
 pub trait TokenValidator: Send + Sync {
+    /// Resolves to `Ok(Some(exp))` (token expiry, Unix seconds) when the token
+    /// is accepted, `Ok(None)` when it is rejected.
     fn validate_token<'a>(&'a self, token: &'a str) -> TokenValidationFuture<'a>;
 }
 
@@ -21,16 +23,19 @@ impl TokenValidator for KeycloakValidator {
     }
 }
 
+/// On success returns the assigned IP pair and, for Keycloak auth, the token's
+/// expiry as a Unix timestamp. Static-token sessions have no expiry (`None`).
 pub async fn authenticate_client(
     token: &str,
     state: &Arc<AppState>,
     config: &Config,
     keycloak: Option<&dyn TokenValidator>,
-) -> Result<(Ipv4Addr, Ipv6Addr)> {
-    if let Some(kc) = keycloak {
-        if !kc.validate_token(token).await? {
+) -> Result<(Ipv4Addr, Ipv6Addr, Option<i64>)> {
+    let session_expiry = if let Some(kc) = keycloak {
+        let Some(exp) = kc.validate_token(token).await? else {
             anyhow::bail!("Access Denied: Invalid Keycloak Token");
-        }
+        };
+        Some(exp)
     } else {
         let Some(auth_token) = config.auth_token.as_deref().filter(|t| !t.is_empty()) else {
             anyhow::bail!("Static auth is enabled but VPN_AUTH_TOKEN is not configured");
@@ -38,9 +43,11 @@ pub async fn authenticate_client(
         if !constant_time_eq(token.as_bytes(), auth_token.as_bytes()) {
             anyhow::bail!("Access Denied: Invalid Token");
         }
-    }
+        None
+    };
 
-    state.assign_ip_pair()
+    let (ip4, ip6) = state.assign_ip_pair()?;
+    Ok((ip4, ip6, session_expiry))
 }
 
 #[cfg(test)]
@@ -82,11 +89,12 @@ mod tests {
     async fn valid_token_returns_ip_pair() {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
-        let (ip4, ip6) = authenticate_client("correct-token", &state, &config, None)
+        let (ip4, ip6, expiry) = authenticate_client("correct-token", &state, &config, None)
             .await
             .unwrap();
         assert_eq!(ip4, Ipv4Addr::new(10, 8, 0, 2));
         assert_eq!(ip6, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
+        assert_eq!(expiry, None);
     }
 
     #[tokio::test]
@@ -110,7 +118,7 @@ mod tests {
 
     #[derive(Debug)]
     struct MockValidator {
-        result: Result<bool, &'static str>,
+        result: Result<Option<i64>, &'static str>,
         calls: AtomicUsize,
     }
 
@@ -129,17 +137,18 @@ mod tests {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
         let validator = MockValidator {
-            result: Ok(true),
+            result: Ok(Some(4_102_444_800)),
             calls: AtomicUsize::new(0),
         };
 
-        let (ip4, ip6) = authenticate_client("kc-token", &state, &config, Some(&validator))
+        let (ip4, ip6, expiry) = authenticate_client("kc-token", &state, &config, Some(&validator))
             .await
             .unwrap();
 
         assert_eq!(validator.calls.load(Ordering::SeqCst), 1);
         assert_eq!(ip4, Ipv4Addr::new(10, 8, 0, 2));
         assert_eq!(ip6, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
+        assert_eq!(expiry, Some(4_102_444_800));
     }
 
     #[tokio::test]
@@ -147,7 +156,7 @@ mod tests {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
         let validator = MockValidator {
-            result: Ok(false),
+            result: Ok(None),
             calls: AtomicUsize::new(0),
         };
 

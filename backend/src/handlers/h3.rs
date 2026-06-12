@@ -210,7 +210,7 @@ pub async fn handle_h3_connection(
     )
     .await;
 
-    let (assigned_ip, assigned_ip6) = match auth_result {
+    let (assigned_ip, assigned_ip6, session_expiry) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
             let error_msg = format!("Unauthorized: {e}");
@@ -265,8 +265,8 @@ pub async fn handle_h3_connection(
 
     let connection_arc = Arc::new(connection);
 
-    run_tunnel(
-        connection_arc,
+    let tunnel = run_tunnel(
+        connection_arc.clone(),
         rx_client,
         tx_tun,
         assigned_ip,
@@ -275,6 +275,11 @@ pub async fn handle_h3_connection(
         state.gateway_ip_v6(),
         config.mtu,
         true, // is_h3
+    );
+    crate::handlers::connection::run_tunnel_until_session_expiry(
+        &connection_arc,
+        session_expiry,
+        tunnel,
     )
     .await
 }

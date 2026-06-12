@@ -136,6 +136,34 @@ pub enum ControlMessage {
     Error { message: String },
 }
 
+/// Validates that a Keycloak base URL uses HTTPS.
+///
+/// JWKS fetches, the OAuth authorization redirect and the token exchange all
+/// derive from this URL; over plain HTTP a MITM can substitute signing keys
+/// or capture tokens. Plain HTTP is only allowed for loopback hosts (dev).
+///
+/// # Errors
+/// Returns a human-readable reason when the URL is not acceptable.
+pub fn validate_keycloak_url(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        let authority = rest.split('/').next().unwrap_or("");
+        let host = authority
+            .strip_prefix('[')
+            .and_then(|h| h.split(']').next())
+            .unwrap_or_else(|| authority.rsplit_once(':').map_or(authority, |(h, _)| h));
+        if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+            return Ok(());
+        }
+        return Err(format!(
+            "Keycloak URL must use https:// (got plain http for host {host:?}); plain HTTP is only allowed for localhost"
+        ));
+    }
+    Err("Keycloak URL must start with https://".to_string())
+}
+
 /// Checks whether a raw byte buffer looks like an HTML response.
 ///
 /// Used by clients to detect the server's camouflage/nginx response when
@@ -411,6 +439,22 @@ mod tests {
         } else {
             std::env::remove_var("VPN_MTU");
         }
+    }
+
+    #[test]
+    fn validate_keycloak_url_rules() {
+        assert!(validate_keycloak_url("https://auth.example.com").is_ok());
+        assert!(validate_keycloak_url("http://localhost").is_ok());
+        assert!(validate_keycloak_url("http://localhost:8080/realms/x").is_ok());
+        assert!(validate_keycloak_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_keycloak_url("http://[::1]:8080").is_ok());
+        assert!(validate_keycloak_url("http://auth.example.com").is_err());
+        assert!(validate_keycloak_url("http://10.0.0.5:8080").is_err());
+        assert!(validate_keycloak_url("ftp://auth.example.com").is_err());
+        assert!(validate_keycloak_url("").is_err());
+        // Substring tricks must not bypass the loopback exemption.
+        assert!(validate_keycloak_url("http://localhost.evil.com").is_err());
+        assert!(validate_keycloak_url("http://evil.com/localhost").is_err());
     }
 
     #[test]

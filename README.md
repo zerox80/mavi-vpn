@@ -276,10 +276,11 @@ All server settings can be configured via environment variables or CLI flags:
 | `VPN_DNS` | `1.1.1.1` | DNS server pushed to clients |
 | `VPN_MTU` | `1280` | TUN interface MTU |
 | `VPN_CENSORSHIP_RESISTANT` | `false` | Enable Layer 7 obfuscation |
-| `VPN_MSS_CLAMPING` | `false` | TCP MSS rewriting via iptables mangle |
+| `VPN_MSS_CLAMPING` | `false` | TCP MSS rewriting via iptables mangle (MSS derived from `VPN_MTU`) |
+| `VPN_ALLOW_CLIENT_TO_CLIENT` | `false` | Allow VPN clients to reach each other (blocked by default) |
 | `VPN_ECH_PUBLIC_NAME` | `cloudflare-ech.com` | ECH cover SNI domain |
 | `VPN_KEYCLOAK_ENABLED` | `false` | Enable Keycloak JWT auth |
-| `VPN_KEYCLOAK_URL` | — | Keycloak server URL |
+| `VPN_KEYCLOAK_URL` | — | Keycloak server URL (must be `https://`; plain HTTP only for localhost) |
 | `VPN_KEYCLOAK_REALM` | `mavi-vpn` | Keycloak realm name |
 | `VPN_KEYCLOAK_CLIENT_ID` | `mavi-client` | Keycloak OIDC client ID |
 

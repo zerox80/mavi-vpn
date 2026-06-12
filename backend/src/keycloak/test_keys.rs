@@ -35,6 +35,7 @@ pub(super) fn signed_token_and_jwks(
         "sub": "user-1",
         "azp": client_id,
         "exp": expires_at,
+        "typ": "Bearer",
     });
 
     let message = [

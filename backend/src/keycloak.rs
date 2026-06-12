@@ -105,8 +105,11 @@ impl KeycloakValidator {
         self.fetcher.fetch_jwks(&jwks_url).await
     }
 
+    /// Validates the token. Returns `Ok(Some(exp))` (the token's expiry as a
+    /// Unix timestamp) when the token is accepted, `Ok(None)` when it fails a
+    /// policy check, and `Err` when validation could not be performed.
     #[allow(clippy::too_many_lines)]
-    pub async fn validate_token(&self, token: &str) -> Result<bool> {
+    pub async fn validate_token(&self, token: &str) -> Result<Option<i64>> {
         let header = decode_header(token).context("Invalid JWT header")?;
         let kid = header
             .kid
@@ -194,23 +197,23 @@ impl KeycloakValidator {
                 #[allow(clippy::cast_possible_wrap)]
                 let leeway = validation.leeway as i64;
 
-                if !Self::validate_claims_with_policy(
+                let Some(exp) = Self::validate_claims_with_policy(
                     claims,
                     &self.client_id,
                     now,
                     leeway,
                     self.required_role.as_deref(),
                     self.required_scope.as_deref(),
-                ) {
-                    return Ok(false);
-                }
+                ) else {
+                    return Ok(None);
+                };
 
                 info!(
                     "Keycloak JWT validated successfully (sub: {}, azp: {})",
                     claims.get("sub").and_then(|v| v.as_str()).unwrap_or("?"),
                     claims.get("azp").and_then(|v| v.as_str()).unwrap_or("?")
                 );
-                Ok(true)
+                Ok(Some(exp))
             }
             Err(e) => {
                 warn!("JWT validation failed: {}", e);
@@ -224,9 +227,10 @@ impl KeycloakValidator {
 
     #[cfg(test)]
     fn validate_claims(claims: &serde_json::Value, client_id: &str, now: i64, leeway: i64) -> bool {
-        Self::validate_claims_with_policy(claims, client_id, now, leeway, None, None)
+        Self::validate_claims_with_policy(claims, client_id, now, leeway, None, None).is_some()
     }
 
+    /// Returns the token's `exp` claim when all policy checks pass, `None` otherwise.
     fn validate_claims_with_policy(
         claims: &serde_json::Value,
         client_id: &str,
@@ -234,27 +238,39 @@ impl KeycloakValidator {
         leeway: i64,
         required_role: Option<&str>,
         required_scope: Option<&str>,
-    ) -> bool {
+    ) -> Option<i64> {
+        // Keycloak marks access tokens with typ:"Bearer". ID tokens (typ:"ID")
+        // share issuer, signature keys and azp, so without this check they
+        // would be accepted as VPN credentials.
+        let Some(typ) = claims.get("typ").and_then(|v| v.as_str()) else {
+            warn!("JWT missing 'typ' claim - rejecting token");
+            return None;
+        };
+        if typ != "Bearer" {
+            warn!("JWT 'typ' is '{}', expected 'Bearer' - rejecting token", typ);
+            return None;
+        }
+
         let Some(exp) = claims.get("exp").and_then(json_number_as_i64) else {
             warn!("JWT missing 'exp' claim - rejecting token");
-            return false;
+            return None;
         };
 
         if now > exp + leeway {
             warn!("JWT expired: exp={}, now={}", exp, now);
-            return false;
+            return None;
         }
 
         if let Some(nbf) = claims.get("nbf").and_then(json_number_as_i64) {
             if now + leeway < nbf {
                 warn!("JWT not yet valid: nbf={}, now={}", nbf, now);
-                return false;
+                return None;
             }
         }
 
         let Some(azp) = claims.get("azp").and_then(|v| v.as_str()) else {
             warn!("JWT missing 'azp' claim — rejecting token");
-            return false;
+            return None;
         };
 
         // Strict check: Only accept tokens that were explicitly issued to THIS client ID.
@@ -263,24 +279,24 @@ impl KeycloakValidator {
                 "JWT azp mismatch: expected '{}', got '{}'. Rejecting token for security.",
                 client_id, azp
             );
-            return false;
+            return None;
         }
 
         if let Some(role) = required_role {
             if !claim_has_role(claims, client_id, role) {
                 warn!("JWT missing required Keycloak role '{}'", role);
-                return false;
+                return None;
             }
         }
 
         if let Some(scope) = required_scope {
             if !claim_has_scope(claims, scope) {
                 warn!("JWT missing required OAuth scope '{}'", scope);
-                return false;
+                return None;
             }
         }
 
-        true
+        Some(exp)
     }
 }
 

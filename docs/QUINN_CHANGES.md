@@ -1,6 +1,6 @@
 # Quinn Changes
 
-This project resolves Quinn through the `zerox80/quinn` fork and `h3` through the `zerox80/h3` fork, both tracked on `main`. The root `Cargo.toml` applies those patches so `h3-quinn` uses Quinn 0.12 instead of pulling a second Quinn 0.11 dependency from crates.io.
+This project resolves Quinn through the `zerox80/quinn` fork and `h3` through the `zerox80/h3` fork. The root `Cargo.toml` pins those patches to immutable commit revisions so `h3-quinn` uses Quinn 0.12 instead of pulling a second Quinn 0.11 dependency from crates.io.
 
 ## 2026-04-27
 
@@ -17,8 +17,8 @@ This project resolves Quinn through the `zerox80/quinn` fork and `h3` through th
 
 ## Fork State
 
-- `quinn`, `quinn-proto`, and `quinn-udp` are patched to `https://github.com/zerox80/quinn`, branch `main`.
-- `h3`, `h3-quinn`, and `h3-datagram` are patched to `https://github.com/zerox80/h3`, branch `main`.
+- `quinn`, `quinn-proto`, and `quinn-udp` are patched to `https://github.com/zerox80/quinn`, revision `760ba55d0192cc2b3da86f184d7a9f3874738515`.
+- `h3`, `h3-quinn`, and `h3-datagram` are patched to `https://github.com/zerox80/h3`, revision `99533cd3f198cd9b548d5264cd7bff07e7d08cc0`.
 - The h3 fork updates `h3-quinn` to accept Quinn 0.12, preventing a fallback to the crates.io Quinn 0.11 line.
-- `Cargo.lock` pins these fork revisions for reproducible builds.
+- `Cargo.toml` pins these fork revisions for reproducible builds.
 - `external/quinn` was removed from this repository to avoid keeping an unused second Quinn source tree beside the fork patches.

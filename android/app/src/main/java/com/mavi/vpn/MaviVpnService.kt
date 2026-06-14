@@ -491,4 +491,13 @@ class MaviVpnService : VpnService() {
         wakeLock = null
     }
 
+    private fun isAuthFailure(message: String): Boolean {
+        val normalized = message.lowercase()
+        return normalized.contains("unauthorized") ||
+            normalized.contains("auth_failed") ||
+            normalized.contains("access denied") ||
+            normalized.contains("invalid token") ||
+            normalized.contains("invalid keycloak token")
+    }
+
 }

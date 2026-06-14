@@ -8,6 +8,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Unit Tests
@@ -50,6 +53,17 @@ jobs:
         run: cargo test -p linux-vpn --verbose
       - name: Test quic-tester
         run: cargo test -p quic-tester --verbose
+      - name: Setup Node.js for Tauri frontend
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Build Tauri frontend assets
+        working-directory: gui
+        run: |
+          npm ci
+          npm run build
       - name: Test GUI backend
         run: cargo test -p mavi-vpn-gui --verbose
 
@@ -89,6 +103,17 @@ jobs:
             libxdo-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
+      - name: Setup Node.js for Tauri frontend
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Build Tauri frontend assets
+        working-directory: gui
+        run: |
+          npm ci
+          npm run build
       - name: Generate Rust coverage summary
         run: |
           mkdir -p target/coverage

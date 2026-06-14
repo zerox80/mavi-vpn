@@ -6,7 +6,34 @@
 //! These helpers keep server and clients in agreement on that value and make the
 //! synthesized PMTUD signal actually convergent.
 
-use crate::{MAX_TUN_MTU, MIN_TUN_MTU};
+use crate::{ControlMessage, MAX_TUN_MTU, MIN_TUN_MTU, QUIC_OVERHEAD_BYTES};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuicMtuConfig {
+    pub quic_mtu: u16,
+    pub transport_tun_mtu: u16,
+    pub mtu_source: crate::TunMtuSource,
+    pub wire_mtu_ipv4: u16,
+    pub wire_mtu_ipv6: u16,
+    pub local_tun_mtu: u16,
+}
+
+/// Computes the pinned QUIC payload budget from the configured inner TUN MTU.
+#[must_use]
+pub fn compute_quic_mtu_config(vpn_mtu: Option<u16>) -> QuicMtuConfig {
+    let (local_tun_mtu, mtu_source) = crate::resolve_tun_mtu_with_source(vpn_mtu);
+    let transport_tun_mtu = local_tun_mtu;
+    let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
+
+    QuicMtuConfig {
+        quic_mtu,
+        transport_tun_mtu,
+        mtu_source,
+        wire_mtu_ipv4: quic_mtu + 20 + 8,
+        wire_mtu_ipv6: quic_mtu + 40 + 8,
+        local_tun_mtu,
+    }
+}
 
 /// Validates the MTU the server pushed against the inner TUN MTU the client
 /// pinned its QUIC transport budget to.
@@ -39,6 +66,21 @@ pub fn check_server_mtu(server_mtu: u16, local_tun_mtu: u16) -> Result<(), Strin
              Configure both sides to the same VPN_MTU (the client pins its transport budget before \
              the handshake and cannot adopt a different value)."
         ));
+    }
+    Ok(())
+}
+
+/// Validates the MTU inside a server control message, ignoring non-config messages.
+///
+/// # Errors
+/// Returns `Err` when a `ControlMessage::Config` contains an unsupported or
+/// mismatched server MTU.
+pub fn validate_control_message_mtu(
+    config: &ControlMessage,
+    local_tun_mtu: u16,
+) -> Result<(), String> {
+    if let ControlMessage::Config { mtu, .. } = config {
+        check_server_mtu(*mtu, local_tun_mtu)?;
     }
     Ok(())
 }
@@ -102,6 +144,18 @@ mod tests {
         assert!(check_server_mtu(2000, 1280)
             .unwrap_err()
             .contains("unsupported VPN MTU"));
+    }
+
+    #[test]
+    fn quic_mtu_config_derives_wire_budgets_from_tun_mtu() {
+        let cfg = compute_quic_mtu_config(Some(1300));
+
+        assert_eq!(cfg.local_tun_mtu, 1300);
+        assert_eq!(cfg.transport_tun_mtu, 1300);
+        assert_eq!(cfg.quic_mtu, 1300 + QUIC_OVERHEAD_BYTES);
+        assert_eq!(cfg.wire_mtu_ipv4, cfg.quic_mtu + 28);
+        assert_eq!(cfg.wire_mtu_ipv6, cfg.quic_mtu + 48);
+        assert_eq!(cfg.mtu_source, crate::TunMtuSource::Config);
     }
 
     #[test]

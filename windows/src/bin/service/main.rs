@@ -1,10 +1,11 @@
 #![allow(unsafe_code)]
 
+use anyhow::Context;
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use windows_service::{
     define_windows_service,
     service::{
@@ -39,9 +40,13 @@ const SERVICE_TYPE: windows_service::service::ServiceType =
 define_windows_service!(ffi_service_main, my_service_main);
 
 pub fn main() -> Result<(), windows_service::Error> {
-    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive("mavi_vpn=info".parse().unwrap())
-        .add_directive("wintun=off".parse().unwrap());
+    let mut env_filter = tracing_subscriber::EnvFilter::from_default_env();
+    for directive in ["mavi_vpn=info", "wintun=off"] {
+        match directive.parse() {
+            Ok(parsed) => env_filter = env_filter.add_directive(parsed),
+            Err(e) => warn!("Ignoring invalid tracing directive {directive:?}: {e}"),
+        }
+    }
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     info!("Starting service dispatcher for {}", SERVICE_NAME);
@@ -49,7 +54,9 @@ pub fn main() -> Result<(), windows_service::Error> {
 
     if args.iter().any(|arg| arg == "--console") {
         info!("Running in console mode");
-        cli::run_standalone();
+        if let Err(e) = cli::run_standalone() {
+            error!("Console service run failed: {e:#}");
+        }
         return Ok(());
     }
 
@@ -79,9 +86,7 @@ pub(crate) fn handle_service_control(
 ) -> (ServiceControlHandlerResult, bool) {
     let mut did_stop = false;
     let result = match control_event {
-        event @ (ServiceControl::Stop
-        | ServiceControl::Preshutdown
-        | ServiceControl::Shutdown) => {
+        event @ (ServiceControl::Stop | ServiceControl::Preshutdown | ServiceControl::Shutdown) => {
             info!("Received {:?} signal from Service Control Manager", event);
             stop_signal.store(true, Ordering::SeqCst);
             did_stop = true;
@@ -116,8 +121,11 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
     let reharden_signal_handler = reharden_signal.clone();
 
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
-        let (result, did_stop) =
-            handle_service_control(control_event, &stop_signal_handler, &reharden_signal_handler);
+        let (result, did_stop) = handle_service_control(
+            control_event,
+            &stop_signal_handler,
+            &reharden_signal_handler,
+        );
         if did_stop {
             utils::run_network_repair_cleanup();
         }
@@ -141,7 +149,7 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("Failed to create Tokio runtime");
+        .context("failed to create Tokio runtime")?;
 
     info!("Service is now running");
 

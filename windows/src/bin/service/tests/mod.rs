@@ -164,7 +164,10 @@ async fn handle_start_request_sets_config_and_flags() {
     assert!(state.vpn_running.load(Ordering::SeqCst));
     assert!(!state.vpn_connected.load(Ordering::SeqCst));
     assert!(!state.vpn_stopping.load(Ordering::SeqCst));
-    assert_eq!(state.active_config.as_ref().unwrap().endpoint, config.endpoint);
+    assert_eq!(
+        state.active_config.as_ref().unwrap().endpoint,
+        config.endpoint
+    );
     assert!(state.vpn_task.is_some());
 
     if let Some(task) = state.vpn_task.take() {
@@ -198,7 +201,11 @@ async fn status_request_returns_current_state() {
     }
 
     match dispatch_request(ipc::IpcRequest::Status, &state).await {
-        ipc::IpcResponse::Status { running, assigned_ip, .. } => {
+        ipc::IpcResponse::Status {
+            running,
+            assigned_ip,
+            ..
+        } => {
             assert!(running);
             assert_eq!(assigned_ip, Some("10.8.0.2".to_string()));
         }
@@ -375,7 +382,10 @@ async fn handle_start_request_preserves_config_fields() {
     assert!(saved_config.http3_framing);
     assert_eq!(saved_config.vpn_mtu, Some(1340));
     assert_eq!(saved_config.kc_auth, Some(true));
-    assert_eq!(saved_config.kc_url.as_deref(), Some("https://auth.example.com"));
+    assert_eq!(
+        saved_config.kc_url.as_deref(),
+        Some("https://auth.example.com")
+    );
 
     if let Some(task) = state.vpn_task.take() {
         task.abort();

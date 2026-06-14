@@ -31,16 +31,17 @@ mod handlers;
 /// Builds the Keycloak token validator when OIDC auth is enabled, retrying the
 /// initial JWKS fetch with exponential backoff.
 ///
-/// Returns `None` when Keycloak is disabled. Panics (fatal) rather than silently
-/// degrading to static-token auth if the URL is missing or the JWKS never loads:
-/// starting with broken auth would be a security disaster.
-async fn init_keycloak(config: &config::Config) -> Option<Arc<keycloak::KeycloakValidator>> {
+/// Returns `None` when Keycloak is disabled. Missing or unreachable Keycloak
+/// configuration is fatal: starting with broken auth would be a security risk.
+async fn init_keycloak(
+    config: &config::Config,
+) -> Result<Option<Arc<keycloak::KeycloakValidator>>> {
     if !config.keycloak_enabled {
-        return None;
+        return Ok(None);
     }
 
     let Some(url) = &config.keycloak_url else {
-        panic!("FATAL: VPN_KEYCLOAK_ENABLED=true but VPN_KEYCLOAK_URL is not set!");
+        anyhow::bail!("VPN_KEYCLOAK_ENABLED=true but VPN_KEYCLOAK_URL is not set");
     };
 
     let kc = keycloak::KeycloakValidator::new(
@@ -62,7 +63,7 @@ async fn init_keycloak(config: &config::Config) -> Option<Arc<keycloak::Keycloak
                     "Keycloak JWKS loaded successfully (attempt {}/{})",
                     attempt, max_retries
                 );
-                return Some(Arc::new(kc));
+                return Ok(Some(Arc::new(kc)));
             }
             Err(e) => {
                 let delay = std::time::Duration::from_secs(2u64.pow(attempt - 1));
@@ -82,11 +83,13 @@ async fn init_keycloak(config: &config::Config) -> Option<Arc<keycloak::Keycloak
     }
 
     // DO NOT silently fall back to static token — that's a security disaster.
-    panic!(
-        "FATAL: Could not load Keycloak JWKS after {} attempts. \
+    anyhow::bail!(
+        "Could not load Keycloak JWKS after {} attempts. \
          Refusing to start with broken auth. \
          Ensure Keycloak is reachable at: {}/realms/{}/protocol/openid-connect/certs",
-        max_retries, url, config.keycloak_realm
+        max_retries,
+        url,
+        config.keycloak_realm
     );
 }
 
@@ -172,7 +175,7 @@ async fn main() -> Result<()> {
     }
 
     // Keycloak Validator Setup
-    let keycloak = init_keycloak(&config).await;
+    let keycloak = init_keycloak(&config).await?;
 
     // --- NETWORK SETUP ---
     // Create the global TUN message channel (Capacity 4096 to prevent backpressure)

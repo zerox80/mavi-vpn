@@ -29,8 +29,13 @@ pub(crate) enum SessionEnd {
 #[derive(Debug)]
 pub(crate) enum ReconnectDecision {
     Break,
-    Reconnect { delay: Duration, next_backoff: Duration },
-    PermanentFailure { error: String },
+    Reconnect {
+        delay: Duration,
+        next_backoff: Duration,
+    },
+    PermanentFailure {
+        error: String,
+    },
 }
 
 pub(crate) fn compute_reconnect_delay(
@@ -102,7 +107,10 @@ mod tests {
     #[test]
     fn connection_lost_resets_backoff() {
         match compute_reconnect_delay(Ok(SessionEnd::ConnectionLost), Duration::from_secs(10)) {
-            ReconnectDecision::Reconnect { delay, next_backoff } => {
+            ReconnectDecision::Reconnect {
+                delay,
+                next_backoff,
+            } => {
                 assert_eq!(delay, Duration::from_secs(1));
                 assert_eq!(next_backoff, Duration::from_secs(1));
             }
@@ -114,7 +122,10 @@ mod tests {
     fn transient_error_backoffs() {
         let err = anyhow::anyhow!("network timeout");
         match compute_reconnect_delay(Err(err), Duration::from_secs(2)) {
-            ReconnectDecision::Reconnect { delay, next_backoff } => {
+            ReconnectDecision::Reconnect {
+                delay,
+                next_backoff,
+            } => {
                 assert_eq!(delay, Duration::from_secs(2));
                 assert_eq!(next_backoff, Duration::from_secs(4));
             }
@@ -127,7 +138,10 @@ mod tests {
         let err = anyhow::anyhow!("network timeout");
         let backoff = Duration::from_secs(25);
         match compute_reconnect_delay(Err(err), backoff) {
-            ReconnectDecision::Reconnect { delay, next_backoff } => {
+            ReconnectDecision::Reconnect {
+                delay,
+                next_backoff,
+            } => {
                 assert_eq!(delay, Duration::from_secs(25));
                 assert_eq!(next_backoff, Duration::from_secs(30));
             }

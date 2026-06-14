@@ -22,7 +22,8 @@ use self::network::{
     cleanup_routes, create_udp_socket, remove_nrpt_dns_rule, set_adapter_network_config,
     SessionRouteGuard,
 };
-use self::reconnect::{compute_reconnect_delay, sleep_unless_stopped, ReconnectDecision, SessionEnd,
+use self::reconnect::{
+    compute_reconnect_delay, sleep_unless_stopped, ReconnectDecision, SessionEnd,
     RECONNECT_INITIAL_SECS,
 };
 use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter, is_wintun_ring_full};
@@ -101,14 +102,14 @@ pub async fn run_vpn(
         match compute_reconnect_delay(outcome, backoff) {
             ReconnectDecision::Break => break,
             ReconnectDecision::PermanentFailure { error } => {
-                warn!(
-                    "Permanent VPN setup failure: {}. Stopping VPN loop.",
-                    error
-                );
+                warn!("Permanent VPN setup failure: {}. Stopping VPN loop.", error);
                 running.store(false, Ordering::Relaxed);
                 break;
             }
-            ReconnectDecision::Reconnect { delay, next_backoff } => {
+            ReconnectDecision::Reconnect {
+                delay,
+                next_backoff,
+            } => {
                 if let Some(ref err_str) = err_opt {
                     warn!("Session failed: {err_str}. Reconnecting...");
                 }
@@ -275,7 +276,9 @@ async fn run_session(
 
         // 2. Verify On-Link split routes exist
         if !network::verify_ipv6_split_routes(idx)? {
-            bail!("IPV6_SETUP_FAILED: IPv6 split routes (::/1, 8000::/1) not found in routing table");
+            bail!(
+                "IPV6_SETUP_FAILED: IPv6 split routes (::/1, 8000::/1) not found in routing table"
+            );
         }
         info!("IPv6 split routes verified as On-Link");
     }
@@ -368,9 +371,7 @@ async fn run_session(
                                 source_ip,
                             ) {
                                 if let Ok(len) = u16::try_from(icmp_packet.len()) {
-                                    if let Ok(mut reply) =
-                                        session_tun.allocate_send_packet(len)
-                                    {
+                                    if let Ok(mut reply) = session_tun.allocate_send_packet(len) {
                                         reply.bytes_mut().copy_from_slice(&icmp_packet);
                                         session_tun.send_packet(reply);
                                     }
@@ -475,7 +476,9 @@ async fn run_session(
     }
     drop(route_cleanup);
 
-    Ok(determine_session_result(global_running.load(Ordering::Relaxed)))
+    Ok(determine_session_result(
+        global_running.load(Ordering::Relaxed),
+    ))
 }
 
 #[cfg(test)]

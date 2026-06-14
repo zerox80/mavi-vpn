@@ -51,7 +51,10 @@ fn unknown_control_returns_not_implemented() {
     let stop = Arc::new(AtomicBool::new(false));
     let reharden = Arc::new(AtomicBool::new(false));
     let (result, did_stop) = handle_service_control(ServiceControl::Pause, &stop, &reharden);
-    assert!(matches!(result, ServiceControlHandlerResult::NotImplemented));
+    assert!(matches!(
+        result,
+        ServiceControlHandlerResult::NotImplemented
+    ));
     assert!(!stop.load(Ordering::SeqCst));
     assert!(!did_stop);
 }
@@ -71,8 +74,11 @@ fn preshutdown_control_sets_stop_signal() {
 fn session_logon_sets_reharden_signal() {
     let stop = Arc::new(AtomicBool::new(false));
     let reharden = Arc::new(AtomicBool::new(false));
-    let (result, did_stop) =
-        handle_service_control(session_change(SessionChangeReason::SessionLogon), &stop, &reharden);
+    let (result, did_stop) = handle_service_control(
+        session_change(SessionChangeReason::SessionLogon),
+        &stop,
+        &reharden,
+    );
     assert!(matches!(result, ServiceControlHandlerResult::NoError));
     assert!(reharden.load(Ordering::SeqCst));
     assert!(!did_stop);
@@ -180,8 +186,11 @@ fn remote_disconnect_does_not_set_reharden_signal() {
 fn session_change_never_sets_stop_signal() {
     let stop = Arc::new(AtomicBool::new(false));
     let reharden = Arc::new(AtomicBool::new(false));
-    let (_, did_stop) =
-        handle_service_control(session_change(SessionChangeReason::SessionLogon), &stop, &reharden);
+    let (_, did_stop) = handle_service_control(
+        session_change(SessionChangeReason::SessionLogon),
+        &stop,
+        &reharden,
+    );
     assert!(!stop.load(Ordering::SeqCst));
     assert!(!did_stop);
 }

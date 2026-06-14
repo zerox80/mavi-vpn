@@ -115,6 +115,43 @@ pub(super) async fn run_tunnel_until_session_expiry(
     }
 }
 
+/// Capacity of the per-client server→client packet queue. Mirrors the global
+/// TUN channel capacity so backpressure behaves symmetrically on both legs.
+const CLIENT_CHANNEL_CAPACITY: usize = 4096;
+
+/// Shared post-authentication setup for both the raw and H3 paths: registers the
+/// client's packet sink, starts the bidirectional tunnel, and tears it down when
+/// the session token expires. The caller retains the [`IpGuard`] so the assigned
+/// IP pair is released even if delivering the config/capsule response fails
+/// before this runs.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_authenticated_tunnel(
+    connection: Arc<quinn::Connection>,
+    state: &AppState,
+    tx_tun: tokio::sync::mpsc::Sender<Bytes>,
+    assigned_ip: std::net::Ipv4Addr,
+    assigned_ip6: std::net::Ipv6Addr,
+    session_expiry: Option<i64>,
+    mtu: u16,
+    is_h3: bool,
+) -> Result<()> {
+    let (tx_client, rx_client) = tokio::sync::mpsc::channel::<Bytes>(CLIENT_CHANNEL_CAPACITY);
+    state.register_client(assigned_ip, assigned_ip6, tx_client);
+
+    let tunnel = run_tunnel(
+        connection.clone(),
+        rx_client,
+        tx_tun,
+        assigned_ip,
+        assigned_ip6,
+        state.gateway_ip(),
+        state.gateway_ip_v6(),
+        mtu,
+        is_h3,
+    );
+    run_tunnel_until_session_expiry(&connection, session_expiry, tunnel).await
+}
+
 pub(super) fn build_config_message(
     state: &AppState,
     config: &Config,
@@ -281,9 +318,7 @@ pub async fn handle_connection(
             &token,
             &state,
             &config,
-            keycloak
-                .as_deref()
-                .map(|kc| kc as &dyn crate::handlers::auth::TokenValidator),
+            crate::handlers::auth::as_token_validator(keycloak.as_ref()),
         )
         .await
     }
@@ -330,9 +365,6 @@ pub async fn handle_connection(
         assigned_ip6
     );
 
-    let (tx_client, rx_client) = tokio::sync::mpsc::channel::<Bytes>(4096);
-    state.register_client(assigned_ip, assigned_ip6, tx_client);
-
     let connection_arc = Arc::new(connection);
     let conn_stats = connection_arc.clone();
     tokio::spawn(async move {
@@ -354,18 +386,17 @@ pub async fn handle_connection(
         }
     });
 
-    let tunnel = run_tunnel(
-        connection_arc.clone(),
-        rx_client,
+    run_authenticated_tunnel(
+        connection_arc,
+        &state,
         tx_tun,
         assigned_ip,
         assigned_ip6,
-        state.gateway_ip(),
-        state.gateway_ip_v6(),
+        session_expiry,
         config.mtu,
         false, // is_h3
-    );
-    run_tunnel_until_session_expiry(&connection_arc, session_expiry, tunnel).await
+    )
+    .await
 }
 
 #[cfg(test)]

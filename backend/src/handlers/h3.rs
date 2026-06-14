@@ -11,9 +11,8 @@ use shared::masque::{
 };
 
 use crate::config::Config;
-use crate::handlers::auth::authenticate_client;
-use crate::handlers::connection::build_config_message;
-use crate::handlers::tunnel::run_tunnel;
+use crate::handlers::auth::{as_token_validator, authenticate_client};
+use crate::handlers::connection::{build_config_message, run_authenticated_tunnel};
 use crate::handlers::utils::{prefix_len_from_mask, IpGuard};
 use crate::keycloak::KeycloakValidator;
 use crate::state::AppState;
@@ -204,9 +203,7 @@ pub async fn handle_h3_connection(
         &token,
         &state,
         &config,
-        keycloak
-            .as_deref()
-            .map(|kc| kc as &dyn crate::handlers::auth::TokenValidator),
+        as_token_validator(keycloak.as_ref()),
     )
     .await;
 
@@ -260,26 +257,17 @@ pub async fn handle_h3_connection(
         assigned_ip6
     );
 
-    let (tx_client, rx_client) = tokio::sync::mpsc::channel::<Bytes>(4096);
-    state.register_client(assigned_ip, assigned_ip6, tx_client);
-
     let connection_arc = Arc::new(connection);
 
-    let tunnel = run_tunnel(
-        connection_arc.clone(),
-        rx_client,
+    run_authenticated_tunnel(
+        connection_arc,
+        &state,
         tx_tun,
         assigned_ip,
         assigned_ip6,
-        state.gateway_ip(),
-        state.gateway_ip_v6(),
+        session_expiry,
         config.mtu,
         true, // is_h3
-    );
-    crate::handlers::connection::run_tunnel_until_session_expiry(
-        &connection_arc,
-        session_expiry,
-        tunnel,
     )
     .await
 }

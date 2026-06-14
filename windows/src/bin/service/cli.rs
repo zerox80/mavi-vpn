@@ -1,5 +1,6 @@
 use super::main_loop::run_service_loop;
 use super::utils::run_network_repair_cleanup;
+use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,17 +8,29 @@ use tracing::{error, info};
 
 pub const SERVICE_NAME: &str = "MaviVPNService";
 
-pub fn run_standalone() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
+pub fn run_standalone() -> Result<()> {
+    let rt = tokio::runtime::Runtime::new().context("failed to create Tokio runtime")?;
     let stop_signal = Arc::new(AtomicBool::new(false));
     let reharden_signal = Arc::new(AtomicBool::new(false));
 
     let stop_signal_handler = stop_signal.clone();
     rt.spawn(async move {
         use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close};
-        let mut s_c = ctrl_c().expect("Failed to listen for Ctrl+C");
-        let mut s_close = ctrl_close().expect("Failed to listen for Ctrl+Close");
-        let mut s_break = ctrl_break().expect("Failed to listen for Ctrl+Break");
+        let Ok(mut s_c) = ctrl_c() else {
+            error!("Failed to listen for Ctrl+C");
+            stop_signal_handler.store(true, Ordering::SeqCst);
+            return;
+        };
+        let Ok(mut s_close) = ctrl_close() else {
+            error!("Failed to listen for Ctrl+Close");
+            stop_signal_handler.store(true, Ordering::SeqCst);
+            return;
+        };
+        let Ok(mut s_break) = ctrl_break() else {
+            error!("Failed to listen for Ctrl+Break");
+            stop_signal_handler.store(true, Ordering::SeqCst);
+            return;
+        };
 
         tokio::select! {
             _ = s_c.recv() => info!("Received Ctrl+C signal"),
@@ -41,10 +54,18 @@ pub fn run_standalone() {
             }
         }
     });
+
+    Ok(())
 }
 
 pub fn install_service() {
-    let exe_path = std::env::current_exe().unwrap();
+    let exe_path = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => {
+            error!("Failed to determine current executable path: {}", e);
+            return;
+        }
+    };
     let quoted_exe_path = format!("\"{}\"", exe_path.display());
     info!("Installing MaviVPNService...");
     let status = std::process::Command::new("sc")

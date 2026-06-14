@@ -2,13 +2,20 @@
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+pub mod endpoint;
 pub mod hex;
 pub mod icmp;
 pub mod ipc;
 pub mod masque;
 pub mod mtu;
 
-pub use mtu::{check_server_mtu, effective_ptb_mtu};
+pub use endpoint::{
+    endpoint_host, endpoint_host_is_explicit_ipv6, resolve_server_name, split_endpoint,
+};
+pub use mtu::{
+    check_server_mtu, compute_quic_mtu_config, effective_ptb_mtu, validate_control_message_mtu,
+    QuicMtuConfig,
+};
 
 #[cfg(test)]
 pub mod test_helpers;

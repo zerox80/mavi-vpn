@@ -124,7 +124,8 @@ impl AppState {
                 .free_ips
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            free.pop().ok_or_else(|| anyhow!("VPN IPv4 pool exhausted"))?
+            free.pop()
+                .ok_or_else(|| anyhow!("VPN IPv4 pool exhausted"))?
         };
         self.leased_ips
             .lock()

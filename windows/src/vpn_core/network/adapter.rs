@@ -294,10 +294,7 @@ mod tests {
 
     #[test]
     fn powershell_single_quoted_escapes_single_quotes() {
-        assert_eq!(
-            powershell_single_quoted("it's a test"),
-            "'it''s a test'"
-        );
+        assert_eq!(powershell_single_quoted("it's a test"), "'it''s a test'");
     }
 
     #[test]
@@ -307,10 +304,7 @@ mod tests {
 
     #[test]
     fn powershell_single_quoted_multiple_quotes() {
-        assert_eq!(
-            powershell_single_quoted("a'b'c"),
-            "'a''b''c'"
-        );
+        assert_eq!(powershell_single_quoted("a'b'c"), "'a''b''c'");
     }
 
     #[test]
@@ -335,22 +329,33 @@ mod tests {
 
     #[test]
     fn nrpt_cleanup_script_contains_all_registry_roots() {
-        let script = nrpt_cleanup_script_for_path(Path::new(r"C:\ProgramData\mavi-vpn\last_dns_servers.txt"));
-        assert!(script.contains(r"HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig"));
-        assert!(script.contains(r"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DNSClient\DnsPolicyConfig"));
-        assert!(script.contains(r"HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig"));
+        let script = nrpt_cleanup_script_for_path(Path::new(
+            r"C:\ProgramData\mavi-vpn\last_dns_servers.txt",
+        ));
+        assert!(script
+            .contains(r"HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig"));
+        assert!(script.contains(
+            r"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DNSClient\DnsPolicyConfig"
+        ));
+        assert!(script.contains(
+            r"HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig"
+        ));
     }
 
     #[test]
     fn nrpt_cleanup_script_clears_dns_cache() {
-        let script = nrpt_cleanup_script_for_path(Path::new(r"C:\ProgramData\mavi-vpn\last_dns_servers.txt"));
+        let script = nrpt_cleanup_script_for_path(Path::new(
+            r"C:\ProgramData\mavi-vpn\last_dns_servers.txt",
+        ));
         assert!(script.contains("Clear-DnsClientCache"));
         assert!(script.contains("Register-DnsClient"));
     }
 
     #[test]
     fn nrpt_cleanup_script_checks_persisted_path() {
-        let script = nrpt_cleanup_script_for_path(Path::new(r"C:\ProgramData\mavi-vpn\last_dns_servers.txt"));
+        let script = nrpt_cleanup_script_for_path(Path::new(
+            r"C:\ProgramData\mavi-vpn\last_dns_servers.txt",
+        ));
         assert!(script.contains("Test-Path $persistedDnsPath"));
         assert!(script.contains("Get-Content $persistedDnsPath"));
     }
@@ -404,26 +409,17 @@ mod tests {
 
     #[test]
     fn powershell_single_quoted_handles_newlines() {
-        assert_eq!(
-            powershell_single_quoted("line1\nline2"),
-            "'line1\nline2'"
-        );
+        assert_eq!(powershell_single_quoted("line1\nline2"), "'line1\nline2'");
     }
 
     #[test]
     fn powershell_single_quoted_handles_tabs() {
-        assert_eq!(
-            powershell_single_quoted("col1\tcol2"),
-            "'col1\tcol2'"
-        );
+        assert_eq!(powershell_single_quoted("col1\tcol2"), "'col1\tcol2'");
     }
 
     #[test]
     fn powershell_single_quoted_handles_unicode() {
-        assert_eq!(
-            powershell_single_quoted("Hello 世界"),
-            "'Hello 世界'"
-        );
+        assert_eq!(powershell_single_quoted("Hello 世界"), "'Hello 世界'");
     }
 
     #[test]

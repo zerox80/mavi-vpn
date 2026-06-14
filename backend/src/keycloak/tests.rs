@@ -1,4 +1,4 @@
-﻿use super::test_keys;
+use super::test_keys;
 use super::*;
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm, RSAKeyParameters, RSAKeyType};
 
@@ -196,7 +196,9 @@ async fn test_refresh_on_unknown_kid() {
     {
         let mut cache = v.jwks_cache.write().await;
         if let Some((_, t)) = cache.as_mut() {
-            *t = Instant::now().checked_sub(JWKS_REFRESH_COOLDOWN).unwrap_or_else(Instant::now);
+            *t = Instant::now()
+                .checked_sub(JWKS_REFRESH_COOLDOWN)
+                .unwrap_or_else(Instant::now);
         }
     }
 
@@ -256,7 +258,9 @@ async fn test_fetch_failure_uses_cache() {
     {
         let mut cache = v.jwks_cache.write().await;
         if let Some((_, t)) = cache.as_mut() {
-            *t = Instant::now().checked_sub(JWKS_REFRESH_COOLDOWN).unwrap_or_else(Instant::now);
+            *t = Instant::now()
+                .checked_sub(JWKS_REFRESH_COOLDOWN)
+                .unwrap_or_else(Instant::now);
         }
     }
 

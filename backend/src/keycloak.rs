@@ -247,7 +247,10 @@ impl KeycloakValidator {
             return None;
         };
         if typ != "Bearer" {
-            warn!("JWT 'typ' is '{}', expected 'Bearer' - rejecting token", typ);
+            warn!(
+                "JWT 'typ' is '{}', expected 'Bearer' - rejecting token",
+                typ
+            );
             return None;
         }
 

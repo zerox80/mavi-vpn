@@ -444,11 +444,15 @@ mod tests {
     fn classify_mtu_errors_as_permanent_config() {
         // A server/client MTU mismatch cannot be fixed by retrying.
         assert_eq!(
-            classify_init_error("MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360"),
+            classify_init_error(
+                "MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360"
+            ),
             INIT_FATAL_CONFIG
         );
         assert_eq!(
-            classify_init_error("Server pushed unsupported VPN MTU 1500. Supported range is 1280-1360."),
+            classify_init_error(
+                "Server pushed unsupported VPN MTU 1500. Supported range is 1280-1360."
+            ),
             INIT_FATAL_CONFIG
         );
     }

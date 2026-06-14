@@ -315,10 +315,22 @@ mod tests {
             // Inheritance disabled, full control for SYSTEM and Administrators,
             // and no ACE for BUILTIN\Users (BU) or Everyone (WD).
             assert!(sddl.contains("D:P"), "DACL must be protected: {sddl}");
-            assert!(sddl.contains("(A;;FA;;;SY)"), "SYSTEM grant expected: {sddl}");
-            assert!(sddl.contains("(A;;FA;;;BA)"), "Admins grant expected: {sddl}");
-            assert!(!sddl.contains(";;;BU)"), "Users must have no access: {sddl}");
-            assert!(!sddl.contains(";;;WD)"), "Everyone must have no access: {sddl}");
+            assert!(
+                sddl.contains("(A;;FA;;;SY)"),
+                "SYSTEM grant expected: {sddl}"
+            );
+            assert!(
+                sddl.contains("(A;;FA;;;BA)"),
+                "Admins grant expected: {sddl}"
+            );
+            assert!(
+                !sddl.contains(";;;BU)"),
+                "Users must have no access: {sddl}"
+            );
+            assert!(
+                !sddl.contains(";;;WD)"),
+                "Everyone must have no access: {sddl}"
+            );
         }
     }
 

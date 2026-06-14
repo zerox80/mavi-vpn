@@ -2,9 +2,9 @@ use bytes::{Buf, Bytes};
 use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
-    looks_like_html_response,
+    compute_quic_mtu_config, looks_like_html_response,
     masque::{self, CAPSULE_MAVI_CONFIG},
-    resolve_tun_mtu_with_source, ControlMessage, QUIC_OVERHEAD_BYTES,
+    ControlMessage,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -78,7 +78,7 @@ pub async fn connect_and_handshake(
         rustls::crypto::ring::default_provider().into(),
     )
     .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
+    .map_err(|e| anyhow::anyhow!("failed to enable TLS 1.3 on client config: {e}"))?
     .dangerous()
     .with_custom_certificate_verifier(verifier)
     .with_no_client_auth();
@@ -120,21 +120,14 @@ pub async fn connect_and_handshake(
     // via vpn_mtu, env VPN_MTU, or default 1280) + 80-byte QUIC/AEAD overhead.
     // Server and client MUST agree on the TUN MTU, otherwise the larger side
     // will send UDP payloads the smaller side considers out-of-spec.
-    let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
-    // When no explicit MTU is configured, use DEFAULT_TUN_MTU (1280) for the
-    // transport budget so client and server agree on packet size. Previously
-    // MAX_TUN_MTU (1360) was used, causing the client to send larger QUIC
-    // packets than the server, leading to silent packet loss on constrained
-    // network paths (PPPoE, carrier-grade NAT).
-    let transport_tun_mtu = local_tun_mtu;
-    let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
+    let mtu_cfg = compute_quic_mtu_config(vpn_mtu);
     info!(
         "Setting QUIC MTU: {} (TUN MTU budget: {}, source: {:?}, Target Wire: {} IPv4 / {} IPv6)",
-        quic_mtu,
-        transport_tun_mtu,
-        mtu_source,
-        quic_mtu + 20 + 8,
-        quic_mtu + 40 + 8,
+        mtu_cfg.quic_mtu,
+        mtu_cfg.transport_tun_mtu,
+        mtu_cfg.mtu_source,
+        mtu_cfg.wire_mtu_ipv4,
+        mtu_cfg.wire_mtu_ipv6,
     );
 
     // Performance Optimizations
@@ -144,8 +137,8 @@ pub async fn connect_and_handshake(
 
     // MTU Pinning
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(quic_mtu);
-    transport_config.min_mtu(quic_mtu);
+    transport_config.initial_mtu(mtu_cfg.quic_mtu);
+    transport_config.min_mtu(mtu_cfg.quic_mtu);
     transport_config
         .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
@@ -240,7 +233,7 @@ pub async fn connect_and_handshake(
         (cfg, None)
     };
 
-    validate_server_mtu(&config, local_tun_mtu)?;
+    validate_server_mtu(&config, mtu_cfg.local_tun_mtu)?;
 
     Ok((connection, config, h3_guard))
 }
@@ -386,19 +379,7 @@ fn is_camouflage_h3_response(headers: &http::HeaderMap) -> bool {
 }
 
 fn endpoint_host(endpoint: &str) -> String {
-    if let Some(rest) = endpoint.strip_prefix('[') {
-        if let Some(end) = rest.find(']') {
-            return rest[..end].to_string();
-        }
-    }
-
-    if endpoint.matches(':').count() == 1 {
-        if let Some((host, _)) = endpoint.rsplit_once(':') {
-            return host.to_string();
-        }
-    }
-
-    endpoint.to_string()
+    shared::endpoint_host(endpoint).to_string()
 }
 
 #[cfg(test)]

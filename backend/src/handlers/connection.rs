@@ -269,12 +269,10 @@ pub async fn handle_connection(
         );
     }
 
-    let initial_streams = tokio::time::timeout(
-        PREAUTH_PHASE_TIMEOUT,
-        detect_initial_streams(&connection),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("Pre-auth handshake timeout from {remote_addr}"))??;
+    let initial_streams =
+        tokio::time::timeout(PREAUTH_PHASE_TIMEOUT, detect_initial_streams(&connection))
+            .await
+            .map_err(|_| anyhow::anyhow!("Pre-auth handshake timeout from {remote_addr}"))??;
     let (pre_bi, pre_uni) = match initial_streams {
         InitialStreams::Raw {
             send_stream,

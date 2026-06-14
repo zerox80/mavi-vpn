@@ -203,7 +203,7 @@ impl Config {
         if self.keycloak_enabled {
             let Some(url) = self.keycloak_url.as_deref().filter(|u| !u.is_empty()) else {
                 return Err(
-                    "VPN_KEYCLOAK_URL is required when VPN_KEYCLOAK_ENABLED=true".to_string()
+                    "VPN_KEYCLOAK_URL is required when VPN_KEYCLOAK_ENABLED=true".to_string(),
                 );
             };
             if let Err(err) = shared::validate_keycloak_url(url) {

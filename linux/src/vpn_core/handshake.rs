@@ -2,7 +2,7 @@ use super::cert_pin::PinnedServerVerifier;
 use super::h3::H3SessionGuard;
 use anyhow::{Context, Result};
 use shared::{
-    resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
+    looks_like_html_response, resolve_tun_mtu_with_source, ControlMessage, QUIC_OVERHEAD_BYTES,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -83,11 +83,12 @@ pub(super) async fn connect_and_handshake(
     // client MUST be configured with the same `VPN_MTU`, otherwise the larger
     // side will send UDP payloads the smaller side considers out-of-spec.
     let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
-    let transport_tun_mtu = if matches!(mtu_source, TunMtuSource::Default) {
-        MAX_TUN_MTU
-    } else {
-        local_tun_mtu
-    };
+    // When no explicit MTU is configured, use DEFAULT_TUN_MTU (1280) for the
+    // transport budget so client and server agree on packet size. Previously
+    // MAX_TUN_MTU (1360) was used, causing the client to send larger QUIC
+    // packets than the server, leading to silent packet loss on constrained
+    // network paths (PPPoE, carrier-grade NAT).
+    let transport_tun_mtu = local_tun_mtu;
     let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
     let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20 } else { 40 }, 8);
     info!(
@@ -165,7 +166,7 @@ pub(super) async fn connect_and_handshake(
         (cfg, None)
     };
 
-    validate_server_mtu(&config, local_tun_mtu, mtu_source)?;
+    validate_server_mtu(&config, local_tun_mtu)?;
 
     Ok((connection, config, h3_guard))
 }
@@ -194,31 +195,23 @@ fn validate_raw_response_len(len: usize) -> Result<()> {
 }
 
 fn decode_raw_response_body(buf: &[u8]) -> Result<ControlMessage> {
+    // In censorship-resistant mode the server returns a fake nginx HTML page
+    // on auth failure instead of a bincode ControlMessage. Detect this
+    // reliably by checking the content, not a magic length.
+    if looks_like_html_response(buf) {
+        anyhow::bail!(
+            "AUTH_FAILED: Server returned HTML (camouflage response). \
+             Check token validity or Keycloak configuration."
+        );
+    }
     bincode::serde::decode_from_slice(buf, bincode::config::standard())
         .map(|(v, _)| v)
         .map_err(Into::into)
 }
 
-fn validate_server_mtu(
-    config: &ControlMessage,
-    local_tun_mtu: u16,
-    mtu_source: TunMtuSource,
-) -> Result<()> {
+fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()> {
     if let ControlMessage::Config { mtu, .. } = config {
-        if !(shared::MIN_TUN_MTU..=MAX_TUN_MTU).contains(mtu) {
-            anyhow::bail!(
-                "Server pushed unsupported VPN MTU {}. Supported range is {}-{}.",
-                mtu,
-                shared::MIN_TUN_MTU,
-                MAX_TUN_MTU
-            );
-        }
-
-        if mtu_source != TunMtuSource::Default && *mtu != local_tun_mtu {
-            anyhow::bail!(
-                "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {mtu}. Configure both sides to the same VPN_MTU."
-            );
-        }
+        shared::check_server_mtu(*mtu, local_tun_mtu).map_err(|e| anyhow::anyhow!(e))?;
     }
     Ok(())
 }
@@ -281,9 +274,66 @@ mod tests {
 
     #[test]
     fn server_mtu_must_match_linux_client() {
-        assert!(validate_server_mtu(&config_with_mtu(1340), 1280, TunMtuSource::Default).is_ok());
-        assert!(validate_server_mtu(&config_with_mtu(1280), 1280, TunMtuSource::Config).is_ok());
-        assert!(validate_server_mtu(&config_with_mtu(1340), 1280, TunMtuSource::Config).is_err());
-        assert!(validate_server_mtu(&config_with_mtu(1400), 1280, TunMtuSource::Default).is_err());
+        // Strict equality regardless of how the local MTU was sourced: a
+        // server MTU that differs from the pinned local budget is rejected.
+        assert!(validate_server_mtu(&config_with_mtu(1280), 1280).is_ok());
+        assert!(validate_server_mtu(&config_with_mtu(1340), 1340).is_ok());
+        assert!(validate_server_mtu(&config_with_mtu(1340), 1280).is_err());
+        assert!(validate_server_mtu(&config_with_mtu(1280), 1340).is_err());
+        assert!(validate_server_mtu(&config_with_mtu(1400), 1280).is_err());
+    }
+
+    #[test]
+    fn raw_response_len_accepts_zero_and_boundary() {
+        assert!(validate_raw_response_len(0).is_ok());
+        assert!(validate_raw_response_len(1).is_ok());
+        assert!(validate_raw_response_len(65_536).is_ok());
+    }
+
+    #[test]
+    fn raw_response_len_rejects_far_above_limit() {
+        assert!(validate_raw_response_len(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn raw_response_body_rejects_empty_buffer() {
+        assert!(decode_raw_response_body(&[]).is_err());
+    }
+
+    #[test]
+    fn server_mtu_ignores_non_config_messages() {
+        let auth = ControlMessage::Auth {
+            token: "tok".to_string(),
+        };
+        assert!(validate_server_mtu(&auth, 1280).is_ok());
+
+        let err = ControlMessage::Error {
+            message: "bad".to_string(),
+        };
+        assert!(validate_server_mtu(&err, 1280).is_ok());
+    }
+
+    #[test]
+    fn server_mtu_boundary_values() {
+        assert!(
+            validate_server_mtu(&config_with_mtu(shared::MIN_TUN_MTU), shared::MIN_TUN_MTU).is_ok()
+        );
+        assert!(
+            validate_server_mtu(&config_with_mtu(shared::MAX_TUN_MTU), shared::MAX_TUN_MTU).is_ok()
+        );
+        assert!(validate_server_mtu(&config_with_mtu(shared::MIN_TUN_MTU - 1), 1280).is_err());
+        assert!(validate_server_mtu(&config_with_mtu(shared::MAX_TUN_MTU + 1), 1280).is_err());
+    }
+
+    #[test]
+    fn endpoint_host_handles_empty_and_port_only() {
+        assert_eq!(endpoint_host(""), "");
+        assert_eq!(endpoint_host(":443"), "");
+    }
+
+    #[test]
+    fn endpoint_host_bare_ipv6_without_brackets() {
+        assert_eq!(endpoint_host("::1"), "::1");
+        assert_eq!(endpoint_host("fe80::1"), "fe80::1");
     }
 }

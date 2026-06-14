@@ -38,8 +38,7 @@ async fn main() -> Result<()> {
 
     let config = config::load();
 
-    let quic_overhead: u16 = 80;
-    let quic_payload_mtu = config.mtu + quic_overhead;
+    let quic_payload_mtu = config.mtu + shared::QUIC_OVERHEAD_BYTES;
     let wire_overhead_ipv4 = 20u16 + 8; // IP + UDP
     let wire_overhead_ipv6 = 40u16 + 8;
     let mtu_source = if std::env::var("VPN_MTU").is_ok() {
@@ -121,6 +120,8 @@ async fn main() -> Result<()> {
             url.clone(),
             config.keycloak_realm.clone(),
             config.keycloak_client_id.clone(),
+            config.keycloak_required_role.clone(),
+            config.keycloak_required_scope.clone(),
         );
 
         info!("Initializing Keycloak validator for {}...", url);

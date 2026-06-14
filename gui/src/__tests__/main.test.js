@@ -9,6 +9,7 @@ import {
   friendlyError,
   heroFromVpnStatus,
   toConfig,
+  parseOptionalMtu,
 } from '../utils.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -206,6 +207,24 @@ describe('toConfig', () => {
   });
 });
 
+describe('parseOptionalMtu', () => {
+  it('allows blank input as default MTU', () => {
+    expect(parseOptionalMtu('')).toEqual({ valid: true, value: null });
+    expect(parseOptionalMtu('   ')).toEqual({ valid: true, value: null });
+  });
+
+  it('accepts the backend-supported MTU range', () => {
+    expect(parseOptionalMtu('1280')).toEqual({ valid: true, value: 1280 });
+    expect(parseOptionalMtu('1360')).toEqual({ valid: true, value: 1360 });
+  });
+
+  it('rejects non-empty invalid MTU input', () => {
+    expect(parseOptionalMtu('1279')).toEqual({ valid: false, value: null });
+    expect(parseOptionalMtu('1361')).toEqual({ valid: false, value: null });
+    expect(parseOptionalMtu('abc')).toEqual({ valid: false, value: null });
+  });
+});
+
 describe('heroFromVpnStatus', () => {
   it('maps stopped to off even when the current hero is connecting', () => {
     expect(
@@ -254,6 +273,15 @@ describe('heroFromVpnStatus', () => {
     expect(heroFromVpnStatus({ service_available: true, state: 'Stopping' })).toBe('disconnecting');
     expect(heroFromVpnStatus({ service_available: true, state: 'Starting' }, 'on', true)).toBe(
       'disconnecting'
+    );
+  });
+
+  it('keeps unknown backend state disconnecting only during local disconnect flow', () => {
+    expect(heroFromVpnStatus({ service_available: true, state: 'Unknown' }, 'disconnecting')).toBe(
+      'disconnecting'
+    );
+    expect(heroFromVpnStatus({ service_available: true, state: 'Unknown' }, 'connecting')).toBe(
+      'off'
     );
   });
 });

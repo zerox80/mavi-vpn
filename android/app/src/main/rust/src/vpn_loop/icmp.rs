@@ -1,6 +1,11 @@
+// Called only from the cfg(target_os = "android") vpn loop; on other hosts it
+// is exercised solely by the unit tests below.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn packet_too_big_feedback(
     packet: &[u8],
     tunnel_mtu: u16,
+    max_datagram: Option<usize>,
+    h3_prefix: usize,
     gateway_v4: std::net::Ipv4Addr,
     gateway_v6: Option<std::net::Ipv6Addr>,
 ) -> Option<Vec<u8>> {
@@ -14,11 +19,9 @@ pub(crate) fn packet_too_big_feedback(
         6 => gateway_v6.map(std::net::IpAddr::V6),
         _ => None,
     };
-    let reported_mtu = if version == 6 {
-        tunnel_mtu.max(1280)
-    } else {
-        tunnel_mtu
-    };
+    // Report the QUIC-transportable inner-packet size (max_datagram minus any
+    // H3 prefix), not the configured TUN MTU, so PMTUD actually converges.
+    let reported_mtu = shared::effective_ptb_mtu(tunnel_mtu, max_datagram, h3_prefix, version == 6);
 
     shared::icmp::generate_packet_too_big(packet, reported_mtu, gateway)
 }
@@ -62,8 +65,14 @@ mod tests {
 
     #[test]
     fn too_large_ipv4_packet_generates_feedback() {
-        let feedback =
-            packet_too_big_feedback(&ipv4_packet(), 1280, Ipv4Addr::new(10, 0, 0, 1), None);
+        let feedback = packet_too_big_feedback(
+            &ipv4_packet(),
+            1280,
+            Some(1330),
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+        );
 
         assert!(feedback.is_some());
     }
@@ -73,6 +82,8 @@ mod tests {
         let feedback = packet_too_big_feedback(
             &ipv6_packet(),
             1200,
+            Some(1000),
+            0,
             Ipv4Addr::new(10, 0, 0, 1),
             Some(Ipv6Addr::LOCALHOST),
         )
@@ -83,7 +94,8 @@ mod tests {
 
     #[test]
     fn too_large_feedback_ignores_empty_packet() {
-        let feedback = packet_too_big_feedback(&[], 1280, Ipv4Addr::new(10, 0, 0, 1), None);
+        let feedback =
+            packet_too_big_feedback(&[], 1280, Some(1330), 0, Ipv4Addr::new(10, 0, 0, 1), None);
 
         assert!(feedback.is_none());
     }

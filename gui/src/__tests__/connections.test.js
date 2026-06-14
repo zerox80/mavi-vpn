@@ -128,6 +128,34 @@ describe('migrateLegacyConfig', () => {
     expect(state.prefs.connections[0].cert_pin).toBe('new-pin');
   });
 
+  it('selects an overwritten legacy connection when no active id exists', async () => {
+    state.prefs.connections = [
+      {
+        id: 'existing',
+        label: 'Existing',
+        endpoint: 'vpn.example.com:443',
+        token: 'old',
+        cert_pin: 'old',
+      },
+    ];
+
+    await migrateLegacyConfig({
+      endpoint: 'vpn.example.com:443',
+      token: 'new',
+      cert_pin: 'new-pin',
+    });
+
+    expect(state.prefs.active_id).toBe('existing');
+  });
+
+  it('marks migration complete even without a legacy endpoint', async () => {
+    await migrateLegacyConfig({});
+
+    expect(state.prefs.legacy_config_migrated).toBe(true);
+    expect(state.prefs.connections).toEqual([]);
+    expect(savePrefs).toHaveBeenCalledOnce();
+  });
+
   it('does not migrate twice', async () => {
     state.prefs.legacy_config_migrated = true;
 
@@ -162,6 +190,22 @@ describe('connection list rendering and selection', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0].classList.contains('selected')).toBe(true);
     expect(rows[0].textContent).toContain('Primary Node');
+  });
+
+  it('renders active and connecting selection classes', () => {
+    state.hero = 'on';
+    renderConnectionList();
+    expect(document.querySelector('.conn-row').className).toContain('active');
+
+    state.hero = 'connecting';
+    renderConnectionList();
+    expect(document.querySelector('.conn-row').className).toContain('connecting');
+  });
+
+  it('does nothing when the connection list is not mounted', () => {
+    document.getElementById('connection-list').remove();
+
+    expect(() => renderConnectionList()).not.toThrow();
   });
 
   it('renders empty and no-match states', () => {

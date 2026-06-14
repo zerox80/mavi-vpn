@@ -6,6 +6,9 @@ pub mod hex;
 pub mod icmp;
 pub mod ipc;
 pub mod masque;
+pub mod mtu;
+
+pub use mtu::{check_server_mtu, effective_ptb_mtu};
 
 #[cfg(test)]
 pub mod test_helpers;
@@ -131,6 +134,54 @@ pub enum ControlMessage {
     /// Sent by the server when it rejects the connection (e.g. bad token, no IPs available).
     /// The client should log `message` and may retry after a backoff.
     Error { message: String },
+}
+
+/// Validates that a Keycloak base URL uses HTTPS.
+///
+/// JWKS fetches, the OAuth authorization redirect and the token exchange all
+/// derive from this URL; over plain HTTP a MITM can substitute signing keys
+/// or capture tokens. Plain HTTP is only allowed for loopback hosts (dev).
+///
+/// # Errors
+/// Returns a human-readable reason when the URL is not acceptable.
+pub fn validate_keycloak_url(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        let authority = rest.split('/').next().unwrap_or("");
+        let host = authority
+            .strip_prefix('[')
+            .and_then(|h| h.split(']').next())
+            .unwrap_or_else(|| authority.rsplit_once(':').map_or(authority, |(h, _)| h));
+        if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+            return Ok(());
+        }
+        return Err(format!(
+            "Keycloak URL must use https:// (got plain http for host {host:?}); plain HTTP is only allowed for localhost"
+        ));
+    }
+    Err("Keycloak URL must start with https://".to_string())
+}
+
+/// Checks whether a raw byte buffer looks like an HTML response.
+///
+/// Used by clients to detect the server's camouflage/nginx response when
+/// authentication fails in censorship-resistant mode. This replaces the
+/// fragile magic-number length check (`0x1901`) that was previously used
+/// on Windows and Android.
+#[must_use]
+pub fn looks_like_html_response(buf: &[u8]) -> bool {
+    let trimmed: Vec<u8> = buf
+        .iter()
+        .copied()
+        .skip_while(u8::is_ascii_whitespace)
+        .take(32)
+        .collect();
+    trimmed.starts_with(b"<!DOCTYPE")
+        || trimmed.starts_with(b"<!doctype")
+        || trimmed.starts_with(b"<html")
+        || trimmed.starts_with(b"<HTML")
 }
 
 #[cfg(test)]
@@ -388,5 +439,52 @@ mod tests {
         } else {
             std::env::remove_var("VPN_MTU");
         }
+    }
+
+    #[test]
+    fn validate_keycloak_url_rules() {
+        assert!(validate_keycloak_url("https://auth.example.com").is_ok());
+        assert!(validate_keycloak_url("http://localhost").is_ok());
+        assert!(validate_keycloak_url("http://localhost:8080/realms/x").is_ok());
+        assert!(validate_keycloak_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_keycloak_url("http://[::1]:8080").is_ok());
+        assert!(validate_keycloak_url("http://auth.example.com").is_err());
+        assert!(validate_keycloak_url("http://10.0.0.5:8080").is_err());
+        assert!(validate_keycloak_url("ftp://auth.example.com").is_err());
+        assert!(validate_keycloak_url("").is_err());
+        // Substring tricks must not bypass the loopback exemption.
+        assert!(validate_keycloak_url("http://localhost.evil.com").is_err());
+        assert!(validate_keycloak_url("http://evil.com/localhost").is_err());
+    }
+
+    #[test]
+    fn html_detection_doctype() {
+        assert!(looks_like_html_response(b"<!DOCTYPE html><html>"));
+        assert!(looks_like_html_response(b"  \n<!doctype html>"));
+    }
+
+    #[test]
+    fn html_detection_html_tag() {
+        assert!(looks_like_html_response(b"<html><body>"));
+        assert!(looks_like_html_response(b"<HTML><HEAD>"));
+    }
+
+    #[test]
+    fn html_detection_rejects_bincode() {
+        // Typical bincode output: starts with enum variant index, not HTML
+        assert!(!looks_like_html_response(&[0x01, 0x00, 0x00, 0x00]));
+    }
+
+    #[test]
+    fn html_detection_rejects_empty() {
+        assert!(!looks_like_html_response(&[]));
+    }
+
+    #[test]
+    fn html_detection_rejects_ip_packet() {
+        // IPv4 packet header
+        let mut pkt = vec![0u8; 20];
+        pkt[0] = 0x45;
+        assert!(!looks_like_html_response(&pkt));
     }
 }

@@ -1,34 +1,38 @@
 use anyhow::{Context, Result};
 use constant_time_eq::constant_time_eq;
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-#[async_trait::async_trait]
+pub type JwksFetchFuture<'a> = Pin<Box<dyn Future<Output = Result<JwkSet>> + Send + 'a>>;
+
 pub trait JwksFetcher: Send + Sync + std::fmt::Debug {
-    async fn fetch_jwks(&self, url: &str) -> Result<JwkSet>;
+    fn fetch_jwks<'a>(&'a self, url: &'a str) -> JwksFetchFuture<'a>;
 }
 
 #[derive(Debug)]
 struct DefaultJwksFetcher;
 
-#[async_trait::async_trait]
 impl JwksFetcher for DefaultJwksFetcher {
-    async fn fetch_jwks(&self, url: &str) -> Result<JwkSet> {
-        info!("Fetching Keycloak JWKS from: {}", url);
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()?;
+    fn fetch_jwks<'a>(&'a self, url: &'a str) -> JwksFetchFuture<'a> {
+        Box::pin(async move {
+            info!("Fetching Keycloak JWKS from: {}", url);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?;
 
-        let res = client
-            .get(url)
-            .send()
-            .await
-            .context("Failed to fetch JWKS")?;
-        let jwks: JwkSet = res.json().await.context("Failed to parse JWKS JSON")?;
-        Ok(jwks)
+            let res = client
+                .get(url)
+                .send()
+                .await
+                .context("Failed to fetch JWKS")?;
+            let jwks: JwkSet = res.json().await.context("Failed to parse JWKS JSON")?;
+            Ok(jwks)
+        })
     }
 }
 
@@ -36,6 +40,8 @@ pub struct KeycloakValidator {
     url: String,
     realm: String,
     pub client_id: String,
+    required_role: Option<String>,
+    required_scope: Option<String>,
     // Combined lock: JWKS and its fetch timestamp are always updated atomically.
     // Keeping them in a single RwLock prevents a TOCTOU race where `last_refresh`
     // could be written by a different task between the two separate writes.
@@ -46,11 +52,19 @@ pub struct KeycloakValidator {
 const JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 
 impl KeycloakValidator {
-    pub fn new(url: String, realm: String, client_id: String) -> Self {
+    pub fn new(
+        url: String,
+        realm: String,
+        client_id: String,
+        required_role: Option<String>,
+        required_scope: Option<String>,
+    ) -> Self {
         Self {
             url,
             realm,
             client_id,
+            required_role,
+            required_scope,
             jwks_cache: RwLock::new(None),
             fetcher: Arc::new(DefaultJwksFetcher),
         }
@@ -67,6 +81,8 @@ impl KeycloakValidator {
             url,
             realm,
             client_id,
+            required_role: None,
+            required_scope: None,
             jwks_cache: RwLock::new(None),
             fetcher,
         }
@@ -89,8 +105,11 @@ impl KeycloakValidator {
         self.fetcher.fetch_jwks(&jwks_url).await
     }
 
+    /// Validates the token. Returns `Ok(Some(exp))` (the token's expiry as a
+    /// Unix timestamp) when the token is accepted, `Ok(None)` when it fails a
+    /// policy check, and `Err` when validation could not be performed.
     #[allow(clippy::too_many_lines)]
-    pub async fn validate_token(&self, token: &str) -> Result<bool> {
+    pub async fn validate_token(&self, token: &str) -> Result<Option<i64>> {
         let header = decode_header(token).context("Invalid JWT header")?;
         let kid = header
             .kid
@@ -178,16 +197,23 @@ impl KeycloakValidator {
                 #[allow(clippy::cast_possible_wrap)]
                 let leeway = validation.leeway as i64;
 
-                if !Self::validate_claims(claims, &self.client_id, now, leeway) {
-                    return Ok(false);
-                }
+                let Some(exp) = Self::validate_claims_with_policy(
+                    claims,
+                    &self.client_id,
+                    now,
+                    leeway,
+                    self.required_role.as_deref(),
+                    self.required_scope.as_deref(),
+                ) else {
+                    return Ok(None);
+                };
 
                 info!(
                     "Keycloak JWT validated successfully (sub: {}, azp: {})",
                     claims.get("sub").and_then(|v| v.as_str()).unwrap_or("?"),
                     claims.get("azp").and_then(|v| v.as_str()).unwrap_or("?")
                 );
-                Ok(true)
+                Ok(Some(exp))
             }
             Err(e) => {
                 warn!("JWT validation failed: {}", e);
@@ -199,27 +225,52 @@ impl KeycloakValidator {
         }
     }
 
+    #[cfg(test)]
     fn validate_claims(claims: &serde_json::Value, client_id: &str, now: i64, leeway: i64) -> bool {
+        Self::validate_claims_with_policy(claims, client_id, now, leeway, None, None).is_some()
+    }
+
+    /// Returns the token's `exp` claim when all policy checks pass, `None` otherwise.
+    fn validate_claims_with_policy(
+        claims: &serde_json::Value,
+        client_id: &str,
+        now: i64,
+        leeway: i64,
+        required_role: Option<&str>,
+        required_scope: Option<&str>,
+    ) -> Option<i64> {
+        // Keycloak marks access tokens with typ:"Bearer". ID tokens (typ:"ID")
+        // share issuer, signature keys and azp, so without this check they
+        // would be accepted as VPN credentials.
+        let Some(typ) = claims.get("typ").and_then(|v| v.as_str()) else {
+            warn!("JWT missing 'typ' claim - rejecting token");
+            return None;
+        };
+        if typ != "Bearer" {
+            warn!("JWT 'typ' is '{}', expected 'Bearer' - rejecting token", typ);
+            return None;
+        }
+
         let Some(exp) = claims.get("exp").and_then(json_number_as_i64) else {
             warn!("JWT missing 'exp' claim - rejecting token");
-            return false;
+            return None;
         };
 
         if now > exp + leeway {
             warn!("JWT expired: exp={}, now={}", exp, now);
-            return false;
+            return None;
         }
 
         if let Some(nbf) = claims.get("nbf").and_then(json_number_as_i64) {
             if now + leeway < nbf {
                 warn!("JWT not yet valid: nbf={}, now={}", nbf, now);
-                return false;
+                return None;
             }
         }
 
         let Some(azp) = claims.get("azp").and_then(|v| v.as_str()) else {
             warn!("JWT missing 'azp' claim — rejecting token");
-            return false;
+            return None;
         };
 
         // Strict check: Only accept tokens that were explicitly issued to THIS client ID.
@@ -228,11 +279,56 @@ impl KeycloakValidator {
                 "JWT azp mismatch: expected '{}', got '{}'. Rejecting token for security.",
                 client_id, azp
             );
-            return false;
+            return None;
         }
 
-        true
+        if let Some(role) = required_role {
+            if !claim_has_role(claims, client_id, role) {
+                warn!("JWT missing required Keycloak role '{}'", role);
+                return None;
+            }
+        }
+
+        if let Some(scope) = required_scope {
+            if !claim_has_scope(claims, scope) {
+                warn!("JWT missing required OAuth scope '{}'", scope);
+                return None;
+            }
+        }
+
+        Some(exp)
     }
+}
+
+fn claim_has_role(claims: &serde_json::Value, client_id: &str, required_role: &str) -> bool {
+    let realm_roles = claims
+        .get("realm_access")
+        .and_then(|v| v.get("roles"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten();
+
+    let client_roles = claims
+        .get("resource_access")
+        .and_then(|v| v.get(client_id))
+        .and_then(|v| v.get("roles"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten();
+
+    realm_roles
+        .chain(client_roles)
+        .filter_map(serde_json::Value::as_str)
+        .any(|role| constant_time_eq(role.as_bytes(), required_role.as_bytes()))
+}
+
+fn claim_has_scope(claims: &serde_json::Value, required_scope: &str) -> bool {
+    claims
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .split_ascii_whitespace()
+        .any(|scope| constant_time_eq(scope.as_bytes(), required_scope.as_bytes()))
 }
 
 fn json_number_as_i64(value: &serde_json::Value) -> Option<i64> {

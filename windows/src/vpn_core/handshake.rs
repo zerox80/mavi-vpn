@@ -1,7 +1,8 @@
 use super::network::split_endpoint;
 use anyhow::{Context, Result};
 use shared::{
-    resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
+    looks_like_html_response, resolve_tun_mtu_with_source, ControlMessage, TunMtuSource,
+    QUIC_OVERHEAD_BYTES,
 };
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -99,35 +100,19 @@ pub async fn connect_and_handshake(
     );
     // When ECH is active we send the config's `public_name` as the outer SNI
     // instead of the real server hostname. Cert-pin auth is unaffected.
-    let server_name: String = ech_state.as_ref().map_or_else(
-        || {
-            let (host, _) = split_endpoint(&endpoint_str);
-            host.to_string()
-        },
-        |ech| ech.outer_sni.clone(),
-    );
-    if server_name.is_empty() {
-        anyhow::bail!("Endpoint host missing");
-    }
+    let server_name = resolve_server_name(&endpoint_str, ech_state.as_ref().map(|e| e.outer_sni.as_str()))?;
 
-    // When the client has no operator-configured MTU, reserve enough QUIC
-    // payload budget for any server-pushed MTU in the supported range. The
-    // server config remains authoritative for the actual Windows adapter MTU.
-    let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
-    let transport_tun_mtu = if matches!(mtu_source, TunMtuSource::Default) {
-        MAX_TUN_MTU
-    } else {
-        local_tun_mtu
-    };
-    let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
-    let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20u16 } else { 40u16 }, 8u16);
+    // The client pins its QUIC payload budget to the local TUN MTU before the
+    // handshake (MTU discovery is disabled), so the server-pushed MTU must
+    // match it exactly — see `validate_server_mtu` / `shared::check_server_mtu`.
+    let mtu_cfg = compute_quic_mtu_config(vpn_mtu, &addr);
     info!(
         "Address family: {}. Setting QUIC MTU: {} (TUN MTU budget: {}, source: {:?}, Target Wire: {})",
         if addr.is_ipv4() { "IPv4" } else { "IPv6" },
-        quic_mtu,
-        transport_tun_mtu,
-        mtu_source,
-        quic_mtu + ip_overhead + udp_overhead,
+        mtu_cfg.quic_mtu,
+        mtu_cfg.transport_tun_mtu,
+        mtu_cfg.mtu_source,
+        mtu_cfg.wire_mtu,
     );
 
     let mut transport_config = quinn::TransportConfig::default();
@@ -138,8 +123,8 @@ pub async fn connect_and_handshake(
 
     // MTU PINNING
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(quic_mtu);
-    transport_config.min_mtu(quic_mtu);
+    transport_config.initial_mtu(mtu_cfg.quic_mtu);
+    transport_config.min_mtu(mtu_cfg.quic_mtu);
 
     // Rule 1: TUN MTU MUST be 1280.
     // Handled in NetworkConfig::apply. Peer datagram size is implicitly limited by path MTU discovery.
@@ -227,16 +212,19 @@ pub async fn connect_and_handshake(
         let _ = send.finish(); // properly close the send side of the auth stream
 
         let len = recv.read_u32_le().await? as usize;
-        if len > 65536 {
-            anyhow::bail!("Server response too large: {len} bytes");
-        }
-        if len == 0x1901 {
-            // This magic length happens when the server sends the HTTP/3 spoof payload
-            // [0x01, 0x19, 0x00, 0x00] in censorship_resistant mode due to Auth Failure.
-            anyhow::bail!("AUTH_FAILED: Server rejected authentication token");
-        }
+        validate_raw_response_len(len)?;
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
+
+        // In censorship-resistant mode the server returns a fake nginx HTML
+        // page on auth failure. Detect by content, not magic length.
+        if looks_like_html_response(&buf) {
+            anyhow::bail!(
+                "AUTH_FAILED: Server returned HTML (camouflage response). \
+                 Check token validity or Keycloak configuration."
+            );
+        }
+
         let cfg: ControlMessage =
             bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
         info!(
@@ -246,7 +234,7 @@ pub async fn connect_and_handshake(
         (cfg, None)
     };
 
-    validate_server_mtu(&config, local_tun_mtu, mtu_source)?;
+    validate_server_mtu(&config, mtu_cfg.local_tun_mtu)?;
 
     Ok((connection, config, h3_guard))
 }
@@ -264,33 +252,58 @@ pub fn order_resolved_addrs(addrs: &mut [SocketAddr], endpoint: &str) {
     addrs.sort_by_key(|addr| i32::from(!addr.is_ipv4()));
 }
 
-fn validate_server_mtu(
-    config: &ControlMessage,
-    local_tun_mtu: u16,
-    mtu_source: TunMtuSource,
-) -> Result<()> {
+pub fn resolve_server_name(endpoint: &str, ech_outer_sni: Option<&str>) -> Result<String> {
+    let name = match ech_outer_sni {
+        Some(sni) => sni.to_string(),
+        None => {
+            let (host, _) = split_endpoint(endpoint);
+            host.to_string()
+        }
+    };
+    if name.is_empty() {
+        anyhow::bail!("Endpoint host missing");
+    }
+    Ok(name)
+}
+
+pub struct QuicMtuConfig {
+    pub quic_mtu: u16,
+    pub transport_tun_mtu: u16,
+    pub mtu_source: TunMtuSource,
+    pub wire_mtu: u16,
+    pub local_tun_mtu: u16,
+}
+
+pub fn compute_quic_mtu_config(vpn_mtu: Option<u16>, addr: &SocketAddr) -> QuicMtuConfig {
+    let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
+    // When no explicit MTU is configured, use DEFAULT_TUN_MTU (1280) for the
+    // transport budget so client and server agree on packet size. Previously
+    // MAX_TUN_MTU (1360) was used, causing the client to send larger QUIC
+    // packets than the server, leading to silent packet loss on constrained
+    // network paths (PPPoE, carrier-grade NAT).
+    let transport_tun_mtu = local_tun_mtu;
+    let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
+    let ip_overhead: u16 = if addr.is_ipv4() { 20 } else { 40 };
+    let udp_overhead: u16 = 8;
+    QuicMtuConfig {
+        quic_mtu,
+        transport_tun_mtu,
+        mtu_source,
+        wire_mtu: quic_mtu + ip_overhead + udp_overhead,
+        local_tun_mtu,
+    }
+}
+
+fn validate_raw_response_len(len: usize) -> Result<()> {
+    if len > 65_536 {
+        anyhow::bail!("Server response too large: {len} bytes");
+    }
+    Ok(())
+}
+
+fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()> {
     if let ControlMessage::Config { mtu, .. } = config {
-        if !(shared::MIN_TUN_MTU..=MAX_TUN_MTU).contains(mtu) {
-            anyhow::bail!(
-                "Server pushed unsupported VPN MTU {}. Supported range is {}-{}.",
-                mtu,
-                shared::MIN_TUN_MTU,
-                MAX_TUN_MTU
-            );
-        }
-
-        if mtu_source != TunMtuSource::Default && *mtu != local_tun_mtu {
-            anyhow::bail!(
-                "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {mtu}. Configure both sides to the same VPN_MTU."
-            );
-        }
-
-        if mtu_source == TunMtuSource::Default && *mtu != local_tun_mtu {
-            info!(
-                "Using server-pushed VPN MTU {} because client MTU is unset (default would be {})",
-                mtu, local_tun_mtu
-            );
-        }
+        shared::check_server_mtu(*mtu, local_tun_mtu).map_err(|e| anyhow::anyhow!(e))?;
     }
     Ok(())
 }

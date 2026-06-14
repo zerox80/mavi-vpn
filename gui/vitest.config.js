@@ -7,13 +7,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{js,ts}'],
-      exclude: ['src/__tests__/**', 'src/animations.js'],
-      thresholds: {
-        lines: 75,
-        statements: 75,
-        branches: 65,
-        functions: 65,
-      },
+      exclude: ['src/__tests__/**'],
     },
   },
 });

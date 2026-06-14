@@ -1,14 +1,6 @@
 use sha2::{Digest, Sha256};
 
-pub(super) fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
-}
+pub(super) use shared::hex::decode_hex;
 
 /// Custom certificate verifier that trusts only a specific SHA-256 fingerprint.
 #[derive(Debug)]

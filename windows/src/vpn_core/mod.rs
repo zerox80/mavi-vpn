@@ -4,6 +4,7 @@
 
 mod handshake;
 mod network;
+mod reconnect;
 mod wintun_mod;
 
 use crate::ipc::Config;
@@ -21,16 +22,15 @@ use self::network::{
     cleanup_routes, create_udp_socket, remove_nrpt_dns_rule, set_adapter_network_config,
     SessionRouteGuard,
 };
+use self::reconnect::{compute_reconnect_delay, sleep_unless_stopped, ReconnectDecision, SessionEnd,
+    RECONNECT_INITIAL_SECS,
+};
 use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter, is_wintun_ring_full};
 
 #[cfg_attr(test, allow(dead_code))]
 pub fn cleanup_stale_network_state() {
     network::cleanup_stale_network_state();
 }
-
-// --- Default timing parameters ---
-const RECONNECT_INITIAL_SECS: u64 = 1;
-const RECONNECT_MAX_SECS: u64 = 30;
 
 use std::sync::OnceLock;
 
@@ -91,39 +91,31 @@ pub async fn run_vpn(
             break;
         }
 
-        let (reconnect_delay, next_backoff) = match outcome {
-            Ok(SessionEnd::UserStopped) => break,
-            Ok(SessionEnd::ConnectionLost) => (
-                Duration::from_secs(RECONNECT_INITIAL_SECS),
-                Duration::from_secs(RECONNECT_INITIAL_SECS),
-            ),
-            Err(e) => {
-                let err_str = e.to_string();
-                if let Ok(mut last) = last_error.lock() {
-                    *last = Some(err_str.clone());
-                }
-                if err_str.contains("AUTH_FAILED")
-                    || err_str.contains("Server rejected connection")
-                    || err_str.contains("MTU mismatch")
-                    || err_str.contains("was not applied to adapter")
-                {
-                    warn!(
-                        "Permanent VPN setup failure: {}. Stopping VPN loop.",
-                        err_str
-                    );
-                    running.store(false, Ordering::Relaxed);
-                    break;
-                }
-                warn!("Session failed: {:#}. Reconnecting...", e);
-                (
-                    backoff,
-                    (backoff * 2).min(Duration::from_secs(RECONNECT_MAX_SECS)),
-                )
+        let err_opt = outcome.as_ref().err().map(|e| e.to_string());
+        if let Some(ref err_str) = err_opt {
+            if let Ok(mut last) = last_error.lock() {
+                *last = Some(err_str.clone());
             }
-        };
+        }
 
-        tokio::time::sleep(reconnect_delay).await;
-        backoff = next_backoff;
+        match compute_reconnect_delay(outcome, backoff) {
+            ReconnectDecision::Break => break,
+            ReconnectDecision::PermanentFailure { error } => {
+                warn!(
+                    "Permanent VPN setup failure: {}. Stopping VPN loop.",
+                    error
+                );
+                running.store(false, Ordering::Relaxed);
+                break;
+            }
+            ReconnectDecision::Reconnect { delay, next_backoff } => {
+                if let Some(ref err_str) = err_opt {
+                    warn!("Session failed: {err_str}. Reconnecting...");
+                }
+                sleep_unless_stopped(delay, &running).await;
+                backoff = next_backoff;
+            }
+        }
     }
 
     // 4. Cleanup – routes first, then DNS/NRPT
@@ -137,9 +129,24 @@ pub async fn run_vpn(
     Ok(())
 }
 
-enum SessionEnd {
-    UserStopped,
-    ConnectionLost,
+/// Extracts a displayable IP string from a remote address, mapping IPv6-mapped
+/// IPv4 addresses back to their IPv4 representation.
+fn extract_endpoint_ip(remote_ip: std::net::IpAddr) -> String {
+    match remote_ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map_or_else(|| v6.to_string(), |v4| v4.to_string()),
+    }
+}
+
+/// Determines the session outcome based on whether the VPN was still running.
+fn determine_session_result(still_running: bool) -> SessionEnd {
+    if still_running {
+        SessionEnd::ConnectionLost
+    } else {
+        SessionEnd::UserStopped
+    }
 }
 
 /// Manages a single active VPN session (handshake + packet pumping).
@@ -217,12 +224,7 @@ async fn run_session(
 
     // 3. Configure Windows Networking (IPs, Routes, DNS)
     let remote_ip = connection.remote_address().ip();
-    let endpoint_ip_str = match remote_ip {
-        std::net::IpAddr::V4(v4) => v4.to_string(),
-        std::net::IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .map_or_else(|| v6.to_string(), |v4| v4.to_string()),
-    };
+    let endpoint_ip_str = extract_endpoint_ip(remote_ip);
 
     // Store the tunnel IP in shared state for CLI/GUI status.
     if let Ok(mut ip) = assigned_ip_state.lock() {
@@ -262,14 +264,18 @@ async fn run_session(
             .context("Failed to get adapter index for IPv6 verification")?;
 
         // 1. Wait for IPv6 address confirmation (DAD, etc)
+        // Marked IPV6_SETUP_FAILED so the reconnect classifier treats a
+        // deterministic local IPv6 stack failure (e.g. IPv6 disabled, DAD
+        // failure) as permanent instead of looping forever — matching Linux,
+        // which already classifies IPv6 split-route failures as permanent.
         if !network::wait_for_ipv6_address(idx, ipv6).await {
-            bail!("IPv6 address {ipv6} failed verification (possibly duplicate or stack error)");
+            bail!("IPV6_SETUP_FAILED: IPv6 address {ipv6} failed verification (possibly duplicate or stack error)");
         }
         info!("IPv6 address {} verified", ipv6);
 
         // 2. Verify On-Link split routes exist
         if !network::verify_ipv6_split_routes(idx)? {
-            bail!("IPv6 split routes (::/1, 8000::/1) not found in routing table");
+            bail!("IPV6_SETUP_FAILED: IPv6 split routes (::/1, 8000::/1) not found in routing table");
         }
         info!("IPv6 split routes verified as On-Link");
     }
@@ -345,22 +351,29 @@ async fn run_session(
                             } else {
                                 None
                             };
-                            let reported_mtu = if version == 6 {
-                                tun_mtu_for_ptb.max(1280)
+                            let h3_prefix = if is_h3_framing {
+                                masque::DATAGRAM_PREFIX.len()
                             } else {
-                                tun_mtu_for_ptb
+                                0
                             };
+                            let reported_mtu = shared::effective_ptb_mtu(
+                                tun_mtu_for_ptb,
+                                conn_quic.max_datagram_size(),
+                                h3_prefix,
+                                version == 6,
+                            );
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(
                                 packet.bytes(),
                                 reported_mtu,
                                 source_ip,
                             ) {
-                                #[allow(clippy::cast_possible_truncation)]
-                                if let Ok(mut reply) =
-                                    session_tun.allocate_send_packet(icmp_packet.len() as u16)
-                                {
-                                    reply.bytes_mut().copy_from_slice(&icmp_packet);
-                                    session_tun.send_packet(reply);
+                                if let Ok(len) = u16::try_from(icmp_packet.len()) {
+                                    if let Ok(mut reply) =
+                                        session_tun.allocate_send_packet(len)
+                                    {
+                                        reply.bytes_mut().copy_from_slice(&icmp_packet);
+                                        session_tun.send_packet(reply);
+                                    }
                                 }
                             }
                         } else if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) {
@@ -462,9 +475,8 @@ async fn run_session(
     }
     drop(route_cleanup);
 
-    if global_running.load(Ordering::Relaxed) {
-        Ok(SessionEnd::ConnectionLost)
-    } else {
-        Ok(SessionEnd::UserStopped)
-    }
+    Ok(determine_session_result(global_running.load(Ordering::Relaxed)))
 }
+
+#[cfg(test)]
+mod tests;

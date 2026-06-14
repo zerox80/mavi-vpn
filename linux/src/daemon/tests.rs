@@ -82,13 +82,8 @@ async fn dispatch_start_is_accepted_and_duplicate_start_rejected() {
     let state = test_state();
 
     assert_eq!(
-        dispatch_request_with_hooks(
-            IpcRequest::Start(test_config()),
-            &state,
-            false,
-            no_cleanup
-        )
-        .await,
+        dispatch_request_with_hooks(IpcRequest::Start(test_config()), &state, false, no_cleanup)
+            .await,
         IpcResponse::Ok
     );
     assert!(matches!(
@@ -138,6 +133,37 @@ async fn dispatch_stop_clears_active_config_error_and_state() {
             assigned_ip: None,
         }
     );
+}
+
+#[tokio::test]
+async fn dispatch_failed_idle_state_accepts_new_start() {
+    let state = test_state();
+    {
+        let mut guard = state.lock().await;
+        guard.vpn_running.store(false, Ordering::SeqCst);
+        guard.vpn_connected.store(false, Ordering::SeqCst);
+        guard.active_config = Some(test_config());
+        *guard.last_error.lock().unwrap() = Some("MTU mismatch".to_string());
+    }
+
+    assert!(matches!(
+        dispatch_request_with_hooks(IpcRequest::Status, &state, false, no_cleanup).await,
+        IpcResponse::Status {
+            running: false,
+            state: VpnState::Failed,
+            last_error: Some(_),
+            ..
+        }
+    ));
+
+    assert_eq!(
+        dispatch_request_with_hooks(IpcRequest::Start(test_config()), &state, false, no_cleanup)
+            .await,
+        IpcResponse::Ok
+    );
+    let guard = state.lock().await;
+    assert!(guard.vpn_running.load(Ordering::SeqCst));
+    assert!(guard.last_error.lock().unwrap().is_none());
 }
 
 #[tokio::test]

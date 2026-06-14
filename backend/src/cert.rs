@@ -5,12 +5,104 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
 
+/// Tighten an existing private file to owner-only permissions.
+pub(crate) fn harden_private_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("failed to stat private file {}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("refusing to use symlinked private file {}", path.display());
+        }
+
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to set 0600 on {}", path.display()))?;
+            tracing::info!(
+                "Tightened permissions on existing private file {:?} from {:o} to 0600",
+                path,
+                mode
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("failed to stat private file {}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("refusing to use symlinked private file {}", path.display());
+        }
+
+        harden_windows_private_file(path)?;
+    }
+
+    Ok(())
+}
+
+/// Restricts an on-disk private key to SYSTEM, Administrators and the current
+/// account on Windows. Default NTFS inheritance under most data directories
+/// grants BUILTIN\Users read access, which would expose the TLS key.
+#[cfg(windows)]
+fn harden_windows_private_file(path: &Path) -> Result<()> {
+    let args = windows_key_acl_args(path, current_windows_account().as_deref());
+    let out = std::process::Command::new("icacls")
+        .args(&args)
+        .output()
+        .context("failed to execute icacls for private key hardening")?;
+
+    if !out.status.success() {
+        anyhow::bail!(
+            "icacls failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// icacls argument list that disables inheritance and grants full control to
+/// SYSTEM, Administrators and (when known) the current account only. The
+/// current-account grant keeps the key readable when the server runs under a
+/// dedicated non-admin service account.
+#[cfg(any(windows, test))]
+fn windows_key_acl_args(path: &Path, account: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        path.to_string_lossy().into_owned(),
+        "/inheritance:r".to_string(),
+        "/grant:r".to_string(),
+        "*S-1-5-18:(F)".to_string(),
+        "*S-1-5-32-544:(F)".to_string(),
+    ];
+    if let Some(account) = account {
+        args.push(format!("{account}:(F)"));
+    }
+    args
+}
+
+#[cfg(windows)]
+fn current_windows_account() -> Option<String> {
+    let user = std::env::var("USERNAME").ok().filter(|u| !u.is_empty())?;
+    match std::env::var("USERDOMAIN").ok().filter(|d| !d.is_empty()) {
+        Some(domain) => Some(format!("{domain}\\{user}")),
+        None => Some(user),
+    }
+}
+
 /// Write `contents` to `path` with an owner-only (0o600) permission mask from
 /// the start, so the TLS private key never exists on disk with world- or
 /// group-readable bits — even briefly. On Unix, we use `O_CREAT | O_EXCL`
 /// with `mode(0o600)` and `O_NOFOLLOW` to avoid clobbering a symlink-attacked
 /// target. On other platforms, fall back to `fs::write`.
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     // Remove any stale file so previously-created world-readable keys from
     // older builds cannot persist with their old mode.
     let _ = fs::remove_file(path);
@@ -30,7 +122,30 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
         f.write_all(contents)
             .with_context(|| format!("failed to write {:?}", path))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+
+        // The freshly created file inherits the parent directory's ACL, which
+        // typically grants BUILTIN\Users read. Create it empty, lock the ACL
+        // down first, and only then write the key bytes — so the secret never
+        // exists on disk while the permissive inherited ACL is in effect.
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("failed to create {path:?}"))?;
+        drop(f);
+        harden_windows_private_file(path)?;
+
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .with_context(|| format!("failed to reopen {path:?} after hardening"))?;
+        f.write_all(contents)
+            .with_context(|| format!("failed to write {path:?}"))?;
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
     }
@@ -60,28 +175,7 @@ pub fn load_or_generate_certs(
         // which honoured the process umask and typically left the file
         // world-readable (0o644). On upgrade, tighten the permissions to 0o600
         // so an already-generated key does not stay exposed on disk.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = fs::metadata(&key_path) {
-                let mode = meta.permissions().mode() & 0o777;
-                if mode != 0o600 {
-                    match fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)) {
-                        Ok(()) => tracing::info!(
-                            "Tightened permissions on existing key file {:?} from {:o} to 0600",
-                            key_path,
-                            mode
-                        ),
-                        Err(e) => tracing::warn!(
-                            "Failed to tighten permissions on {:?} (current mode {:o}): {}",
-                            key_path,
-                            mode,
-                            e
-                        ),
-                    }
-                }
-            }
-        }
+        harden_private_file_permissions(key_path)?;
 
         let cert_chain = fs::read(cert_path).context("failed to read certificate chain")?;
         let key = fs::read(key_path).context("failed to read private key")?;
@@ -214,6 +308,67 @@ mod tests {
             let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+
+        #[cfg(windows)]
+        {
+            let sddl = windows_file_sddl(&key_path);
+            // Inheritance disabled, full control for SYSTEM and Administrators,
+            // and no ACE for BUILTIN\Users (BU) or Everyone (WD).
+            assert!(sddl.contains("D:P"), "DACL must be protected: {sddl}");
+            assert!(sddl.contains("(A;;FA;;;SY)"), "SYSTEM grant expected: {sddl}");
+            assert!(sddl.contains("(A;;FA;;;BA)"), "Admins grant expected: {sddl}");
+            assert!(!sddl.contains(";;;BU)"), "Users must have no access: {sddl}");
+            assert!(!sddl.contains(";;;WD)"), "Everyone must have no access: {sddl}");
+        }
+    }
+
+    #[cfg(windows)]
+    fn windows_file_sddl(path: &std::path::Path) -> String {
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "(Get-Acl -LiteralPath '{}').Sddl",
+                    path.to_str().unwrap().replace('\'', "''")
+                ),
+            ])
+            .output()
+            .expect("read back SDDL");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn windows_key_acl_args_grant_only_system_admins_and_account() {
+        let args = windows_key_acl_args(
+            std::path::Path::new(r"C:\data\key.pem"),
+            Some(r"VM\backend-svc"),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                r"C:\data\key.pem".to_string(),
+                "/inheritance:r".to_string(),
+                "/grant:r".to_string(),
+                "*S-1-5-18:(F)".to_string(),
+                "*S-1-5-32-544:(F)".to_string(),
+                r"VM\backend-svc:(F)".to_string(),
+            ]
+        );
+        assert!(!args.iter().any(|a| a.contains("S-1-1-0")));
+        assert!(!args.iter().any(|a| a.contains("S-1-5-32-545")));
+    }
+
+    #[test]
+    fn windows_key_acl_args_without_account_grants_system_and_admins_only() {
+        let args = windows_key_acl_args(std::path::Path::new(r"C:\data\key.pem"), None);
+
+        assert_eq!(args.len(), 5);
+        assert!(args.contains(&"/inheritance:r".to_string()));
+        assert!(args.contains(&"*S-1-5-18:(F)".to_string()));
+        assert!(args.contains(&"*S-1-5-32-544:(F)".to_string()));
     }
 
     #[test]

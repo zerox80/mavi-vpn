@@ -2,14 +2,18 @@ use bytes::{Buf, Bytes};
 use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
+    looks_like_html_response,
     masque::{self, CAPSULE_MAVI_CONFIG},
-    resolve_tun_mtu_with_source, ControlMessage, TunMtuSource, MAX_TUN_MTU, QUIC_OVERHEAD_BYTES,
+    resolve_tun_mtu_with_source, ControlMessage, QUIC_OVERHEAD_BYTES,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod validation;
+
 use crate::crypto::{decode_hex, PinnedServerVerifier};
+use validation::validate_server_mtu;
 
 /// Holds the h3 CONNECT-IP request state for the lifetime of the VPN session.
 ///
@@ -37,6 +41,14 @@ impl Drop for H3SessionGuard {
 
 pub const fn effective_http3_framing(censorship_resistant: bool, http3_framing: bool) -> bool {
     http3_framing || censorship_resistant
+}
+
+fn alpn_protocols(effective_http3_framing: bool) -> Vec<Vec<u8>> {
+    if effective_http3_framing {
+        vec![b"h3".to_vec()]
+    } else {
+        vec![b"mavivpn".to_vec()]
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -71,13 +83,14 @@ pub async fn connect_and_handshake(
     .with_custom_certificate_verifier(verifier)
     .with_no_client_auth();
 
-    // HTTP/3 transport requires h3. Raw mode keeps mavivpn as the preferred ALPN.
+    // Raw and HTTP/3 modes are different wire protocols. Advertise exactly the
+    // protocol the client is going to speak so the server cannot select h3 while
+    // the client sends raw bincode auth bytes.
+    client_crypto.alpn_protocols = alpn_protocols(effective_http3_framing);
     if effective_http3_framing {
-        client_crypto.alpn_protocols = vec![b"h3".to_vec()];
         info!("HTTP/3 transport enabled. ALPN: h3");
     } else {
-        client_crypto.alpn_protocols = vec![b"mavivpn".to_vec(), b"h3".to_vec()];
-        info!("Standard Mode enabled. ALPN: mavivpn, h3");
+        info!("Standard Mode enabled. ALPN: mavivpn");
     }
 
     // Connect & MTU Logic
@@ -108,11 +121,12 @@ pub async fn connect_and_handshake(
     // Server and client MUST agree on the TUN MTU, otherwise the larger side
     // will send UDP payloads the smaller side considers out-of-spec.
     let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
-    let transport_tun_mtu = if matches!(mtu_source, TunMtuSource::Default) {
-        MAX_TUN_MTU
-    } else {
-        local_tun_mtu
-    };
+    // When no explicit MTU is configured, use DEFAULT_TUN_MTU (1280) for the
+    // transport budget so client and server agree on packet size. Previously
+    // MAX_TUN_MTU (1360) was used, causing the client to send larger QUIC
+    // packets than the server, leading to silent packet loss on constrained
+    // network paths (PPPoE, carrier-grade NAT).
+    let transport_tun_mtu = local_tun_mtu;
     let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
     info!(
         "Setting QUIC MTU: {} (TUN MTU budget: {}, source: {:?}, Target Wire: {} IPv4 / {} IPv6)",
@@ -211,44 +225,24 @@ pub async fn connect_and_handshake(
             return Err(anyhow::anyhow!("Server response too large: {len} bytes"));
         }
         let mut buf = vec![0u8; len];
-        if let Err(e) = recv_stream.read_exact(&mut buf).await {
-            if len == 6401 && censorship_resistant {
-                return Err(anyhow::anyhow!("Access Denied: Server rejected the token. Check Keycloak logs or token validity."));
-            }
-            return Err(anyhow::anyhow!("Handshake read error: {e}"));
+        recv_stream.read_exact(&mut buf).await?;
+
+        // In censorship-resistant mode the server returns a fake nginx HTML
+        // page on auth failure. Detect by content, not a magic length.
+        if looks_like_html_response(&buf) {
+            return Err(anyhow::anyhow!(
+                "AUTH_FAILED: Server returned HTML (camouflage response). \
+                 Check token validity or Keycloak configuration."
+            ));
         }
 
         let cfg = decode_raw_server_config(&buf)?;
         (cfg, None)
     };
 
-    validate_server_mtu(&config, local_tun_mtu, mtu_source)?;
+    validate_server_mtu(&config, local_tun_mtu)?;
 
     Ok((connection, config, h3_guard))
-}
-
-fn validate_server_mtu(
-    config: &ControlMessage,
-    local_tun_mtu: u16,
-    mtu_source: TunMtuSource,
-) -> anyhow::Result<()> {
-    if let ControlMessage::Config { mtu, .. } = config {
-        if !(shared::MIN_TUN_MTU..=MAX_TUN_MTU).contains(mtu) {
-            anyhow::bail!(
-                "Server pushed unsupported VPN MTU {}. Supported range is {}-{}.",
-                mtu,
-                shared::MIN_TUN_MTU,
-                MAX_TUN_MTU
-            );
-        }
-
-        if mtu_source != TunMtuSource::Default && *mtu != local_tun_mtu {
-            anyhow::bail!(
-                "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {mtu}. Configure both sides to the same VPN_MTU."
-            );
-        }
-    }
-    Ok(())
 }
 
 fn decode_raw_server_config(buf: &[u8]) -> anyhow::Result<ControlMessage> {
@@ -308,6 +302,9 @@ async fn connect_and_handshake_h3(
     if resp.status() != http::StatusCode::OK {
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
     }
+    if is_camouflage_h3_response(resp.headers()) {
+        anyhow::bail!("AUTH_FAILED: Server returned camouflage HTML instead of MAVI_CONFIG");
+    }
 
     // Parse capsule stream. The server sends ADDRESS_ASSIGN + ROUTE_ADVERTISEMENT
     // (standard connect-ip) followed by the vendor MAVI_CONFIG capsule carrying
@@ -350,6 +347,9 @@ async fn connect_and_handshake_h3(
             Err(_) => anyhow::bail!("Timed out waiting for MAVI_CONFIG capsule"),
         };
         capsule_buf.extend_from_slice(chunk.chunk());
+        if looks_like_html_response(&capsule_buf) {
+            anyhow::bail!("AUTH_FAILED: Server returned HTML instead of MAVI_CONFIG");
+        }
         if capsule_buf.len() > masque::MAX_CAPSULE_BUF {
             anyhow::bail!(
                 "connect-ip capsule buffer exceeded {} bytes",
@@ -374,6 +374,17 @@ async fn connect_and_handshake_h3(
     ))
 }
 
+fn is_camouflage_h3_response(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("text/html"))
+        || headers
+            .get(http::header::SERVER)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("nginx"))
+}
+
 fn endpoint_host(endpoint: &str) -> String {
     if let Some(rest) = endpoint.strip_prefix('[') {
         if let Some(end) = rest.find(']') {
@@ -391,94 +402,4 @@ fn endpoint_host(endpoint: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn endpoint_host_simple() {
-        assert_eq!(endpoint_host("vpn.example.com:4433"), "vpn.example.com");
-    }
-
-    #[test]
-    fn endpoint_host_ipv4() {
-        assert_eq!(endpoint_host("192.168.1.1:4433"), "192.168.1.1");
-    }
-
-    #[test]
-    fn endpoint_host_ipv6_bracketed() {
-        assert_eq!(endpoint_host("[::1]:4433"), "::1");
-    }
-
-    #[test]
-    fn endpoint_host_no_port() {
-        assert_eq!(endpoint_host("vpn.example.com"), "vpn.example.com");
-    }
-
-    #[test]
-    fn endpoint_host_ipv6_no_brackets() {
-        assert_eq!(endpoint_host("::1"), "::1");
-    }
-
-    #[test]
-    fn effective_http3_framing_matches_transport_invariant() {
-        assert!(!effective_http3_framing(false, false));
-        assert!(effective_http3_framing(false, true));
-        assert!(effective_http3_framing(true, false));
-        assert!(effective_http3_framing(true, true));
-    }
-
-    fn config_with_mtu(mtu: u16) -> ControlMessage {
-        ControlMessage::Config {
-            assigned_ip: "10.8.0.2".parse().unwrap(),
-            netmask: "255.255.255.0".parse().unwrap(),
-            gateway: "10.8.0.1".parse().unwrap(),
-            dns_server: "1.1.1.1".parse().unwrap(),
-            mtu,
-            assigned_ipv6: None,
-            netmask_v6: None,
-            gateway_v6: None,
-            dns_server_v6: None,
-            whitelist_domains: None,
-        }
-    }
-
-    #[test]
-    fn validate_server_mtu_accepts_match() {
-        assert!(validate_server_mtu(&config_with_mtu(1280), 1280, TunMtuSource::Config).is_ok());
-        assert!(validate_server_mtu(&config_with_mtu(1360), 1280, TunMtuSource::Default).is_ok());
-    }
-
-    #[test]
-    fn validate_server_mtu_rejects_mismatch() {
-        let err =
-            validate_server_mtu(&config_with_mtu(1360), 1280, TunMtuSource::Config).unwrap_err();
-        assert!(err.to_string().contains("MTU mismatch"));
-    }
-
-    #[test]
-    fn validate_server_mtu_rejects_unsupported_value() {
-        let err =
-            validate_server_mtu(&config_with_mtu(1400), 1280, TunMtuSource::Default).unwrap_err();
-        assert!(err.to_string().contains("unsupported VPN MTU"));
-    }
-
-    #[test]
-    fn raw_server_config_rejects_server_error() {
-        let bytes = bincode::serde::encode_to_vec(
-            &ControlMessage::Error {
-                message: "denied".to_string(),
-            },
-            bincode::config::standard(),
-        )
-        .unwrap();
-
-        let err = decode_raw_server_config(&bytes).unwrap_err();
-
-        assert!(err.to_string().contains("Server Error: denied"));
-    }
-
-    #[test]
-    fn raw_server_config_rejects_malformed_bytes() {
-        assert!(decode_raw_server_config(&[0xde, 0xad, 0xbe, 0xef]).is_err());
-    }
-}
+mod tests;

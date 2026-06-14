@@ -9,5 +9,30 @@ ExecStart=/usr/local/bin/mavi-vpn daemon
 Restart=on-failure
 RestartSec=5
 
+# The daemon must create a TUN device and adjust routes/DNS, but it should not
+# inherit broad root filesystem or device access beyond those operations.
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RuntimeDirectory=mavi-vpn
+RuntimeDirectoryMode=0711
+StateDirectory=mavi-vpn
+StateDirectoryMode=0700
+ReadWritePaths=/run/mavi-vpn /var/lib/mavi-vpn /etc/resolv.conf -/run/systemd/resolve
+
 [Install]
 WantedBy=multi-user.target

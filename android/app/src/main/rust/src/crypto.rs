@@ -1,14 +1,6 @@
 use sha2::{Digest, Sha256};
 
-pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
-}
+pub use shared::hex::decode_hex;
 
 #[derive(Debug)]
 pub struct PinnedServerVerifier {
@@ -68,6 +60,8 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
     #[test]
     fn decode_hex_valid() {
@@ -92,9 +86,57 @@ mod tests {
     }
 
     #[test]
+    fn decode_hex_non_ascii_returns_none_instead_of_panicking() {
+        assert_eq!(decode_hex("€€"), None);
+        assert_eq!(decode_hex("aaé"), None);
+    }
+
+    #[test]
     fn pinned_verifier_new_stores_hash() {
         let hash = vec![0x01, 0x02, 0x03];
         let verifier = PinnedServerVerifier::new(hash.clone());
         assert_eq!(verifier.expected_hash, hash);
+    }
+
+    #[test]
+    fn pinned_verifier_accepts_matching_certificate_hash() {
+        let cert = CertificateDer::from(vec![0x42; 32]);
+        let expected_hash = Sha256::digest(cert.as_ref()).to_vec();
+        let verifier = PinnedServerVerifier::new(expected_hash);
+
+        let result = verifier.verify_server_cert(
+            &cert,
+            &[],
+            &ServerName::try_from("vpn.example.com").unwrap(),
+            &[],
+            UnixTime::since_unix_epoch(std::time::Duration::from_secs(1)),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pinned_verifier_rejects_mismatched_certificate_hash() {
+        let verifier = PinnedServerVerifier::new(vec![0x00; 32]);
+        let cert = CertificateDer::from(vec![0x42; 32]);
+
+        let err = verifier
+            .verify_server_cert(
+                &cert,
+                &[],
+                &ServerName::try_from("vpn.example.com").unwrap(),
+                &[],
+                UnixTime::since_unix_epoch(std::time::Duration::from_secs(1)),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Pin mismatch"));
+    }
+
+    #[test]
+    fn pinned_verifier_exposes_supported_signature_schemes() {
+        let verifier = PinnedServerVerifier::new(vec![0x00; 32]);
+
+        assert!(!verifier.supported_verify_schemes().is_empty());
     }
 }

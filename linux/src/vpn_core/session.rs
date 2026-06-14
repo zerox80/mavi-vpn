@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use tracing::{info, warn};
 
 use crate::network::NetworkConfig;
@@ -15,6 +15,19 @@ use crate::tun::TunDevice;
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
 const TUN_DEVICE_NAME: &str = "mavi0";
+
+/// Sleeps up to `delay`, but returns as soon as `running` is cleared.
+///
+/// A Stop command only flips the `running` flag; without this, the reconnect
+/// backoff (`tokio::time::sleep`, up to 30s) would block the loop so a disconnect
+/// appears to hang and `vpn_stopping` stays set, rejecting fresh Start requests.
+/// Polling in 100ms steps makes Stop take effect within ~100ms in any backoff.
+async fn sleep_unless_stopped(delay: Duration, running: &Arc<AtomicBool>) {
+    let deadline = std::time::Instant::now() + delay;
+    while running.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 
 /// Entry point for the VPN runner. Manages the reconnection loop and TUN lifecycle.
 pub async fn run_vpn(
@@ -53,12 +66,21 @@ pub async fn run_vpn(
                 Duration::from_secs(RECONNECT_INITIAL_SECS),
             ),
             Err(e) => {
+                let err_str = e.to_string();
                 connected.store(false, Ordering::SeqCst);
                 if let Ok(mut ip) = assigned_ip.lock() {
                     *ip = None;
                 }
                 if let Ok(mut last) = last_error.lock() {
-                    *last = Some(e.to_string());
+                    *last = Some(err_str.clone());
+                }
+                if is_permanent_setup_error(&err_str) {
+                    warn!(
+                        "Permanent VPN setup failure: {}. Stopping VPN loop.",
+                        err_str
+                    );
+                    running.store(false, Ordering::Relaxed);
+                    break;
                 }
                 warn!("Session failed: {:#}. Reconnecting...", e);
                 (
@@ -68,12 +90,24 @@ pub async fn run_vpn(
             }
         };
 
-        tokio::time::sleep(reconnect_delay).await;
+        sleep_unless_stopped(reconnect_delay, &running).await;
         backoff = next_backoff;
     }
 
     info!("VPN stopped.");
     Ok(())
+}
+
+fn is_permanent_setup_error(message: &str) -> bool {
+    message.contains("AUTH_FAILED")
+        || message.contains("Server rejected connection")
+        || message.contains("MTU mismatch")
+        || message.contains("unsupported VPN MTU")
+        || message.contains("Failed to open /dev/net/tun")
+        || message.contains("Failed to create TUN device")
+        || message.contains("Failed to install IPv6 split route")
+        || message.contains("Failed to execute: ip ")
+        || message.contains("ip failed:")
 }
 
 enum SessionEnd {
@@ -262,11 +296,17 @@ async fn run_session(
                             } else {
                                 None
                             };
-                            let reported_mtu = if version == 6 {
-                                tun_mtu_for_ptb.max(1280)
+                            let h3_prefix = if is_h3_framing {
+                                masque::DATAGRAM_PREFIX.len()
                             } else {
-                                tun_mtu_for_ptb
+                                0
                             };
+                            let reported_mtu = shared::effective_ptb_mtu(
+                                tun_mtu_for_ptb,
+                                conn_sender.max_datagram_size(),
+                                h3_prefix,
+                                version == 6,
+                            );
                             if let Some(icmp_packet) = icmp::generate_packet_too_big(
                                 &scratch[..n],
                                 reported_mtu,
@@ -296,12 +336,22 @@ async fn run_session(
     let alive_quic = session_alive.clone();
     let run_quic = global_running.clone();
     let is_h3_framing_dl = config.effective_http3_framing();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
+    let conn_clone = connection.clone();
     let quic_to_tun = tokio::spawn(async move {
         loop {
             if !run_quic.load(Ordering::Relaxed) || !alive_quic.load(Ordering::Relaxed) {
                 break;
             }
-            match connection.read_datagram().await {
+            // Use select! to race read_datagram against a shutdown signal.
+            // Without this, a Stop command blocks for up to 60s (QUIC idle
+            // timeout) because read_datagram holds the .await indefinitely.
+            let datagram = tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => { break; }
+                result = conn_clone.read_datagram() => { result }
+            };
+            match datagram {
                 Ok(mut data) => {
                     // Strip [Quarter Stream ID] [Context ID] for connect-ip.
                     if is_h3_framing_dl {
@@ -337,6 +387,11 @@ async fn run_session(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Signal shutdown to the QUIC->TUN task (unblocks read_datagram)
+    drop(shutdown_tx);
+    // Close the QUIC connection to unblock any remaining awaits
+    connection.close(0u32.into(), b"session ending");
+
     tun_to_quic.abort();
     quic_to_tun.abort();
     mtu_monitor.abort();
@@ -352,5 +407,64 @@ async fn run_session(
         Ok(SessionEnd::ConnectionLost)
     } else {
         Ok(SessionEnd::UserStopped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_permanent_setup_error, sleep_unless_stopped};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn backoff_sleep_returns_promptly_when_stopped() {
+        let running = Arc::new(AtomicBool::new(true));
+        let stopper = running.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            stopper.store(false, Ordering::Relaxed);
+        });
+
+        let started = Instant::now();
+        // A long backoff that must be cut short by the Stop above.
+        sleep_unless_stopped(Duration::from_secs(30), &running).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "Stop during backoff must return within ~1s, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn backoff_sleep_completes_full_delay_when_running() {
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+        sleep_unless_stopped(Duration::from_millis(250), &running).await;
+        assert!(started.elapsed() >= Duration::from_millis(200));
+    }
+
+    #[test]
+    fn permanent_setup_errors_stop_reconnect_loop() {
+        for message in [
+            "AUTH_FAILED: Server returned HTTP 401",
+            "Server rejected connection: denied",
+            "MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360",
+            "Server pushed unsupported VPN MTU 1400",
+            "Failed to open /dev/net/tun: permission denied",
+            "Failed to install IPv6 split route ::/1",
+            "Failed to execute: ip route add 0.0.0.0/1",
+            "ip failed: RTNETLINK answers: Operation not permitted",
+        ] {
+            assert!(is_permanent_setup_error(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn transient_transport_errors_keep_reconnect_loop() {
+        assert!(!is_permanent_setup_error("connection lost"));
+        assert!(!is_permanent_setup_error(
+            "timed out while reading datagram"
+        ));
     }
 }

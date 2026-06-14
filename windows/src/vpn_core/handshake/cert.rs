@@ -1,14 +1,7 @@
 use sha2::{Digest, Sha256};
 
-pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
-}
+pub use shared::hex::decode_hex;
+
 /// Custom certificate verifier that trusts only a specific SHA-256 fingerprint.
 #[derive(Debug)]
 pub(super) struct PinnedServerVerifier {
@@ -63,5 +56,66 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.supported.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_hex_empty_string() {
+        assert_eq!(decode_hex(""), Some(vec![]));
+    }
+
+    #[test]
+    fn decode_hex_valid_lowercase() {
+        assert_eq!(decode_hex("deadbeef"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn decode_hex_valid_uppercase() {
+        assert_eq!(decode_hex("DEADBEEF"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn decode_hex_valid_mixed_case() {
+        assert_eq!(decode_hex("DeAdBeEf"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn decode_hex_odd_length_returns_none() {
+        assert_eq!(decode_hex("abc"), None);
+        assert_eq!(decode_hex("1"), None);
+        assert_eq!(decode_hex("deadbee"), None);
+    }
+
+    #[test]
+    fn decode_hex_invalid_chars_returns_none() {
+        assert_eq!(decode_hex("gg"), None);
+        assert_eq!(decode_hex("zzzz"), None);
+        assert_eq!(decode_hex("12abXX"), None);
+    }
+
+    #[test]
+    fn decode_hex_non_ascii_returns_none_instead_of_panicking() {
+        assert_eq!(decode_hex("€€"), None);
+        assert_eq!(decode_hex("aaé"), None);
+    }
+
+    #[test]
+    fn decode_hex_single_byte() {
+        assert_eq!(decode_hex("ff"), Some(vec![0xff]));
+        assert_eq!(decode_hex("00"), Some(vec![0x00]));
+    }
+
+    #[test]
+    fn decode_hex_all_zeros() {
+        assert_eq!(decode_hex("00000000"), Some(vec![0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn decode_hex_all_ff() {
+        assert_eq!(decode_hex("ffffffff"), Some(vec![0xff, 0xff, 0xff, 0xff]));
     }
 }

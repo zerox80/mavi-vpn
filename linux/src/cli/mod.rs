@@ -301,6 +301,7 @@ fn print_help() {
     println!("  mavi-vpn stop                      # Disconnect via daemon");
 }
 
+#[allow(unsafe_code)] // geteuid is a trivial, always-safe libc call
 fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }

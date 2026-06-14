@@ -9,7 +9,6 @@ use shared::masque::{
     self, AssignedAddress, IpAddressRange, CAPSULE_ADDRESS_ASSIGN, CAPSULE_MAVI_CONFIG,
     CAPSULE_ROUTE_ADVERTISEMENT,
 };
-use shared::ControlMessage;
 
 use crate::config::Config;
 use crate::handlers::auth::authenticate_client;
@@ -142,14 +141,18 @@ pub async fn handle_h3_connection(
         .await
         .map_err(|e| anyhow::anyhow!("H3 build failed: {e}"))?;
 
-    let resolver = h3_conn
-        .accept()
+    // Bound the wait for the client's first request so an H3 peer that opens the
+    // control stream but never sends a request cannot pin a connection slot until
+    // the idle timeout (connection-slot exhaustion DoS).
+    let preauth_timeout = crate::handlers::connection::PREAUTH_PHASE_TIMEOUT;
+    let resolver = tokio::time::timeout(preauth_timeout, h3_conn.accept())
         .await
+        .map_err(|_| anyhow::anyhow!("H3 accept timeout from {remote_addr}"))?
         .map_err(|e| anyhow::anyhow!("H3 accept error: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("Expected H3 request"))?;
-    let (req, mut req_stream) = resolver
-        .resolve_request()
+    let (req, mut req_stream) = tokio::time::timeout(preauth_timeout, resolver.resolve_request())
         .await
+        .map_err(|_| anyhow::anyhow!("H3 resolve timeout from {remote_addr}"))?
         .map_err(|e| anyhow::anyhow!("H3 resolve error: {e}"))?;
     let connect_ip_requested =
         req.extensions().get::<h3::ext::Protocol>().copied() == Some(h3::ext::Protocol::CONNECT_IP);
@@ -207,7 +210,7 @@ pub async fn handle_h3_connection(
     )
     .await;
 
-    let (assigned_ip, assigned_ip6) = match auth_result {
+    let (assigned_ip, assigned_ip6, session_expiry) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
             let error_msg = format!("Unauthorized: {e}");
@@ -262,8 +265,8 @@ pub async fn handle_h3_connection(
 
     let connection_arc = Arc::new(connection);
 
-    run_tunnel(
-        connection_arc,
+    let tunnel = run_tunnel(
+        connection_arc.clone(),
         rx_client,
         tx_tun,
         assigned_ip,
@@ -272,6 +275,11 @@ pub async fn handle_h3_connection(
         state.gateway_ip_v6(),
         config.mtu,
         true, // is_h3
+    );
+    crate::handlers::connection::run_tunnel_until_session_expiry(
+        &connection_arc,
+        session_expiry,
+        tunnel,
     )
     .await
 }
@@ -279,6 +287,7 @@ pub async fn handle_h3_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::ControlMessage;
     use clap::Parser;
     use shared::masque::{
         decode_address_assign, decode_route_advertisement, read_capsule, CAPSULE_ADDRESS_ASSIGN,

@@ -142,7 +142,14 @@ mavi-vpn/
 cd backend
 cp .env.example .env
 nano .env                    # Set VPN_AUTH_TOKEN, VPN_PORT, etc.
-docker-compose up -d --build
+docker compose up -d --build
+```
+
+To force-refresh the forked Rust Git dependencies during deployment:
+```bash
+docker compose pull --ignore-buildable
+docker compose build --pull --no-cache vpn-server
+docker compose up -d --force-recreate
 ```
 
 Retrieve the certificate PIN for clients:
@@ -253,7 +260,7 @@ Full enterprise SSO with Keycloak:
 | QUIC Payload | **1360** | Fits within 1460-MTU networks (e.g. Vodafone) without fragmentation |
 | Congestion Control | **BBR** | Bandwidth-based, not loss-based — optimal for mobile/high-latency |
 | UDP Socket Buffers | **4 MB** | Prevents kernel drops during GSO bursts |
-| Allocator | **mimalloc** | Reduces memory allocation latency on the server |
+| Allocator | **system default** | Avoids an unused native allocator dependency in test and build paths |
 | Release Profile | `lto=true, codegen-units=1, strip=true` | Maximally optimized binary |
 
 ## Configuration Reference
@@ -269,17 +276,24 @@ All server settings can be configured via environment variables or CLI flags:
 | `VPN_DNS` | `1.1.1.1` | DNS server pushed to clients |
 | `VPN_MTU` | `1280` | TUN interface MTU |
 | `VPN_CENSORSHIP_RESISTANT` | `false` | Enable Layer 7 obfuscation |
-| `VPN_MSS_CLAMPING` | `false` | TCP MSS rewriting via iptables mangle |
+| `VPN_MSS_CLAMPING` | `false` | TCP MSS rewriting via iptables mangle (MSS derived from `VPN_MTU`) |
+| `VPN_ALLOW_CLIENT_TO_CLIENT` | `false` | Allow VPN clients to reach each other (blocked by default) |
 | `VPN_ECH_PUBLIC_NAME` | `cloudflare-ech.com` | ECH cover SNI domain |
 | `VPN_KEYCLOAK_ENABLED` | `false` | Enable Keycloak JWT auth |
-| `VPN_KEYCLOAK_URL` | — | Keycloak server URL |
+| `VPN_KEYCLOAK_URL` | — | Keycloak server URL (must be `https://`; plain HTTP only for localhost) |
 | `VPN_KEYCLOAK_REALM` | `mavi-vpn` | Keycloak realm name |
 | `VPN_KEYCLOAK_CLIENT_ID` | `mavi-client` | Keycloak OIDC client ID |
 
 ## Testing
 
 ```bash
-# Run unit tests (shared crate + backend)
+# Run the portable Rust core without Tauri/WebView or OS service deps
+cargo test-core-workspace --verbose
+
+# Run the Tauri Rust backend separately when WebView/Tauri deps are installed
+cargo test-gui-backend --verbose
+
+# Focused core checks
 cargo test -p shared --verbose
 cargo test -p mavi-vpn --verbose
 ```

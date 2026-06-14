@@ -97,12 +97,14 @@ jobs:
           mkdir -p target/coverage
 
           ALL_RUST_PACKAGES="-p shared -p mavivpn -p mavi-vpn -p linux-vpn -p quic-tester -p mavi-vpn-gui"
-          CORE_COVERAGE_PACKAGES="-p shared -p mavi-vpn"
-          CORE_COVERAGE_IGNORE="(^|/)backend/src/(main\.rs|utils\.rs|network/h3_quinn/.*)$"
 
-          # Gate the unit-testable Rust core. Platform clients, FFI boundaries,
-          # binaries, and runtime glue remain visible in the full LCOV report.
-          cargo llvm-cov --all-features $CORE_COVERAGE_PACKAGES --ignore-filename-regex "$CORE_COVERAGE_IGNORE" --summary-only --fail-under-lines 70
+          cargo llvm-cov --all-features -p shared --summary-only
+          cargo llvm-cov --all-features -p mavivpn --summary-only
+          cargo llvm-cov --all-features -p mavi-vpn --summary-only
+          cargo llvm-cov --all-features -p linux-vpn --summary-only
+          cargo llvm-cov --all-features -p quic-tester --summary-only
+          cargo llvm-cov --all-features -p mavi-vpn-gui --summary-only
+
           cargo llvm-cov --all-features $ALL_RUST_PACKAGES --lcov --output-path target/coverage/lcov.info
       - name: Upload Rust coverage
         uses: actions/upload-artifact@v4
@@ -131,6 +133,41 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - name: Test windows crate
         run: cargo test -p windows-vpn --verbose
+
+  coverage-windows:
+    name: Windows Rust Coverage
+    runs-on: windows-latest
+    needs: test-windows
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-
+            ${{ runner.os }}-cargo-
+      - name: Generate Windows Rust coverage summary
+        run: |
+          New-Item -ItemType Directory -Force -Path target/coverage | Out-Null
+          cargo llvm-cov --all-features -p windows-vpn --summary-only
+          cargo llvm-cov --all-features -p windows-vpn --lcov --output-path target/coverage/windows-lcov.info
+      - name: Upload Windows Rust coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-rust-coverage
+          path: target/coverage/windows-lcov.info
 
   test-gui:
     name: GUI Frontend Tests

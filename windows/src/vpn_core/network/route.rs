@@ -331,4 +331,67 @@ mod tests {
 
         assert!(!apply_ipv6_prefix_policy_with_runner(&runner, "fd00::/64", false));
     }
+
+    #[test]
+    fn ipv6_network_prefix_full_64() {
+        let ip = Ipv6Addr::new(0x2001, 0x0db8, 0x85a3, 0x1234, 0x5678, 0xabcd, 0xef01, 0x2345);
+        assert_eq!(ipv6_network_prefix(ip, 64), "2001:db8:85a3:1234::/64");
+    }
+
+    #[test]
+    fn ipv6_network_prefix_full_128() {
+        let ip = Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1);
+        assert_eq!(ipv6_network_prefix(ip, 128), "2001:db8::1/128");
+    }
+
+    #[test]
+    fn ipv6_network_prefix_zero() {
+        let ip = Ipv6Addr::new(0x2001, 0x0db8, 0x85a3, 0x1234, 0x5678, 0xabcd, 0xef01, 0x2345);
+        assert_eq!(ipv6_network_prefix(ip, 0), "::/0");
+    }
+
+    #[test]
+    fn ipv6_network_prefix_48() {
+        let ip = Ipv6Addr::new(0x2001, 0x0db8, 0x85a3, 0x1234, 0x5678, 0xabcd, 0xef01, 0x2345);
+        assert_eq!(ipv6_network_prefix(ip, 48), "2001:db8:85a3::/48");
+    }
+
+    #[test]
+    fn ipv6_network_prefix_partial_segment() {
+        let ip = Ipv6Addr::new(0x2001, 0x0db8, 0xffff, 0, 0, 0, 0, 0);
+        assert_eq!(ipv6_network_prefix(ip, 20), "2001::/20");
+    }
+
+    #[test]
+    fn ipv6_network_prefix_loopback() {
+        let ip = Ipv6Addr::LOCALHOST;
+        assert_eq!(ipv6_network_prefix(ip, 128), "::1/128");
+        assert_eq!(ipv6_network_prefix(ip, 64), "::/64");
+    }
+
+    #[test]
+    fn prefix_policy_persist_and_load_roundtrip() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy_path = temp.path().join("last_prefix_policy.txt");
+
+        std::fs::write(&policy_path, "fd00::/64").unwrap();
+        let loaded = std::fs::read_to_string(&policy_path)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        assert_eq!(loaded.as_deref(), Some("fd00::/64"));
+    }
+
+    #[test]
+    fn prefix_policy_load_returns_none_for_empty_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy_path = temp.path().join("last_prefix_policy.txt");
+
+        std::fs::write(&policy_path, "   \n  ").unwrap();
+        let loaded = std::fs::read_to_string(&policy_path)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        assert!(loaded.is_none());
+    }
 }

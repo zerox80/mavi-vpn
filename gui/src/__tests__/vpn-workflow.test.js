@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
-import { connect, disconnect, applyHeroForSelection } from '../vpn.js';
+import {
+  applyHeroForSelection,
+  connect,
+  disconnect,
+  refreshStatus,
+  setHero,
+  toggleConnection,
+  wireHero,
+} from '../vpn.js';
 import { invoke } from '../api.js';
 import { showToast } from '../toast.js';
 
@@ -60,7 +68,10 @@ describe('vpn workflows', () => {
   });
 
   it('connect saves config before starting the VPN', async () => {
-    invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce('Connected');
+    invoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce('Connected')
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Starting' });
 
     await connect();
 
@@ -89,6 +100,27 @@ describe('vpn workflows', () => {
     expect(showToast).toHaveBeenCalledWith('Select a saved connection first, or add one.', 'error');
   });
 
+  it('connect refuses a connection without token or Keycloak', async () => {
+    state.prefs.connections[0].token = '';
+
+    await connect();
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      'Edit the saved connection and enter a pre-shared key, or enable Keycloak.',
+      'error'
+    );
+  });
+
+  it('connect reports invoke failures and returns to off', async () => {
+    invoke.mockRejectedValueOnce(new Error('connection refused'));
+
+    await connect();
+
+    expect(showToast).toHaveBeenCalledWith('VPN daemon is not running.', 'error');
+    expect(state.hero).toBe('off');
+  });
+
   it('disconnect waits for stopped status and refreshes final status', async () => {
     state.hero = 'on';
     invoke
@@ -103,6 +135,75 @@ describe('vpn workflows', () => {
     expect(invoke).toHaveBeenNthCalledWith(3, 'vpn_status');
     expect(state.disconnecting).toBe(false);
     expect(state.hero).toBe('off');
+  });
+
+  it('disconnect reports errors and refreshes status', async () => {
+    state.hero = 'on';
+    invoke
+      .mockRejectedValueOnce(new Error('disconnect failed'))
+      .mockResolvedValueOnce({ service_available: true, running: true, state: 'Connected' });
+
+    await disconnect();
+
+    expect(showToast).toHaveBeenCalledWith('Error: disconnect failed', 'error');
+    expect(invoke).toHaveBeenNthCalledWith(1, 'vpn_disconnect');
+    expect(invoke).toHaveBeenNthCalledWith(2, 'vpn_status');
+    expect(state.hero).toBe('on');
+  });
+
+  it('refreshStatus applies offline state when status invoke fails', async () => {
+    invoke.mockRejectedValueOnce(new Error('offline'));
+
+    await refreshStatus();
+
+    expect(state.serviceAvailable).toBe(false);
+    expect(document.getElementById('connect-btn').disabled).toBe(true);
+  });
+
+  it('toggleConnection ignores transitional states and routes on/off states', async () => {
+    state.hero = 'connecting';
+    await toggleConnection();
+    expect(invoke).not.toHaveBeenCalled();
+
+    state.hero = 'off';
+    invoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Starting' });
+    await toggleConnection();
+    expect(invoke).toHaveBeenCalledWith('vpn_connect', expect.any(Object));
+
+    vi.clearAllMocks();
+    state.hero = 'on';
+    invoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Stopped' })
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Stopped' });
+    await toggleConnection();
+    expect(invoke).toHaveBeenCalledWith('vpn_disconnect');
+  });
+
+  it('wireHero connects the button to toggleConnection', () => {
+    wireHero();
+    invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined);
+
+    document.getElementById('connect-btn').click();
+
+    expect(invoke).toHaveBeenCalledWith('save_config', expect.any(Object));
+  });
+
+  it('setHero renders each hero state label', () => {
+    setHero('connecting');
+    expect(document.getElementById('connect-btn').textContent).toBe('CONNECTING...');
+    expect(document.getElementById('core-label').textContent).toBe('HANDSHAKE');
+
+    setHero('disconnecting');
+    expect(document.getElementById('connect-btn').textContent).toBe('DISCONNECTING...');
+    expect(document.getElementById('core-label').textContent).toBe('CLEANUP');
+
+    setHero('on');
+    expect(document.getElementById('connect-btn').textContent).toBe('DISCONNECT');
+    expect(document.getElementById('title-state-label').textContent).toBe('ENCRYPTED');
   });
 
   it('selection state disables connect with no active connection', () => {

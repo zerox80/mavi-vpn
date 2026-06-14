@@ -7,7 +7,9 @@ use tokio::net::TcpStream;
 
 mod ipc;
 mod oauth;
+mod secrets;
 use ipc::{Config, IpcRequest, IpcResponse};
+use secrets::{config_token_account, KeyringSecretStore, SecretStore};
 
 const CONFIG_FILE: &str = "config.json";
 
@@ -223,30 +225,56 @@ fn config_path() -> PathBuf {
     dir.join(CONFIG_FILE)
 }
 
-fn load_config() -> Option<Config> {
-    let path = config_path();
+fn load_config() -> Result<Option<Config>> {
+    load_config_from_path(&config_path(), &KeyringSecretStore)
+}
+
+fn load_config_from_path(
+    path: &std::path::Path,
+    store: &dyn SecretStore,
+) -> Result<Option<Config>> {
     if path.exists() {
-        let content = std::fs::read_to_string(&path).ok()?;
-        let mut config: Config = serde_json::from_str(&content).ok()?;
+        let content = std::fs::read_to_string(path)?;
+        let mut config: Config = serde_json::from_str(&content)?;
         config.normalize_transport();
-        Some(config)
+        if config.token.is_empty() {
+            if let Some(secret) = store.get_secret(config_token_account())? {
+                config.token = secret;
+            }
+        } else {
+            save_config_to_path(path, &config, store)?;
+        }
+        Ok(Some(config))
     } else {
-        None
+        Ok(None)
     }
 }
 
 fn save_config(config: &Config) -> Result<()> {
-    let path = config_path();
+    save_config_to_path(&config_path(), config, &KeyringSecretStore)
+}
+
+fn save_config_to_path(
+    path: &std::path::Path,
+    config: &Config,
+    store: &dyn SecretStore,
+) -> Result<()> {
     let mut config = config.clone();
     config.normalize_transport();
+    if !config.token.is_empty() {
+        store.set_secret(config_token_account(), &config.token)?;
+        config.token.clear();
+    } else {
+        store.delete_secret(config_token_account())?;
+    }
     let content = serde_json::to_string_pretty(&config)?;
-    std::fs::write(&path, content)?;
+    std::fs::write(path, content)?;
     println!("Config saved to {}", path.display());
     Ok(())
 }
 
 async fn load_or_prompt_config() -> Result<Config> {
-    if let Some(mut saved) = load_config() {
+    if let Some(mut saved) = load_config()? {
         println!("Saved configuration found:");
         println!("  Endpoint: {}", saved.endpoint);
         if saved.kc_auth.unwrap_or(false) {
@@ -428,3 +456,6 @@ fn read_line() -> Result<String> {
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_string())
 }
+
+#[cfg(test)]
+mod main_tests;

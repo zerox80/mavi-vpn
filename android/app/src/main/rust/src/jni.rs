@@ -1,3 +1,8 @@
+// JNI inherently requires `unsafe` (raw env pointers, #[no_mangle] exports,
+// session handles round-tripped through jlong). Same precedent as the Windows
+// service entry point, which also allows unsafe_code at module level.
+#![allow(unsafe_code)]
+
 use android_logger::Config;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jint, jlong};
@@ -44,13 +49,18 @@ fn classify_init_error(message: &str) -> jlong {
         return INIT_FATAL_CERT;
     }
     if msg.contains("server error: unauthorized")
+        || msg.contains("auth_failed")
         || msg.contains("access denied")
         || msg.contains("invalid keycloak token")
         || msg.contains("invalid token")
     {
         return INIT_FATAL_AUTH;
     }
-    if msg.contains("endpoint host missing") || msg.contains("invalid address") {
+    if msg.contains("endpoint host missing")
+        || msg.contains("invalid address")
+        || msg.contains("mtu mismatch")
+        || msg.contains("unsupported vpn mtu")
+    {
         return INIT_FATAL_CONFIG;
     }
     INIT_RETRYABLE_FAILURE
@@ -428,6 +438,19 @@ mod tests {
             INIT_FATAL_CONFIG
         );
         assert_eq!(classify_init_error("invalid address"), INIT_FATAL_CONFIG);
+    }
+
+    #[test]
+    fn classify_mtu_errors_as_permanent_config() {
+        // A server/client MTU mismatch cannot be fixed by retrying.
+        assert_eq!(
+            classify_init_error("MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360"),
+            INIT_FATAL_CONFIG
+        );
+        assert_eq!(
+            classify_init_error("Server pushed unsupported VPN MTU 1500. Supported range is 1280-1360."),
+            INIT_FATAL_CONFIG
+        );
     }
 
     #[test]

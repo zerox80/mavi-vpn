@@ -36,6 +36,10 @@ export async function connect() {
   try {
     await invoke('save_config', { config });
     await invoke('vpn_connect', { config });
+    // Immediately fetch the real status instead of waiting up to 2s for
+    // the next poller tick. This prevents the UI from showing "Connecting..."
+    // when the service has already transitioned to Connected (or Failed).
+    await refreshStatus();
   } catch (e) {
     showToast(friendlyError(e), 'error');
     setHero('off');
@@ -88,6 +92,8 @@ export function applyStatus(status) {
   const btn = $('connect-btn');
   if (!btn) return;
 
+  $('ip-readout').textContent = status.assigned_ip || '—';
+
   if (!state.serviceAvailable) {
     state.disconnecting = false;
     setHero('off');
@@ -130,9 +136,6 @@ export function applyStatus(status) {
     btn.disabled = !activeConn();
     btn.title = activeConn() ? '' : 'Select or add a saved connection first';
     hideToast('hint');
-  }
-  if (status.assigned_ip) {
-    $('ip-readout').textContent = status.assigned_ip;
   }
   updateNetworkPanel();
 }

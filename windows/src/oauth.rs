@@ -17,6 +17,10 @@ fn html_escape(s: &str) -> String {
 
 #[allow(clippy::too_many_lines)]
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
+    // Plain-HTTP Keycloak would expose the authorization code and tokens to a
+    // MITM; only loopback is exempt (dev setups).
+    shared::validate_keycloak_url(kc_url).map_err(|e| anyhow::anyhow!(e))?;
+
     // 1. Generate PKCE verifier and challenge
     let verifier_bytes: [u8; 32] = rand::random();
     let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
@@ -184,5 +188,87 @@ mod tests {
     #[test]
     fn html_escape_quotes() {
         assert_eq!(html_escape("say \"hello\""), "say &quot;hello&quot;");
+    }
+
+    #[test]
+    fn html_escape_all_special_chars_combined() {
+        assert_eq!(
+            html_escape("<a href=\"x\" & b='y'>"),
+            "&lt;a href=&quot;x&quot; &amp; b='y'&gt;"
+        );
+    }
+
+    #[test]
+    fn html_escape_preserves_whitespace() {
+        assert_eq!(html_escape("  hello\nworld\t"), "  hello\nworld\t");
+    }
+
+    #[test]
+    fn html_escape_unicode_passthrough() {
+        assert_eq!(html_escape("Hello 世界 🌍"), "Hello 世界 🌍");
+    }
+
+    #[test]
+    fn html_escape_single_quote_not_escaped() {
+        assert_eq!(html_escape("it's fine"), "it's fine");
+    }
+
+    #[test]
+    fn html_escape_consecutive_special_chars() {
+        assert_eq!(html_escape("<<<>>>"), "&lt;&lt;&lt;&gt;&gt;&gt;");
+    }
+
+    #[test]
+    fn html_escape_only_ampersands() {
+        assert_eq!(html_escape("&&&"), "&amp;&amp;&amp;");
+    }
+
+    #[test]
+    fn html_escape_only_angle_brackets() {
+        assert_eq!(html_escape("<><>"), "&lt;&gt;&lt;&gt;");
+    }
+
+    #[test]
+    fn html_escape_only_quotes() {
+        assert_eq!(html_escape("\"\"\""), "&quot;&quot;&quot;");
+    }
+
+    #[test]
+    fn html_escape_newlines_with_special_chars() {
+        assert_eq!(
+            html_escape("line1\n<line2>\n&line3"),
+            "line1\n&lt;line2&gt;\n&amp;line3"
+        );
+    }
+
+    #[test]
+    fn html_escape_tabs_with_special_chars() {
+        assert_eq!(
+            html_escape("col1\t<col2>\t&col3"),
+            "col1\t&lt;col2&gt;\t&amp;col3"
+        );
+    }
+
+    #[test]
+    fn html_escape_long_string() {
+        let long_input = "a".repeat(10000);
+        let result = html_escape(&long_input);
+        assert_eq!(result.len(), 10000);
+        assert_eq!(result, long_input);
+    }
+
+    #[test]
+    fn html_escape_long_string_with_special_chars() {
+        let long_input = "<a>".repeat(1000);
+        let result = html_escape(&long_input);
+        assert_eq!(result, "&lt;a&gt;".repeat(1000));
+    }
+
+    #[test]
+    fn html_escape_mixed_whitespace_and_special() {
+        assert_eq!(
+            html_escape("  <tag>  &  \"value\"  "),
+            "  &lt;tag&gt;  &amp;  &quot;value&quot;  "
+        );
     }
 }

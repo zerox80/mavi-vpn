@@ -4,15 +4,10 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
 
 use crate::config::Config;
+use shared::QUIC_OVERHEAD_BYTES;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
-
-/// Fixed overhead budget reserved on top of the inner TUN MTU to account for
-/// QUIC short-header framing + AEAD tag + connection-ID bytes. The outer QUIC
-/// payload MTU is derived as `config.mtu + QUIC_OVERHEAD_BYTES`, so the inner
-/// MTU remains the single knob operators turn.
-const QUIC_OVERHEAD_BYTES: u16 = 80;
 
 pub fn create_quic_endpoint(
     config: &Config,
@@ -45,7 +40,10 @@ pub fn create_quic_endpoint(
     let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
     let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
 
+    // Disabling kernel PMTU discovery needs a raw setsockopt; socket2 has no
+    // safe wrapper for IP_MTU_DISCOVER / IPV6_MTU_DISCOVER.
     #[cfg(target_os = "linux")]
+    #[allow(unsafe_code)]
     {
         let fd = socket2_sock.as_raw_fd();
         unsafe {
@@ -162,7 +160,7 @@ mod tests {
 
     #[test]
     fn quic_overhead_constant() {
-        assert_eq!(QUIC_OVERHEAD_BYTES, 80);
+        assert_eq!(shared::QUIC_OVERHEAD_BYTES, 80);
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bytes::Bytes;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -29,6 +30,13 @@ enum InitialStreams {
 
 const RAW_AUTH_MAX_BYTES: usize = 16_384;
 
+/// Upper bound on how long a freshly accepted connection may take to open its
+/// initial control stream (and, for H3, to send its request). Without it, a peer
+/// that completes the handshake but never opens a stream would pin a bounded
+/// connection-handler slot until the 60s idle timeout — cheap, unauthenticated
+/// connection-slot exhaustion. Bounding the pre-auth phase releases stalled slots.
+pub(crate) const PREAUTH_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn validate_raw_auth_len(len: usize) -> Result<()> {
     if len > RAW_AUTH_MAX_BYTES {
         anyhow::bail!("Auth message too big");
@@ -55,9 +63,55 @@ fn encode_control_message_frame(msg: &ControlMessage) -> Result<Vec<u8>> {
     Ok(framed)
 }
 
-fn unauthorized_control_message(error: &anyhow::Error) -> ControlMessage {
+// The rejection reason stays in the server log only. Echoing it to the
+// unauthenticated peer would let probers distinguish bad credentials from
+// infrastructure state (Keycloak down, IP pool exhausted, ...).
+fn unauthorized_control_message() -> ControlMessage {
     ControlMessage::Error {
-        message: format!("Unauthorized: {error}"),
+        message: "Unauthorized".to_string(),
+    }
+}
+
+/// Leeway applied on top of the token's `exp` before force-closing the
+/// session, mirroring the validation leeway in `KeycloakValidator`.
+const SESSION_EXPIRY_LEEWAY: Duration = Duration::from_secs(30);
+
+/// Converts a token expiry (Unix seconds) into a tokio deadline. Returns
+/// `None` when the session has no expiry (static token auth).
+pub(super) fn session_deadline(expiry: Option<i64>) -> Option<tokio::time::Instant> {
+    let exp = expiry?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let remaining = u64::try_from(exp).unwrap_or(0).saturating_sub(now);
+    Some(tokio::time::Instant::now() + Duration::from_secs(remaining) + SESSION_EXPIRY_LEEWAY)
+}
+
+/// Runs the tunnel future, force-closing the QUIC connection when the
+/// authenticating token expires so revoked/expired credentials cannot keep a
+/// session alive indefinitely.
+pub(super) async fn run_tunnel_until_session_expiry(
+    connection: &quinn::Connection,
+    expiry: Option<i64>,
+    tunnel: impl Future<Output = Result<()>>,
+) -> Result<()> {
+    match session_deadline(expiry) {
+        Some(deadline) => {
+            tokio::pin!(tunnel);
+            tokio::select! {
+                res = &mut tunnel => res,
+                () = tokio::time::sleep_until(deadline) => {
+                    warn!(
+                        "Closing connection from {}: session token expired",
+                        connection.remote_address()
+                    );
+                    connection.close(0u32.into(), b"session token expired");
+                    Ok(())
+                }
+            }
+        }
+        None => tunnel.await,
     }
 }
 
@@ -178,7 +232,13 @@ pub async fn handle_connection(
         );
     }
 
-    let (pre_bi, pre_uni) = match detect_initial_streams(&connection).await? {
+    let initial_streams = tokio::time::timeout(
+        PREAUTH_PHASE_TIMEOUT,
+        detect_initial_streams(&connection),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Pre-auth handshake timeout from {remote_addr}"))??;
+    let (pre_bi, pre_uni) = match initial_streams {
         InitialStreams::Raw {
             send_stream,
             recv_stream,
@@ -229,10 +289,9 @@ pub async fn handle_connection(
     }
     .await;
 
-    let (assigned_ip, assigned_ip6) = match auth_result {
+    let (assigned_ip, assigned_ip6, session_expiry) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
-            let error_msg = format!("Unauthorized: {e}");
             if config.censorship_resistant {
                 warn!(
                     "Unauthorized probe from {}. Emulating HTTP/3. Error: {}",
@@ -241,12 +300,13 @@ pub async fn handle_connection(
                 let _ = emulate_http3(&connection, &mut send_stream).await;
                 return Err(anyhow::anyhow!("HTTP/3 probe response sent: {e}"));
             }
-            let err_payload = unauthorized_control_message(&e);
+            warn!("Unauthorized connection from {}: {}", remote_addr, e);
+            let err_payload = unauthorized_control_message();
             if let Ok(framed) = encode_control_message_frame(&err_payload) {
                 let _ = send_stream.write_all(&framed).await;
                 let _ = send_stream.finish();
             }
-            return Err(anyhow::anyhow!("{error_msg}"));
+            return Err(anyhow::anyhow!("Unauthorized: {e}"));
         }
     };
 
@@ -294,8 +354,8 @@ pub async fn handle_connection(
         }
     });
 
-    run_tunnel(
-        connection_arc,
+    let tunnel = run_tunnel(
+        connection_arc.clone(),
         rx_client,
         tx_tun,
         assigned_ip,
@@ -304,174 +364,9 @@ pub async fn handle_connection(
         state.gateway_ip_v6(),
         config.mtu,
         false, // is_h3
-    )
-    .await
+    );
+    run_tunnel_until_session_expiry(&connection_arc, session_expiry, tunnel).await
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-    use std::net::{Ipv4Addr, Ipv6Addr};
-
-    fn test_config() -> Config {
-        Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "secret",
-            "--dns",
-            "9.9.9.9",
-            "--dns-v6",
-            "2001:4860:4860::8888",
-            "--whitelist-domains",
-            "example.com,internal.test",
-            "--mtu",
-            "1340",
-        ])
-    }
-
-    fn encode_message(msg: &ControlMessage) -> Vec<u8> {
-        bincode::serde::encode_to_vec(msg, bincode::config::standard()).unwrap()
-    }
-
-    #[test]
-    fn raw_auth_len_accepts_boundary_and_rejects_oversize() {
-        assert!(validate_raw_auth_len(RAW_AUTH_MAX_BYTES).is_ok());
-        assert!(validate_raw_auth_len(RAW_AUTH_MAX_BYTES + 1)
-            .unwrap_err()
-            .to_string()
-            .contains("too big"));
-    }
-
-    #[test]
-    fn raw_auth_payload_extracts_token() {
-        let payload = encode_message(&ControlMessage::Auth {
-            token: "token-123".to_string(),
-        });
-
-        assert_eq!(decode_raw_auth_payload(&payload).unwrap(), "token-123");
-    }
-
-    #[test]
-    fn raw_auth_payload_rejects_non_auth_and_malformed() {
-        let payload = encode_message(&ControlMessage::Error {
-            message: "nope".to_string(),
-        });
-        assert!(decode_raw_auth_payload(&payload)
-            .unwrap_err()
-            .to_string()
-            .contains("Expected Auth"));
-
-        assert!(decode_raw_auth_payload(&[0xde, 0xad, 0xbe, 0xef])
-            .unwrap_err()
-            .to_string()
-            .contains("Protocol error"));
-    }
-
-    #[test]
-    fn unauthorized_response_frame_contains_error_message() {
-        let err = anyhow::anyhow!("Access Denied: Invalid Token");
-        let framed = encode_control_message_frame(&unauthorized_control_message(&err)).unwrap();
-        let len = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;
-        assert_eq!(len, framed.len() - 4);
-
-        let (decoded, _): (ControlMessage, _) =
-            bincode::serde::decode_from_slice(&framed[4..], bincode::config::standard()).unwrap();
-        match decoded {
-            ControlMessage::Error { message } => {
-                assert_eq!(message, "Unauthorized: Access Denied: Invalid Token");
-            }
-            other => panic!("expected Error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn config_message_omits_ipv6_when_disabled() {
-        let state = AppState::new("10.8.0.0/24").unwrap();
-        let config = test_config();
-        let msg = build_config_message(
-            &state,
-            &config,
-            Ipv4Addr::new(10, 8, 0, 2),
-            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
-            false,
-        );
-
-        match msg {
-            ControlMessage::Config {
-                assigned_ipv6,
-                netmask_v6,
-                gateway_v6,
-                dns_server_v6,
-                whitelist_domains,
-                mtu,
-                ..
-            } => {
-                assert_eq!(mtu, 1340);
-                assert!(assigned_ipv6.is_none());
-                assert!(netmask_v6.is_none());
-                assert!(gateway_v6.is_none());
-                assert!(dns_server_v6.is_none());
-                assert_eq!(
-                    whitelist_domains,
-                    Some(vec!["example.com".to_string(), "internal.test".to_string()])
-                );
-            }
-            other => panic!("expected Config, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn config_message_includes_ipv6_and_default_dns_v6() {
-        let state = AppState::new("10.8.0.0/24").unwrap();
-        let mut config = test_config();
-        config.dns_v6 = None;
-        let assigned_ip6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
-        let msg = build_config_message(
-            &state,
-            &config,
-            Ipv4Addr::new(10, 8, 0, 2),
-            assigned_ip6,
-            true,
-        );
-
-        match msg {
-            ControlMessage::Config {
-                assigned_ipv6,
-                netmask_v6,
-                gateway_v6,
-                dns_server_v6,
-                ..
-            } => {
-                assert_eq!(assigned_ipv6, Some(assigned_ip6));
-                assert_eq!(netmask_v6, Some(64));
-                assert_eq!(gateway_v6, Some(state.gateway_ip_v6()));
-                assert_eq!(
-                    dns_server_v6,
-                    Some(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111))
-                );
-            }
-            other => panic!("expected Config, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn config_message_uses_configured_ipv6_prefix() {
-        let state = AppState::new_with_ipv6("10.8.0.0/24", "fd12:3456::/80").unwrap();
-        let config = test_config();
-        let msg = build_config_message(
-            &state,
-            &config,
-            Ipv4Addr::new(10, 8, 0, 2),
-            Ipv6Addr::new(0xfd12, 0x3456, 0, 0, 0, 0, 0, 2),
-            true,
-        );
-
-        match msg {
-            ControlMessage::Config { netmask_v6, .. } => {
-                assert_eq!(netmask_v6, Some(80));
-            }
-            other => panic!("expected Config, got {other:?}"),
-        }
-    }
-}
+mod tests;

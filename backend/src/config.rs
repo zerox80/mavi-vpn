@@ -133,6 +133,15 @@ pub struct Config {
     #[arg(long, env = "VPN_KEYCLOAK_CLIENT_ID", default_value = "mavi-client")]
     pub keycloak_client_id: String,
 
+    /// Optional Keycloak role required on accepted JWTs. The validator checks
+    /// both realm roles and roles scoped to `VPN_KEYCLOAK_CLIENT_ID`.
+    #[arg(long, env = "VPN_KEYCLOAK_REQUIRED_ROLE")]
+    pub keycloak_required_role: Option<String>,
+
+    /// Optional OAuth scope required on accepted JWTs.
+    #[arg(long, env = "VPN_KEYCLOAK_REQUIRED_SCOPE")]
+    pub keycloak_required_scope: Option<String>,
+
     /// ECH "`public_name`" — the cover/outer SNI that clients will send on the
     /// wire. Must be a plausible-looking domain (e.g. a CDN). Only used when
     /// `censorship_resistant` is enabled.
@@ -172,6 +181,34 @@ impl Config {
                 "VPN_AUTH_TOKEN / --auth-token is required when Keycloak auth is disabled"
                     .to_string(),
             );
+        }
+        if !self.keycloak_enabled
+            && (self.keycloak_required_role.is_some() || self.keycloak_required_scope.is_some())
+        {
+            return Err(
+                "VPN_KEYCLOAK_REQUIRED_ROLE/SCOPE require VPN_KEYCLOAK_ENABLED=true".to_string(),
+            );
+        }
+        if self
+            .keycloak_required_role
+            .as_deref()
+            .is_some_and(str::is_empty)
+            || self
+                .keycloak_required_scope
+                .as_deref()
+                .is_some_and(str::is_empty)
+        {
+            return Err("Keycloak role/scope requirements must not be empty".to_string());
+        }
+        if self.keycloak_enabled {
+            let Some(url) = self.keycloak_url.as_deref().filter(|u| !u.is_empty()) else {
+                return Err(
+                    "VPN_KEYCLOAK_URL is required when VPN_KEYCLOAK_ENABLED=true".to_string()
+                );
+            };
+            if let Err(err) = shared::validate_keycloak_url(url) {
+                return Err(format!("VPN_KEYCLOAK_URL: {err}"));
+            }
         }
         Ok(())
     }
@@ -270,6 +307,8 @@ mod tests {
         );
         assert_eq!(config.keycloak_realm, "my-realm");
         assert_eq!(config.keycloak_client_id, "my-client");
+        assert!(config.keycloak_required_role.is_none());
+        assert!(config.keycloak_required_scope.is_none());
     }
 
     #[test]
@@ -279,6 +318,8 @@ mod tests {
         assert!(config.keycloak_url.is_none());
         assert_eq!(config.keycloak_realm, "mavi-vpn");
         assert_eq!(config.keycloak_client_id, "mavi-client");
+        assert!(config.keycloak_required_role.is_none());
+        assert!(config.keycloak_required_scope.is_none());
     }
 
     #[test]
@@ -300,6 +341,70 @@ mod tests {
         assert!(!config.keycloak_enabled);
         assert!(config.auth_token.is_none());
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_keycloak_policy_flags() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--keycloak-enabled",
+            "--keycloak-url",
+            "https://auth.example.com",
+            "--keycloak-required-role",
+            "vpn-user",
+            "--keycloak-required-scope",
+            "vpn:connect",
+        ]);
+
+        assert_eq!(config.keycloak_required_role.as_deref(), Some("vpn-user"));
+        assert_eq!(
+            config.keycloak_required_scope.as_deref(),
+            Some("vpn:connect")
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_keycloak_policy_requires_keycloak_auth() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--auth-token",
+            "secret",
+            "--keycloak-required-role",
+            "vpn-user",
+        ]);
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_keycloak_requires_url() {
+        let config = Config::parse_from(["mavi-vpn", "--keycloak-enabled"]);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_keycloak_rejects_plain_http_url() {
+        let config = Config::parse_from([
+            "mavi-vpn",
+            "--keycloak-enabled",
+            "--keycloak-url",
+            "http://auth.example.com",
+        ]);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_keycloak_allows_localhost_http_url() {
+        for url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080/path",
+            "http://[::1]:8080",
+        ] {
+            let config =
+                Config::parse_from(["mavi-vpn", "--keycloak-enabled", "--keycloak-url", url]);
+            assert!(config.validate().is_ok(), "expected {url} to be allowed");
+        }
     }
 
     #[test]

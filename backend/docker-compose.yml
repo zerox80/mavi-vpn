@@ -3,31 +3,38 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: mavi-vpn-server
     container_name: mavi-vpn
     restart: unless-stopped
-    privileged: true
     network_mode: host # Direct host networking for native IPv6 support
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN # Required for TUN device creation & iptables
+      - NET_RAW # Required by some kernels for ICMP/packet handling
+      - NET_BIND_SERVICE # Required when binding directly to privileged ports like 443
     devices:
       - /dev/net/tun:/dev/net/tun
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     volumes:
       - ./data:/app/data # Persist certificates
     environment:
-      - RUST_LOG=info
-      - VPN_AUTH_TOKEN=${VPN_AUTH_TOKEN:-change_me}
-      - VPN_BIND_ADDR=${VPN_BIND_ADDR:-0.0.0.0:${VPN_PORT:-10443}}
-      - VPN_NETWORK=10.8.0.0/24
-      - VPN_NETWORK_V6=fd00::/64
-      - VPN_DNS=1.1.1.1
-      - VPN_MTU=${VPN_MTU:-1280}
-      - VPN_CENSORSHIP_RESISTANT=${VPN_CENSORSHIP_RESISTANT:-false}
-      - VPN_MSS_CLAMPING=${VPN_MSS_CLAMPING:-true}
-      - VPN_KEYCLOAK_ENABLED=${VPN_KEYCLOAK_ENABLED}
-      - VPN_KEYCLOAK_URL=${VPN_KEYCLOAK_URL}
-      - VPN_KEYCLOAK_REALM=${VPN_KEYCLOAK_REALM}
-      - VPN_KEYCLOAK_CLIENT_ID=${VPN_KEYCLOAK_CLIENT_ID}
+      RUST_LOG: ${RUST_LOG:-info}
+      VPN_AUTH_TOKEN: ${VPN_AUTH_TOKEN:-}
+      VPN_BIND_ADDR: ${VPN_BIND_ADDR:-0.0.0.0:${VPN_PORT:-10443}}
+      VPN_NETWORK: ${VPN_NETWORK:-10.8.0.0/24}
+      VPN_NETWORK_V6: ${VPN_NETWORK_V6:-fd00::/64}
+      VPN_DNS: ${VPN_DNS:-1.1.1.1}
+      VPN_MTU: ${VPN_MTU:-1280}
+      VPN_CENSORSHIP_RESISTANT: ${VPN_CENSORSHIP_RESISTANT:-false}
+      VPN_MSS_CLAMPING: ${VPN_MSS_CLAMPING:-true}
+      VPN_ALLOW_CLIENT_TO_CLIENT: ${VPN_ALLOW_CLIENT_TO_CLIENT:-false}
+      VPN_KEYCLOAK_ENABLED: ${VPN_KEYCLOAK_ENABLED:-false}
+      VPN_KEYCLOAK_URL: ${VPN_KEYCLOAK_URL:-}
+      VPN_KEYCLOAK_REALM: ${VPN_KEYCLOAK_REALM:-mavi-vpn}
+      VPN_KEYCLOAK_CLIENT_ID: ${VPN_KEYCLOAK_CLIENT_ID:-mavi-client}
     healthcheck:
       test: ["CMD-SHELL", "ip -details link show type tun | grep -q 'tun' || exit 1"]
       interval: 30s

@@ -100,3 +100,34 @@ pub fn uninstall_service() {
         Err(e) => error!("Failed to execute sc command: {}", e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_name_is_correct() {
+        assert_eq!(SERVICE_NAME, "MaviVPNService");
+    }
+
+    #[test]
+    fn service_name_is_not_empty() {
+        assert!(!SERVICE_NAME.is_empty());
+    }
+
+    #[test]
+    fn service_name_contains_mavi() {
+        assert!(SERVICE_NAME.contains("Mavi"));
+    }
+
+    #[test]
+    fn service_name_has_no_leading_or_trailing_whitespace() {
+        assert!(!SERVICE_NAME.starts_with(' '));
+        assert!(!SERVICE_NAME.ends_with(' '));
+    }
+
+    #[test]
+    fn service_name_contains_vpn() {
+        assert!(SERVICE_NAME.contains("VPN"));
+    }
+}

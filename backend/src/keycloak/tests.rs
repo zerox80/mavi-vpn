@@ -1,4 +1,4 @@
-use super::test_keys;
+﻿use super::test_keys;
 use super::*;
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm, RSAKeyParameters, RSAKeyType};
 
@@ -9,20 +9,21 @@ struct MockFetcher {
     should_fail: Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[async_trait::async_trait]
 impl JwksFetcher for MockFetcher {
-    async fn fetch_jwks(&self, _url: &str) -> Result<JwkSet> {
-        self.fetch_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if self.should_fail.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("Mock fetcher failure");
-        }
-        Ok(self
-            .jwks
-            .read()
-            .await
-            .clone()
-            .unwrap_or_else(|| JwkSet { keys: vec![] }))
+    fn fetch_jwks<'a>(&'a self, _url: &'a str) -> JwksFetchFuture<'a> {
+        Box::pin(async move {
+            self.fetch_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.should_fail.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("Mock fetcher failure");
+            }
+            Ok(self
+                .jwks
+                .read()
+                .await
+                .clone()
+                .unwrap_or_else(|| JwkSet { keys: vec![] }))
+        })
     }
 }
 
@@ -103,6 +104,8 @@ fn validator_new_sets_fields() {
         "https://auth.example.com".to_string(),
         "my-realm".to_string(),
         "my-client".to_string(),
+        None,
+        None,
     );
     assert_eq!(v.client_id, "my-client");
 }
@@ -158,7 +161,7 @@ async fn test_validate_token_success_with_cached_keys() {
 
     v.init_and_fetch().await.unwrap();
 
-    assert!(v.validate_token(&token).await.unwrap());
+    assert!(v.validate_token(&token).await.unwrap().is_some());
     assert_eq!(
         fetcher
             .fetch_count
@@ -193,7 +196,7 @@ async fn test_refresh_on_unknown_kid() {
     {
         let mut cache = v.jwks_cache.write().await;
         if let Some((_, t)) = cache.as_mut() {
-            *t = Instant::now() - Duration::from_secs(3600);
+            *t = Instant::now().checked_sub(JWKS_REFRESH_COOLDOWN).unwrap_or_else(Instant::now);
         }
     }
 
@@ -253,7 +256,7 @@ async fn test_fetch_failure_uses_cache() {
     {
         let mut cache = v.jwks_cache.write().await;
         if let Some((_, t)) = cache.as_mut() {
-            *t = Instant::now() - Duration::from_secs(3600);
+            *t = Instant::now().checked_sub(JWKS_REFRESH_COOLDOWN).unwrap_or_else(Instant::now);
         }
     }
 
@@ -309,6 +312,7 @@ fn test_validate_claims() {
 
     // Valid token
     let claims = serde_json::json!({
+        "typ": "Bearer",
         "exp": 1100,
         "azp": "my-client",
         "sub": "user1"
@@ -319,6 +323,7 @@ fn test_validate_claims() {
 
     // Missing exp
     let claims = serde_json::json!({
+        "typ": "Bearer",
         "azp": "my-client"
     });
     assert!(!KeycloakValidator::validate_claims(
@@ -327,6 +332,7 @@ fn test_validate_claims() {
 
     // Expired
     let claims = serde_json::json!({
+        "typ": "Bearer",
         "exp": 900,
         "azp": "my-client"
     });
@@ -336,6 +342,7 @@ fn test_validate_claims() {
 
     // Expired but within leeway
     let claims = serde_json::json!({
+        "typ": "Bearer",
         "exp": 980,
         "azp": "my-client"
     });
@@ -345,6 +352,7 @@ fn test_validate_claims() {
 
     // nbf in the future
     let claims = serde_json::json!({
+        "typ": "Bearer",
         "exp": 1100,
         "nbf": 1050,
         "azp": "my-client"
@@ -355,6 +363,7 @@ fn test_validate_claims() {
 
     // nbf in the future but within leeway
     let claims = serde_json::json!({
+        "typ": "Bearer",
         "exp": 1100,
         "nbf": 1020,
         "azp": "my-client"
@@ -365,6 +374,7 @@ fn test_validate_claims() {
 
     // Missing azp
     let claims = serde_json::json!({
+        "typ": "Bearer",
         "exp": 1100
     });
     assert!(!KeycloakValidator::validate_claims(
@@ -373,6 +383,7 @@ fn test_validate_claims() {
 
     // azp mismatch
     let claims = serde_json::json!({
+        "typ": "Bearer",
         "exp": 1100,
         "azp": "wrong-client"
     });
@@ -380,3 +391,5 @@ fn test_validate_claims() {
         &claims, client_id, now, leeway
     ));
 }
+
+mod claim_policy_tests;

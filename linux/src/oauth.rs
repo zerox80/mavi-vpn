@@ -15,6 +15,10 @@ use tokio::net::TcpListener;
 const OAUTH_CALLBACK_PORT: u16 = 18923;
 
 pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
+    // Plain-HTTP Keycloak would expose the authorization code and tokens to a
+    // MITM; only loopback is exempt (dev setups).
+    shared::validate_keycloak_url(kc_url).map_err(|e| anyhow::anyhow!(e))?;
+
     // 1. Generate PKCE verifier and challenge
     let verifier_bytes: [u8; 32] = rand::random();
     let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);

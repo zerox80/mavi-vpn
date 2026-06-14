@@ -4,7 +4,7 @@
 //! Uses `ip` commands for routing and supports both systemd-resolved and
 //! direct /etc/resolv.conf manipulation for DNS.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::{info, warn};
 
@@ -171,7 +171,15 @@ fn apply_interface_and_routes<R: CommandRunner>(
     let gateway_s = gateway.to_string();
     runner.run(
         "ip",
-        &["route", "add", "0.0.0.0/1", "dev", tun_name, "via", &gateway_s],
+        &[
+            "route",
+            "add",
+            "0.0.0.0/1",
+            "dev",
+            tun_name,
+            "via",
+            &gateway_s,
+        ],
     )?;
     runner.run(
         "ip",
@@ -188,23 +196,20 @@ fn apply_interface_and_routes<R: CommandRunner>(
 
     if let Some(gv6) = gateway_v6 {
         let gv6_s = gv6.to_string();
-        let _ = runner.run(
-            "ip",
-            &["-6", "route", "add", "::/1", "dev", tun_name, "via", &gv6_s],
-        );
-        let _ = runner.run(
-            "ip",
-            &[
-                "-6",
-                "route",
-                "add",
-                "8000::/1",
-                "dev",
-                tun_name,
-                "via",
-                &gv6_s,
-            ],
-        );
+        runner
+            .run(
+                "ip",
+                &["-6", "route", "add", "::/1", "dev", tun_name, "via", &gv6_s],
+            )
+            .context("Failed to install IPv6 split route ::/1")?;
+        runner
+            .run(
+                "ip",
+                &[
+                    "-6", "route", "add", "8000::/1", "dev", tun_name, "via", &gv6_s,
+                ],
+            )
+            .context("Failed to install IPv6 split route 8000::/1")?;
     }
 
     Ok(())
@@ -279,14 +284,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingRunner {
         calls: Vec<(String, Vec<String>)>,
+        fail_on_args: Option<Vec<String>>,
     }
 
     impl CommandRunner for RecordingRunner {
         fn run(&mut self, cmd: &str, args: &[&str]) -> Result<()> {
-            self.calls.push((
-                cmd.to_string(),
-                args.iter().map(|arg| (*arg).to_string()).collect(),
-            ));
+            let args = args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+            self.calls.push((cmd.to_string(), args.clone()));
+            if self.fail_on_args.as_ref().is_some_and(|fail| fail == &args) {
+                anyhow::bail!("forced command failure");
+            }
             Ok(())
         }
     }
@@ -337,10 +347,18 @@ mod tests {
         )));
         assert!(runner.calls.contains(&(
             "ip".to_string(),
-            vec!["route", "add", "0.0.0.0/1", "dev", "mavi0", "via", "10.8.0.1"]
-                .into_iter()
-                .map(String::from)
-                .collect()
+            vec![
+                "route",
+                "add",
+                "0.0.0.0/1",
+                "dev",
+                "mavi0",
+                "via",
+                "10.8.0.1"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
         )));
     }
 
@@ -396,6 +414,43 @@ mod tests {
                 .map(String::from)
                 .collect()
         )));
+    }
+
+    #[test]
+    fn interface_and_routes_fails_when_ipv6_split_route_fails() {
+        let mut runner = RecordingRunner {
+            fail_on_args: Some(
+                vec![
+                    "-6", "route", "add", "::/1", "dev", "mavi0", "via", "fd00::1",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            ),
+            ..RecordingRunner::default()
+        };
+
+        let err = apply_interface_and_routes(
+            &mut runner,
+            "mavi0",
+            Ipv4Addr::new(10, 8, 0, 2),
+            24,
+            Ipv4Addr::new(10, 8, 0, 1),
+            1340,
+            "2001:db8::10",
+            Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)),
+            Some(64),
+            Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)),
+            None,
+            None,
+            Some("fe80::1"),
+            Some("eth0"),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("Failed to install IPv6 split route ::/1"));
     }
 
     #[test]

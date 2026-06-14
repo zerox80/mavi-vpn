@@ -98,6 +98,7 @@ where
 ///
 /// Implements a [`quic::RecvStream`] backed by a [`quinn::RecvStream`].
 pub struct RecvStream {
+    stream_id: StreamId,
     stream: Option<quinn::RecvStream>,
     read_chunk_fut: ReadChunkFuture,
     pending_stop: Option<VarInt>,
@@ -113,7 +114,9 @@ type ReadChunkFuture = ReusableBoxFuture<
 
 impl RecvStream {
     pub(super) fn new(stream: quinn::RecvStream) -> Self {
+        let stream_id = quinn_stream_id(stream.id());
         Self {
+            stream_id,
             stream: Some(stream),
             // Should only allocate once the first time it's used
             read_chunk_fut: ReusableBoxFuture::new(async { unreachable!() }),
@@ -159,10 +162,13 @@ impl quic::RecvStream for RecvStream {
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     fn recv_id(&self) -> StreamId {
-        let num: u64 = self.stream.as_ref().unwrap().id().into();
-
-        num.try_into().expect("invalid stream id")
+        self.stream_id
     }
+}
+
+fn quinn_stream_id(id: quinn::StreamId) -> StreamId {
+    let num: u64 = id.into();
+    num.try_into().expect("invalid stream id")
 }
 
 fn convert_read_error_to_stream_error(error: ReadError) -> StreamErrorIncoming {
@@ -202,6 +208,7 @@ fn convert_write_error_to_stream_error(error: quinn::WriteError) -> StreamErrorI
 ///
 /// Implements a [`quic::SendStream`] backed by a [`quinn::SendStream`].
 pub struct SendStream<B: Buf> {
+    stream_id: StreamId,
     stream: quinn::SendStream,
     writing: Option<WriteBuf<B>>,
 }
@@ -210,8 +217,10 @@ impl<B> SendStream<B>
 where
     B: Buf,
 {
-    pub(super) const fn new(stream: quinn::SendStream) -> Self {
+    pub(super) fn new(stream: quinn::SendStream) -> Self {
+        let stream_id = quinn_stream_id(stream.id());
         Self {
+            stream_id,
             stream,
             writing: None,
         }
@@ -276,8 +285,7 @@ where
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     fn send_id(&self) -> StreamId {
-        let num: u64 = self.stream.id().into();
-        num.try_into().expect("invalid stream id")
+        self.stream_id
     }
 }
 

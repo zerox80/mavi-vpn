@@ -50,20 +50,14 @@ fn client_to_server_packet(datagram: Bytes, is_h3: bool) -> Option<Bytes> {
     Some(datagram.slice(prefix_len..))
 }
 
-fn packet_source_is_assigned(
-    packet: &[u8],
-    assigned_ip: Ipv4Addr,
-    assigned_ip6: Ipv6Addr,
-) -> bool {
+fn packet_source_is_assigned(packet: &[u8], assigned_ip: Ipv4Addr, assigned_ip6: Ipv6Addr) -> bool {
     if packet.is_empty() {
         return false;
     }
 
     match packet[0] >> 4 {
-        4 => Ipv4HeaderSlice::from_slice(packet)
-            .is_ok_and(|h| h.source_addr() == assigned_ip),
-        6 => Ipv6HeaderSlice::from_slice(packet)
-            .is_ok_and(|h| h.source_addr() == assigned_ip6),
+        4 => Ipv4HeaderSlice::from_slice(packet).is_ok_and(|h| h.source_addr() == assigned_ip),
+        6 => Ipv6HeaderSlice::from_slice(packet).is_ok_and(|h| h.source_addr() == assigned_ip6),
         _ => false,
     }
 }
@@ -142,7 +136,11 @@ pub async fn run_tunnel(
                     send_stats
                         .server_to_client_too_large
                         .fetch_add(1, Ordering::Relaxed);
-                    let h3_prefix = if is_h3 { masque::DATAGRAM_PREFIX.len() } else { 0 };
+                    let h3_prefix = if is_h3 {
+                        masque::DATAGRAM_PREFIX.len()
+                    } else {
+                        0
+                    };
                     if let Some(icmp_p) = packet_too_big_response(
                         &packet_for_icmp,
                         tunnel_mtu,
@@ -300,8 +298,9 @@ mod tests {
             client_to_server_packet(framed, true).unwrap().as_ref(),
             packet.as_slice()
         );
-        assert!(client_to_server_packet(Bytes::from_static(&masque::DATAGRAM_PREFIX), true)
-            .is_none());
+        assert!(
+            client_to_server_packet(Bytes::from_static(&masque::DATAGRAM_PREFIX), true).is_none()
+        );
         assert!(client_to_server_packet(Bytes::from_static(&[0x40]), true).is_none());
     }
 
@@ -333,9 +332,21 @@ mod tests {
         let assigned_v6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
 
         assert!(!packet_source_is_assigned(&[], assigned_v4, assigned_v6));
-        assert!(!packet_source_is_assigned(&[0x45, 0x00], assigned_v4, assigned_v6));
-        assert!(!packet_source_is_assigned(&[0x60, 0x00, 0x00], assigned_v4, assigned_v6));
-        assert!(!packet_source_is_assigned(&[0x10, 0x00, 0x00], assigned_v4, assigned_v6));
+        assert!(!packet_source_is_assigned(
+            &[0x45, 0x00],
+            assigned_v4,
+            assigned_v6
+        ));
+        assert!(!packet_source_is_assigned(
+            &[0x60, 0x00, 0x00],
+            assigned_v4,
+            assigned_v6
+        ));
+        assert!(!packet_source_is_assigned(
+            &[0x10, 0x00, 0x00],
+            assigned_v4,
+            assigned_v6
+        ));
     }
 
     #[test]

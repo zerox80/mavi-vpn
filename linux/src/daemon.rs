@@ -252,7 +252,13 @@ async fn handle_ipc_client(
 }
 
 async fn dispatch_request(req: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> IpcResponse {
-    dispatch_request_with_hooks(req, state, true, crate::network::cleanup_stale_network_state).await
+    dispatch_request_with_hooks(
+        req,
+        state,
+        true,
+        crate::network::cleanup_stale_network_state,
+    )
+    .await
 }
 
 async fn dispatch_request_with_hooks(

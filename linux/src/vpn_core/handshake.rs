@@ -2,7 +2,8 @@ use super::cert_pin::PinnedServerVerifier;
 use super::h3::H3SessionGuard;
 use anyhow::{Context, Result};
 use shared::{
-    looks_like_html_response, resolve_tun_mtu_with_source, ControlMessage, QUIC_OVERHEAD_BYTES,
+    compute_quic_mtu_config, looks_like_html_response, resolve_server_name,
+    validate_control_message_mtu, ControlMessage,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +57,7 @@ pub(super) async fn connect_and_handshake(
     } else {
         builder
             .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
+            .context("failed to enable TLS 1.3 on client config")?
     };
 
     let mut client_crypto = versioned
@@ -82,34 +83,32 @@ pub(super) async fn connect_and_handshake(
     // QUIC short-header framing + AEAD tag + connection-ID bytes. Server and
     // client MUST be configured with the same `VPN_MTU`, otherwise the larger
     // side will send UDP payloads the smaller side considers out-of-spec.
-    let (local_tun_mtu, mtu_source) = resolve_tun_mtu_with_source(vpn_mtu);
-    // When no explicit MTU is configured, use DEFAULT_TUN_MTU (1280) for the
-    // transport budget so client and server agree on packet size. Previously
-    // MAX_TUN_MTU (1360) was used, causing the client to send larger QUIC
-    // packets than the server, leading to silent packet loss on constrained
-    // network paths (PPPoE, carrier-grade NAT).
-    let transport_tun_mtu = local_tun_mtu;
-    let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
-    let (ip_overhead, udp_overhead) = (if addr.is_ipv4() { 20 } else { 40 }, 8);
+    let mtu_cfg = compute_quic_mtu_config(vpn_mtu);
+    let wire_mtu = if addr.is_ipv4() {
+        mtu_cfg.wire_mtu_ipv4
+    } else {
+        mtu_cfg.wire_mtu_ipv6
+    };
     info!(
         "Address family: {}. Setting QUIC MTU: {} (TUN MTU budget: {}, source: {:?}, Target Wire: {})",
         if addr.is_ipv4() { "IPv4" } else { "IPv6" },
-        quic_mtu,
-        transport_tun_mtu,
-        mtu_source,
-        quic_mtu + ip_overhead + udp_overhead,
+        mtu_cfg.quic_mtu,
+        mtu_cfg.transport_tun_mtu,
+        mtu_cfg.mtu_source,
+        wire_mtu,
     );
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(
-        Duration::from_secs(IDLE_TIMEOUT_SECS).try_into().unwrap(),
-    ));
+    let idle_timeout = Duration::from_secs(IDLE_TIMEOUT_SECS)
+        .try_into()
+        .context("invalid QUIC idle timeout")?;
+    transport_config.max_idle_timeout(Some(idle_timeout));
     transport_config.keep_alive_interval(Some(Duration::from_secs(KEEPALIVE_SECS)));
 
     // MTU PINNING
     transport_config.mtu_discovery_config(None);
-    transport_config.initial_mtu(quic_mtu);
-    transport_config.min_mtu(quic_mtu);
+    transport_config.initial_mtu(mtu_cfg.quic_mtu);
+    transport_config.min_mtu(mtu_cfg.quic_mtu);
 
     // Rule 1: TUN MTU MUST be 1280.
     // Handled in NetworkConfig::apply.
@@ -136,10 +135,11 @@ pub(super) async fn connect_and_handshake(
 
     // When ECH is active we send the config's `public_name` as the outer SNI
     // instead of the real server hostname. Cert-pin auth is unaffected.
-    let server_name: String = match ech_state.as_ref() {
-        Some(ech) => ech.outer_sni.clone(),
-        None => endpoint_host(&endpoint_str),
-    };
+    let server_name = resolve_server_name(
+        &endpoint_str,
+        ech_state.as_ref().map(|e| e.outer_sni.as_str()),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     info!("Connecting to {} (SNI: {})", addr, server_name);
     let connection = endpoint
         .connect(addr, &server_name)?
@@ -166,25 +166,9 @@ pub(super) async fn connect_and_handshake(
         (cfg, None)
     };
 
-    validate_server_mtu(&config, local_tun_mtu)?;
+    validate_control_message_mtu(&config, mtu_cfg.local_tun_mtu).map_err(|e| anyhow::anyhow!(e))?;
 
     Ok((connection, config, h3_guard))
-}
-
-fn endpoint_host(endpoint: &str) -> String {
-    if let Some(rest) = endpoint.strip_prefix('[') {
-        if let Some(end) = rest.find(']') {
-            return rest[..end].to_string();
-        }
-    }
-
-    if endpoint.matches(':').count() == 1 {
-        if let Some((host, _)) = endpoint.rsplit_once(':') {
-            return host.to_string();
-        }
-    }
-
-    endpoint.to_string()
 }
 
 fn validate_raw_response_len(len: usize) -> Result<()> {
@@ -192,6 +176,11 @@ fn validate_raw_response_len(len: usize) -> Result<()> {
         anyhow::bail!("Server response too large: {} bytes", len);
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn endpoint_host(endpoint: &str) -> String {
+    shared::endpoint_host(endpoint).to_string()
 }
 
 fn decode_raw_response_body(buf: &[u8]) -> Result<ControlMessage> {
@@ -209,11 +198,9 @@ fn decode_raw_response_body(buf: &[u8]) -> Result<ControlMessage> {
         .map_err(Into::into)
 }
 
+#[cfg(test)]
 fn validate_server_mtu(config: &ControlMessage, local_tun_mtu: u16) -> Result<()> {
-    if let ControlMessage::Config { mtu, .. } = config {
-        shared::check_server_mtu(*mtu, local_tun_mtu).map_err(|e| anyhow::anyhow!(e))?;
-    }
-    Ok(())
+    validate_control_message_mtu(config, local_tun_mtu).map_err(|e| anyhow::anyhow!(e))
 }
 
 #[cfg(test)]

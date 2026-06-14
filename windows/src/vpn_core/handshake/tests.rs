@@ -338,52 +338,56 @@ fn validate_server_mtu_ignores_error_message() {
 #[test]
 fn quic_mtu_config_default_uses_default_tun_mtu_ipv4() {
     let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
-    let cfg = compute_quic_mtu_config(None, &addr);
+    let cfg = compute_quic_mtu_config(None);
     assert_eq!(cfg.transport_tun_mtu, shared::DEFAULT_TUN_MTU);
-    assert_eq!(cfg.quic_mtu, shared::DEFAULT_TUN_MTU + shared::QUIC_OVERHEAD_BYTES);
-    assert!(matches!(cfg.mtu_source, TunMtuSource::Default));
+    assert_eq!(
+        cfg.quic_mtu,
+        shared::DEFAULT_TUN_MTU + shared::QUIC_OVERHEAD_BYTES
+    );
+    assert!(matches!(cfg.mtu_source, shared::TunMtuSource::Default));
     assert_eq!(cfg.local_tun_mtu, shared::DEFAULT_TUN_MTU);
-    assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 20 + 8);
+    assert_eq!(wire_mtu_for_addr(cfg, &addr), cfg.quic_mtu + 20 + 8);
 }
 
 #[test]
 fn quic_mtu_config_default_uses_default_tun_mtu_ipv6() {
     let addr: SocketAddr = "[::1]:443".parse().unwrap();
-    let cfg = compute_quic_mtu_config(None, &addr);
+    let cfg = compute_quic_mtu_config(None);
     assert_eq!(cfg.transport_tun_mtu, shared::DEFAULT_TUN_MTU);
-    assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 40 + 8);
+    assert_eq!(wire_mtu_for_addr(cfg, &addr), cfg.quic_mtu + 40 + 8);
 }
 
 #[test]
 fn quic_mtu_config_explicit_mtu_uses_provided_value() {
-    let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
-    let cfg = compute_quic_mtu_config(Some(1340), &addr);
+    let cfg = compute_quic_mtu_config(Some(1340));
     assert_eq!(cfg.transport_tun_mtu, 1340);
     assert_eq!(cfg.local_tun_mtu, 1340);
     assert_eq!(cfg.quic_mtu, 1340 + shared::QUIC_OVERHEAD_BYTES);
-    assert!(matches!(cfg.mtu_source, TunMtuSource::Config));
+    assert!(matches!(cfg.mtu_source, shared::TunMtuSource::Config));
 }
 
 #[test]
 fn quic_mtu_config_minimum_explicit_mtu() {
-    let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
-    let cfg = compute_quic_mtu_config(Some(shared::MIN_TUN_MTU), &addr);
+    let cfg = compute_quic_mtu_config(Some(shared::MIN_TUN_MTU));
     assert_eq!(cfg.transport_tun_mtu, shared::MIN_TUN_MTU);
-    assert_eq!(cfg.quic_mtu, shared::MIN_TUN_MTU + shared::QUIC_OVERHEAD_BYTES);
+    assert_eq!(
+        cfg.quic_mtu,
+        shared::MIN_TUN_MTU + shared::QUIC_OVERHEAD_BYTES
+    );
 }
 
 #[test]
 fn quic_mtu_config_ipv4_wire_mtu_includes_ip_and_udp_headers() {
     let addr: SocketAddr = "10.0.0.1:443".parse().unwrap();
-    let cfg = compute_quic_mtu_config(Some(1280), &addr);
-    assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 28);
+    let cfg = compute_quic_mtu_config(Some(1280));
+    assert_eq!(wire_mtu_for_addr(cfg, &addr), cfg.quic_mtu + 28);
 }
 
 #[test]
 fn quic_mtu_config_ipv6_wire_mtu_includes_larger_ip_header() {
     let addr: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
-    let cfg = compute_quic_mtu_config(Some(1280), &addr);
-    assert_eq!(cfg.wire_mtu, cfg.quic_mtu + 48);
+    let cfg = compute_quic_mtu_config(Some(1280));
+    assert_eq!(wire_mtu_for_addr(cfg, &addr), cfg.quic_mtu + 48);
 }
 
 // --- resolve_server_name tests ---
@@ -404,7 +408,10 @@ fn resolve_server_name_uses_ech_outer_sni_when_provided() {
 fn resolve_server_name_rejects_empty_host() {
     let result = resolve_server_name(":4433", None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Endpoint host missing"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Endpoint host missing"));
 }
 
 #[test]

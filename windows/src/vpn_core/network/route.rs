@@ -290,7 +290,11 @@ mod tests {
     fn prefix_policy_uses_set_command_first() {
         let runner = RecordingRunner::new(vec![true]);
 
-        assert!(apply_ipv6_prefix_policy_with_runner(&runner, "fd00::/64", false));
+        assert!(apply_ipv6_prefix_policy_with_runner(
+            &runner,
+            "fd00::/64",
+            false
+        ));
 
         assert_eq!(
             runner.commands(),
@@ -317,7 +321,11 @@ mod tests {
     fn prefix_policy_falls_back_to_add_when_set_fails() {
         let runner = RecordingRunner::new(vec![false, true]);
 
-        assert!(apply_ipv6_prefix_policy_with_runner(&runner, "fd00::/64", false));
+        assert!(apply_ipv6_prefix_policy_with_runner(
+            &runner,
+            "fd00::/64",
+            false
+        ));
 
         let commands = runner.commands();
         assert_eq!(commands.len(), 2);
@@ -329,12 +337,18 @@ mod tests {
     fn prefix_policy_reports_failure_when_set_and_add_fail() {
         let runner = RecordingRunner::new(vec![false, false]);
 
-        assert!(!apply_ipv6_prefix_policy_with_runner(&runner, "fd00::/64", false));
+        assert!(!apply_ipv6_prefix_policy_with_runner(
+            &runner,
+            "fd00::/64",
+            false
+        ));
     }
 
     #[test]
     fn ipv6_network_prefix_full_64() {
-        let ip = Ipv6Addr::new(0x2001, 0x0db8, 0x85a3, 0x1234, 0x5678, 0xabcd, 0xef01, 0x2345);
+        let ip = Ipv6Addr::new(
+            0x2001, 0x0db8, 0x85a3, 0x1234, 0x5678, 0xabcd, 0xef01, 0x2345,
+        );
         assert_eq!(ipv6_network_prefix(ip, 64), "2001:db8:85a3:1234::/64");
     }
 
@@ -346,13 +360,17 @@ mod tests {
 
     #[test]
     fn ipv6_network_prefix_zero() {
-        let ip = Ipv6Addr::new(0x2001, 0x0db8, 0x85a3, 0x1234, 0x5678, 0xabcd, 0xef01, 0x2345);
+        let ip = Ipv6Addr::new(
+            0x2001, 0x0db8, 0x85a3, 0x1234, 0x5678, 0xabcd, 0xef01, 0x2345,
+        );
         assert_eq!(ipv6_network_prefix(ip, 0), "::/0");
     }
 
     #[test]
     fn ipv6_network_prefix_48() {
-        let ip = Ipv6Addr::new(0x2001, 0x0db8, 0x85a3, 0x1234, 0x5678, 0xabcd, 0xef01, 0x2345);
+        let ip = Ipv6Addr::new(
+            0x2001, 0x0db8, 0x85a3, 0x1234, 0x5678, 0xabcd, 0xef01, 0x2345,
+        );
         assert_eq!(ipv6_network_prefix(ip, 48), "2001:db8:85a3::/48");
     }
 

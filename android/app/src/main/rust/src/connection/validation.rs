@@ -4,10 +4,7 @@ pub(crate) fn validate_server_mtu(
     config: &ControlMessage,
     local_tun_mtu: u16,
 ) -> anyhow::Result<()> {
-    if let ControlMessage::Config { mtu, .. } = config {
-        shared::check_server_mtu(*mtu, local_tun_mtu).map_err(|e| anyhow::anyhow!(e))?;
-    }
-    Ok(())
+    shared::validate_control_message_mtu(config, local_tun_mtu).map_err(|e| anyhow::anyhow!(e))
 }
 
 #[cfg(test)]

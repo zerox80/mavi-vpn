@@ -348,8 +348,14 @@ mod tests {
         // Reader observed A's closed sender -> must be a no-op for B's entry.
         remove_peer_if_same(&state.peers, &v4, &tx_a);
         remove_peer_if_same(&state.peers_v6, &v6, &tx_a);
-        assert!(state.peers.contains_key(&v4), "B's v4 registration survives");
-        assert!(state.peers_v6.contains_key(&v6), "B's v6 registration survives");
+        assert!(
+            state.peers.contains_key(&v4),
+            "B's v4 registration survives"
+        );
+        assert!(
+            state.peers_v6.contains_key(&v6),
+            "B's v6 registration survives"
+        );
 
         // Observing B's own sender DOES remove the entry.
         remove_peer_if_same(&state.peers, &v4, &tx_b);

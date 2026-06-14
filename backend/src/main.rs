@@ -28,6 +28,68 @@ use crate::utils::cleanup_legacy_rules;
 
 mod handlers;
 
+/// Builds the Keycloak token validator when OIDC auth is enabled, retrying the
+/// initial JWKS fetch with exponential backoff.
+///
+/// Returns `None` when Keycloak is disabled. Panics (fatal) rather than silently
+/// degrading to static-token auth if the URL is missing or the JWKS never loads:
+/// starting with broken auth would be a security disaster.
+async fn init_keycloak(config: &config::Config) -> Option<Arc<keycloak::KeycloakValidator>> {
+    if !config.keycloak_enabled {
+        return None;
+    }
+
+    let Some(url) = &config.keycloak_url else {
+        panic!("FATAL: VPN_KEYCLOAK_ENABLED=true but VPN_KEYCLOAK_URL is not set!");
+    };
+
+    let kc = keycloak::KeycloakValidator::new(
+        url.clone(),
+        config.keycloak_realm.clone(),
+        config.keycloak_client_id.clone(),
+        config.keycloak_required_role.clone(),
+        config.keycloak_required_scope.clone(),
+    );
+
+    info!("Initializing Keycloak validator for {}...", url);
+
+    // Retry with exponential backoff — Keycloak may not be ready yet.
+    let max_retries = 5u32;
+    for attempt in 1..=max_retries {
+        match kc.init_and_fetch().await {
+            Ok(()) => {
+                info!(
+                    "Keycloak JWKS loaded successfully (attempt {}/{})",
+                    attempt, max_retries
+                );
+                return Some(Arc::new(kc));
+            }
+            Err(e) => {
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt - 1));
+                warn!(
+                    "Failed to fetch Keycloak JWKS (attempt {}/{}): {}. Retrying in {}s...",
+                    attempt,
+                    max_retries,
+                    e,
+                    delay.as_secs()
+                );
+                if attempt == max_retries {
+                    break;
+                }
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+
+    // DO NOT silently fall back to static token — that's a security disaster.
+    panic!(
+        "FATAL: Could not load Keycloak JWKS after {} attempts. \
+         Refusing to start with broken auth. \
+         Ensure Keycloak is reachable at: {}/realms/{}/protocol/openid-connect/certs",
+        max_retries, url, config.keycloak_realm
+    );
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
@@ -110,64 +172,7 @@ async fn main() -> Result<()> {
     }
 
     // Keycloak Validator Setup
-    let mut keycloak = None;
-    if config.keycloak_enabled {
-        let Some(url) = &config.keycloak_url else {
-            panic!("FATAL: VPN_KEYCLOAK_ENABLED=true but VPN_KEYCLOAK_URL is not set!");
-        };
-
-        let kc = crate::keycloak::KeycloakValidator::new(
-            url.clone(),
-            config.keycloak_realm.clone(),
-            config.keycloak_client_id.clone(),
-            config.keycloak_required_role.clone(),
-            config.keycloak_required_scope.clone(),
-        );
-
-        info!("Initializing Keycloak validator for {}...", url);
-
-        // Retry with exponential backoff — Keycloak may not be ready yet
-        let max_retries = 5u32;
-        let mut success = false;
-        for attempt in 1..=max_retries {
-            match kc.init_and_fetch().await {
-                Ok(()) => {
-                    info!(
-                        "Keycloak JWKS loaded successfully (attempt {}/{})",
-                        attempt, max_retries
-                    );
-                    success = true;
-                    break;
-                }
-                Err(e) => {
-                    let delay = std::time::Duration::from_secs(2u64.pow(attempt - 1));
-                    warn!(
-                        "Failed to fetch Keycloak JWKS (attempt {}/{}): {}. Retrying in {}s...",
-                        attempt,
-                        max_retries,
-                        e,
-                        delay.as_secs()
-                    );
-                    if attempt == max_retries {
-                        break;
-                    }
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-
-        if success {
-            keycloak = Some(Arc::new(kc));
-        } else {
-            // DO NOT silently fall back to static token — that's a security disaster.
-            panic!(
-                "FATAL: Could not load Keycloak JWKS after {} attempts. \
-                 Refusing to start with broken auth. \
-                 Ensure Keycloak is reachable at: {}/realms/{}/protocol/openid-connect/certs",
-                max_retries, url, config.keycloak_realm
-            );
-        }
-    }
+    let keycloak = init_keycloak(&config).await;
 
     // --- NETWORK SETUP ---
     // Create the global TUN message channel (Capacity 4096 to prevent backpressure)

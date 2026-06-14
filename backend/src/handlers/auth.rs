@@ -23,6 +23,15 @@ impl TokenValidator for KeycloakValidator {
     }
 }
 
+/// Coerces the optional shared `KeycloakValidator` into the `TokenValidator`
+/// trait object expected by [`authenticate_client`]. When `None`, the caller
+/// falls back to static-token auth.
+pub(crate) fn as_token_validator(
+    keycloak: Option<&Arc<KeycloakValidator>>,
+) -> Option<&dyn TokenValidator> {
+    keycloak.map(|kc| kc.as_ref() as &dyn TokenValidator)
+}
+
 /// On success returns the assigned IP pair and, for Keycloak auth, the token's
 /// expiry as a Unix timestamp. Static-token sessions have no expiry (`None`).
 pub async fn authenticate_client(

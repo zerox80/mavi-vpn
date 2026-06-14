@@ -27,7 +27,7 @@ where
     peers.remove_if(key, |_, tx| tx.same_channel(observed));
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct TunReaderStats {
     read_packets: u64,
     read_bytes: u64,
@@ -66,17 +66,8 @@ impl TunReaderStats {
             channel_closed,
         );
 
-        *previous = Self {
-            read_packets: self.read_packets,
-            read_bytes: self.read_bytes,
-            routed_packets: self.routed_packets,
-            routed_bytes: self.routed_bytes,
-            no_peer_v4: self.no_peer_v4,
-            no_peer_v6: self.no_peer_v6,
-            invalid_ip: self.invalid_ip,
-            channel_full: self.channel_full,
-            channel_closed: self.channel_closed,
-        };
+        // Snapshot the running totals so the next interval reports deltas.
+        *previous = *self;
     }
 }
 
@@ -92,6 +83,46 @@ pub fn spawn_tun_writer(
             }
         }
     });
+}
+
+/// Routes one framed packet to the client registered for `dest_ip`, updating the
+/// shared TUN-reader counters for the send outcome.
+///
+/// Returns `false` when no peer is registered for the address, so the caller can
+/// bump the address-family-specific `no_peer` counter. This is the single code
+/// path shared by the IPv4 and IPv6 branches of the TUN reader's hot loop.
+#[allow(clippy::too_many_arguments)]
+fn deliver_to_client<K>(
+    peers: &DashMap<K, ClientTx>,
+    dest_ip: K,
+    framed: Bytes,
+    packet_len: u64,
+    stats: &mut TunReaderStats,
+    drop_count: &mut u64,
+    last_drop_warn: &mut std::time::Instant,
+) -> bool
+where
+    K: Hash + Eq + Copy + Display,
+{
+    let Some(tx_client) = peers.get(&dest_ip).map(|tx_ref| tx_ref.value().clone()) else {
+        return false;
+    };
+
+    match tx_client.try_send(framed) {
+        Ok(()) => {
+            stats.routed_packets += 1;
+            stats.routed_bytes += packet_len;
+        }
+        Err(TrySendError::Full(_)) => {
+            stats.channel_full += 1;
+            record_s2c_channel_drop(drop_count, last_drop_warn, dest_ip);
+        }
+        Err(TrySendError::Closed(_)) => {
+            stats.channel_closed += 1;
+            remove_peer_if_same(peers, &dest_ip, &tx_client);
+        }
+    }
+    true
 }
 
 fn record_s2c_channel_drop<D: Display>(
@@ -161,63 +192,41 @@ pub fn spawn_tun_reader(
                                 continue;
                             }
 
-                            let version = packet[0] >> 4;
-                            if version == 4 {
-                                if let Ok(ipv4_header) = Ipv4HeaderSlice::from_slice(&packet) {
-                                    let dest_ip = ipv4_header.destination_addr();
-                                    let packet_len = packet.len() as u64;
-
-                                    let tx_client_opt = state_reader.peers.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
-                                    if let Some(tx_client) = tx_client_opt {
-                                        match tx_client.try_send(framed) {
-                                            Ok(()) => {
-                                                stats.routed_packets += 1;
-                                                stats.routed_bytes += packet_len;
-                                            }
-                                            Err(TrySendError::Full(_)) => {
-                                                stats.channel_full += 1;
-                                                record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
-                                            }
-                                            Err(TrySendError::Closed(_)) => {
-                                                stats.channel_closed += 1;
-                                                remove_peer_if_same(&state_reader.peers, &dest_ip, &tx_client);
-                                            }
+                            let packet_len = packet.len() as u64;
+                            match packet[0] >> 4 {
+                                4 => match Ipv4HeaderSlice::from_slice(&packet) {
+                                    Ok(header) => {
+                                        if !deliver_to_client(
+                                            &state_reader.peers,
+                                            header.destination_addr(),
+                                            framed,
+                                            packet_len,
+                                            &mut stats,
+                                            &mut drop_count,
+                                            &mut last_drop_warn,
+                                        ) {
+                                            stats.no_peer_v4 += 1;
                                         }
-                                    } else {
-                                        stats.no_peer_v4 += 1;
                                     }
-                                } else {
-                                    stats.invalid_ip += 1;
-                                }
-                            } else if version == 6 {
-                                if let Ok(ipv6_header) = Ipv6HeaderSlice::from_slice(&packet) {
-                                    let dest_ip = ipv6_header.destination_addr();
-                                    let packet_len = packet.len() as u64;
-
-                                    let tx_client_opt = state_reader.peers_v6.get(&dest_ip).map(|tx_ref| tx_ref.value().clone());
-                                    if let Some(tx_client) = tx_client_opt {
-                                        match tx_client.try_send(framed) {
-                                            Ok(()) => {
-                                                stats.routed_packets += 1;
-                                                stats.routed_bytes += packet_len;
-                                            }
-                                            Err(TrySendError::Full(_)) => {
-                                                stats.channel_full += 1;
-                                                record_s2c_channel_drop(&mut drop_count, &mut last_drop_warn, dest_ip);
-                                            }
-                                            Err(TrySendError::Closed(_)) => {
-                                                stats.channel_closed += 1;
-                                                remove_peer_if_same(&state_reader.peers_v6, &dest_ip, &tx_client);
-                                            }
+                                    Err(_) => stats.invalid_ip += 1,
+                                },
+                                6 => match Ipv6HeaderSlice::from_slice(&packet) {
+                                    Ok(header) => {
+                                        if !deliver_to_client(
+                                            &state_reader.peers_v6,
+                                            header.destination_addr(),
+                                            framed,
+                                            packet_len,
+                                            &mut stats,
+                                            &mut drop_count,
+                                            &mut last_drop_warn,
+                                        ) {
+                                            stats.no_peer_v6 += 1;
                                         }
-                                    } else {
-                                        stats.no_peer_v6 += 1;
                                     }
-                                } else {
-                                    stats.invalid_ip += 1;
-                                }
-                            } else {
-                                stats.invalid_ip += 1;
+                                    Err(_) => stats.invalid_ip += 1,
+                                },
+                                _ => stats.invalid_ip += 1,
                             }
                         }
                         Err(e) => {

@@ -260,68 +260,18 @@ class MaviVpnService : VpnService() {
                         Log.d("MaviVPN", "Config received from server")
                         val root = JSONObject(configJson)
                         val config = if (root.has("Config")) root.getJSONObject("Config") else root
-                        val whitelistDomains = whitelistDomainsFromConfig(config)
 
                         var localInterface: ParcelFileDescriptor? = null
 
                         try {
                             val builder = Builder()
-                            val assignedIp = config.getString("assigned_ip")
-                            val netmask = config.optString("netmask", "255.255.255.0")
-                            val prefixLength = netmaskToPrefixLength(netmask)
-
-                            builder.addAddress(assignedIp, prefixLength)
-                            builder.addRoute("0.0.0.0", 0)
-
-                            val dns = config.optString("dns_server", "8.8.8.8")
-                            builder.addDnsServer(dns)
-
-                            val hasIpv6 = try {
-                                applyAssignedIpv6Config(config, AndroidVpnBuilderAdapter(builder))
-                            } catch (e: Exception) {
-                                val message = "Failed to configure IPv6 tunnel: ${e.message}"
-                                Log.e("MaviVPN", message, e)
+                            try {
+                                configureTunnelBuilder(builder, config, splitMode, splitPackages, notificationHelper)
+                            } catch (e: Ipv6TunnelException) {
                                 isConnected.value = false
                                 isRunning = false
                                 notificationHelper.updateNotification(1, "Mavi VPN", "IPv6 VPN setup failed. Disconnecting.")
-                                throw IllegalStateException(message, e)
-                            }
-
-                            applyWhitelistDomainExclusions(
-                                builder,
-                                whitelistDomains,
-                                hasIpv6,
-                                notificationHelper,
-                            )
-
-                            if (splitMode == "include" || splitMode == "exclude") {
-                                val packages =
-                                    splitPackages.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-                                Log.d("MaviVPN", "Applying Split Tunneling: Mode=$splitMode, Packages=$packages")
-
-                                for (pkg in packages) {
-                                    try {
-                                        if (splitMode == "include") {
-                                            builder.addAllowedApplication(pkg)
-                                        } else {
-                                            builder.addDisallowedApplication(pkg)
-                                        }
-                                    } catch (e: Exception) {
-                                        Log.w(
-                                            "MaviVPN",
-                                            "Failed to add split tunneling for package '$pkg': ${e.message}",
-                                        )
-                                    }
-                                }
-                            }
-
-                            builder.setSession("MaviVPN")
-                            val serverMtu = config.optInt("mtu", 1280)
-                            val tunMtu = if (serverMtu in 1280..1360) serverMtu else 1280
-                            builder.setMtu(tunMtu)
-
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                builder.setMetered(false)
+                                throw e
                             }
 
                             localInterface = builder.establish()

@@ -116,15 +116,23 @@ sudo sysctl -w "net.ipv6.conf.${WAN}.accept_ra=2"
 echo "WAN interface: $WAN"
 ```
 
-**3. Persist it across reboots** in `/etc/sysctl.d/99-mavi-vpn.conf` (replace `ens5` with your `$WAN` from above):
+**3. Persist it across reboots (recommended)** so you never have to touch the host again. This writes `/etc/sysctl.d/99-mavi-vpn.conf` with your WAN interface filled in automatically — files in `/etc/sysctl.d/` are re-applied by the kernel on **every boot**, so the settings survive reboots and instance restarts:
 ```bash
-sudo tee /etc/sysctl.d/99-mavi-vpn.conf >/dev/null <<'CONF'
+WAN=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+sudo tee /etc/sysctl.d/99-mavi-vpn.conf >/dev/null <<CONF
+# Mavi VPN — host forwarding for VPN clients (loaded automatically on every boot)
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
-# RA-based WAN only (e.g. AWS Lightsail). Replace ens5 with your interface.
-net.ipv6.conf.ens5.accept_ra = 2
+# Keep the RA-derived IPv6 default route on RA-based clouds (e.g. AWS Lightsail).
+net.ipv6.conf.${WAN}.accept_ra = 2
+net.ipv6.conf.default.accept_ra = 2
 CONF
 sudo sysctl --system
+```
+The heredoc is intentionally **unquoted** (`<<CONF`, not `<<'CONF'`), so `${WAN}` is expanded into the file — no hand-editing of the interface name. Then confirm it persisted (this re-reads only that file, exactly as the kernel does at boot):
+```bash
+cat /etc/sysctl.d/99-mavi-vpn.conf
+sudo sysctl -p /etc/sysctl.d/99-mavi-vpn.conf   # should print forwarding=1 and accept_ra=2
 ```
 
 > **IPv4-only deployments:** If you don't want IPv6, set `VPN_DISABLE_IPV6=true` in `.env`. The server then skips IPv6 setup entirely (and the startup wait). Hosts with IPv6 fully disabled in the kernel are detected automatically and run IPv4-only without any error. `VPN_IPV6_WAIT` (default `30`) controls how long the entrypoint waits for the WAN's global IPv6 address to appear before continuing.

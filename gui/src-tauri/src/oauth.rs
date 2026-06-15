@@ -61,7 +61,14 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         .append_pair("scope", "openid")
         .append_pair("code_challenge", &code_challenge)
         .append_pair("code_challenge_method", "S256")
-        .append_pair("state", &oauth_state);
+        .append_pair("state", &oauth_state)
+        // Force Keycloak to ignore an existing SSO cookie and always present the
+        // login form. Without this, reconnecting while a previous browser session
+        // is still alive makes Keycloak show its "You are already logged in" info
+        // page instead of redirecting back to the loopback callback — so no fresh
+        // authorization code ever reaches the listener and the reconnect hangs.
+        // The Android client sets the same parameter for the same reason.
+        .append_pair("prompt", "login");
 
     // 4. Open the browser (works on Windows and Linux/Wayland via xdg-open)
     let url_str = auth_url.as_str().to_string();

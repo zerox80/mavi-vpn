@@ -4,13 +4,13 @@
 
 mod handshake;
 mod network;
+mod pump;
 mod reconnect;
 mod wintun_mod;
 
 use crate::ipc::Config;
 use anyhow::{bail, Context, Result};
-use bytes::{Buf, Bytes};
-use shared::{icmp, masque, ControlMessage};
+use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -22,11 +22,12 @@ use self::network::{
     cleanup_routes, create_udp_socket, remove_nrpt_dns_rule, set_adapter_network_config,
     SessionRouteGuard,
 };
+use self::pump::{pump_quic_to_tun, pump_tun_to_quic, PtbContext};
 use self::reconnect::{
     compute_reconnect_delay, sleep_unless_stopped, ReconnectDecision, SessionEnd,
     RECONNECT_INITIAL_SECS,
 };
-use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter, is_wintun_ring_full};
+use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter};
 
 #[cfg_attr(test, allow(dead_code))]
 pub fn cleanup_stale_network_state() {
@@ -151,7 +152,6 @@ fn determine_session_result(still_running: bool) -> SessionEnd {
 }
 
 /// Manages a single active VPN session (handshake + packet pumping).
-#[allow(clippy::too_many_lines)]
 async fn run_session(
     config: &Config,
     cert_pin_bytes: &[u8],
@@ -317,150 +317,28 @@ async fn run_session(
     });
 
     // Thread: TUN -> QUIC (Read from WinTUN, Send via QUIC)
-    let session_tun = session.clone();
-    let conn_quic = connection.clone();
-    let alive_pump = session_alive.clone();
-    let run_pump = global_running.clone();
-    let gateway_v6_for_ptb = gateway_v6;
-    let is_h3_framing = config.effective_http3_framing();
-    let tun_mtu_for_ptb = mtu;
+    let ptb_ctx = PtbContext {
+        gateway,
+        gateway_v6,
+        is_h3_framing: config.effective_http3_framing(),
+        tun_mtu: mtu,
+    };
+    let session_tx = session.clone();
+    let conn_tx = connection.clone();
+    let alive_tx = session_alive.clone();
+    let run_tx = global_running.clone();
     let tun_to_quic = std::thread::spawn(move || {
-        let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
-        loop {
-            if !run_pump.load(Ordering::Relaxed) || !alive_pump.load(Ordering::Relaxed) {
-                break;
-            }
-            match session_tun.try_receive() {
-                Ok(Some(packet)) => {
-                    let packet_bytes = packet.bytes();
-                    if pool.capacity() < packet_bytes.len() + masque::DATAGRAM_PREFIX.len() {
-                        pool.reserve(4 * 1024 * 1024);
-                    }
-                    if is_h3_framing {
-                        pool.extend_from_slice(&masque::DATAGRAM_PREFIX);
-                    }
-                    pool.extend_from_slice(packet_bytes);
-                    let payload = pool.split().freeze();
-                    if let Err(e) = conn_quic.send_datagram(payload) {
-                        if matches!(e, quinn::SendDatagramError::TooLarge) {
-                            if packet.bytes().is_empty() {
-                                continue;
-                            }
-                            let version = packet.bytes()[0] >> 4;
-                            let source_ip = if version == 4 {
-                                Some(std::net::IpAddr::V4(gateway))
-                            } else if version == 6 {
-                                gateway_v6_for_ptb.map(std::net::IpAddr::V6)
-                            } else {
-                                None
-                            };
-                            let h3_prefix = if is_h3_framing {
-                                masque::DATAGRAM_PREFIX.len()
-                            } else {
-                                0
-                            };
-                            let reported_mtu = shared::effective_ptb_mtu(
-                                tun_mtu_for_ptb,
-                                conn_quic.max_datagram_size(),
-                                h3_prefix,
-                                version == 6,
-                            );
-                            if let Some(icmp_packet) = icmp::generate_packet_too_big(
-                                packet.bytes(),
-                                reported_mtu,
-                                source_ip,
-                            ) {
-                                if let Ok(len) = u16::try_from(icmp_packet.len()) {
-                                    if let Ok(mut reply) = session_tun.allocate_send_packet(len) {
-                                        reply.bytes_mut().copy_from_slice(&icmp_packet);
-                                        session_tun.send_packet(reply);
-                                    }
-                                }
-                            }
-                        } else if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) {
-                            break;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    if let Ok(event) = session_tun.get_read_wait_event() {
-                        unsafe {
-                            windows_sys::Win32::System::Threading::WaitForSingleObject(
-                                event as _, 50,
-                            );
-                        }
-                    } else {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                }
-                Err(_) => {
-                    alive_pump.store(false, Ordering::SeqCst);
-                    break;
-                }
-            }
-        }
+        pump_tun_to_quic(&session_tx, &conn_tx, &run_tx, &alive_tx, &ptb_ctx);
     });
 
     // Task: QUIC -> TUN (Read from QUIC, Write to WinTUN)
-    let session_quic_in = session.clone();
-    let alive_quic_in = session_alive.clone();
-    let run_quic_in = global_running.clone();
-    let conn_quic = connection.clone();
+    let session_rx = session.clone();
+    let conn_rx = connection.clone();
+    let alive_rx = session_alive.clone();
+    let run_rx = global_running.clone();
     let is_h3_framing_dl = config.effective_http3_framing();
     let quic_to_tun = tokio::spawn(async move {
-        let mut pending_datagram: Option<Bytes> = None;
-        let mut yield_count = 0u8;
-        loop {
-            if !run_quic_in.load(Ordering::Relaxed) || !alive_quic_in.load(Ordering::Relaxed) {
-                break;
-            }
-            let data = match pending_datagram.take() {
-                Some(data) => data,
-                None => {
-                    if let Ok(mut data) = conn_quic.read_datagram().await {
-                        if is_h3_framing_dl {
-                            let inner_len = match masque::unwrap_datagram(&data) {
-                                Some(slice) => slice.len(),
-                                None => continue,
-                            };
-                            if inner_len == 0 {
-                                continue;
-                            }
-                            let prefix = data.len() - inner_len;
-                            data.advance(prefix);
-                        }
-                        data
-                    } else {
-                        alive_quic_in.store(false, Ordering::SeqCst);
-                        break;
-                    }
-                }
-            };
-            if data.is_empty() {
-                continue;
-            }
-            #[allow(clippy::cast_possible_truncation)]
-            match session_quic_in.allocate_send_packet(data.len() as u16) {
-                Ok(mut packet) => {
-                    yield_count = 0;
-                    packet.bytes_mut().copy_from_slice(&data);
-                    session_quic_in.send_packet(packet);
-                }
-                Err(e) if is_wintun_ring_full(&e) => {
-                    pending_datagram = Some(data);
-                    if yield_count < 10 {
-                        yield_count += 1;
-                        tokio::task::yield_now().await;
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                }
-                Err(_) => {
-                    alive_quic_in.store(false, Ordering::SeqCst);
-                    break;
-                }
-            }
-        }
+        pump_quic_to_tun(&session_rx, &conn_rx, &run_rx, &alive_rx, is_h3_framing_dl).await;
     });
 
     // Wait for termination

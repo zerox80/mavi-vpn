@@ -304,7 +304,7 @@ async fn load_or_prompt_config() -> Result<Config> {
         print!("Use this configuration? [Y/n]: ");
         io::stdout().flush()?;
         let input = read_line()?.to_lowercase();
-        if input.is_empty() || input == "y" || input == "yes" || input == "j" || input == "ja" {
+        if input.is_empty() || is_affirmative(&input) {
             println!();
             if saved.kc_auth.unwrap_or(false) {
                 let kc_url = saved.kc_url.as_deref().unwrap_or("");
@@ -335,11 +335,7 @@ async fn prompt_new_config() -> Result<Config> {
     stdout.flush()?;
     let is_keycloak = read_line()?.to_lowercase();
     let mut kc_auth = Some(false);
-    let (token, saved_kc_url, saved_kc_realm, saved_kc_client_id) = if is_keycloak == "y"
-        || is_keycloak == "yes"
-        || is_keycloak == "j"
-        || is_keycloak == "ja"
-    {
+    let (token, saved_kc_url, saved_kc_realm, saved_kc_client_id) = if is_affirmative(&is_keycloak) {
         kc_auth = Some(true);
         let config = prompt_keycloak_config().await?;
         (
@@ -359,8 +355,7 @@ async fn prompt_new_config() -> Result<Config> {
     print!("Censorship Resistant Mode? [y/N]: ");
     stdout.flush()?;
     let cr_input = read_line()?.to_lowercase();
-    let censorship_resistant =
-        cr_input == "y" || cr_input == "yes" || cr_input == "j" || cr_input == "ja";
+    let censorship_resistant = is_affirmative(&cr_input);
     let http3_framing = if censorship_resistant {
         println!("HTTP/3 Datagram Framing is automatically enabled in CR Mode.");
         true
@@ -368,7 +363,7 @@ async fn prompt_new_config() -> Result<Config> {
         print!("HTTP/3 Datagram Framing? (Only useful in CR Mode) [y/N]: ");
         stdout.flush()?;
         let h3_input = read_line()?.to_lowercase();
-        h3_input == "y" || h3_input == "yes" || h3_input == "j" || h3_input == "ja"
+        is_affirmative(&h3_input)
     };
     let ech_config = match std::env::var("VPN_ECH_CONFIG") {
         Ok(s) if !s.is_empty() => Some(s),
@@ -455,6 +450,12 @@ fn read_line() -> Result<String> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_string())
+}
+
+/// Returns `true` if `input` (already lowercased) is an affirmative answer in
+/// English or German (`y`/`yes`/`j`/`ja`).
+fn is_affirmative(input: &str) -> bool {
+    matches!(input, "y" | "yes" | "j" | "ja")
 }
 
 #[cfg(test)]

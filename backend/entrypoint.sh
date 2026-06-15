@@ -97,31 +97,137 @@ fi
 # other. Client-to-client packets re-enter the kernel via the TUN device and
 # are routed back out of it, so a tun+ -> tun+ FORWARD drop blocks them.
 # Inserted last so it ends up at the top of the chain, ahead of the ACCEPTs.
+# (The IPv6 counterpart lives in the IPv6 section below, inserted after the
+# IPv6 ACCEPT rules so the DROP likewise ends up above them.)
 if [ "${VPN_ALLOW_CLIENT_TO_CLIENT:-false}" != "true" ]; then
     echo "Blocking client-to-client traffic (set VPN_ALLOW_CLIENT_TO_CLIENT=true to allow)..."
     iptables -C FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null || \
         iptables -I FORWARD -i tun+ -o tun+ -j DROP
-    ip6tables -C FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null || \
-        ip6tables -I FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null || true
 fi
-
-# IPv6 Support
-echo "Enabling IPv6 Forwarding..."
-sysctl -w net.ipv6.conf.all.forwarding=1 || echo "Failed to enable ipv6 forwarding (container might be restricted)"
-
-# IPv6 NAT
-if ! ip6tables -t nat -C POSTROUTING -s "$VPN_NETWORK_V6" -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null; then
-    ip6tables -t nat -I POSTROUTING -s "$VPN_NETWORK_V6" -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || echo "ip6tables NAT failed"
-fi
-ip6tables -C FORWARD -i tun+ -j ACCEPT 2>/dev/null || \
-    ip6tables -I FORWARD -i tun+ -j ACCEPT 2>/dev/null || true
-ip6tables -C FORWARD -o tun+ -j ACCEPT 2>/dev/null || \
-    ip6tables -I FORWARD -o tun+ -j ACCEPT 2>/dev/null || true
-ip6tables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-    ip6tables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
 echo "NAT configured: $VPN_NETWORK -> $DEFAULT_IFACE (IPv4)"
-echo "NAT configured: $VPN_NETWORK_V6 -> $DEFAULT_IFACE (IPv6)"
+
+# ---------------------------------------------------------------------------
+# IPv6 support (NAT66 for VPN clients on the ULA prefix $VPN_NETWORK_V6).
+#
+# On RA-based clouds (e.g. AWS Lightsail) the WAN gets its IPv6 address and
+# default route from Router Advertisements. Turning the host into a router by
+# enabling forwarding makes Linux stop accepting RAs (and drop the default
+# route) unless accept_ra=2 is set on the WAN interface.
+#
+# This container is intentionally hardened (cap-based, non-privileged), so
+# /proc/sys is read-only and it usually cannot write net sysctls itself. We
+# therefore attempt the sysctls best-effort, then VERIFY the resulting kernel
+# state and fail loudly with host-setup guidance instead of pretending IPv6
+# works. ip6tables (NAT66/FORWARD) does work via netlink + CAP_NET_ADMIN.
+# ---------------------------------------------------------------------------
+if [ ! -e /proc/sys/net/ipv6/conf/all/forwarding ]; then
+    echo "Info: IPv6 is disabled in this kernel; running IPv4-only."
+elif [ "${VPN_DISABLE_IPV6:-false}" = "true" ]; then
+    echo "Info: VPN_DISABLE_IPV6=true; skipping IPv6 setup (IPv4-only)."
+else
+    echo "Configuring IPv6 (WAN interface: $DEFAULT_IFACE)..."
+
+    # Keep accepting Router Advertisements even once forwarding is enabled, so
+    # the WAN keeps its RA-derived global address and default route. Each is
+    # guarded by its /proc entry and best-effort (the host may own these).
+    if [ -e "/proc/sys/net/ipv6/conf/${DEFAULT_IFACE}/accept_ra" ]; then
+        sysctl -w "net.ipv6.conf.${DEFAULT_IFACE}.accept_ra=2" >/dev/null 2>&1 || true
+    fi
+    if [ -e "/proc/sys/net/ipv6/conf/${DEFAULT_IFACE}/accept_ra_defrtr" ]; then
+        sysctl -w "net.ipv6.conf.${DEFAULT_IFACE}.accept_ra_defrtr=1" >/dev/null 2>&1 || true
+    fi
+    if [ -e "/proc/sys/net/ipv6/conf/${DEFAULT_IFACE}/autoconf" ]; then
+        sysctl -w "net.ipv6.conf.${DEFAULT_IFACE}.autoconf=1" >/dev/null 2>&1 || true
+    fi
+
+    # Give RA-based providers (Lightsail) time to bring up the global address
+    # before deciding whether IPv6 routing is expected to work. Breaks as soon
+    # as an address appears, so there is no delay when IPv6 is already up.
+    VPN_IPV6_WAIT=${VPN_IPV6_WAIT:-30}
+    case "$VPN_IPV6_WAIT" in
+        *[!0-9]*|"") VPN_IPV6_WAIT=30 ;;
+    esac
+    have_global_v6=false
+    waited=0
+    while [ "$waited" -lt "$VPN_IPV6_WAIT" ]; do
+        if ip -6 addr show dev "$DEFAULT_IFACE" scope global 2>/dev/null | grep -q 'inet6 '; then
+            echo "IPv6 address detected on $DEFAULT_IFACE"
+            have_global_v6=true
+            break
+        fi
+        waited=$((waited + 1))
+        sleep 1
+    done
+
+    if [ "$have_global_v6" != "true" ]; then
+        echo "Warning: no global IPv6 on $DEFAULT_IFACE after ${VPN_IPV6_WAIT}s; continuing IPv4-only."
+        echo "         (Set VPN_DISABLE_IPV6=true to skip this wait on IPv4-only hosts.)"
+    else
+        # Enable IPv6 forwarding. Do not trust the command's exit code -- the
+        # container's /proc/sys may be read-only -- verify the result below.
+        sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+        # Enabling forwarding can reset RA handling, so re-assert accept_ra=2.
+        if [ -e "/proc/sys/net/ipv6/conf/${DEFAULT_IFACE}/accept_ra" ]; then
+            sysctl -w "net.ipv6.conf.${DEFAULT_IFACE}.accept_ra=2" >/dev/null 2>&1 || true
+        fi
+
+        if [ "$(cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null)" != "1" ]; then
+            echo "Error: IPv6 forwarding is not enabled (net.ipv6.conf.all.forwarding != 1)." >&2
+            echo "       This hardened container cannot write host sysctls (/proc/sys is" >&2
+            echo "       read-only without privileged mode), and $DEFAULT_IFACE has public" >&2
+            echo "       IPv6, so enable forwarding on the HOST and restart the container:" >&2
+            echo "         sudo sysctl -w net.ipv6.conf.all.forwarding=1" >&2
+            echo "         sudo sysctl -w net.ipv6.conf.${DEFAULT_IFACE}.accept_ra=2" >&2
+            echo "       Persist it in /etc/sysctl.d/99-mavi-vpn.conf (see docs/INSTALLATION.md)." >&2
+            echo "       To intentionally run IPv4-only, set VPN_DISABLE_IPV6=true." >&2
+            exit 1
+        fi
+
+        # NAT66 for the VPN ULA prefix -> WAN. Fail loudly if it cannot be added.
+        if ! ip6tables -t nat -C POSTROUTING -s "$VPN_NETWORK_V6" -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null; then
+            if ! ip6tables -t nat -I POSTROUTING -s "$VPN_NETWORK_V6" -o "$DEFAULT_IFACE" -j MASQUERADE; then
+                echo "Error: failed to add IPv6 NAT66 rule ($VPN_NETWORK_V6 -> $DEFAULT_IFACE)." >&2
+                exit 1
+            fi
+        fi
+
+        # Allow forwarding to/from the tunnel. Fail loudly on failure.
+        ip6tables -C FORWARD -i tun+ -j ACCEPT 2>/dev/null || \
+            ip6tables -I FORWARD -i tun+ -j ACCEPT || \
+            { echo "Error: failed to add IPv6 FORWARD -i tun+ ACCEPT rule." >&2; exit 1; }
+        ip6tables -C FORWARD -o tun+ -j ACCEPT 2>/dev/null || \
+            ip6tables -I FORWARD -o tun+ -j ACCEPT || \
+            { echo "Error: failed to add IPv6 FORWARD -o tun+ ACCEPT rule." >&2; exit 1; }
+        ip6tables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+            ip6tables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT || \
+            { echo "Error: failed to add IPv6 FORWARD RELATED,ESTABLISHED ACCEPT rule." >&2; exit 1; }
+
+        echo "NAT66 configured: $VPN_NETWORK_V6 -> $DEFAULT_IFACE (IPv6)"
+    fi
+
+    # IPv6 client isolation: block client-to-client over the tunnel. Delete any
+    # stale copies first, then insert so the DROP sits ABOVE the tun+ ACCEPT
+    # rules (mirroring IPv4). Applied whenever IPv6 is enabled, since clients can
+    # reach each other over the ULA prefix even without global IPv6.
+    if [ "${VPN_ALLOW_CLIENT_TO_CLIENT:-false}" != "true" ]; then
+        while ip6tables -C FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null; do
+            ip6tables -D FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null || break
+        done
+        ip6tables -I FORWARD -i tun+ -o tun+ -j DROP || \
+            echo "Warning: could not add IPv6 client-isolation DROP rule." >&2
+    fi
+
+    # Diagnostics (printed at startup to make IPv6 state obvious).
+    echo "----- IPv6 diagnostics -----"
+    echo "Default interface: $DEFAULT_IFACE"
+    echo "IPv6 forwarding:   $(cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || echo unknown)"
+    echo "$DEFAULT_IFACE accept_ra: $(cat "/proc/sys/net/ipv6/conf/${DEFAULT_IFACE}/accept_ra" 2>/dev/null || echo unknown)"
+    ip -6 addr show dev "$DEFAULT_IFACE" || true
+    ip -6 route show default || true
+    ip6tables -t nat -S POSTROUTING | grep -- "$VPN_NETWORK_V6" || true
+    echo "----------------------------"
+fi
 
 # Verify tables
 iptables -t nat -L -v -n

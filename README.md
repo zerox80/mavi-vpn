@@ -273,6 +273,8 @@ All server settings can be configured via environment variables or CLI flags:
 | `VPN_AUTH_TOKEN` | *(required)* | Pre-shared authentication token |
 | `VPN_NETWORK` | `10.8.0.0/24` | IPv4 client subnet (supports /8 to /30) |
 | `VPN_NETWORK_V6` | `fd00::/64` | IPv6 client subnet (ULA) |
+| `VPN_DISABLE_IPV6` | `false` | Skip all IPv6 setup and run IPv4-only |
+| `VPN_IPV6_WAIT` | `30` | Seconds to wait for the WAN's global IPv6 to appear before continuing |
 | `VPN_DNS` | `1.1.1.1` | DNS server pushed to clients |
 | `VPN_MTU` | `1280` | TUN interface MTU |
 | `VPN_CENSORSHIP_RESISTANT` | `false` | Enable Layer 7 obfuscation |
@@ -302,6 +304,32 @@ The `quic-tester/` tool simulates a DPI scanner to verify censorship resistance:
 ```bash
 cargo run -p quic-tester -- <server:port>
 # Expects HTTP/3 nginx response → confirms probe resistance is active
+```
+
+## Troubleshooting
+
+### IPv6 on AWS Lightsail & other RA-based hosts
+
+On AWS Lightsail (and similar clouds) the instance receives its public IPv6 address and default route via **Router Advertisements (RA)** on the WAN interface (e.g. `ens5`), and the public address is typically a single `/128`. Mavi VPN does **not** hand that public prefix to clients — clients get internal **ULA** addresses from `fd00::/64` and reach the internet through **NAT66**. For that to work:
+
+- **Forwarding must be enabled on the host.** The VPN container is deliberately hardened (non-privileged, `cap_drop: ALL` + `NET_ADMIN`), so its `/proc/sys` is read-only and it *cannot* set host sysctls itself. Enable forwarding on the host and persist it (see [`docs/INSTALLATION.md`](docs/INSTALLATION.md)):
+  ```bash
+  sudo sysctl -w net.ipv6.conf.all.forwarding=1
+  ```
+- **Keep `accept_ra=2` on the WAN while forwarding is on.** Turning the host into a router makes Linux stop accepting RAs (which drops the IPv6 default route) unless the WAN interface uses `accept_ra=2`:
+  ```bash
+  WAN=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+  sudo sysctl -w "net.ipv6.conf.${WAN}.accept_ra=2"
+  ```
+
+If the host has public IPv6 but forwarding is not enabled, the container now **fails loudly** at startup (instead of pretending IPv6 works) and prints the exact host commands to run. To run IPv4-only on purpose, set `VPN_DISABLE_IPV6=true`.
+
+If IPv6 still fails, check (replace `<wan>` with your interface, e.g. `ens5`):
+```bash
+cat /proc/sys/net/ipv6/conf/all/forwarding    # expect: 1
+cat /proc/sys/net/ipv6/conf/<wan>/accept_ra   # expect: 2
+ip -6 route show default                       # expect: default via fe80::… dev <wan> proto ra
+ip6tables -t nat -S POSTROUTING                # expect: -A POSTROUTING -s fd00::/64 -o <wan> -j MASQUERADE
 ```
 
 ## Documentation

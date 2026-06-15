@@ -99,6 +99,44 @@ For the VPN client to connect securely via QUIC without MITM attacks, you need t
 ```bash
 cat data/cert_pin.txt
 ```
+
+### Step 6: IPv6 Networking (Host Setup)
+The VPN gives clients internal ULA IPv6 addresses from `fd00::/64` and routes their traffic out via **NAT66**. The container is intentionally hardened (non-privileged, `cap_drop: ALL` + `NET_ADMIN`), so its `/proc/sys` is **read-only** and it cannot enable kernel forwarding itself — you must enable it **on the host** (just like IPv4 forwarding). If the host has public IPv6 but forwarding is off, the container fails loudly at startup with the exact commands to run.
+
+**1. Enable forwarding now (current boot):**
+```bash
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv6.conf.all.forwarding=1
+```
+
+**2. On RA-based clouds (e.g. AWS Lightsail), keep accepting Router Advertisements on the WAN while forwarding is enabled** — otherwise enabling forwarding makes Linux drop the IPv6 default route:
+```bash
+WAN=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+sudo sysctl -w "net.ipv6.conf.${WAN}.accept_ra=2"
+echo "WAN interface: $WAN"
+```
+
+**3. Persist it across reboots** in `/etc/sysctl.d/99-mavi-vpn.conf` (replace `ens5` with your `$WAN` from above):
+```bash
+sudo tee /etc/sysctl.d/99-mavi-vpn.conf >/dev/null <<'CONF'
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+# RA-based WAN only (e.g. AWS Lightsail). Replace ens5 with your interface.
+net.ipv6.conf.ens5.accept_ra = 2
+CONF
+sudo sysctl --system
+```
+
+> **IPv4-only deployments:** If you don't want IPv6, set `VPN_DISABLE_IPV6=true` in `.env`. The server then skips IPv6 setup entirely (and the startup wait). Hosts with IPv6 fully disabled in the kernel are detected automatically and run IPv4-only without any error. `VPN_IPV6_WAIT` (default `30`) controls how long the entrypoint waits for the WAN's global IPv6 address to appear before continuing.
+
+> **Important:** Do **not** assign your provider's public IPv6 prefix (e.g. a `/128` or `/64` such as `2a05:…`) to `VPN_NETWORK_V6`. Keep the ULA `fd00::/64`; outbound IPv6 for clients works through NAT66.
+
+After enabling forwarding on the host, (re)start the stack and confirm IPv6 is healthy:
+```bash
+docker compose up -d --force-recreate
+docker compose logs vpn-server | grep -A12 'IPv6 diagnostics'
+cat /proc/sys/net/ipv6/conf/all/forwarding   # expect: 1
+```
 ---
 
 ## 2. Windows Client Installation

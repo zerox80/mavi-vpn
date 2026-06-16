@@ -165,6 +165,16 @@ describe('vpn workflows', () => {
     await toggleConnection();
     expect(invoke).not.toHaveBeenCalled();
 
+    state.vpnState = 'Reconnecting';
+    invoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Stopped' })
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Stopped' });
+    await toggleConnection();
+    expect(invoke).toHaveBeenCalledWith('vpn_disconnect');
+
+    vi.clearAllMocks();
+    state.vpnState = 'Stopped';
     state.hero = 'off';
     invoke
       .mockResolvedValueOnce(undefined)

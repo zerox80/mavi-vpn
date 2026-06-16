@@ -6,6 +6,8 @@ pub mod endpoint;
 pub mod hex;
 pub mod icmp;
 pub mod ipc;
+#[cfg(feature = "oauth-client")]
+pub mod kc_oauth;
 pub mod masque;
 pub mod mtu;
 

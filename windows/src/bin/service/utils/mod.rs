@@ -13,6 +13,16 @@ pub fn run_network_repair_cleanup() {
     // In tests, we don't want to actually touch the network stack
 }
 
+/// Maps the service's atomic flags to a client-facing [`ipc::VpnState`].
+///
+/// `starting` is `vpn_running && !connected`, i.e. the reconnect loop is still
+/// active. Crucially, a `last_error` while still running means the loop is
+/// *retrying* a transient failure (e.g. the server closing an expired-token
+/// session with `H3_NO_ERROR`), so it maps to `Reconnecting`, NOT `Failed`.
+/// `Failed` is reserved for the terminal case where the loop has given up
+/// (`!running`) yet an error is recorded — only then should the UI flip off and
+/// surface the error. Without this ordering every transient reconnect flashed a
+/// hard error and dropped the hero to "NOT CONNECTED".
 pub const fn classify_status(
     connected: bool,
     stopping: bool,
@@ -21,12 +31,16 @@ pub const fn classify_status(
 ) -> ipc::VpnState {
     if connected {
         ipc::VpnState::Connected
-    } else if last_error.is_some() {
-        ipc::VpnState::Failed
     } else if stopping {
         ipc::VpnState::Stopping
     } else if starting {
-        ipc::VpnState::Starting
+        if last_error.is_some() {
+            ipc::VpnState::Reconnecting
+        } else {
+            ipc::VpnState::Starting
+        }
+    } else if last_error.is_some() {
+        ipc::VpnState::Failed
     } else {
         ipc::VpnState::Stopped
     }

@@ -85,6 +85,12 @@ pub enum IpcRequest {
     Status,
     /// Remove stale `MaviVPN` routes and DNS/NRPT state without starting a tunnel.
     RepairNetwork,
+    /// Replace the access token used for the next (re)handshake. Sent by the GUI
+    /// after it has silently refreshed a short-lived Keycloak access token so the
+    /// service's reconnect loop authenticates with a valid token instead of the
+    /// stale one captured at `Start`. The long-lived refresh token never leaves
+    /// the user-session GUI; only the freshly minted access token crosses IPC.
+    UpdateToken { token: String },
 }
 
 /// More precise lifecycle state for clients that need to distinguish setup
@@ -96,6 +102,10 @@ pub enum VpnState {
     Connected,
     Failed,
     Stopping,
+    /// The tunnel dropped and the service is actively retrying (transient error).
+    /// Distinct from `Failed`, which is terminal: the UI keeps showing
+    /// "connecting" instead of flipping to a hard error during auto-reconnect.
+    Reconnecting,
 }
 
 /// A wrapper around `IpcRequest` that includes the authentication token.
@@ -218,6 +228,9 @@ mod tests {
             IpcRequest::Stop,
             IpcRequest::Status,
             IpcRequest::RepairNetwork,
+            IpcRequest::UpdateToken {
+                token: "fresh-access-token".to_string(),
+            },
         ];
 
         for req in configs {
@@ -245,6 +258,13 @@ mod tests {
                 endpoint: None,
                 state: VpnState::Failed,
                 last_error: Some("Auth failed".to_string()),
+                assigned_ip: None,
+            },
+            IpcResponse::Status {
+                running: false,
+                endpoint: Some("1.2.3.4:443".to_string()),
+                state: VpnState::Reconnecting,
+                last_error: Some("H3 recv_response failed".to_string()),
                 assigned_ip: None,
             },
         ];

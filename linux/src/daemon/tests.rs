@@ -246,3 +246,53 @@ async fn dispatch_status_maps_failed_starting_stopping_and_connected() {
         }
     ));
 }
+
+#[tokio::test]
+async fn dispatch_status_maps_transient_error_while_running_to_reconnecting() {
+    // Reconnect loop still active (running, not connected) with a recorded
+    // transient error → Reconnecting, NOT Failed. This is what keeps the GUI on
+    // "connecting" through an H3_NO_ERROR retry instead of flashing a hard error.
+    let state = test_state();
+    {
+        let guard = state.lock().await;
+        guard.vpn_running.store(true, Ordering::SeqCst);
+        guard.vpn_connected.store(false, Ordering::SeqCst);
+        *guard.last_error.lock().unwrap() =
+            Some("H3 recv_response failed: ApplicationClose: H3_NO_ERROR".to_string());
+    }
+    assert!(matches!(
+        dispatch_request_with_hooks(IpcRequest::Status, &state, false, no_cleanup).await,
+        IpcResponse::Status {
+            state: VpnState::Reconnecting,
+            last_error: Some(_),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn update_token_replaces_current_token() {
+    let state = test_state();
+    // Start (without spawning a session) seeds the cell from config.token.
+    dispatch_request_with_hooks(IpcRequest::Start(test_config()), &state, false, no_cleanup).await;
+    assert_eq!(
+        state.lock().await.current_token.lock().unwrap().clone(),
+        "token"
+    );
+
+    let resp = dispatch_request_with_hooks(
+        IpcRequest::UpdateToken {
+            token: "fresh-access-token".to_string(),
+        },
+        &state,
+        false,
+        no_cleanup,
+    )
+    .await;
+
+    assert_eq!(resp, IpcResponse::Ok);
+    assert_eq!(
+        state.lock().await.current_token.lock().unwrap().clone(),
+        "fresh-access-token"
+    );
+}

@@ -335,10 +335,11 @@ fn classify_connected_takes_priority_over_error() {
 }
 
 #[test]
-fn classify_error_takes_priority_over_stopping() {
+fn classify_stopping_takes_priority_over_error() {
+    // Tearing down on a user Stop: show "Stopping", not a stale error.
     assert_eq!(
         classify_status(false, true, false, Some("error")),
-        ipc::VpnState::Failed
+        ipc::VpnState::Stopping
     );
 }
 
@@ -347,5 +348,25 @@ fn classify_stopping_takes_priority_over_starting() {
     assert_eq!(
         classify_status(false, true, true, None),
         ipc::VpnState::Stopping
+    );
+}
+
+#[test]
+fn classify_reconnecting_when_running_with_transient_error() {
+    // Reconnect loop active (starting) with a recorded transient error must be
+    // Reconnecting, NOT Failed — otherwise the UI flips to "NOT CONNECTED" mid
+    // auto-retry (the original H3_NO_ERROR symptom).
+    assert_eq!(
+        classify_status(false, false, true, Some("H3 recv_response failed")),
+        ipc::VpnState::Reconnecting
+    );
+}
+
+#[test]
+fn classify_failed_only_after_loop_gives_up() {
+    // Not running, not starting, error recorded → terminal Failed.
+    assert_eq!(
+        classify_status(false, false, false, Some("AUTH_FAILED")),
+        ipc::VpnState::Failed
     );
 }

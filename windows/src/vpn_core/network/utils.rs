@@ -32,6 +32,19 @@ pub fn win_err(code: WIN32_ERROR) -> anyhow::Error {
     anyhow::anyhow!("Win32 error: {code}")
 }
 
+/// RAII guard owning a MIB table allocation handed back by a `Get*Table` call.
+/// Frees it with `FreeMibTable` on drop — including during a panic unwind — so the
+/// closure operating on the rows can never leak the table.
+struct MibTable(*mut std::ffi::c_void);
+
+impl Drop for MibTable {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a non-null allocation owned by us (returned by a
+        // `Get*Table` call) and freed exactly once, here.
+        unsafe { FreeMibTable(self.0) };
+    }
+}
+
 /// Fetches the interface table, hands the rows to `f`, then **always** releases the
 /// table with `FreeMibTable`. Returns `f`'s result, or `None` if `GetIfTable2` failed.
 ///
@@ -39,18 +52,18 @@ pub fn win_err(code: WIN32_ERROR) -> anyhow::Error {
 /// lifecycle in one audited place so call sites cannot forget to free the table.
 pub fn with_if_table<R>(f: impl FnOnce(&[MIB_IF_ROW2]) -> R) -> Option<R> {
     let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-    // SAFETY: On success GetIfTable2 hands us an allocation we own. We build a slice
+    // SAFETY: On success GetIfTable2 hands us an allocation we own. The `MibTable`
+    // guard frees it on every exit path (including a panic in `f`). We build a slice
     // over exactly NumEntries rows (the documented layout of the trailing Table array)
-    // and free the allocation before this scope ends, so the pointer never escapes.
+    // and the pointer never escapes this scope.
     unsafe {
         if GetIfTable2(&raw mut table) != 0 {
             return None;
         }
+        let _guard = MibTable(table as _);
         let rows =
             std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
-        let result = f(rows);
-        FreeMibTable(table as _);
-        Some(result)
+        Some(f(rows))
     }
 }
 
@@ -62,16 +75,15 @@ pub fn with_forward_table<R>(
     f: impl FnOnce(&[MIB_IPFORWARD_ROW2]) -> R,
 ) -> Option<R> {
     let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
-    // SAFETY: see `with_if_table` — same owned-allocation, slice, free contract.
+    // SAFETY: see `with_if_table` — same owned-allocation, guard-freed, slice contract.
     unsafe {
         if GetIpForwardTable2(family, &raw mut table) != 0 {
             return None;
         }
+        let _guard = MibTable(table as _);
         let rows =
             std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
-        let result = f(rows);
-        FreeMibTable(table as _);
-        Some(result)
+        Some(f(rows))
     }
 }
 
@@ -83,16 +95,15 @@ pub fn with_unicast_table<R>(
     f: impl FnOnce(&[MIB_UNICASTIPADDRESS_ROW]) -> R,
 ) -> Option<R> {
     let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-    // SAFETY: see `with_if_table` — same owned-allocation, slice, free contract.
+    // SAFETY: see `with_if_table` — same owned-allocation, guard-freed, slice contract.
     unsafe {
         if GetUnicastIpAddressTable(family, &raw mut table) != 0 {
             return None;
         }
+        let _guard = MibTable(table as _);
         let rows =
             std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
-        let result = f(rows);
-        FreeMibTable(table as _);
-        Some(result)
+        Some(f(rows))
     }
 }
 

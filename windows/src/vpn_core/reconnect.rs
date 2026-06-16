@@ -7,6 +7,17 @@ use std::time::{Duration, Instant};
 pub(crate) const RECONNECT_INITIAL_SECS: u64 = 1;
 pub(crate) const RECONNECT_MAX_SECS: u64 = 30;
 
+/// Substrings that mark an error as a permanent failure: reconnecting cannot fix
+/// these (bad credentials, rejected handshake, or adapter/IP setup that will fail
+/// identically on retry), so the loop stops instead of backing off forever.
+const PERMANENT_FAILURE_MARKERS: &[&str] = &[
+    "AUTH_FAILED",
+    "Server rejected connection",
+    "MTU mismatch",
+    "was not applied to adapter",
+    "IPV6_SETUP_FAILED",
+];
+
 /// Sleeps up to `delay`, but returns as soon as `running` is cleared.
 ///
 /// A Stop command only flips the `running` flag; without this, the reconnect
@@ -50,11 +61,9 @@ pub(crate) fn compute_reconnect_delay(
         },
         Err(e) => {
             let err_str = e.to_string();
-            if err_str.contains("AUTH_FAILED")
-                || err_str.contains("Server rejected connection")
-                || err_str.contains("MTU mismatch")
-                || err_str.contains("was not applied to adapter")
-                || err_str.contains("IPV6_SETUP_FAILED")
+            if PERMANENT_FAILURE_MARKERS
+                .iter()
+                .any(|marker| err_str.contains(marker))
             {
                 ReconnectDecision::PermanentFailure { error: err_str }
             } else {

@@ -4,11 +4,10 @@ use super::ip::win32_cleanup_all_ips_on_interface;
 use super::route::{
     cleanup_ipv6_prefix_policy, win32_cleanup_all_routes_on_interface, win32_delete_route,
 };
-use super::utils::run_powershell_cmd;
+use super::utils::{run_powershell_cmd, with_if_table};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
-use tracing::info;
-use windows_sys::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+use tracing::{debug, info};
 
 pub fn cleanup_routes(host_route: Option<&str>) {
     info!("Cleaning up MaviVPN routes...");
@@ -16,14 +15,18 @@ pub fn cleanup_routes(host_route: Option<&str>) {
 
     let started = Instant::now();
 
-    let _ = win32_delete_route(0, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1);
-    let _ = win32_delete_route(0, IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 1);
+    // The two split-default routes may legitimately be absent (already torn down);
+    // log a failure at debug so it never adds noise to normal cleanup.
+    for prefix in [
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
+    ] {
+        if let Err(e) = win32_delete_route(0, prefix, 1) {
+            debug!("split-default route {prefix}/1 not removed during cleanup: {e}");
+        }
+    }
 
-    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-    if unsafe { GetIfTable2(&raw mut table) } == 0 {
-        let rows = unsafe {
-            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
-        };
+    with_if_table(|rows| {
         for row in rows {
             let name = String::from_utf16_lossy(&row.Alias);
             if name.contains("MaviVPN") {
@@ -32,8 +35,7 @@ pub fn cleanup_routes(host_route: Option<&str>) {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
-        unsafe { FreeMibTable(table as _) };
-    }
+    });
 
     let mut host_prefixes = Vec::new();
     if let Some(prefix) = host_route {

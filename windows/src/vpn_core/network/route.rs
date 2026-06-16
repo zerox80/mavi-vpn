@@ -1,15 +1,16 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
 use tracing::{info, warn};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable, GetIpForwardTable2,
-    InitializeIpForwardEntry, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+    CreateIpForwardEntry2, DeleteIpForwardEntry2, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2,
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
 use super::command_runner::{CommandRunner, SystemCommandRunner};
-use super::utils::{to_sockaddr_inet, win_err};
+use super::utils::{
+    to_sockaddr_inet, win_err, with_forward_table, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS,
+};
 
 pub fn win32_add_route(
     adapter_index: u32,
@@ -18,6 +19,9 @@ pub fn win32_add_route(
     next_hop: Option<IpAddr>,
     metric: u32,
 ) -> Result<()> {
+    // SAFETY: MIB_IPFORWARD_ROW2 is a plain-old-data Win32 struct with no invalid
+    // bit patterns; zeroing it is the documented way to start a fresh entry, and
+    // InitializeIpForwardEntry then fills in the sentinel defaults the API expects.
     let mut row: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
     unsafe { InitializeIpForwardEntry(&raw mut row) };
 
@@ -30,7 +34,7 @@ pub fn win32_add_route(
     row.Metric = metric;
 
     let res = unsafe { CreateIpForwardEntry2(&raw const row) };
-    if res == 0 || res == 5010 {
+    if res == 0 || res == ERROR_OBJECT_ALREADY_EXISTS {
         Ok(())
     } else {
         Err(win_err(res))
@@ -38,6 +42,8 @@ pub fn win32_add_route(
 }
 
 pub fn win32_delete_route(adapter_index: u32, destination: IpAddr, prefix_len: u8) -> Result<()> {
+    // SAFETY: see `win32_add_route` — zeroing this POD struct and letting
+    // InitializeIpForwardEntry seed its defaults is the documented setup.
     let mut row: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
     unsafe { InitializeIpForwardEntry(&raw mut row) };
     row.InterfaceIndex = adapter_index;
@@ -45,7 +51,7 @@ pub fn win32_delete_route(adapter_index: u32, destination: IpAddr, prefix_len: u
     row.DestinationPrefix.PrefixLength = prefix_len;
 
     let res = unsafe { DeleteIpForwardEntry2(&raw const row) };
-    if res == 0 || res == 1168 {
+    if res == 0 || res == ERROR_NOT_FOUND {
         Ok(())
     } else {
         Err(win_err(res))
@@ -53,63 +59,43 @@ pub fn win32_delete_route(adapter_index: u32, destination: IpAddr, prefix_len: u
 }
 
 pub fn win32_cleanup_all_routes_on_interface(adapter_index: u32) {
-    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
-    if unsafe { GetIpForwardTable2(AF_INET, &raw mut table) } == 0 {
-        let rows = unsafe {
-            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
-        };
-        for row in rows {
-            if row.InterfaceIndex == adapter_index {
-                unsafe { DeleteIpForwardEntry2(row) };
+    for family in [AF_INET, AF_INET6] {
+        with_forward_table(family, |rows| {
+            for row in rows {
+                if row.InterfaceIndex == adapter_index {
+                    // SAFETY: `row` points into the live table owned by the helper
+                    // for the duration of this closure.
+                    unsafe { DeleteIpForwardEntry2(row) };
+                }
             }
-        }
-        unsafe { FreeMibTable(table as _) };
-    }
-    // Repeat for IPv6
-    let mut table_v6: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
-    if unsafe { GetIpForwardTable2(AF_INET6, &raw mut table_v6) } == 0 {
-        let rows = unsafe {
-            std::slice::from_raw_parts((*table_v6).Table.as_ptr(), (*table_v6).NumEntries as usize)
-        };
-        for row in rows {
-            if row.InterfaceIndex == adapter_index {
-                unsafe { DeleteIpForwardEntry2(row) };
-            }
-        }
-        unsafe { FreeMibTable(table_v6 as _) };
+        });
     }
 }
 
 pub fn verify_ipv6_split_routes(adapter_index: u32) -> Result<bool> {
-    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
-    if unsafe { GetIpForwardTable2(AF_INET6, &raw mut table) } != 0 {
-        bail!("Failed to get IPv6 forward table");
-    }
+    with_forward_table(AF_INET6, |rows| {
+        let mut found_zero = false;
+        let mut found_eight = false;
 
-    let rows = unsafe {
-        std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
-    };
+        for row in rows {
+            if row.InterfaceIndex == adapter_index {
+                let prefix = row.DestinationPrefix;
+                // SAFETY: union access — IPv6 rows carry an Ipv6 sockaddr here.
+                let addr_bytes = unsafe { prefix.Prefix.Ipv6.sin6_addr.u.Byte };
+                let plen = prefix.PrefixLength;
 
-    let mut found_zero = false;
-    let mut found_eight = false;
-
-    for row in rows {
-        if row.InterfaceIndex == adapter_index {
-            let prefix = row.DestinationPrefix;
-            let addr_bytes = unsafe { prefix.Prefix.Ipv6.sin6_addr.u.Byte };
-            let plen = prefix.PrefixLength;
-
-            if plen == 1 && addr_bytes.iter().all(|&b| b == 0) {
-                found_zero = true;
-            }
-            if plen == 1 && addr_bytes[0] == 0x80 && addr_bytes[1..].iter().all(|&b| b == 0) {
-                found_eight = true;
+                if plen == 1 && addr_bytes.iter().all(|&b| b == 0) {
+                    found_zero = true;
+                }
+                if plen == 1 && addr_bytes[0] == 0x80 && addr_bytes[1..].iter().all(|&b| b == 0) {
+                    found_eight = true;
+                }
             }
         }
-    }
 
-    unsafe { FreeMibTable(table as _) };
-    Ok(found_zero && found_eight)
+        found_zero && found_eight
+    })
+    .ok_or_else(|| anyhow::anyhow!("Failed to get IPv6 forward table"))
 }
 
 fn prefix_policy_path() -> PathBuf {

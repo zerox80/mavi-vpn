@@ -1,24 +1,23 @@
 #![allow(clippy::multiple_crate_versions)]
 use anyhow::Result;
-use std::io::{self, Write};
-use std::path::PathBuf;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
+mod client_config;
+mod client_ipc;
+mod client_prompt;
 mod ipc;
 mod oauth;
 mod secrets;
-use ipc::{Config, IpcRequest, IpcResponse};
-use secrets::{config_token_account, KeyringSecretStore, SecretStore};
 
-const CONFIG_FILE: &str = "config.json";
+use client_ipc::send_request;
+use client_prompt::{interactive_mode, load_or_prompt_config, read_line};
+use ipc::IpcRequest;
 
 #[tokio::main]
 async fn main() {
     println!();
-    println!("╔══════════════════════════════════════╗");
-    println!("║         Mavi VPN - Windows           ║");
-    println!("╚══════════════════════════════════════╝");
+    println!("========================================");
+    println!("         Mavi VPN - Windows");
+    println!("========================================");
     println!();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -26,436 +25,33 @@ async fn main() {
     let result = if args.is_empty() {
         interactive_mode().await
     } else {
-        let cmd = args[0].to_lowercase();
-        match cmd.as_str() {
-            "start" => match load_or_prompt_config().await {
-                Ok(config) => send_request(IpcRequest::Start(config)).await,
-                Err(e) => Err(e),
-            },
-            "stop" => send_request(IpcRequest::Stop).await,
-            "status" => send_request(IpcRequest::Status).await,
-            "repair" => send_request(IpcRequest::RepairNetwork).await,
-            _ => {
-                println!("Unknown command: {cmd}");
-                println!("Usage: mavi-vpn-client [start|stop|status|repair]");
-                Ok(())
-            }
-        }
+        dispatch_cli(&args).await
     };
 
     if let Err(e) = result {
-        println!("\n❌ Error: {e}");
+        println!("\n[ERROR] Error: {e}");
     }
 
     println!("\nPress Enter to exit...");
     let _ = read_line();
 }
 
-async fn interactive_mode() -> Result<()> {
-    let status_res = send_request_internal(IpcRequest::Status).await;
-    match status_res {
-        Ok(IpcResponse::Status {
-            running: true,
-            endpoint,
-            ..
-        }) => {
-            println!(
-                "VPN is currently RUNNING (Endpoint: {}).",
-                endpoint.as_deref().unwrap_or("Unknown")
-            );
-            print!("Do you want to stop it? [y/N]: ");
-            io::stdout().flush()?;
-            let input = read_line()?.to_lowercase();
-            if input == "y" || input == "yes" {
-                send_request(IpcRequest::Stop).await?;
-            } else {
-                println!("Leaving VPN running in background. Goodbye!");
-            }
-        }
-        Ok(IpcResponse::Status { running: false, .. }) => {
-            println!("VPN is disconnected.");
+async fn dispatch_cli(args: &[String]) -> Result<()> {
+    let cmd = args[0].to_lowercase();
+    match cmd.as_str() {
+        "start" => {
             let config = load_or_prompt_config().await?;
-            send_request(IpcRequest::Start(config)).await?;
-            println!("\n✅ VPN is now CONNECTED!");
-            println!("To safely DISCONNECT and exit, press Enter...");
-            let _ = read_line();
-            println!("Disconnecting...");
-            send_request(IpcRequest::Stop).await?;
-            println!("✅ Disconnected. Goodbye!");
+            send_request(IpcRequest::Start(config)).await
         }
-        Err(e) if e.to_string().contains("Connection refused") => {
-            println!("Error: The Mavi VPN Service is not running.");
-            println!("Please ensure the service is installed and started via Administrator:");
-            println!("  mavi-vpn-service.exe install");
-            println!("  net start MaviVPNService");
-        }
-        Err(e) => {
-            println!("Failed to communicate with service: {e}");
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-async fn send_request_internal(req: IpcRequest) -> Result<IpcResponse> {
-    let token_path = ipc::ipc_token_path();
-    let auth_token = std::fs::read_to_string(&token_path)
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                anyhow::anyhow!(
-                    "Failed to read IPC token from {}: access denied. Your Windows user is not allowed to control the Mavi VPN service. Log in and restart the service so it can grant your desktop session access, or run the client as Administrator.",
-                    token_path.display()
-                )
-            } else {
-                anyhow::anyhow!(
-                    "Failed to read IPC token from {}. Is the service running? {e}",
-                    token_path.display()
-                )
-            }
-        })?
-        .trim()
-        .to_string();
-
-    let req_msg = ipc::SecureIpcRequest {
-        auth_token,
-        request: req,
-    };
-
-    let mut client = TcpStream::connect(ipc::LOCAL_IPC_ADDR).await?;
-    let req_buf = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())?;
-    #[allow(clippy::cast_possible_truncation)]
-    client.write_u32_le(req_buf.len() as u32).await?;
-    client.write_all(&req_buf).await?;
-    let mut len_buf = [0u8; 4];
-    client.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > 65536 {
-        return Err(anyhow::anyhow!("Response too large"));
-    }
-    let mut buf = vec![0u8; len];
-    client.read_exact(&mut buf).await?;
-    let (resp, _) = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-        .map_err(|e| anyhow::anyhow!("Decode error: {e}"))?;
-    Ok(resp)
-}
-
-async fn send_request(req: IpcRequest) -> Result<()> {
-    let is_start = matches!(req, IpcRequest::Start(_));
-    match send_request_internal(req).await {
-        Ok(IpcResponse::Ok) => {
-            if is_start {
-                wait_for_connected().await?;
-            } else {
-                println!("Action executed successfully.");
-            }
-        }
-        Ok(IpcResponse::Error(msg)) => {
-            println!("Service returned an error: {msg}");
-        }
-        Ok(IpcResponse::Status {
-            running,
-            endpoint,
-            state,
-            last_error,
-            assigned_ip,
-        }) => {
-            println!("Status: {}", if running { "RUNNING" } else { "STOPPED" });
-            println!("State: {state:?}");
-            if let Some(ep) = endpoint {
-                println!("Endpoint: {ep}");
-            }
-            if let Some(ip) = assigned_ip {
-                println!("Tunnel IP: {ip}");
-            }
-            if let Some(err) = last_error {
-                println!("Last error: {err}");
-            }
-        }
-        Err(e) => {
-            println!("Failed to communicate with service: {e}");
+        "stop" => send_request(IpcRequest::Stop).await,
+        "status" => send_request(IpcRequest::Status).await,
+        "repair" => send_request(IpcRequest::RepairNetwork).await,
+        _ => {
+            println!("Unknown command: {cmd}");
+            println!("Usage: mavi-vpn-client [start|stop|status|repair]");
+            Ok(())
         }
     }
-    Ok(())
-}
-
-async fn wait_for_connected() -> Result<()> {
-    println!("Start accepted. Waiting for tunnel readiness...");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline {
-        match send_request_internal(IpcRequest::Status).await {
-            Ok(IpcResponse::Status {
-                running: true,
-                endpoint,
-                assigned_ip,
-                ..
-            }) => {
-                println!("VPN is now CONNECTED.");
-                if let Some(ep) = endpoint {
-                    println!("Endpoint: {ep}");
-                }
-                if let Some(ip) = assigned_ip {
-                    println!("Tunnel IP: {ip}");
-                }
-                return Ok(());
-            }
-            Ok(IpcResponse::Status {
-                state: ipc::VpnState::Failed,
-                last_error,
-                ..
-            }) => {
-                anyhow::bail!(
-                    "VPN failed to connect: {}",
-                    last_error.as_deref().unwrap_or("unknown error")
-                );
-            }
-            Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
-            Err(e) => {
-                anyhow::bail!("Failed to read status after start: {e}");
-            }
-        }
-    }
-    anyhow::bail!("VPN is still starting. Run status to check progress.")
-}
-
-fn config_path() -> PathBuf {
-    let dir = std::env::var("APPDATA")
-        .map_or_else(|_| PathBuf::from("."), PathBuf::from)
-        .join("MaviVPN");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join(CONFIG_FILE)
-}
-
-fn load_config() -> Result<Option<Config>> {
-    load_config_from_path(&config_path(), &KeyringSecretStore)
-}
-
-fn load_config_from_path(
-    path: &std::path::Path,
-    store: &dyn SecretStore,
-) -> Result<Option<Config>> {
-    if path.exists() {
-        let content = std::fs::read_to_string(path)?;
-        let mut config: Config = serde_json::from_str(&content)?;
-        config.normalize_transport();
-        if config.token.is_empty() {
-            if let Some(secret) = store.get_secret(config_token_account())? {
-                config.token = secret;
-            }
-        } else {
-            save_config_to_path(path, &config, store)?;
-        }
-        Ok(Some(config))
-    } else {
-        Ok(None)
-    }
-}
-
-fn save_config(config: &Config) -> Result<()> {
-    save_config_to_path(&config_path(), config, &KeyringSecretStore)
-}
-
-fn save_config_to_path(
-    path: &std::path::Path,
-    config: &Config,
-    store: &dyn SecretStore,
-) -> Result<()> {
-    let mut config = config.clone();
-    config.normalize_transport();
-    if !config.token.is_empty() {
-        store.set_secret(config_token_account(), &config.token)?;
-        config.token.clear();
-    } else {
-        store.delete_secret(config_token_account())?;
-    }
-    let content = serde_json::to_string_pretty(&config)?;
-    std::fs::write(path, content)?;
-    println!("Config saved to {}", path.display());
-    Ok(())
-}
-
-async fn load_or_prompt_config() -> Result<Config> {
-    if let Some(mut saved) = load_config()? {
-        println!("Saved configuration found:");
-        println!("  Endpoint: {}", saved.endpoint);
-        if saved.kc_auth.unwrap_or(false) {
-            println!("  Auth Mode: Keycloak (SSO)");
-        } else {
-            println!(
-                "  Token: {}...",
-                &saved.token.chars().take(8).collect::<String>()
-            );
-        }
-        println!(
-            "  CR Mode: {}",
-            if saved.censorship_resistant {
-                "Yes"
-            } else {
-                "No"
-            }
-        );
-        println!(
-            "  HTTP/3 Framing: {}",
-            if saved.http3_framing { "Yes" } else { "No" }
-        );
-        if let Some(mtu) = saved.vpn_mtu {
-            println!("  VPN MTU: {mtu}");
-        }
-        println!();
-        print!("Use this configuration? [Y/n]: ");
-        io::stdout().flush()?;
-        let input = read_line()?.to_lowercase();
-        if input.is_empty() || is_affirmative(&input) {
-            println!();
-            if saved.kc_auth.unwrap_or(false) {
-                let kc_url = saved.kc_url.as_deref().unwrap_or("");
-                let realm = saved.kc_realm.as_deref().unwrap_or("mavi-vpn");
-                let client_id = saved.kc_client_id.as_deref().unwrap_or("mavi-client");
-                println!("Refreshing Keycloak session...");
-                let fresh_token = oauth::start_oauth_flow(kc_url, realm, client_id).await?;
-                println!("Session successfully refreshed!");
-                saved.token = fresh_token;
-                save_config(&saved)?;
-            }
-            return Ok(saved);
-        }
-        println!();
-    }
-    let config = prompt_new_config().await?;
-    save_config(&config)?;
-    Ok(config)
-}
-
-#[allow(clippy::too_many_lines)]
-async fn prompt_new_config() -> Result<Config> {
-    let mut stdout = io::stdout();
-    print!("Server Endpoint (e.g. vpn.example.com:443): ");
-    stdout.flush()?;
-    let endpoint = read_line()?;
-    print!("Use Keycloak authentication? [y/N]: ");
-    stdout.flush()?;
-    let is_keycloak = read_line()?.to_lowercase();
-    let mut kc_auth = Some(false);
-    let (token, saved_kc_url, saved_kc_realm, saved_kc_client_id) = if is_affirmative(&is_keycloak) {
-        kc_auth = Some(true);
-        let config = prompt_keycloak_config().await?;
-        (
-            config.token,
-            Some(config.url),
-            Some(config.realm),
-            Some(config.client_id),
-        )
-    } else {
-        print!("Preshared Key: ");
-        stdout.flush()?;
-        (read_line()?, None, None, None)
-    };
-    print!("Certificate PIN (SHA256 hex): ");
-    stdout.flush()?;
-    let cert_pin = read_line()?;
-    print!("Censorship Resistant Mode? [y/N]: ");
-    stdout.flush()?;
-    let cr_input = read_line()?.to_lowercase();
-    let censorship_resistant = is_affirmative(&cr_input);
-    let http3_framing = if censorship_resistant {
-        println!("HTTP/3 Datagram Framing is automatically enabled in CR Mode.");
-        true
-    } else {
-        print!("HTTP/3 Datagram Framing? (Only useful in CR Mode) [y/N]: ");
-        stdout.flush()?;
-        let h3_input = read_line()?.to_lowercase();
-        is_affirmative(&h3_input)
-    };
-    let ech_config = match std::env::var("VPN_ECH_CONFIG") {
-        Ok(s) if !s.is_empty() => Some(s),
-        _ if censorship_resistant => {
-            print!("ECHConfigList (hex, optional – Enter to skip): ");
-            stdout.flush()?;
-            let input = read_line()?;
-            if input.is_empty() {
-                None
-            } else if shared::hex::decode_hex(&input).is_none() {
-                eprintln!("Warning: ECHConfigList hex is invalid – ECH will be disabled");
-                None
-            } else {
-                Some(input)
-            }
-        }
-        _ => None,
-    };
-    print!("VPN MTU (1280–1360, optional – Enter for default 1280): ");
-    stdout.flush()?;
-    let vpn_mtu_input = read_line()?;
-    let vpn_mtu = if vpn_mtu_input.is_empty() {
-        None
-    } else {
-        match vpn_mtu_input.parse::<u16>() {
-            Ok(v) if (1280..=1360).contains(&v) => Some(v),
-            _ => {
-                eprintln!("Warning: Invalid MTU value – using default (1280)");
-                None
-            }
-        }
-    };
-    println!();
-    Ok(Config {
-        endpoint,
-        token,
-        cert_pin,
-        censorship_resistant,
-        http3_framing,
-        kc_auth,
-        kc_url: saved_kc_url,
-        kc_realm: saved_kc_realm,
-        kc_client_id: saved_kc_client_id,
-        ech_config,
-        vpn_mtu,
-    })
-}
-
-struct KcPromptResult {
-    token: String,
-    url: String,
-    realm: String,
-    client_id: String,
-}
-
-async fn prompt_keycloak_config() -> Result<KcPromptResult> {
-    let mut stdout = io::stdout();
-    print!("Keycloak Server URL (e.g. https://auth.example.com): ");
-    stdout.flush()?;
-    let url = read_line()?;
-    print!("Realm (default: mavi-vpn): ");
-    stdout.flush()?;
-    let mut realm = read_line()?;
-    if realm.is_empty() {
-        realm = "mavi-vpn".to_string();
-    }
-    print!("Client ID (default: mavi-client): ");
-    stdout.flush()?;
-    let mut client_id = read_line()?;
-    if client_id.is_empty() {
-        client_id = "mavi-client".to_string();
-    }
-    let token = oauth::start_oauth_flow(&url, &realm, &client_id).await?;
-    println!("Keycloak login complete! Saving configuration...");
-    Ok(KcPromptResult {
-        token,
-        url,
-        realm,
-        client_id,
-    })
-}
-
-fn read_line() -> Result<String> {
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
-
-/// Returns `true` if `input` (already lowercased) is an affirmative answer in
-/// English or German (`y`/`yes`/`j`/`ja`).
-fn is_affirmative(input: &str) -> bool {
-    matches!(input, "y" | "yes" | "j" | "ja")
 }
 
 #[cfg(test)]

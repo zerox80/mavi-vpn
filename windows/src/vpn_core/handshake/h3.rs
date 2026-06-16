@@ -30,7 +30,7 @@ impl Drop for H3SessionGuard {
 ///
 /// Returns the decoded `ControlMessage` plus an `H3SessionGuard` that owns the
 /// `SendRequest` handle and the background driver task. The caller MUST hold
-/// the guard for the entire VPN session — dropping it sends
+/// the guard for the entire VPN session - dropping it sends
 /// `CONNECTION_CLOSE(H3_NO_ERROR)` and terminates the underlying quinn connection.
 pub(super) async fn connect_and_handshake_h3(
     connection: quinn::Connection,
@@ -53,7 +53,7 @@ pub(super) async fn connect_and_handshake_h3(
         tracing::debug!("H3 driver finished: {}", e);
     });
 
-    // Extended CONNECT with :protocol=connect-ip (RFC 9484 §3).
+    // Extended CONNECT with :protocol=connect-ip (RFC 9484 section 3).
     // The `:authority` component is the MASQUE target URI template result;
     // per RFC 9484 we use the well-known path `/.well-known/masque/ip/*/*/`.
     let req = http::Request::builder()
@@ -69,7 +69,7 @@ pub(super) async fn connect_and_handshake_h3(
         .send_request(req)
         .await
         .map_err(|e| anyhow::anyhow!("H3 send_request failed: {e}"))?;
-    // NB: do NOT finish the stream — connect-ip keeps the request stream open
+    // NB: do NOT finish the stream - connect-ip keeps the request stream open
     // for bidirectional capsule traffic throughout the session.
 
     let resp = stream

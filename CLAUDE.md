@@ -1,36 +1,36 @@
-## Context Compaction Policy
+# Context Management and Compaction
 
-You must proactively manage the conversation and working context.
+You must keep the working context compact and clean.
 
-When the accumulated context approaches approximately 60,000 tokens, or earlier if the context becomes noisy, repetitive, or inefficient, you must compact the context before continuing with the task.
+Do not maximize context length. Long context reduces coding quality because stale logs, failed attempts, outdated assumptions, repeated explanations, and irrelevant exploration details distract from the current task.
 
-Compaction means creating a concise but complete working summary that preserves all information required to continue accurately, while removing irrelevant logs, repeated explanations, failed attempts, and low-value details.
+When the active context approaches approximately 80,000 tokens, you must run `/compact` before continuing with implementation or further analysis.
 
-When compacting, preserve:
+Also compact earlier if the context becomes noisy, repetitive, or after a major implementation phase.
 
-* The user's current goal and latest instructions
-* Important constraints, preferences, and decisions
-* The current repository structure and relevant files
-* Code changes already made or planned
-* Commands that were run and their important results
-* Errors, warnings, and unresolved issues
-* Environment details, paths, ports, services, variables, and configuration assumptions
-* Any TODOs or next steps
+Before compacting, preserve all task-critical state:
 
-Do not lose task-critical information during compaction.
+* Current objective
+* User constraints and preferences
+* Relevant files and paths
+* Important repository structure
+* Code changes already made
+* Commands run and important outputs
+* Failing tests, errors, warnings, and unresolved bugs
+* Environment details, services, ports, variables, and config assumptions
+* Important decisions and why they were made
+* Discarded approaches and why they were discarded
+* Next concrete actions
 
-After compacting, continue from the compacted summary as the source of truth. Do not restart the task, repeat already completed work, or ask the user for information that is already present in the compacted summary.
+Remove or compress:
 
-If the environment or model supports an explicit compaction command, use it when the context is near 60,000 tokens. If no explicit compaction command is available, internally create and maintain a compact working summary before proceeding.
+* Long logs that are no longer needed
+* Repeated explanations
+* Failed attempts that are no longer relevant
+* Old file contents that have changed
+* Irrelevant exploration details
+* Stale assumptions that were later corrected
 
-The compacted summary should be structured like this:
+After `/compact`, continue from the compacted state as the source of truth. Do not restart the task, repeat completed work, or ask again for information already preserved in the compacted summary.
 
-1. Current objective
-2. User constraints and preferences
-3. Relevant project/files/context
-4. Completed work
-5. Important findings and command results
-6. Open problems
-7. Next actions
-
-Always prefer a smaller, accurate context over a large noisy context.
+For long coding tasks, work in phases: inspect briefly, plan, implement one coherent phase, run checks, compact if near 80,000 tokens, then continue.

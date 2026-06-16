@@ -1,5 +1,4 @@
 use constant_time_eq::constant_time_eq;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -71,19 +70,20 @@ pub async fn dispatch_request(
     let mut guard = state.lock().await;
     match req {
         ipc::IpcRequest::Status => {
-            let connected = guard.vpn_connected.load(Ordering::SeqCst);
-            let stopping = guard.vpn_stopping.load(Ordering::SeqCst);
-            let starting = guard.vpn_running.load(Ordering::SeqCst) && !connected;
-            let last_error = guard.last_error.lock().ok().and_then(|e| e.clone());
-            let assigned_ip = guard.assigned_ip.lock().ok().and_then(|e| e.clone());
-            let state = classify_status(connected, stopping, starting, last_error.as_deref());
+            let snapshot = guard.status_snapshot();
+            let state = classify_status(
+                snapshot.connected,
+                snapshot.stopping,
+                snapshot.starting,
+                snapshot.last_error.as_deref(),
+            );
 
             ipc::IpcResponse::Status {
-                running: connected,
-                endpoint: guard.active_config.as_ref().map(|c| c.endpoint.clone()),
+                running: snapshot.connected,
+                endpoint: snapshot.endpoint,
                 state,
-                last_error,
-                assigned_ip,
+                last_error: snapshot.last_error,
+                assigned_ip: snapshot.assigned_ip,
             }
         }
         ipc::IpcRequest::Stop => {
@@ -102,7 +102,7 @@ pub async fn dispatch_request(
         ipc::IpcRequest::UpdateToken { token } => {
             // The GUI silently refreshed the Keycloak access token; store it so
             // the next (re)handshake authenticates with a valid token. Harmless
-            // when no session is active — the next Start overwrites it anyway.
+            // when no session is active - the next Start overwrites it anyway.
             guard.set_current_token(token);
             ipc::IpcResponse::Ok
         }
@@ -111,47 +111,34 @@ pub async fn dispatch_request(
 
 pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) -> ipc::IpcResponse {
     info!("Handling Start request for endpoint: {}", config.endpoint);
-    if guard.vpn_stopping.load(Ordering::SeqCst) {
+    if guard.is_stopping() {
         ipc::IpcResponse::Error("VPN is stopping; retry shortly".to_string())
-    } else if guard.vpn_running.load(Ordering::SeqCst) || guard.active_task_running() {
+    } else if guard.is_running() || guard.active_task_running() {
         ipc::IpcResponse::Error("VPN is already running".to_string())
     } else {
         guard.mark_session_starting(config.clone());
-        let flag = guard.vpn_running.clone();
-        let connected = guard.vpn_connected.clone();
-        let stopping = guard.vpn_stopping.clone();
-        let last_error = guard.last_error.clone();
-        let assigned_ip = guard.assigned_ip.clone();
-        let current_token = guard.current_token.clone();
+        let task_runtime = guard.runtime_handles();
 
-        guard.vpn_task = Some(tokio::spawn(async move {
+        guard.set_task(tokio::spawn(async move {
             if let Err(e) = vpn_core::run_vpn(
                 config,
-                flag.clone(),
-                connected.clone(),
-                last_error.clone(),
-                assigned_ip,
-                current_token,
+                task_runtime.running.clone(),
+                task_runtime.connected.clone(),
+                task_runtime.last_error.clone(),
+                task_runtime.assigned_ip.clone(),
+                task_runtime.current_token.clone(),
             )
             .await
             {
                 let msg = e.to_string();
                 error!("VPN task failed: {}", msg);
-                if flag.load(Ordering::SeqCst) {
-                    if let Ok(mut last) = last_error.lock() {
-                        *last = Some(msg);
-                    }
-                } else if let Ok(mut last) = last_error.lock() {
-                    *last = None;
-                }
+                task_runtime.record_task_error_if_running(msg);
             }
             let _ = tokio::task::spawn_blocking(|| {
                 run_network_repair_cleanup();
             })
             .await;
-            flag.store(false, Ordering::SeqCst);
-            connected.store(false, Ordering::SeqCst);
-            stopping.store(false, Ordering::SeqCst);
+            task_runtime.finish_session_flags();
         }));
         ipc::IpcResponse::Ok
     }

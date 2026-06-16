@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// Fixed callback port — register `http://127.0.0.1:18923/callback` in Keycloak.
+/// Fixed callback port - register `http://127.0.0.1:18923/callback` in Keycloak.
 const OAUTH_CALLBACK_PORT: u16 = 18923;
 
 fn html_escape(s: &str) -> String {
@@ -59,7 +59,7 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         // Force Keycloak to ignore an existing SSO cookie and always present the
         // login form. Without this, reconnecting while a previous browser session
         // is still alive makes Keycloak show its "You are already logged in" info
-        // page instead of redirecting back to the loopback callback — so no fresh
+        // page instead of redirecting back to the loopback callback - so no fresh
         // authorization code ever reaches the listener and the reconnect hangs.
         .append_pair("prompt", "login");
 

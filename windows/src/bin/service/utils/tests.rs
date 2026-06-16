@@ -354,7 +354,7 @@ fn classify_stopping_takes_priority_over_starting() {
 #[test]
 fn classify_reconnecting_when_running_with_transient_error() {
     // Reconnect loop active (starting) with a recorded transient error must be
-    // Reconnecting, NOT Failed — otherwise the UI flips to "NOT CONNECTED" mid
+    // Reconnecting, NOT Failed - otherwise the UI flips to "NOT CONNECTED" mid
     // auto-retry (the original H3_NO_ERROR symptom).
     assert_eq!(
         classify_status(false, false, true, Some("H3 recv_response failed")),
@@ -364,7 +364,7 @@ fn classify_reconnecting_when_running_with_transient_error() {
 
 #[test]
 fn classify_failed_only_after_loop_gives_up() {
-    // Not running, not starting, error recorded → terminal Failed.
+    // Not running, not starting, error recorded -> terminal Failed.
     assert_eq!(
         classify_status(false, false, false, Some("AUTH_FAILED")),
         ipc::VpnState::Failed

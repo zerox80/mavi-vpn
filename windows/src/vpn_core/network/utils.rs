@@ -35,12 +35,12 @@ pub fn run_cmd(program: &str, args: &[&str]) -> bool {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let msg = format!("[FAIL] {display} → {stdout} {stderr}");
+            let msg = format!("[FAIL] {display} -> {stdout} {stderr}");
             warn!(cmd = %msg);
             false
         }
         Err(e) => {
-            let msg = format!("[ERR] {display} → {e}");
+            let msg = format!("[ERR] {display} -> {e}");
             warn!(cmd = %msg);
             false
         }
@@ -60,12 +60,12 @@ pub fn run_powershell_cmd(display: &str, script: &str) -> bool {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let msg = format!("[FAIL] {display} → {stdout} {stderr}");
+            let msg = format!("[FAIL] {display} -> {stdout} {stderr}");
             warn!(cmd = %msg);
             false
         }
         Err(e) => {
-            let msg = format!("[ERR] {display} → {e}");
+            let msg = format!("[ERR] {display} -> {e}");
             warn!(cmd = %msg);
             false
         }

@@ -58,7 +58,7 @@ pub async fn run_service_loop(
             let task = {
                 let mut guard = state.lock().await;
                 guard.stop_session();
-                guard.vpn_task.take()
+                guard.take_task()
             };
 
             if let Some(task) = task {

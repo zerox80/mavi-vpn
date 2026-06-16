@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use wintun::Adapter;
 
-use self::handshake::{connect_and_handshake, decode_hex};
+use self::handshake::{connect_and_handshake, decode_hex, HandshakeRequest};
 use self::network::{
     cleanup_routes, create_udp_socket, remove_nrpt_dns_rule, set_adapter_network_config,
-    SessionRouteGuard,
+    AdapterNetworkConfig, SessionRouteGuard,
 };
 use self::pump::{pump_quic_to_tun, pump_tun_to_quic, PtbContext};
 use self::reconnect::{
@@ -52,6 +52,139 @@ fn get_global_adapter() -> Result<Arc<Adapter>> {
     Ok(adapter.clone())
 }
 
+#[derive(Clone)]
+struct VpnRuntimeState {
+    running: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
+    last_error: Arc<StdMutex<Option<String>>>,
+    assigned_ip: Arc<StdMutex<Option<String>>>,
+    current_token: Arc<StdMutex<String>>,
+}
+
+impl VpnRuntimeState {
+    fn new(
+        running: Arc<AtomicBool>,
+        connected: Arc<AtomicBool>,
+        last_error: Arc<StdMutex<Option<String>>>,
+        assigned_ip: Arc<StdMutex<Option<String>>>,
+        current_token: Arc<StdMutex<String>>,
+    ) -> Self {
+        Self {
+            running,
+            connected,
+            last_error,
+            assigned_ip,
+            current_token,
+        }
+    }
+
+    fn running(&self) -> &Arc<AtomicBool> {
+        &self.running
+    }
+
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    fn stop_running(&self) {
+        self.running.store(false, Ordering::Relaxed);
+    }
+
+    fn set_connected(&self, connected: bool) {
+        self.connected.store(connected, Ordering::SeqCst);
+    }
+
+    fn current_token_or(&self, fallback: &str) -> String {
+        self.current_token
+            .lock()
+            .map(|token| token.clone())
+            .unwrap_or_else(|_| fallback.to_string())
+    }
+
+    fn set_last_error(&self, error: Option<String>) {
+        if let Ok(mut last) = self.last_error.lock() {
+            *last = error;
+        }
+    }
+
+    fn clear_last_error(&self) {
+        self.set_last_error(None);
+    }
+
+    fn set_assigned_ip(&self, ip: String) {
+        if let Ok(mut assigned_ip) = self.assigned_ip.lock() {
+            *assigned_ip = Some(ip);
+        }
+    }
+
+    fn clear_assigned_ip(&self) {
+        if let Ok(mut assigned_ip) = self.assigned_ip.lock() {
+            *assigned_ip = None;
+        }
+    }
+}
+
+struct ServerNetworkAssignment {
+    assigned_ip: std::net::Ipv4Addr,
+    netmask: std::net::Ipv4Addr,
+    gateway: std::net::Ipv4Addr,
+    dns: std::net::Ipv4Addr,
+    mtu: u16,
+    assigned_ipv6: Option<std::net::Ipv6Addr>,
+    netmask_v6: Option<u8>,
+    gateway_v6: Option<std::net::Ipv6Addr>,
+    dns_v6: Option<std::net::Ipv6Addr>,
+}
+
+impl ServerNetworkAssignment {
+    fn from_control(message: ControlMessage) -> Result<Self> {
+        match message {
+            ControlMessage::Config {
+                assigned_ip,
+                netmask,
+                gateway,
+                dns_server,
+                mtu,
+                assigned_ipv6,
+                netmask_v6,
+                gateway_v6,
+                dns_server_v6,
+                ..
+            } => Ok(Self {
+                assigned_ip,
+                netmask,
+                gateway,
+                dns: dns_server,
+                mtu,
+                assigned_ipv6,
+                netmask_v6,
+                gateway_v6,
+                dns_v6: dns_server_v6,
+            }),
+            ControlMessage::Error { message } => {
+                Err(anyhow::anyhow!("Server rejected connection: {message}"))
+            }
+            ControlMessage::Auth { .. } => Err(anyhow::anyhow!(
+                "Unexpected server response during handshake"
+            )),
+        }
+    }
+
+    fn adapter_config(&self) -> AdapterNetworkConfig {
+        AdapterNetworkConfig {
+            ip: self.assigned_ip,
+            netmask: self.netmask,
+            gateway: self.gateway,
+            dns: self.dns,
+            tun_mtu: self.mtu,
+            assigned_ipv6: self.assigned_ipv6,
+            netmask_v6: self.netmask_v6,
+            gateway_v6: self.gateway_v6,
+            dns_v6: self.dns_v6,
+        }
+    }
+}
+
 /// Entry point for the VPN runner. Manages the reconnection loop and `WinTUN` lifecycle.
 pub async fn run_vpn(
     mut config: Config,
@@ -61,8 +194,16 @@ pub async fn run_vpn(
     assigned_ip: Arc<StdMutex<Option<String>>>,
     current_token: Arc<StdMutex<String>>,
 ) -> Result<()> {
+    let runtime = VpnRuntimeState::new(
+        running,
+        connected,
+        last_error,
+        assigned_ip,
+        current_token,
+    );
+
     config.normalize_transport();
-    connected.store(false, Ordering::SeqCst);
+    runtime.set_connected(false);
     // 1. Prepare environment
     let cert_pin_bytes =
         decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
@@ -73,40 +214,28 @@ pub async fn run_vpn(
     let mut backoff = Duration::from_secs(RECONNECT_INITIAL_SECS);
 
     // 3. Main Connection Loop
-    while running.load(Ordering::Relaxed) {
+    while runtime.is_running() {
         // Always clear stale routes before a new session so a previous
         // (possibly crashed) session does not leave orphaned routing entries.
         cleanup_routes(None);
-        connected.store(false, Ordering::SeqCst);
+        runtime.set_connected(false);
 
-        let outcome = run_session(
-            &config,
-            &cert_pin_bytes,
-            &adapter,
-            &running,
-            &connected,
-            &last_error,
-            &assigned_ip,
-            &current_token,
-        )
-        .await;
+        let outcome = run_session(&config, &cert_pin_bytes, &adapter, &runtime).await;
 
-        if !running.load(Ordering::Relaxed) {
+        if !runtime.is_running() {
             break;
         }
 
         let err_opt = outcome.as_ref().err().map(|e| e.to_string());
         if let Some(ref err_str) = err_opt {
-            if let Ok(mut last) = last_error.lock() {
-                *last = Some(err_str.clone());
-            }
+            runtime.set_last_error(Some(err_str.clone()));
         }
 
         match compute_reconnect_delay(outcome, backoff) {
             ReconnectDecision::Break => break,
             ReconnectDecision::PermanentFailure { error } => {
                 warn!("Permanent VPN setup failure: {}. Stopping VPN loop.", error);
-                running.store(false, Ordering::Relaxed);
+                runtime.stop_running();
                 break;
             }
             ReconnectDecision::Reconnect {
@@ -116,19 +245,17 @@ pub async fn run_vpn(
                 if let Some(ref err_str) = err_opt {
                     warn!("Session failed: {err_str}. Reconnecting...");
                 }
-                sleep_unless_stopped(delay, &running).await;
+                sleep_unless_stopped(delay, runtime.running()).await;
                 backoff = next_backoff;
             }
         }
     }
 
-    // 4. Cleanup – routes first, then DNS/NRPT
-    connected.store(false, Ordering::SeqCst);
+    // 4. Cleanup - routes first, then DNS/NRPT
+    runtime.set_connected(false);
     cleanup_routes(None);
     remove_nrpt_dns_rule();
-    if let Ok(mut ip) = assigned_ip.lock() {
-        *ip = None;
-    }
+    runtime.clear_assigned_ip();
     info!("VPN Service Stopped.");
     Ok(())
 }
@@ -154,16 +281,11 @@ fn determine_session_result(still_running: bool) -> SessionEnd {
 }
 
 /// Manages a single active VPN session (handshake + packet pumping).
-#[allow(clippy::too_many_arguments)]
 async fn run_session(
     config: &Config,
     cert_pin_bytes: &[u8],
     adapter: &Arc<Adapter>,
-    global_running: &Arc<AtomicBool>,
-    connected: &Arc<AtomicBool>,
-    last_error: &Arc<StdMutex<Option<String>>>,
-    assigned_ip_state: &Arc<StdMutex<Option<String>>>,
-    current_token: &Arc<StdMutex<String>>,
+    runtime: &VpnRuntimeState,
 ) -> Result<SessionEnd> {
     let socket = create_udp_socket()?;
 
@@ -176,22 +298,19 @@ async fn run_session(
     // Read the freshest access token (GUI may have refreshed it via UpdateToken
     // since this session's config was captured). Fall back to the seed token if
     // the lock is poisoned.
-    let token = current_token
-        .lock()
-        .map(|t| t.clone())
-        .unwrap_or_else(|_| config.token.clone());
+    let token = runtime.current_token_or(&config.token);
 
     let connect_started = Instant::now();
-    let (connection, server_config, _h3_guard) = connect_and_handshake(
+    let (connection, server_config, _h3_guard) = connect_and_handshake(HandshakeRequest {
         socket,
         token,
-        config.endpoint.clone(),
-        cert_pin_bytes.to_vec(),
-        config.censorship_resistant,
-        config.effective_http3_framing(),
-        ech_bytes,
-        config.vpn_mtu,
-    )
+        endpoint_str: config.endpoint.clone(),
+        cert_pin: cert_pin_bytes.to_vec(),
+        censorship_resistant: config.censorship_resistant,
+        http3_framing: config.effective_http3_framing(),
+        ech_config_list: ech_bytes,
+        vpn_mtu: config.vpn_mtu,
+    })
     .await?;
     info!(
         "Windows session handshake/config completed in {} ms",
@@ -199,64 +318,25 @@ async fn run_session(
     );
 
     // 2. Extract Network Configuration
-    let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
-        match server_config {
-            ControlMessage::Config {
-                assigned_ip,
-                netmask,
-                gateway,
-                dns_server,
-                mtu,
-                assigned_ipv6,
-                netmask_v6,
-                gateway_v6,
-                dns_server_v6,
-                ..
-            } => (
-                assigned_ip,
-                netmask,
-                gateway,
-                dns_server,
-                mtu,
-                assigned_ipv6,
-                netmask_v6,
-                gateway_v6,
-                dns_server_v6,
-            ),
-            ControlMessage::Error { message } => {
-                return Err(anyhow::anyhow!("Server rejected connection: {message}"))
-            }
-            ControlMessage::Auth { .. } => {
-                return Err(anyhow::anyhow!(
-                    "Unexpected server response during handshake"
-                ))
-            }
-        };
+    let assignment = ServerNetworkAssignment::from_control(server_config)?;
 
-    info!("Handshake successful. Internal IPv4: {}", assigned_ip);
+    info!(
+        "Handshake successful. Internal IPv4: {}",
+        assignment.assigned_ip
+    );
 
     // 3. Configure Windows Networking (IPs, Routes, DNS)
     let remote_ip = connection.remote_address().ip();
     let endpoint_ip_str = extract_endpoint_ip(remote_ip);
 
     // Store the tunnel IP in shared state for CLI/GUI status.
-    if let Ok(mut ip) = assigned_ip_state.lock() {
-        *ip = Some(assigned_ip.to_string());
-    }
+    runtime.set_assigned_ip(assignment.assigned_ip.to_string());
 
     let adapter_config_started = Instant::now();
     let route_cleanup = SessionRouteGuard::new(set_adapter_network_config(
         adapter,
-        assigned_ip,
-        netmask,
-        gateway,
-        dns,
-        mtu,
+        assignment.adapter_config(),
         &endpoint_ip_str,
-        assigned_ipv6,
-        netmask_v6,
-        gateway_v6,
-        dns_v6,
     )?);
     info!(
         "Windows adapter/network config completed in {} ms",
@@ -271,7 +351,7 @@ async fn run_session(
     );
 
     // Hard verification for IPv6 if assigned
-    if let Some(ipv6) = assigned_ipv6 {
+    if let Some(ipv6) = assignment.assigned_ipv6 {
         let idx = adapter
             .get_adapter_index()
             .context("Failed to get adapter index for IPv6 verification")?;
@@ -279,7 +359,7 @@ async fn run_session(
         // 1. Wait for IPv6 address confirmation (DAD, etc)
         // Marked IPV6_SETUP_FAILED so the reconnect classifier treats a
         // deterministic local IPv6 stack failure (e.g. IPv6 disabled, DAD
-        // failure) as permanent instead of looping forever — matching Linux,
+        // failure) as permanent instead of looping forever - matching Linux,
         // which already classifies IPv6 split-route failures as permanent.
         if !network::wait_for_ipv6_address(idx, ipv6).await {
             bail!("IPV6_SETUP_FAILED: IPv6 address {ipv6} failed verification (possibly duplicate or stack error)");
@@ -295,10 +375,8 @@ async fn run_session(
         info!("IPv6 split routes verified as On-Link");
     }
 
-    connected.store(true, Ordering::SeqCst);
-    if let Ok(mut last) = last_error.lock() {
-        *last = None;
-    }
+    runtime.set_connected(true);
+    runtime.clear_last_error();
     let session_alive = Arc::new(AtomicBool::new(true));
 
     // 5. Data Hubs
@@ -307,7 +385,7 @@ async fn run_session(
     // Task: MTU Monitor
     let conn_monitor = connection.clone();
     let alive_monitor = session_alive.clone();
-    let running_monitor = global_running.clone();
+    let running_monitor = runtime.running().clone();
     tokio::spawn(async move {
         let mut last_mtu = 0;
         loop {
@@ -330,15 +408,15 @@ async fn run_session(
 
     // Thread: TUN -> QUIC (Read from WinTUN, Send via QUIC)
     let ptb_ctx = PtbContext {
-        gateway,
-        gateway_v6,
+        gateway: assignment.gateway,
+        gateway_v6: assignment.gateway_v6,
         is_h3_framing: config.effective_http3_framing(),
-        tun_mtu: mtu,
+        tun_mtu: assignment.mtu,
     };
     let session_tx = session.clone();
     let conn_tx = connection.clone();
     let alive_tx = session_alive.clone();
-    let run_tx = global_running.clone();
+    let run_tx = runtime.running().clone();
     let tun_to_quic = std::thread::spawn(move || {
         pump_tun_to_quic(&session_tx, &conn_tx, &run_tx, &alive_tx, &ptb_ctx);
     });
@@ -347,28 +425,24 @@ async fn run_session(
     let session_rx = session.clone();
     let conn_rx = connection.clone();
     let alive_rx = session_alive.clone();
-    let run_rx = global_running.clone();
+    let run_rx = runtime.running().clone();
     let is_h3_framing_dl = config.effective_http3_framing();
     let quic_to_tun = tokio::spawn(async move {
         pump_quic_to_tun(&session_rx, &conn_rx, &run_rx, &alive_rx, is_h3_framing_dl).await;
     });
 
     // Wait for termination
-    while global_running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
+    while runtime.is_running() && session_alive.load(Ordering::Relaxed) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     quic_to_tun.abort();
     let _ = tun_to_quic.join();
-    connected.store(false, Ordering::SeqCst);
-    if let Ok(mut ip) = assigned_ip_state.lock() {
-        *ip = None;
-    }
+    runtime.set_connected(false);
+    runtime.clear_assigned_ip();
     drop(route_cleanup);
 
-    Ok(determine_session_result(
-        global_running.load(Ordering::Relaxed),
-    ))
+    Ok(determine_session_result(runtime.is_running()))
 }
 
 #[cfg(test)]

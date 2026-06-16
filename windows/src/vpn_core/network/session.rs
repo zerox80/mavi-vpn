@@ -30,20 +30,37 @@ impl Drop for SessionRouteGuard {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+pub struct AdapterNetworkConfig {
+    pub ip: Ipv4Addr,
+    pub netmask: Ipv4Addr,
+    pub gateway: Ipv4Addr,
+    pub dns: Ipv4Addr,
+    pub tun_mtu: u16,
+    pub assigned_ipv6: Option<Ipv6Addr>,
+    pub netmask_v6: Option<u8>,
+    pub gateway_v6: Option<Ipv6Addr>,
+    pub dns_v6: Option<Ipv6Addr>,
+}
+
 pub fn set_adapter_network_config(
     adapter: &Adapter,
-    ip: Ipv4Addr,
-    _netmask: Ipv4Addr,
-    gateway: Ipv4Addr,
-    dns: Ipv4Addr,
-    tun_mtu: u16,
+    config: AdapterNetworkConfig,
     endpoint: &str,
-    assigned_ipv6: Option<Ipv6Addr>,
-    netmask_v6: Option<u8>,
-    gateway_v6: Option<Ipv6Addr>,
-    dns_v6: Option<Ipv6Addr>,
 ) -> Result<Option<String>> {
+    let AdapterNetworkConfig {
+        ip,
+        netmask,
+        gateway,
+        dns,
+        tun_mtu,
+        assigned_ipv6,
+        netmask_v6,
+        gateway_v6,
+        dns_v6,
+    } = config;
+    let _ = netmask;
+
     let requested_adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let adapter_index = adapter.get_adapter_index()?;
     let adapter_name = wait_for_adapter_alias(adapter_index, &requested_adapter_name)?;

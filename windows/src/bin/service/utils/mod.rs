@@ -20,7 +20,7 @@ pub fn run_network_repair_cleanup() {
 /// *retrying* a transient failure (e.g. the server closing an expired-token
 /// session with `H3_NO_ERROR`), so it maps to `Reconnecting`, NOT `Failed`.
 /// `Failed` is reserved for the terminal case where the loop has given up
-/// (`!running`) yet an error is recorded — only then should the UI flip off and
+/// (`!running`) yet an error is recorded - only then should the UI flip off and
 /// surface the error. Without this ordering every transient reconnect flashed a
 /// hard error and dropped the hero to "NOT CONNECTED".
 pub const fn classify_status(
@@ -130,7 +130,7 @@ pub fn harden_ipc_permissions(path: &Path, target: IpcAclTarget) -> Result<()> {
 /// SYSTEM and Administrators get full control, the active console user gets
 /// read (token file) or read+traverse (directory) access. Because the DACL is
 /// fully specified, applying it removes any ACEs left behind for previous
-/// console users — `icacls /grant` only replaces rights of the SIDs it names,
+/// console users - `icacls /grant` only replaces rights of the SIDs it names,
 /// so a user granted in an earlier session would otherwise keep access to the
 /// token across fast-user-switching and service restarts.
 fn ipc_acl_sddl(target: IpcAclTarget, user_sid: Option<&str>) -> String {
@@ -184,7 +184,7 @@ fn escape_powershell_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-/// Accepts only canonical `S-…` SID strings (digits separated by dashes) so
+/// Accepts only canonical `S-...` SID strings (digits separated by dashes) so
 /// the value can be embedded into the SDDL string without escaping concerns.
 fn is_valid_sid(sid: &str) -> bool {
     sid.strip_prefix("S-").is_some_and(|rest| {

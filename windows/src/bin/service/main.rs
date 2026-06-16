@@ -102,7 +102,7 @@ pub(crate) fn handle_service_control(
                     | SessionChangeReason::SessionUnlock
             ) {
                 info!(
-                    "Session change ({:?}) for session {} — queuing IPC token ACL re-harden",
+                    "Session change ({:?}) for session {} - queuing IPC token ACL re-harden",
                     param.reason, param.notification.session_id
                 );
                 reharden_signal.store(true, Ordering::SeqCst);

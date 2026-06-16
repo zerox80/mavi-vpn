@@ -22,19 +22,33 @@ pub use self::h3::H3SessionGuard;
 const KEEPALIVE_SECS: u64 = 10;
 const IDLE_TIMEOUT_SECS: u64 = 60;
 
+pub(super) struct HandshakeRequest {
+    pub(super) socket: std::net::UdpSocket,
+    pub(super) token: String,
+    pub(super) endpoint_str: String,
+    pub(super) cert_pin: Vec<u8>,
+    pub(super) censorship_resistant: bool,
+    pub(super) http3_framing: bool,
+    pub(super) ech_config_list: Option<Vec<u8>>,
+    pub(super) vpn_mtu: Option<u16>,
+}
+
 /// QUIC connection setup with custom certificate pinning.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
-pub async fn connect_and_handshake(
-    socket: std::net::UdpSocket,
-    token: String,
-    endpoint_str: String,
-    cert_pin: Vec<u8>,
-    censorship_resistant: bool,
-    http3_framing: bool,
-    ech_config_list: Option<Vec<u8>>,
-    vpn_mtu: Option<u16>,
+pub(super) async fn connect_and_handshake(
+    request: HandshakeRequest,
 ) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
+    let HandshakeRequest {
+        socket,
+        token,
+        endpoint_str,
+        cert_pin,
+        censorship_resistant,
+        http3_framing,
+        ech_config_list,
+        vpn_mtu,
+    } = request;
+
     let effective_http3_framing = http3_framing || censorship_resistant;
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
@@ -107,7 +121,7 @@ pub async fn connect_and_handshake(
 
     // The client pins its QUIC payload budget to the local TUN MTU before the
     // handshake (MTU discovery is disabled), so the server-pushed MTU must
-    // match it exactly — see `validate_server_mtu` / `shared::check_server_mtu`.
+    // match it exactly - see `validate_server_mtu` / `shared::check_server_mtu`.
     let mtu_cfg = compute_quic_mtu_config(vpn_mtu);
     let wire_mtu = if addr.is_ipv4() {
         mtu_cfg.wire_mtu_ipv4

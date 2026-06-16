@@ -1,5 +1,5 @@
 use crate::ipc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 pub struct VpnServiceState {
@@ -28,6 +28,49 @@ impl VpnServiceState {
             current_token: Arc::new(StdMutex::new(String::new())),
             vpn_task: None,
             active_config: None,
+        }
+    }
+
+    pub fn active_task_running(&self) -> bool {
+        self.vpn_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+    }
+
+    pub fn stop_session(&mut self) {
+        let task_running = self.active_task_running();
+        self.vpn_running.store(false, Ordering::SeqCst);
+        self.vpn_connected.store(false, Ordering::SeqCst);
+        self.vpn_stopping.store(task_running, Ordering::SeqCst);
+        self.active_config = None;
+        self.clear_last_error();
+        self.clear_assigned_ip();
+    }
+
+    pub fn mark_session_starting(&mut self, config: ipc::Config) {
+        self.active_config = Some(config.clone());
+        self.vpn_running.store(true, Ordering::SeqCst);
+        self.vpn_connected.store(false, Ordering::SeqCst);
+        self.vpn_stopping.store(false, Ordering::SeqCst);
+        self.clear_last_error();
+        self.set_current_token(config.token);
+    }
+
+    pub fn clear_last_error(&self) {
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = None;
+        }
+    }
+
+    pub fn clear_assigned_ip(&self) {
+        if let Ok(mut assigned_ip) = self.assigned_ip.lock() {
+            *assigned_ip = None;
+        }
+    }
+
+    pub fn set_current_token(&self, token: String) {
+        if let Ok(mut current_token) = self.current_token.lock() {
+            *current_token = token;
         }
     }
 }

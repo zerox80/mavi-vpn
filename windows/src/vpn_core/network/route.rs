@@ -8,19 +8,8 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
-use super::utils::{run_cmd, to_sockaddr_inet, win_err};
-
-trait NetshRunner {
-    fn run_cmd(&self, program: &str, args: &[&str]) -> bool;
-}
-
-struct SystemNetshRunner;
-
-impl NetshRunner for SystemNetshRunner {
-    fn run_cmd(&self, program: &str, args: &[&str]) -> bool {
-        run_cmd(program, args)
-    }
-}
+use super::command_runner::{CommandRunner, SystemCommandRunner};
+use super::utils::{to_sockaddr_inet, win_err};
 
 pub fn win32_add_route(
     adapter_index: u32,
@@ -149,11 +138,11 @@ pub fn clear_persisted_prefix_policy() {
 }
 
 pub fn apply_ipv6_prefix_policy(prefix: &str) -> bool {
-    apply_ipv6_prefix_policy_with_runner(&SystemNetshRunner, prefix, true)
+    apply_ipv6_prefix_policy_with_runner(&SystemCommandRunner, prefix, true)
 }
 
 fn apply_ipv6_prefix_policy_with_runner(
-    runner: &dyn NetshRunner,
+    runner: &dyn CommandRunner,
     prefix: &str,
     persist: bool,
 ) -> bool {
@@ -207,7 +196,8 @@ fn apply_ipv6_prefix_policy_with_runner(
 
 pub fn cleanup_ipv6_prefix_policy() {
     if let Some(prefix) = load_persisted_prefix_policy() {
-        let ok = run_cmd(
+        let runner = SystemCommandRunner;
+        let ok = runner.run_cmd(
             "netsh",
             &[
                 "interface",
@@ -250,45 +240,13 @@ pub fn ipv6_network_prefix(ip: Ipv6Addr, prefix_len: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct RecordedCommand {
-        program: String,
-        args: Vec<String>,
-    }
-
-    struct RecordingRunner {
-        commands: RefCell<Vec<RecordedCommand>>,
-        results: RefCell<Vec<bool>>,
-    }
-
-    impl RecordingRunner {
-        fn new(results: Vec<bool>) -> Self {
-            Self {
-                commands: RefCell::new(Vec::new()),
-                results: RefCell::new(results),
-            }
-        }
-
-        fn commands(&self) -> Vec<RecordedCommand> {
-            self.commands.borrow().clone()
-        }
-    }
-
-    impl NetshRunner for RecordingRunner {
-        fn run_cmd(&self, program: &str, args: &[&str]) -> bool {
-            self.commands.borrow_mut().push(RecordedCommand {
-                program: program.to_string(),
-                args: args.iter().map(|arg| (*arg).to_string()).collect(),
-            });
-            self.results.borrow_mut().remove(0)
-        }
-    }
+    use crate::vpn_core::network::command_runner::test_support::{
+        RecordedCommand, RecordingRunner,
+    };
 
     #[test]
     fn prefix_policy_uses_set_command_first() {
-        let runner = RecordingRunner::new(vec![true]);
+        let runner = RecordingRunner::with_results(vec![true]);
 
         assert!(apply_ipv6_prefix_policy_with_runner(
             &runner,
@@ -298,7 +256,38 @@ mod tests {
 
         assert_eq!(
             runner.commands(),
-            vec![RecordedCommand {
+            vec![RecordedCommand::Cmd {
+                program: "netsh".to_string(),
+                args: vec![
+                    "interface",
+                    "ipv6",
+                    "set",
+                    "prefixpolicy",
+                    "prefix=fd00::/64",
+                    "precedence=100",
+                    "label=13",
+                    "store=active",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            }]
+        );
+    }
+
+    #[test]
+    fn prefix_policy_uses_shared_runner_command_shape() {
+        let runner = RecordingRunner::new(true);
+
+        assert!(apply_ipv6_prefix_policy_with_runner(
+            &runner,
+            "fd00::/64",
+            false
+        ));
+
+        assert_eq!(
+            runner.commands(),
+            vec![RecordedCommand::Cmd {
                 program: "netsh".to_string(),
                 args: vec![
                     "interface",
@@ -319,7 +308,7 @@ mod tests {
 
     #[test]
     fn prefix_policy_falls_back_to_add_when_set_fails() {
-        let runner = RecordingRunner::new(vec![false, true]);
+        let runner = RecordingRunner::with_results(vec![false, true]);
 
         assert!(apply_ipv6_prefix_policy_with_runner(
             &runner,
@@ -329,19 +318,26 @@ mod tests {
 
         let commands = runner.commands();
         assert_eq!(commands.len(), 2);
-        assert_eq!(commands[0].args[2], "set");
-        assert_eq!(commands[1].args[2], "add");
+        assert_eq!(command_args(&commands[0])[2], "set");
+        assert_eq!(command_args(&commands[1])[2], "add");
     }
 
     #[test]
     fn prefix_policy_reports_failure_when_set_and_add_fail() {
-        let runner = RecordingRunner::new(vec![false, false]);
+        let runner = RecordingRunner::with_results(vec![false, false]);
 
         assert!(!apply_ipv6_prefix_policy_with_runner(
             &runner,
             "fd00::/64",
             false
         ));
+    }
+
+    fn command_args(command: &RecordedCommand) -> &[String] {
+        match command {
+            RecordedCommand::Cmd { args, .. } => args,
+            RecordedCommand::PowerShell { .. } => panic!("expected netsh command"),
+        }
     }
 
     #[test]

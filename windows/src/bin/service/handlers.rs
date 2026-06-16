@@ -88,32 +88,12 @@ pub async fn dispatch_request(
         }
         ipc::IpcRequest::Stop => {
             info!("Handling Stop request from client");
-            let task_running = guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished());
-            guard.vpn_running.store(false, Ordering::SeqCst);
-            guard.vpn_connected.store(false, Ordering::SeqCst);
-            guard.vpn_stopping.store(task_running, Ordering::SeqCst);
-            if let Ok(mut last_error) = guard.last_error.lock() {
-                *last_error = None;
-            }
-            if let Ok(mut assigned_ip) = guard.assigned_ip.lock() {
-                *assigned_ip = None;
-            }
-            guard.active_config = None;
+            guard.stop_session();
             ipc::IpcResponse::Ok
         }
         ipc::IpcRequest::RepairNetwork => {
             info!("Handling RepairNetwork request from client");
-            let task_running = guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished());
-            guard.vpn_running.store(false, Ordering::SeqCst);
-            guard.vpn_connected.store(false, Ordering::SeqCst);
-            guard.vpn_stopping.store(task_running, Ordering::SeqCst);
-            if let Ok(mut last_error) = guard.last_error.lock() {
-                *last_error = None;
-            }
-            if let Ok(mut assigned_ip) = guard.assigned_ip.lock() {
-                *assigned_ip = None;
-            }
-            guard.active_config = None;
+            guard.stop_session();
             drop(guard);
             run_network_repair_cleanup();
             ipc::IpcResponse::Ok
@@ -123,9 +103,7 @@ pub async fn dispatch_request(
             // The GUI silently refreshed the Keycloak access token; store it so
             // the next (re)handshake authenticates with a valid token. Harmless
             // when no session is active — the next Start overwrites it anyway.
-            if let Ok(mut current) = guard.current_token.lock() {
-                *current = token;
-            }
+            guard.set_current_token(token);
             ipc::IpcResponse::Ok
         }
     }
@@ -135,24 +113,10 @@ pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) ->
     info!("Handling Start request for endpoint: {}", config.endpoint);
     if guard.vpn_stopping.load(Ordering::SeqCst) {
         ipc::IpcResponse::Error("VPN is stopping; retry shortly".to_string())
-    } else if guard.vpn_running.load(Ordering::SeqCst)
-        || guard.vpn_task.as_ref().is_some_and(|t| !t.is_finished())
-    {
+    } else if guard.vpn_running.load(Ordering::SeqCst) || guard.active_task_running() {
         ipc::IpcResponse::Error("VPN is already running".to_string())
     } else {
-        guard.active_config = Some(config.clone());
-        guard.vpn_running.store(true, Ordering::SeqCst);
-        guard.vpn_connected.store(false, Ordering::SeqCst);
-        guard.vpn_stopping.store(false, Ordering::SeqCst);
-        if let Ok(mut last_error) = guard.last_error.lock() {
-            *last_error = None;
-        }
-        // Seed the live token cell from this Start's config. The reconnect loop
-        // reads the cell (not config.token) so GUI-pushed UpdateToken refreshes
-        // take effect on the next handshake.
-        if let Ok(mut token) = guard.current_token.lock() {
-            *token = config.token.clone();
-        }
+        guard.mark_session_starting(config.clone());
         let flag = guard.vpn_running.clone();
         let connected = guard.vpn_connected.clone();
         let stopping = guard.vpn_stopping.clone();

@@ -55,16 +55,14 @@ pub async fn run_service_loop(
     loop {
         if stop_signal.load(Ordering::SeqCst) {
             info!("Stop signal flag is true, terminating service loop.");
-            let mut guard = state.lock().await;
-            guard.vpn_running.store(false, Ordering::SeqCst);
-            guard.vpn_connected.store(false, Ordering::SeqCst);
-            if let Some(t) = guard.vpn_task.take() {
-                guard.vpn_stopping.store(true, Ordering::SeqCst);
-                drop(guard);
-                let _ = t.await;
-            } else {
-                guard.vpn_stopping.store(false, Ordering::SeqCst);
-                drop(guard);
+            let task = {
+                let mut guard = state.lock().await;
+                guard.stop_session();
+                guard.vpn_task.take()
+            };
+
+            if let Some(task) = task {
+                let _ = task.await;
             }
             break;
         }

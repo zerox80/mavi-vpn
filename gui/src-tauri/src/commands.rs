@@ -193,6 +193,7 @@ async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
             .flatten()
             .filter(|t| !t.is_empty())
         else {
+            let _ = send_ipc_request(&IpcRequest::Stop).await;
             let _ = app.emit("kc-needs-login", "Session expired; please log in again.");
             break;
         };
@@ -206,9 +207,17 @@ async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
         .await
         {
             RefreshOutcome::Success(tokens) => {
-                if let Some(r) = tokens.refresh_token.as_deref().filter(|r| !r.is_empty()) {
-                    let _ = store.set_secret(&refresh_account, r);
+                if let Err(e) =
+                    persist_refresh_token(&store, &refresh_account, tokens.refresh_token.as_deref())
+                {
+                    let _ = send_ipc_request(&IpcRequest::Stop).await;
+                    let _ = app.emit(
+                        "kc-needs-login",
+                        format!("Session could not be saved; please log in again. {e}"),
+                    );
+                    break;
                 }
+
                 session.access_token = tokens.access_token.clone();
                 let _ = send_ipc_request(&IpcRequest::UpdateToken {
                     token: tokens.access_token,

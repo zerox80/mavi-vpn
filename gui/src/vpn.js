@@ -13,7 +13,11 @@ export function activeConn() {
 }
 
 export async function toggleConnection() {
-  if (state.hero === 'connecting' || state.hero === 'disconnecting') return;
+  if (state.hero === 'disconnecting') return;
+  if (state.hero === 'connecting') {
+    if (state.vpnState === 'Reconnecting') return disconnect();
+    return;
+  }
   if (state.hero === 'on') return disconnect();
   return connect();
 }
@@ -130,13 +134,15 @@ export function applyStatus(status) {
     hideToast('hint');
   } else if (nextHero === 'connecting') {
     setHero('connecting');
-    btn.title = '';
     // A mid-session drop that is being auto-retried: show a calm, non-error
     // hint instead of the old red failure toast. First-time connects (Starting)
     // stay silent — the hero already reads "ESTABLISHING TUNNEL".
     if (state.vpnState === 'Reconnecting') {
+      btn.disabled = false;
+      btn.title = 'Disconnect';
       showToast('Connection dropped — reconnecting…', 'hint', 0);
     } else {
+      btn.title = '';
       hideToast('hint');
     }
   } else {
@@ -161,11 +167,15 @@ export function setHero(s) {
     s === 'on'
       ? 'DISCONNECT'
       : s === 'connecting'
-        ? 'CONNECTING...'
+        ? state.vpnState === 'Reconnecting'
+          ? 'DISCONNECT'
+          : 'CONNECTING...'
         : s === 'disconnecting'
           ? 'DISCONNECTING...'
           : 'CONNECT';
-  if (s === 'connecting' || s === 'disconnecting') btn.disabled = true;
+  if (s === 'connecting' || s === 'disconnecting') {
+    btn.disabled = !(s === 'connecting' && state.vpnState === 'Reconnecting');
+  }
 
   const labels = {
     off: 'NOT CONNECTED',
@@ -213,7 +223,7 @@ export function applyHeroForSelection() {
   const btn = $('connect-btn');
   if (btn) {
     btn.disabled =
-      state.hero === 'connecting' ||
+      (state.hero === 'connecting' && state.vpnState !== 'Reconnecting') ||
       state.hero === 'disconnecting' ||
       (!state.running && !state.serviceAvailable) ||
       (state.hero === 'off' && !conn);

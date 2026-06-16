@@ -131,6 +131,8 @@ describe('applyStatus', () => {
       last_error: 'H3 recv_response failed: ApplicationClose: H3_NO_ERROR',
     });
     expect(state.hero).toBe('connecting');
+    expect(document.getElementById('connect-btn').disabled).toBe(false);
+    expect(document.getElementById('connect-btn').textContent).toBe('DISCONNECT');
     const toast = document.getElementById('toast');
     // Non-error hint, and it must NOT surface the raw H3_NO_ERROR text.
     expect(toast.dataset.kind).toBe('hint');

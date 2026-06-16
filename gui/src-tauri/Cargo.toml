@@ -21,7 +21,7 @@ tauri-build = { version = "2", features = [] }
 workspace = true
 
 [dependencies]
-shared = { path = "../../shared" }
+shared = { path = "../../shared", features = ["oauth-client"] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 # Tauri pulls brotli 8.x, whose alloc-no-stdlib 2.x dependency is

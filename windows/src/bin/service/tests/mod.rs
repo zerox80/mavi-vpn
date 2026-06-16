@@ -1,4 +1,5 @@
 mod control;
+mod status;
 
 use crate::handlers::{dispatch_request, handle_start_request};
 use crate::ipc;
@@ -190,114 +191,6 @@ async fn handle_start_request_clears_last_error() {
 }
 
 #[tokio::test]
-async fn status_request_returns_current_state() {
-    let state = test_state();
-    {
-        let mut guard = state.lock().await;
-        guard.vpn_running.store(true, Ordering::SeqCst);
-        guard.vpn_connected.store(true, Ordering::SeqCst);
-        guard.active_config = Some(test_config());
-        *guard.assigned_ip.lock().unwrap() = Some("10.8.0.2".to_string());
-    }
-
-    match dispatch_request(ipc::IpcRequest::Status, &state).await {
-        ipc::IpcResponse::Status {
-            running,
-            assigned_ip,
-            ..
-        } => {
-            assert!(running);
-            assert_eq!(assigned_ip, Some("10.8.0.2".to_string()));
-        }
-        other => panic!("Expected Status, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn status_request_when_disconnected() {
-    let state = test_state();
-
-    match dispatch_request(ipc::IpcRequest::Status, &state).await {
-        ipc::IpcResponse::Status {
-            running,
-            endpoint,
-            state: vpn_state,
-            last_error,
-            assigned_ip,
-        } => {
-            assert!(!running);
-            assert!(endpoint.is_none());
-            assert!(matches!(vpn_state, ipc::VpnState::Stopped));
-            assert!(last_error.is_none());
-            assert!(assigned_ip.is_none());
-        }
-        other => panic!("Expected Status, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn status_request_with_last_error() {
-    let state = test_state();
-    {
-        let guard = state.lock().await;
-        guard.vpn_running.store(true, Ordering::SeqCst);
-        *guard.last_error.lock().unwrap() = Some("connection failed".to_string());
-    }
-
-    match dispatch_request(ipc::IpcRequest::Status, &state).await {
-        ipc::IpcResponse::Status {
-            running,
-            state: vpn_state,
-            last_error,
-            ..
-        } => {
-            assert!(!running);
-            assert!(matches!(vpn_state, ipc::VpnState::Failed));
-            assert_eq!(last_error.as_deref(), Some("connection failed"));
-        }
-        other => panic!("Expected Status, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn status_request_when_stopping() {
-    let state = test_state();
-    {
-        let guard = state.lock().await;
-        guard.vpn_running.store(true, Ordering::SeqCst);
-        guard.vpn_stopping.store(true, Ordering::SeqCst);
-    }
-
-    match dispatch_request(ipc::IpcRequest::Status, &state).await {
-        ipc::IpcResponse::Status {
-            state: vpn_state, ..
-        } => {
-            assert!(matches!(vpn_state, ipc::VpnState::Stopping));
-        }
-        other => panic!("Expected Status, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn status_request_when_starting() {
-    let state = test_state();
-    {
-        let guard = state.lock().await;
-        guard.vpn_running.store(true, Ordering::SeqCst);
-        guard.vpn_connected.store(false, Ordering::SeqCst);
-    }
-
-    match dispatch_request(ipc::IpcRequest::Status, &state).await {
-        ipc::IpcResponse::Status {
-            state: vpn_state, ..
-        } => {
-            assert!(matches!(vpn_state, ipc::VpnState::Starting));
-        }
-        other => panic!("Expected Status, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn repair_network_clears_state() {
     let state = test_state();
     let sleeper = tokio::spawn(async {
@@ -466,31 +359,5 @@ async fn sequential_stop_start_stop_cycle() {
     assert!(guard.vpn_running.load(Ordering::SeqCst));
     if let Some(task) = guard.vpn_task.take() {
         task.abort();
-    }
-}
-
-#[tokio::test]
-async fn status_request_with_endpoint_and_assigned_ip() {
-    let state = test_state();
-    {
-        let mut guard = state.lock().await;
-        guard.vpn_running.store(true, Ordering::SeqCst);
-        guard.vpn_connected.store(true, Ordering::SeqCst);
-        guard.active_config = Some(test_config());
-        *guard.assigned_ip.lock().unwrap() = Some("10.8.0.5".to_string());
-    }
-
-    match dispatch_request(ipc::IpcRequest::Status, &state).await {
-        ipc::IpcResponse::Status {
-            running,
-            endpoint,
-            assigned_ip,
-            ..
-        } => {
-            assert!(running);
-            assert_eq!(endpoint.as_deref(), Some("vpn.example.com:4433"));
-            assert_eq!(assigned_ip.as_deref(), Some("10.8.0.5"));
-        }
-        other => panic!("Expected Status, got {other:?}"),
     }
 }

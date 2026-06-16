@@ -25,6 +25,7 @@ use tray::{setup_tray, start_status_poller};
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .manage(commands::TokenRefreshHandle::default())
         .invoke_handler(tauri::generate_handler![
             vpn_connect,
             vpn_disconnect,

@@ -50,6 +50,10 @@ struct DaemonState {
     vpn_stopping: Arc<AtomicBool>,
     last_error: Arc<StdMutex<Option<String>>>,
     assigned_ip: Arc<StdMutex<Option<String>>>,
+    /// Access token for the next (re)handshake. Seeded from `Start` and
+    /// overwritten by `UpdateToken` so the reconnect loop uses the freshest
+    /// GUI-refreshed token instead of the one captured at session start.
+    current_token: Arc<StdMutex<String>>,
     vpn_task: Option<tokio::task::JoinHandle<()>>,
     active_config: Option<Config>,
 }
@@ -62,6 +66,7 @@ impl DaemonState {
             vpn_stopping: Arc::new(AtomicBool::new(false)),
             last_error: Arc::new(StdMutex::new(None)),
             assigned_ip: Arc::new(StdMutex::new(None)),
+            current_token: Arc::new(StdMutex::new(String::new())),
             vpn_task: None,
             active_config: None,
         }
@@ -278,14 +283,22 @@ async fn dispatch_request_with_hooks(
             let last_error = guard.last_error.lock().ok().and_then(|e| e.clone());
             let assigned_ip = guard.assigned_ip.lock().ok().and_then(|e| e.clone());
 
+            // A recorded error while the loop is still running (`starting`) means
+            // a transient failure is being retried → Reconnecting, not Failed.
+            // Failed is reserved for the terminal case (loop gave up). Otherwise
+            // the UI flips to "NOT CONNECTED" mid auto-reconnect.
             let vpn_state = if connected {
                 ipc::VpnState::Connected
-            } else if last_error.is_some() {
-                ipc::VpnState::Failed
             } else if stopping {
                 ipc::VpnState::Stopping
             } else if starting {
-                ipc::VpnState::Starting
+                if last_error.is_some() {
+                    ipc::VpnState::Reconnecting
+                } else {
+                    ipc::VpnState::Starting
+                }
+            } else if last_error.is_some() {
+                ipc::VpnState::Failed
             } else {
                 ipc::VpnState::Stopped
             };
@@ -343,12 +356,18 @@ async fn dispatch_request_with_hooks(
                 if let Ok(mut last) = guard.last_error.lock() {
                     *last = None;
                 }
+                // Seed the live token cell; the reconnect loop reads it (not
+                // config.token) so GUI-pushed UpdateToken refreshes apply.
+                if let Ok(mut token) = guard.current_token.lock() {
+                    *token = config.token.clone();
+                }
                 if spawn_vpn_session {
                     let flag = guard.vpn_running.clone();
                     let connected = guard.vpn_connected.clone();
                     let stopping = guard.vpn_stopping.clone();
                     let last_error = guard.last_error.clone();
                     let assigned_ip = guard.assigned_ip.clone();
+                    let current_token = guard.current_token.clone();
 
                     guard.vpn_task = Some(tokio::spawn(async move {
                         if let Err(e) = crate::vpn_core::run_vpn(
@@ -357,6 +376,7 @@ async fn dispatch_request_with_hooks(
                             connected.clone(),
                             last_error.clone(),
                             assigned_ip.clone(),
+                            current_token,
                         )
                         .await
                         {
@@ -376,6 +396,15 @@ async fn dispatch_request_with_hooks(
                 }
                 IpcResponse::Ok
             }
+        }
+        IpcRequest::UpdateToken { token } => {
+            // The GUI silently refreshed the Keycloak access token; store it so
+            // the next (re)handshake authenticates with a valid token. Harmless
+            // when no session is active — the next Start overwrites it anyway.
+            if let Ok(mut current) = guard.current_token.lock() {
+                *current = token;
+            }
+            IpcResponse::Ok
         }
     }
 }

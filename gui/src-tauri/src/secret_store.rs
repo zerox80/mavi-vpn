@@ -48,6 +48,14 @@ pub(crate) fn connection_token_account(id: &str) -> String {
     format!("connection:{id}:token")
 }
 
+/// Keyring account for a connection's Keycloak **refresh** token. Kept separate
+/// from the access/PSK token (`connection_token_account`) and never written to
+/// `prefs.json`/`config.json` or sent over IPC — it stays in the user-session
+/// OS keyring so the GUI can renew access tokens silently.
+pub(crate) fn connection_refresh_token_account(id: &str) -> String {
+    format!("connection:{id}:refresh_token")
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::SecretStore;

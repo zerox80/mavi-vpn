@@ -17,6 +17,7 @@ import {
   startSessionClock,
   updateSparklineColors,
 } from './animations.js';
+import { showToast } from './toast.js';
 
 // ============================================================================
 // Init
@@ -61,6 +62,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     await listen('vpn-status-update', (e) => applyStatus(e.payload));
     await listen('tray-toggle', () => toggleConnection());
+    // The Keycloak refresh token expired (per Keycloak's session policy): the
+    // backend stopped the tunnel. Prompt the user — the next Connect re-opens
+    // the browser login.
+    await listen('kc-needs-login', () => {
+      showToast('Your session expired — click Connect to log in again.', 'error');
+      refreshStatus();
+    });
   } catch (e) {
     console.warn('event wiring failed:', e);
   }

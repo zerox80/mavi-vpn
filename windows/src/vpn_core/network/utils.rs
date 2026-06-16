@@ -1,10 +1,99 @@
 use std::net::IpAddr;
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::WIN32_ERROR;
-use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, SOCKADDR_INET};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    FreeMibTable, GetIfTable2, GetIpForwardTable2, GetUnicastIpAddressTable, MIB_IF_ROW2,
+    MIB_IF_TABLE2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_UNICASTIPADDRESS_ROW,
+    MIB_UNICASTIPADDRESS_TABLE,
+};
+use windows_sys::Win32::Networking::WinSock::{ADDRESS_FAMILY, AF_INET, AF_INET6, SOCKADDR_INET};
+
+/// Win32 status meaning "the entry already exists" (`ERROR_OBJECT_ALREADY_EXISTS`).
+/// Treated as success for our idempotent add operations (`CreateIpForwardEntry2` /
+/// `CreateUnicastIpAddressEntry`), which may run again after a reconnect.
+pub const ERROR_OBJECT_ALREADY_EXISTS: u32 = 5010;
+
+/// Win32 status meaning "no matching entry was found" (`ERROR_NOT_FOUND`).
+/// Treated as success for our idempotent delete operations: removing a route that
+/// is already gone is the desired end state, not a failure.
+pub const ERROR_NOT_FOUND: u32 = 1168;
+
+/// `IP_DAD_STATE` value `IpDadStatePreferred`: the address has passed Duplicate
+/// Address Detection and is fully usable. Typed `i32` to match `MIB_*::DadState`
+/// (`NL_DAD_STATE`).
+pub const IP_DAD_STATE_PREFERRED: i32 = 4;
+
+/// `IP_DAD_STATE` value `IpDadStateDeprecated`: the address is still usable for
+/// existing connections even though it should not be used for new ones — good
+/// enough to consider the address "applied".
+pub const IP_DAD_STATE_DEPRECATED: i32 = 3;
 
 pub fn win_err(code: WIN32_ERROR) -> anyhow::Error {
     anyhow::anyhow!("Win32 error: {code}")
+}
+
+/// Fetches the interface table, hands the rows to `f`, then **always** releases the
+/// table with `FreeMibTable`. Returns `f`'s result, or `None` if `GetIfTable2` failed.
+///
+/// Centralizing the fetch/borrow/free dance here keeps the `unsafe` Win32 table
+/// lifecycle in one audited place so call sites cannot forget to free the table.
+pub fn with_if_table<R>(f: impl FnOnce(&[MIB_IF_ROW2]) -> R) -> Option<R> {
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    // SAFETY: On success GetIfTable2 hands us an allocation we own. We build a slice
+    // over exactly NumEntries rows (the documented layout of the trailing Table array)
+    // and free the allocation before this scope ends, so the pointer never escapes.
+    unsafe {
+        if GetIfTable2(&raw mut table) != 0 {
+            return None;
+        }
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        let result = f(rows);
+        FreeMibTable(table as _);
+        Some(result)
+    }
+}
+
+/// Fetches the IP forward (routing) table for `family`, hands the rows to `f`, then
+/// **always** frees it. Returns `None` if `GetIpForwardTable2` failed. See
+/// [`with_if_table`] for the safety rationale.
+pub fn with_forward_table<R>(
+    family: ADDRESS_FAMILY,
+    f: impl FnOnce(&[MIB_IPFORWARD_ROW2]) -> R,
+) -> Option<R> {
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    // SAFETY: see `with_if_table` — same owned-allocation, slice, free contract.
+    unsafe {
+        if GetIpForwardTable2(family, &raw mut table) != 0 {
+            return None;
+        }
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        let result = f(rows);
+        FreeMibTable(table as _);
+        Some(result)
+    }
+}
+
+/// Fetches the unicast IP address table for `family`, hands the rows to `f`, then
+/// **always** frees it. Returns `None` if `GetUnicastIpAddressTable` failed. See
+/// [`with_if_table`] for the safety rationale.
+pub fn with_unicast_table<R>(
+    family: ADDRESS_FAMILY,
+    f: impl FnOnce(&[MIB_UNICASTIPADDRESS_ROW]) -> R,
+) -> Option<R> {
+    let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+    // SAFETY: see `with_if_table` — same owned-allocation, slice, free contract.
+    unsafe {
+        if GetUnicastIpAddressTable(family, &raw mut table) != 0 {
+            return None;
+        }
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        let result = f(rows);
+        FreeMibTable(table as _);
+        Some(result)
+    }
 }
 
 pub const fn to_sockaddr_inet(ip: IpAddr) -> SOCKADDR_INET {

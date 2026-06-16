@@ -7,6 +7,7 @@ pub(super) struct CommandOutcome {
 }
 
 impl CommandOutcome {
+    #[cfg(test)]
     pub(super) fn success() -> Self {
         Self {
             success: true,
@@ -14,6 +15,7 @@ impl CommandOutcome {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn failure(stderr: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -32,6 +34,7 @@ impl CommandOutcome {
         self.success
     }
 
+    #[cfg(test)]
     pub(super) fn stderr(&self) -> Option<&str> {
         self.stderr.as_deref()
     }

@@ -119,6 +119,15 @@ pub async fn dispatch_request(
             ipc::IpcResponse::Ok
         }
         ipc::IpcRequest::Start(config) => handle_start_request(config, &mut guard),
+        ipc::IpcRequest::UpdateToken { token } => {
+            // The GUI silently refreshed the Keycloak access token; store it so
+            // the next (re)handshake authenticates with a valid token. Harmless
+            // when no session is active — the next Start overwrites it anyway.
+            if let Ok(mut current) = guard.current_token.lock() {
+                *current = token;
+            }
+            ipc::IpcResponse::Ok
+        }
     }
 }
 
@@ -138,11 +147,18 @@ pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) ->
         if let Ok(mut last_error) = guard.last_error.lock() {
             *last_error = None;
         }
+        // Seed the live token cell from this Start's config. The reconnect loop
+        // reads the cell (not config.token) so GUI-pushed UpdateToken refreshes
+        // take effect on the next handshake.
+        if let Ok(mut token) = guard.current_token.lock() {
+            *token = config.token.clone();
+        }
         let flag = guard.vpn_running.clone();
         let connected = guard.vpn_connected.clone();
         let stopping = guard.vpn_stopping.clone();
         let last_error = guard.last_error.clone();
         let assigned_ip = guard.assigned_ip.clone();
+        let current_token = guard.current_token.clone();
 
         guard.vpn_task = Some(tokio::spawn(async move {
             if let Err(e) = vpn_core::run_vpn(
@@ -151,6 +167,7 @@ pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) ->
                 connected.clone(),
                 last_error.clone(),
                 assigned_ip,
+                current_token,
             )
             .await
             {

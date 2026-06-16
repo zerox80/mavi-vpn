@@ -123,6 +123,21 @@ describe('applyStatus', () => {
     expect(document.getElementById('toast').textContent).toBe('Auth failed');
   });
 
+  it('treats Reconnecting as connecting with a calm hint, not a hard failure', () => {
+    applyStatus({
+      service_available: true,
+      running: false,
+      state: 'Reconnecting',
+      last_error: 'H3 recv_response failed: ApplicationClose: H3_NO_ERROR',
+    });
+    expect(state.hero).toBe('connecting');
+    const toast = document.getElementById('toast');
+    // Non-error hint, and it must NOT surface the raw H3_NO_ERROR text.
+    expect(toast.dataset.kind).toBe('hint');
+    expect(toast.textContent.toLowerCase()).toContain('reconnecting');
+    expect(toast.textContent).not.toContain('H3_NO_ERROR');
+  });
+
   it('handles missing active connection by disabling connect', () => {
     state.prefs.active_id = 'missing';
     state.prefs.connections = [];

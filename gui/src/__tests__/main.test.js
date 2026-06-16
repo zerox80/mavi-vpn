@@ -264,6 +264,10 @@ describe('heroFromVpnStatus', () => {
     expect(heroFromVpnStatus({ service_available: true, state: 'Starting' })).toBe('connecting');
   });
 
+  it('maps Reconnecting to connecting (transient auto-retry, never off)', () => {
+    expect(heroFromVpnStatus({ service_available: true, state: 'Reconnecting' })).toBe('connecting');
+  });
+
   it('maps Connected or running=true to on', () => {
     expect(heroFromVpnStatus({ service_available: true, state: 'Connected' })).toBe('on');
     expect(heroFromVpnStatus({ service_available: true, running: true })).toBe('on');

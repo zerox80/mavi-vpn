@@ -35,7 +35,9 @@ export async function connect() {
   setHero('connecting');
   try {
     await invoke('save_config', { config });
-    await invoke('vpn_connect', { config });
+    // connectionId scopes the Keycloak refresh token in the OS keyring and lets
+    // the backend silently refresh (or fall back to browser login) on connect.
+    await invoke('vpn_connect', { config, connectionId: conn.id });
     // Immediately fetch the real status instead of waiting up to 2s for
     // the next poller tick. This prevents the UI from showing "Connecting..."
     // when the service has already transitioned to Connected (or Failed).
@@ -129,6 +131,14 @@ export function applyStatus(status) {
   } else if (nextHero === 'connecting') {
     setHero('connecting');
     btn.title = '';
+    // A mid-session drop that is being auto-retried: show a calm, non-error
+    // hint instead of the old red failure toast. First-time connects (Starting)
+    // stay silent — the hero already reads "ESTABLISHING TUNNEL".
+    if (state.vpnState === 'Reconnecting') {
+      showToast('Connection dropped — reconnecting…', 'hint', 0);
+    } else {
+      hideToast('hint');
+    }
   } else {
     state.disconnecting = false;
     setHero('off');

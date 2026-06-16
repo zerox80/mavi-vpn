@@ -36,6 +36,7 @@ pub async fn run_vpn(
     connected: Arc<AtomicBool>,
     last_error: Arc<StdMutex<Option<String>>>,
     assigned_ip: Arc<StdMutex<Option<String>>>,
+    current_token: Arc<StdMutex<String>>,
 ) -> Result<()> {
     config.normalize_transport();
 
@@ -52,6 +53,7 @@ pub async fn run_vpn(
             &connected,
             &last_error,
             &assigned_ip,
+            &current_token,
         )
         .await;
 
@@ -116,6 +118,7 @@ enum SessionEnd {
 }
 
 /// Manages a single active VPN session (handshake + packet pumping).
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     config: &Config,
     cert_pin_bytes: &[u8],
@@ -123,6 +126,7 @@ async fn run_session(
     connected_flag: &Arc<AtomicBool>,
     last_error_state: &Arc<StdMutex<Option<String>>>,
     assigned_ip_state: &Arc<StdMutex<Option<String>>>,
+    current_token: &Arc<StdMutex<String>>,
 ) -> Result<SessionEnd> {
     let socket = super::socket::create_udp_socket()?;
 
@@ -138,9 +142,17 @@ async fn run_session(
         .as_deref()
         .and_then(crate::ech_client::decode_hex);
 
+    // Read the freshest access token (GUI may have refreshed it via UpdateToken
+    // since this session's config was captured). Fall back to the seed token if
+    // the lock is poisoned.
+    let token = current_token
+        .lock()
+        .map(|t| t.clone())
+        .unwrap_or_else(|_| config.token.clone());
+
     let (connection, server_config, _h3_guard) = super::handshake::connect_and_handshake(
         socket,
-        config.token.clone(),
+        token,
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
         config.censorship_resistant,

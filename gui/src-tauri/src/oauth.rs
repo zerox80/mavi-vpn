@@ -20,9 +20,14 @@ fn html_escape(s: &str) -> String {
 ///
 /// This must be called from the GUI process (not the service) because it needs
 /// to open a browser window in the user's desktop session.
-/// Returns the access token string on success.
+/// Returns the access **and** refresh tokens on success; the refresh token lets
+/// the GUI renew the short-lived access token silently (no browser) later.
 #[allow(clippy::too_many_lines)]
-pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
+pub async fn start_oauth_flow(
+    kc_url: &str,
+    realm: &str,
+    client_id: &str,
+) -> Result<shared::kc_oauth::OAuthTokens> {
     // Plain-HTTP Keycloak would expose the authorization code and tokens to a
     // MITM; only loopback is exempt (dev setups).
     shared::validate_keycloak_url(kc_url).map_err(|e| anyhow::anyhow!(e))?;
@@ -175,13 +180,12 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         return Err(anyhow::anyhow!("Token exchange failed: {body}"));
     }
 
-    let json: serde_json::Value = res.json().await?;
-    let token = json["access_token"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No access_token in response"))?
-        .to_string();
-
-    Ok(token)
+    let body = res
+        .text()
+        .await
+        .context("Failed to read Keycloak token response")?;
+    shared::kc_oauth::parse_token_response(&body, None)
+        .ok_or_else(|| anyhow::anyhow!("Token response missing access_token"))
 }
 
 /// Open a URL in the default browser (cross-platform via `webbrowser` crate).

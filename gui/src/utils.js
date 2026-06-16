@@ -53,7 +53,9 @@ export function heroFromVpnStatus(status = {}, currentHero = 'off', disconnectin
   if (!serviceAvailable || vpnState === 'Failed' || vpnState === 'Stopped') return 'off';
   if (disconnecting || vpnState === 'Stopping') return 'disconnecting';
   if (running || vpnState === 'Connected') return 'on';
-  if (vpnState === 'Starting') return 'connecting';
+  // Reconnecting is a transient auto-retry (e.g. after the server closed an
+  // expired-token session); keep the hero on "connecting", never "off".
+  if (vpnState === 'Starting' || vpnState === 'Reconnecting') return 'connecting';
   return currentHero === 'disconnecting' ? 'disconnecting' : 'off';
 }
 

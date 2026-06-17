@@ -56,6 +56,18 @@ impl VpnRuntimeState {
             .unwrap_or_else(|_| fallback.to_string())
     }
 
+    /// Returns a clone of the `current_token` Arc so background tasks can
+    /// update it independently of the runtime state.
+    pub(super) fn current_token(&self) -> Arc<StdMutex<String>> {
+        self.current_token.clone()
+    }
+
+    /// Returns a clone of the `refresh_token` Arc so the refresh task can
+    /// rotate the stored token.
+    pub(super) fn refresh_token(&self) -> Arc<StdMutex<Option<String>>> {
+        self.refresh_token.clone()
+    }
+
     pub(super) fn set_last_error(&self, error: Option<String>) {
         if let Ok(mut last) = self.last_error.lock() {
             *last = error;

@@ -100,9 +100,12 @@ pub async fn dispatch_request(
         }
         ipc::IpcRequest::Start(config) => handle_start_request(config, &mut guard),
         ipc::IpcRequest::UpdateToken { token } => {
-            // The GUI silently refreshed the Keycloak access token; store it so
-            // the next (re)handshake authenticates with a valid token. Harmless
-            // when no session is active - the next Start overwrites it anyway.
+            // The GUI owns the Keycloak refresh token and silently refreshes the
+            // short-lived access token itself; it pushes only the fresh access
+            // token here. Store it so the next (re)handshake authenticates with
+            // a valid token, and the in-band reauth task forwards it to the VPN
+            // server. The service never receives or stores the refresh token.
+            // Harmless when no session is active - the next Start overwrites it.
             guard.set_current_token(token);
             ipc::IpcResponse::Ok
         }
@@ -118,7 +121,6 @@ pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) ->
     } else {
         guard.mark_session_starting(config.clone());
         let task_runtime = guard.runtime_handles();
-        let refresh_token = Arc::new(std::sync::Mutex::new(config.refresh_token.clone()));
 
         guard.set_task(tokio::spawn(async move {
             if let Err(e) = vpn_core::run_vpn(
@@ -128,7 +130,6 @@ pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) ->
                 task_runtime.last_error.clone(),
                 task_runtime.assigned_ip.clone(),
                 task_runtime.current_token.clone(),
-                refresh_token,
             )
             .await
             {

@@ -16,6 +16,8 @@ const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
 const TUN_DEVICE_NAME: &str = "mavi0";
 
+mod reauth;
+
 /// Sleeps up to `delay`, but returns as soon as `running` is cleared.
 ///
 /// A Stop command only flips the `running` flag; without this, the reconnect
@@ -152,7 +154,9 @@ async fn run_session(
 
     let (connection, server_config, _h3_guard) = super::handshake::connect_and_handshake(
         socket,
-        token,
+        // Clone so the plaintext token survives as the reauth task's initial
+        // `last_token` baseline (the handshake takes ownership otherwise).
+        token.clone(),
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
         config.censorship_resistant,
@@ -245,6 +249,18 @@ async fn run_session(
 
     let session_alive = Arc::new(AtomicBool::new(true));
     let connection = Arc::new(connection);
+
+    // Task: in-band Keycloak token reauth. The GUI silently refreshes the access
+    // token and pushes it via UpdateToken into current_token; present it to the
+    // server over a fresh bidi stream so the live tunnel survives the original
+    // token's expiry instead of being force-closed and reconnected.
+    let reauth_task = reauth::spawn_reauth_task(
+        connection.clone(),
+        session_alive.clone(),
+        global_running.clone(),
+        current_token.clone(),
+        token,
+    );
 
     // Task: MTU Monitor
     let conn_monitor = connection.clone();
@@ -399,6 +415,16 @@ async fn run_session(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Capture WHY the tunnel dropped *before* we self-close below, so a
+    // server-initiated close (e.g. "session token expired") or a QUIC idle
+    // timeout is visible in the log instead of a silent reconnect.
+    if global_running.load(Ordering::Relaxed) {
+        match connection.close_reason() {
+            Some(reason) => warn!("VPN session ended - QUIC close reason: {reason}"),
+            None => warn!("VPN session ended without an explicit QUIC close reason"),
+        }
+    }
+
     // Signal shutdown to the QUIC->TUN task (unblocks read_datagram)
     drop(shutdown_tx);
     // Close the QUIC connection to unblock any remaining awaits
@@ -407,6 +433,7 @@ async fn run_session(
     tun_to_quic.abort();
     quic_to_tun.abort();
     mtu_monitor.abort();
+    reauth_task.abort();
 
     // Cleanup networking
     net_config.cleanup();
@@ -423,60 +450,4 @@ async fn run_session(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{is_permanent_setup_error, sleep_unless_stopped};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    #[tokio::test]
-    async fn backoff_sleep_returns_promptly_when_stopped() {
-        let running = Arc::new(AtomicBool::new(true));
-        let stopper = running.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            stopper.store(false, Ordering::Relaxed);
-        });
-
-        let started = Instant::now();
-        // A long backoff that must be cut short by the Stop above.
-        sleep_unless_stopped(Duration::from_secs(30), &running).await;
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "Stop during backoff must return within ~1s, took {:?}",
-            started.elapsed()
-        );
-    }
-
-    #[tokio::test]
-    async fn backoff_sleep_completes_full_delay_when_running() {
-        let running = Arc::new(AtomicBool::new(true));
-        let started = Instant::now();
-        sleep_unless_stopped(Duration::from_millis(250), &running).await;
-        assert!(started.elapsed() >= Duration::from_millis(200));
-    }
-
-    #[test]
-    fn permanent_setup_errors_stop_reconnect_loop() {
-        for message in [
-            "AUTH_FAILED: Server returned HTTP 401",
-            "Server rejected connection: denied",
-            "MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360",
-            "Server pushed unsupported VPN MTU 1400",
-            "Failed to open /dev/net/tun: permission denied",
-            "Failed to install IPv6 split route ::/1",
-            "Failed to execute: ip route add 0.0.0.0/1",
-            "ip failed: RTNETLINK answers: Operation not permitted",
-        ] {
-            assert!(is_permanent_setup_error(message), "{message}");
-        }
-    }
-
-    #[test]
-    fn transient_transport_errors_keep_reconnect_loop() {
-        assert!(!is_permanent_setup_error("connection lost"));
-        assert!(!is_permanent_setup_error(
-            "timed out while reading datagram"
-        ));
-    }
-}
+mod tests;

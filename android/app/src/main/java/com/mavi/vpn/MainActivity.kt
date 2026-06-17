@@ -30,6 +30,12 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: VpnViewModel by viewModels()
 
+    /// Set when the user taps Connect with Keycloak enabled: we launch a fresh
+    /// interactive login first and only start the tunnel once the redirect brings
+    /// back new tokens. Forces re-authentication on every manual connect instead
+    /// of silently reusing the stored token.
+    private var pendingConnect = false
+
     private val vpnPrepareLauncher =
         registerForActivityResult(
             androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
@@ -62,14 +68,29 @@ class MainActivity : ComponentActivity() {
                         VpnScreen(
                             viewModel = viewModel,
                             onConnect = { ip, port, token, pin ->
-                                prepareAndStartVpn(
-                                    ip,
-                                    port,
-                                    token,
-                                    pin,
-                                    viewModel.splitMode.value,
-                                    viewModel.splitPackages.value,
-                                )
+                                if (viewModel.useKeycloak.value) {
+                                    // Force a fresh Keycloak browser login on every manual
+                                    // connect; the tunnel starts in handleIntent once the
+                                    // redirect returns new tokens.
+                                    pendingConnect = true
+                                    viewModel.saveServerDetails()
+                                    viewModel.saveKeycloakDetails()
+                                    OAuthHelper.startAuth(
+                                        this@MainActivity,
+                                        viewModel.kcUrl.value,
+                                        viewModel.kcRealm.value,
+                                        viewModel.kcClientId.value,
+                                    )
+                                } else {
+                                    prepareAndStartVpn(
+                                        ip,
+                                        port,
+                                        token,
+                                        pin,
+                                        viewModel.splitMode.value,
+                                        viewModel.splitPackages.value,
+                                    )
+                                }
                             },
                             onDisconnect = { stopVpn() },
                             onOpenSettings = { currentScreen = "settings" },
@@ -130,7 +151,21 @@ class MainActivity : ComponentActivity() {
                         )
                     if (tokens != null) {
                         viewModel.saveOAuthTokens(tokens)
-                        recreate()
+                        if (pendingConnect) {
+                            // The user tapped Connect: now that a fresh login
+                            // succeeded, bring the tunnel up with the new token.
+                            pendingConnect = false
+                            prepareAndStartVpn(
+                                viewModel.serverIp.value,
+                                viewModel.serverPort.value,
+                                tokens.accessToken,
+                                viewModel.certPin.value,
+                                viewModel.splitMode.value,
+                                viewModel.splitPackages.value,
+                            )
+                        } else {
+                            recreate()
+                        }
                     }
                 }
             }

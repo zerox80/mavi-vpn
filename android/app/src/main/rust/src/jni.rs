@@ -239,6 +239,9 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
             let effective_http3_framing =
                 crate::connection::effective_http3_framing(censorship_resistant, http3_framing);
 
+            // Keep a copy of the access token to seed the session's reauth cell;
+            // the handshake call below consumes `token`.
+            let session_token = token.clone();
             let result = rt.block_on(async {
                 connect_and_handshake(
                     socket,
@@ -256,8 +259,14 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
             match result {
                 Ok((connection, config, h3_guard)) => {
                     clear_last_init_error();
-                    let session =
-                        VpnSession::new(rt, connection, config, effective_http3_framing, h3_guard);
+                    let session = VpnSession::new(
+                        rt,
+                        connection,
+                        config,
+                        effective_http3_framing,
+                        session_token,
+                        h3_guard,
+                    );
                     Box::into_raw(Box::new(session)) as jlong
                 }
                 Err(e) => {
@@ -343,9 +352,52 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_startLoop<'local>(
         let config = session.config.clone();
         let http3_framing = session.http3_framing;
         let shutdown_rx = session.shutdown_tx.subscribe();
-        session.runtime.block_on(async {
+
+        // In-band Keycloak reauth: present GUI-refreshed tokens over the live
+        // connection so the tunnel survives the original token's expiry.
+        let reauth_conn = session.connection.clone();
+        let reauth_token = session.current_token.clone();
+        let reauth_stop = session.stop_flag.clone();
+
+        session.runtime.block_on(async move {
+            let reauth_handle = tokio::spawn(crate::connection::run_reauth_task(
+                reauth_conn,
+                reauth_token,
+                reauth_stop,
+            ));
             run_vpn_loop(conn, tun_fd, stop_flag, config, shutdown_rx, http3_framing).await;
+            reauth_handle.abort();
         });
+    }));
+}
+
+#[allow(improper_ctypes_definitions)]
+#[no_mangle]
+/// Replaces the session's current access token. Called by the Keycloak refresh
+/// ticker after a silent renewal so the in-band reauth task can present the fresh
+/// token to the server over the live connection (no reconnect).
+pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_updateToken<'local>(
+    env_unowned: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    token: JString<'local>,
+) {
+    if (-3..=0).contains(&handle) {
+        return;
+    }
+    let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
+    let env = guard.borrow_env_mut();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[allow(deprecated)]
+        let Ok(token_str) = env.get_string(&token) else {
+            error!("updateToken: failed to read token from JNI");
+            return;
+        };
+        let token_string: String = token_str.into();
+        let session = unsafe { &*(handle as *const VpnSession) };
+        if let Ok(mut current) = session.current_token.lock() {
+            *current = token_string;
+        }
     }));
 }
 
@@ -401,93 +453,4 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_networkChanged<'loc
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classify_cert_pin_mismatch() {
-        assert_eq!(
-            classify_init_error("invalid certificate pin"),
-            INIT_FATAL_CERT
-        );
-        assert_eq!(classify_init_error("pin mismatch"), INIT_FATAL_CERT);
-        assert_eq!(
-            classify_init_error("certificate pin mismatch"),
-            INIT_FATAL_CERT
-        );
-    }
-
-    #[test]
-    fn classify_auth_errors() {
-        assert_eq!(
-            classify_init_error("server error: Unauthorized"),
-            INIT_FATAL_AUTH
-        );
-        assert_eq!(classify_init_error("Access Denied"), INIT_FATAL_AUTH);
-        assert_eq!(
-            classify_init_error("Invalid Keycloak Token"),
-            INIT_FATAL_AUTH
-        );
-        assert_eq!(classify_init_error("Invalid Token"), INIT_FATAL_AUTH);
-    }
-
-    #[test]
-    fn classify_config_errors() {
-        assert_eq!(
-            classify_init_error("endpoint host missing"),
-            INIT_FATAL_CONFIG
-        );
-        assert_eq!(classify_init_error("invalid address"), INIT_FATAL_CONFIG);
-    }
-
-    #[test]
-    fn classify_mtu_errors_as_permanent_config() {
-        // A server/client MTU mismatch cannot be fixed by retrying.
-        assert_eq!(
-            classify_init_error(
-                "MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360"
-            ),
-            INIT_FATAL_CONFIG
-        );
-        assert_eq!(
-            classify_init_error(
-                "Server pushed unsupported VPN MTU 1500. Supported range is 1280-1360."
-            ),
-            INIT_FATAL_CONFIG
-        );
-    }
-
-    #[test]
-    fn classify_unknown_returns_retryable() {
-        assert_eq!(
-            classify_init_error("connection timed out"),
-            INIT_RETRYABLE_FAILURE
-        );
-        assert_eq!(
-            classify_init_error("network unreachable"),
-            INIT_RETRYABLE_FAILURE
-        );
-    }
-
-    #[test]
-    fn classify_case_insensitive() {
-        assert_eq!(
-            classify_init_error("INVALID CERTIFICATE PIN"),
-            INIT_FATAL_CERT
-        );
-        assert_eq!(classify_init_error("ACCESS DENIED"), INIT_FATAL_AUTH);
-    }
-
-    #[test]
-    fn retryable_failure_is_zero() {
-        assert_eq!(INIT_RETRYABLE_FAILURE, 0);
-    }
-
-    #[test]
-    #[allow(clippy::assertions_on_constants)]
-    fn fatal_errors_are_negative() {
-        assert!(INIT_FATAL_AUTH < 0);
-        assert!(INIT_FATAL_CERT < 0);
-        assert!(INIT_FATAL_CONFIG < 0);
-    }
-}
+mod tests;

@@ -22,7 +22,12 @@ services:
     image: quay.io/keycloak/keycloak:24.0.1
     container_name: keycloak
     restart: unless-stopped
-    command: start
+    # --import-realm: on first start (empty DB) Keycloak imports the mounted
+    # mavi-vpn-realm.json, creating the `mavi-vpn` realm with the `mavi-client`
+    # public PKCE client, the `vpn-user` role, and token lifespans tuned for
+    # the VPN refresh cycle (10 min access / 1 h SSO idle / 24 h SSO max).
+    # Idempotent: if the realm already exists, the import is skipped on restart.
+    command: ["start", "--import-realm"]
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
@@ -33,6 +38,13 @@ services:
       KC_HOSTNAME: auth.${DOMAIN_NAME:?DOMAIN_NAME is required for Keycloak}
       KC_PROXY: edge
       KC_PROXY_HEADERS: xforwarded
+    volumes:
+      # Realm import: read-only mount. Keycloak reads it on startup when
+      # --import-realm is set. Only the first start (empty DB) imports it;
+      # subsequent restarts skip the import, so changes here are not picked up
+      # by an existing realm. To re-import, drop the keycloak-db volume or use
+      # `command: ["start", "--import-realm", "--override"]` once.
+      - ./mavi-vpn-realm.json:/opt/keycloak/data/import/mavi-vpn-realm.json:ro
     # Uncomment the following to expose Keycloak internally if using external Nginx manually:
     # ports:
     #   - "127.0.0.1:8080:8080"

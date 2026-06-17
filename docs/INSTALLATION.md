@@ -75,24 +75,29 @@ reusing Docker's cached dependency layer.
 > **⏳ Important:** Keycloak is a large Java application. Once you run the command above, give the server **1 to 2 minutes** to initialize the database and UI. If you access `auth.yourdomain.com` too early, you will see a `502 Bad Gateway` error. Just wait and refresh!
 
 ### Step 4: Configure Keycloak (Enterprise Mode Only)
-If you enabled Keycloak, it starts completely empty. You must create the Realm and Client before connecting:
+The Keycloak container ships with a **pre-configured realm import** (`backend/keycloak/mavi-vpn-realm.json`) that is applied automatically on first start (empty database). It creates everything the VPN needs — you no longer have to set up the realm or client manually.
+
+**What gets imported automatically on first start:**
+- Realm **`mavi-vpn`** (enabled, `sslRequired: external`, brute-force protection on)
+- Client **`mavi-client`** — public PKCE client (`S256`), standard flow enabled, redirect URIs `http://127.0.0.1:18923/callback` (desktop clients) and `mavivpn://oauth` (Android)
+- Realm role **`vpn-user`** — optional, only enforced when `VPN_KEYCLOAK_REQUIRED_ROLE=vpn-user` is set on the server (off by default)
+- Token lifespans tuned for the VPN refresh cycle:
+  - **Access Token Lifespan: 10 min (600 s)** — gives the client's 300 s refresh skew real headroom
+  - **SSO Session Idle Timeout: 1 h (3600 s)** — survives brief network outages and laptop sleep
+  - **SSO Session Max Lifespan: 24 h (86400 s)** — upper bound on a refresh-token chain
+
+**The only remaining manual step — create your users:**
 1. Open your browser and navigate to `https://auth.yourdomain.com/`.
 2. Click **Administration Console** and log in with `admin` and the `KEYCLOAK_ADMIN_PASS` value from your `.env`.
-3. In the top-left dropdown (under the Keycloak logo), click **Create Realm**.
-   - Name it exactly: **`mavi-vpn`** and click Create.
-4. On the left menu, click **Clients** -> **Create client**.
-   - **Client ID**: `mavi-client`
-   - Click Next.
-   - **Client authentication**: `Off` (We use a Public Client with PKCE).
-   - **Standard flow**: `On` (Required for browser-based login).
-   - Click Next.
-   - **Valid redirect URIs**: Enter these three lines:
-     1. `http://127.0.0.1:18923/callback` (For Windows/Linux CLI and GUI)
-     2. `mavivpn://oauth` (For Android App)
-   - Click Save.
-5. On the left menu, click **Users** -> **Add user**.
+3. Make sure the realm selector (top-left) is on **`mavi-vpn`** (not `master`).
+4. On the left menu, click **Users** -> **Add user**.
    - Create a user for yourself.
    - Go to the **Credentials** tab and set a password for this user (turn off "Temporary").
+5. *(Optional)* If you enable `VPN_KEYCLOAK_REQUIRED_ROLE=vpn-user` on the server, go to the **Role mapping** tab of each user and assign the `vpn-user` role. With the default config (policy off) this is not required.
+
+> **Idempotent restarts:** The import only runs when the Keycloak database is empty (first start). Subsequent restarts skip the import, so manual changes in the admin console are preserved. To force a re-import, stop the stack, delete the `keycloak-db` container's data volume (`./data/postgres`), and start again — or temporarily change `command` in `backend/keycloak/docker-compose.yml` to `["start", "--import-realm", "--override"]` for a one-time override.
+
+> **Existing deployments:** If you already created the `mavi-vpn` realm manually, the import will be skipped and your existing configuration is left untouched. To pick up the tuned token lifespans from the import, either apply them manually in the Keycloak admin console (Realm Settings → Tokens) or re-import with `--override` after backing up your users.
 
 ### Step 5: Retrieve the Certificate PIN
 For the VPN client to connect securely via QUIC without MITM attacks, you need the server's unique Certificate PIN:

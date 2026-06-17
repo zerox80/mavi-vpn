@@ -181,10 +181,11 @@ describe('vpn workflows', () => {
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce({ service_available: true, running: false, state: 'Starting' });
     await toggleConnection();
-    // A manual connect must force a fresh Keycloak login (forceLogin: true).
+    // A manual connect reuses a stored refresh token when available, so it
+    // does not force a fresh Keycloak login.
     expect(invoke).toHaveBeenCalledWith(
       'vpn_connect',
-      expect.objectContaining({ forceLogin: true }),
+      expect.objectContaining({ forceLogin: false }),
     );
 
     vi.clearAllMocks();

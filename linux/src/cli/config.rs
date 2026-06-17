@@ -93,14 +93,7 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
 
         if input.is_empty() || input == "y" || input == "yes" {
             if saved.kc_auth.unwrap_or(false) {
-                let kc_url = saved.kc_url.as_deref().unwrap_or("");
-                let realm = saved.kc_realm.as_deref().unwrap_or("mavi-vpn");
-                let client_id = saved.kc_client_id.as_deref().unwrap_or("mavi-client");
-
-                println!("Refreshing Keycloak session...");
-                let fresh_token = crate::oauth::start_oauth_flow(kc_url, realm, client_id).await?;
-                println!("Session refreshed!");
-                saved.token = fresh_token;
+                saved = refresh_keycloak_or_login(saved).await?;
                 save_config(&saved, &config_path)?;
             }
 
@@ -111,6 +104,45 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
 
     let config = prompt_new_config().await?;
     save_config(&config, &config_path)?;
+    Ok(config)
+}
+
+/// Tries to renew the Keycloak access token silently using the stored refresh
+/// token. Falls back to an interactive browser login when there is no refresh
+/// token or it has been rejected.
+async fn refresh_keycloak_or_login(mut config: Config) -> Result<Config> {
+    let kc_url = config.kc_url.as_deref().unwrap_or("");
+    let realm = config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into());
+    let client_id = config
+        .kc_client_id
+        .clone()
+        .unwrap_or_else(|| "mavi-client".into());
+
+    if let Some(refresh) = config.refresh_token.as_deref().filter(|r| !r.is_empty()) {
+        println!("Refreshing Keycloak session...");
+        match shared::kc_oauth::refresh_access_token(kc_url, &realm, &client_id, refresh).await {
+            shared::kc_oauth::RefreshOutcome::Success(tokens) => {
+                println!("Session refreshed!");
+                config.token = tokens.access_token;
+                config.refresh_token = tokens.refresh_token;
+                return Ok(config);
+            }
+            shared::kc_oauth::RefreshOutcome::NetworkError(e) => {
+                eprintln!("Could not reach Keycloak to refresh session: {e}");
+                // Keep the existing token and refresh token; the VPN core will retry.
+                return Ok(config);
+            }
+            shared::kc_oauth::RefreshOutcome::NeedsLogin(_) => {
+                println!("Stored Keycloak session expired; logging in again...");
+                config.refresh_token = None;
+            }
+        }
+    }
+
+    let tokens = crate::oauth::start_oauth_flow(kc_url, &realm, &client_id).await?;
+    println!("Keycloak login successful!");
+    config.token = tokens.access_token;
+    config.refresh_token = tokens.refresh_token;
     Ok(config)
 }
 
@@ -131,6 +163,7 @@ async fn prompt_new_config() -> Result<Config> {
     let mut saved_kc_client_id = None;
 
     let token;
+    let refresh_token;
     if is_keycloak == "y" || is_keycloak == "yes" {
         kc_auth = Some(true);
         print!("Keycloak server URL (e.g. https://auth.example.com): ");
@@ -151,8 +184,10 @@ async fn prompt_new_config() -> Result<Config> {
             client_id = "mavi-client".to_string();
         }
 
-        token = crate::oauth::start_oauth_flow(&kc_url, &realm, &client_id).await?;
+        let tokens = crate::oauth::start_oauth_flow(&kc_url, &realm, &client_id).await?;
         println!("Keycloak login successful!");
+        token = tokens.access_token;
+        refresh_token = tokens.refresh_token;
 
         saved_kc_url = Some(kc_url);
         saved_kc_realm = Some(realm);
@@ -161,6 +196,7 @@ async fn prompt_new_config() -> Result<Config> {
         print!("Preshared Key: ");
         stdout.flush()?;
         token = read_line()?;
+        refresh_token = None;
     }
 
     print!("Certificate PIN (SHA256 hex): ");
@@ -229,6 +265,7 @@ async fn prompt_new_config() -> Result<Config> {
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,
         kc_client_id: saved_kc_client_id,
+        refresh_token,
         ech_config,
         vpn_mtu,
     })

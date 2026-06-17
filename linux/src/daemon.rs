@@ -368,6 +368,7 @@ async fn dispatch_request_with_hooks(
                     let last_error = guard.last_error.clone();
                     let assigned_ip = guard.assigned_ip.clone();
                     let current_token = guard.current_token.clone();
+                    let refresh_token = Arc::new(StdMutex::new(config.refresh_token.clone()));
 
                     guard.vpn_task = Some(tokio::spawn(async move {
                         if let Err(e) = crate::vpn_core::run_vpn(
@@ -377,6 +378,7 @@ async fn dispatch_request_with_hooks(
                             last_error.clone(),
                             assigned_ip.clone(),
                             current_token,
+                            refresh_token,
                         )
                         .await
                         {

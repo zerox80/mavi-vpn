@@ -5,6 +5,7 @@
 mod cert_pin;
 mod h3;
 mod handshake;
+mod kc_refresh;
 mod session;
 mod socket;
 

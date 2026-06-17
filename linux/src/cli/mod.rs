@@ -125,11 +125,20 @@ fn run_connect(config_path: Option<PathBuf>) -> Result<()> {
         println!("\x1b[1;32mConnecting...\x1b[0m");
         println!("Press Ctrl+C to disconnect.\n");
 
-        // Foreground CLI holds the token directly; seed the live cell from the
-        // loaded config. (A CLI-side refresh ticker can later update this cell.)
+        // Foreground CLI holds the tokens directly; seed the live cells from the
+        // loaded config so the core can refresh the access token in the background.
         let current_token = Arc::new(StdMutex::new(config.token.clone()));
-        vpn_core::run_vpn(config, running, connected, last_error, assigned_ip, current_token)
-            .await?;
+        let refresh_token = Arc::new(StdMutex::new(config.refresh_token.clone()));
+        vpn_core::run_vpn(
+            config,
+            running,
+            connected,
+            last_error,
+            assigned_ip,
+            current_token,
+            refresh_token,
+        )
+        .await?;
 
         println!("\x1b[1;32mDisconnected. Goodbye!\x1b[0m");
         Ok(())

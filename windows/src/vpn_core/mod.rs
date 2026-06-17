@@ -3,10 +3,12 @@
 //! Implements the core VPN logic for Windows.
 
 mod handshake;
+mod kc_refresh;
 mod network;
 mod pump;
 mod reauth;
 mod reconnect;
+mod runtime_state;
 mod wintun_mod;
 
 use crate::ipc::Config;
@@ -28,6 +30,7 @@ use self::reconnect::{
     compute_reconnect_delay, sleep_unless_stopped, ReconnectDecision, SessionEnd,
     RECONNECT_INITIAL_SECS,
 };
+use self::runtime_state::VpnRuntimeState;
 use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter};
 
 #[cfg_attr(test, allow(dead_code))]
@@ -51,78 +54,6 @@ fn get_global_adapter() -> Result<Arc<Adapter>> {
 
     let (_, adapter) = WINTUN_ADAPTER.get_or_init(|| (wintun, adapter));
     Ok(adapter.clone())
-}
-
-#[derive(Clone)]
-struct VpnRuntimeState {
-    running: Arc<AtomicBool>,
-    connected: Arc<AtomicBool>,
-    last_error: Arc<StdMutex<Option<String>>>,
-    assigned_ip: Arc<StdMutex<Option<String>>>,
-    current_token: Arc<StdMutex<String>>,
-}
-
-impl VpnRuntimeState {
-    fn new(
-        running: Arc<AtomicBool>,
-        connected: Arc<AtomicBool>,
-        last_error: Arc<StdMutex<Option<String>>>,
-        assigned_ip: Arc<StdMutex<Option<String>>>,
-        current_token: Arc<StdMutex<String>>,
-    ) -> Self {
-        Self {
-            running,
-            connected,
-            last_error,
-            assigned_ip,
-            current_token,
-        }
-    }
-
-    fn running(&self) -> &Arc<AtomicBool> {
-        &self.running
-    }
-
-    fn is_running(&self) -> bool {
-        self.running.load(Ordering::Relaxed)
-    }
-
-    fn stop_running(&self) {
-        self.running.store(false, Ordering::Relaxed);
-    }
-
-    fn set_connected(&self, connected: bool) {
-        self.connected.store(connected, Ordering::SeqCst);
-    }
-
-    fn current_token_or(&self, fallback: &str) -> String {
-        self.current_token
-            .lock()
-            .map(|token| token.clone())
-            .unwrap_or_else(|_| fallback.to_string())
-    }
-
-    fn set_last_error(&self, error: Option<String>) {
-        if let Ok(mut last) = self.last_error.lock() {
-            *last = error;
-        }
-    }
-
-    fn clear_last_error(&self) {
-        self.set_last_error(None);
-    }
-
-    fn set_assigned_ip(&self, ip: String) {
-        if let Ok(mut assigned_ip) = self.assigned_ip.lock() {
-            *assigned_ip = Some(ip);
-        }
-    }
-
-    fn clear_assigned_ip(&self) {
-        if let Ok(mut assigned_ip) = self.assigned_ip.lock() {
-            *assigned_ip = None;
-        }
-    }
 }
 
 struct ServerNetworkAssignment {
@@ -189,6 +120,7 @@ impl ServerNetworkAssignment {
 }
 
 /// Entry point for the VPN runner. Manages the reconnection loop and `WinTUN` lifecycle.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_vpn(
     mut config: Config,
     running: Arc<AtomicBool>,
@@ -196,6 +128,7 @@ pub async fn run_vpn(
     last_error: Arc<StdMutex<Option<String>>>,
     assigned_ip: Arc<StdMutex<Option<String>>>,
     current_token: Arc<StdMutex<String>>,
+    refresh_token: Arc<StdMutex<Option<String>>>,
 ) -> Result<()> {
     let runtime = VpnRuntimeState::new(
         running,
@@ -203,6 +136,7 @@ pub async fn run_vpn(
         last_error,
         assigned_ip,
         current_token,
+        refresh_token,
     );
 
     config.normalize_transport();
@@ -223,7 +157,7 @@ pub async fn run_vpn(
         cleanup_routes(None);
         runtime.set_connected(false);
 
-        let outcome = run_session(&config, &cert_pin_bytes, &adapter, &runtime).await;
+        let outcome = run_session(&config, &cert_pin_bytes, &adapter, &runtime, &runtime.refresh_token).await;
 
         if !runtime.is_running() {
             break;
@@ -289,6 +223,7 @@ async fn run_session(
     cert_pin_bytes: &[u8],
     adapter: &Arc<Adapter>,
     runtime: &VpnRuntimeState,
+    refresh_token: &Arc<StdMutex<Option<String>>>,
 ) -> Result<SessionEnd> {
     let socket = create_udp_socket()?;
 
@@ -411,10 +346,9 @@ async fn run_session(
         }
     });
 
-    // Task: in-band Keycloak token reauth. The GUI silently refreshes the access
-    // token and pushes it via UpdateToken into current_token; present it to the
-    // server over a fresh bidi stream so the live tunnel survives the original
-    // token's expiry instead of being force-closed and reconnected.
+    // Task: in-band Keycloak token reauth. The background refresh task pushes
+    // fresh access tokens into current_token; present them to the server over a
+    // fresh bidi stream so the live tunnel survives the original token's expiry.
     let reauth_task = reauth::spawn_reauth_task(
         connection.clone(),
         session_alive.clone(),
@@ -422,6 +356,29 @@ async fn run_session(
         runtime.current_token.clone(),
         token,
     );
+
+    // Task: background Keycloak access-token refresh. Renews the short-lived
+    // access token using the long-lived refresh token and writes it into
+    // current_token so the in-band reauth task can push it to the server.
+    let kc_refresh_task = if config.kc_auth.unwrap_or(false) {
+        let kc_url = config.kc_url.clone().unwrap_or_default();
+        let realm = config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into());
+        let client_id = config
+            .kc_client_id
+            .clone()
+            .unwrap_or_else(|| "mavi-client".into());
+        Some(kc_refresh::spawn_refresh_task(
+            runtime.current_token.clone(),
+            refresh_token.clone(),
+            runtime.running().clone(),
+            session_alive.clone(),
+            kc_url,
+            realm,
+            client_id,
+        ))
+    } else {
+        None
+    };
 
     // Thread: TUN -> QUIC (Read from WinTUN, Send via QUIC)
     let ptb_ctx = PtbContext {
@@ -455,6 +412,9 @@ async fn run_session(
 
     quic_to_tun.abort();
     reauth_task.abort();
+    if let Some(task) = kc_refresh_task {
+        task.abort();
+    }
     let _ = tun_to_quic.join();
 
     // Surface WHY the tunnel dropped so disconnects are diagnosable instead of

@@ -16,7 +16,7 @@ fn html_escape(s: &str) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<String> {
+pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<shared::kc_oauth::OAuthTokens> {
     // Plain-HTTP Keycloak would expose the authorization code and tokens to a
     // MITM; only loopback is exempt (dev setups).
     shared::validate_keycloak_url(kc_url).map_err(|e| anyhow::anyhow!(e))?;
@@ -151,12 +151,9 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
         return Err(anyhow::anyhow!("Token exchange failed: {error_text}"));
     }
 
-    let json: serde_json::Value = res.json().await?;
-    let access_token = json["access_token"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No access_token found"))?;
-
-    Ok(access_token.to_string())
+    let body = res.text().await?;
+    shared::kc_oauth::parse_token_response(&body, None)
+        .ok_or_else(|| anyhow::anyhow!("Token response missing access_token or refresh_token"))
 }
 
 #[cfg(test)]

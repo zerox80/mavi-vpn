@@ -248,7 +248,8 @@ Full enterprise SSO with Keycloak:
    COMPOSE_FILE=docker-compose.yml:keycloak/docker-compose.yml
    COMPOSE_PROFILES=traefik,keycloak
    ```
-3. Clients authenticate via **browser-based PKCE OAuth2** — the CLI/GUI opens a local HTTP server on port `18923`, redirects to Keycloak, and captures the JWT automatically.
+3. On first start, Keycloak **auto-imports** the `mavi-vpn` realm from `backend/keycloak/mavi-vpn-realm.json` — including the `mavi-client` public PKCE client, the `vpn-user` realm role, and token lifespans tuned for the VPN refresh cycle (10 min access token, 1 h SSO idle, 24 h SSO max). You only need to create your users in the Keycloak admin console; the realm and client setup is automated. See `docs/INSTALLATION.md` Step 4 for details.
+4. Clients authenticate via **browser-based PKCE OAuth2** — the CLI/GUI opens a local HTTP server on port `18923`, redirects to Keycloak, and captures the JWT automatically.
 
 > The server validates JWTs using Keycloak's JWKS endpoint with automatic key rotation and constant-time `azp` comparison.
 
@@ -285,6 +286,10 @@ All server settings can be configured via environment variables or CLI flags:
 | `VPN_KEYCLOAK_URL` | — | Keycloak server URL (must be `https://`; plain HTTP only for localhost) |
 | `VPN_KEYCLOAK_REALM` | `mavi-vpn` | Keycloak realm name |
 | `VPN_KEYCLOAK_CLIENT_ID` | `mavi-client` | Keycloak OIDC client ID |
+| `VPN_KEYCLOAK_REQUIRED_ROLE` | — | Optional fail-closed: accepted JWTs must carry this realm/client role |
+| `VPN_KEYCLOAK_REQUIRED_SCOPE` | — | Optional fail-closed: accepted JWTs must carry this OAuth scope |
+
+> **Token lifetimes:** The auto-imported realm pre-configures Access Token Lifespan = 10 min, SSO Session Idle = 1 h, SSO Session Max = 24 h — matching the client's 300 s refresh skew to avoid mid-session disconnects. For existing deployments or to customize, see `docs/INSTALLATION.md` Step 4.
 
 ## Testing
 

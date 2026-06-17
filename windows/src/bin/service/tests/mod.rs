@@ -259,6 +259,61 @@ async fn start_request_with_finished_task_succeeds() {
 }
 
 #[tokio::test]
+async fn update_token_replaces_current_token_without_refresh_dependency() {
+    // The GUI owns the Keycloak refresh token; the service only ever receives
+    // the freshly minted access token via UpdateToken. Verify that UpdateToken
+    // overwrites current_token and never touches any refresh-token state.
+    let state = test_state();
+    {
+        let guard = state.lock().await;
+        guard.set_current_token("initial-access".to_string());
+        assert_eq!(
+            guard.current_token.lock().unwrap().clone(),
+            "initial-access"
+        );
+    }
+
+    let result = dispatch_request(
+        ipc::IpcRequest::UpdateToken {
+            token: "fresh-access-token".to_string(),
+        },
+        &state,
+    )
+    .await;
+    assert!(matches!(result, ipc::IpcResponse::Ok));
+
+    let guard = state.lock().await;
+    assert_eq!(
+        guard.current_token.lock().unwrap().clone(),
+        "fresh-access-token"
+    );
+}
+
+#[tokio::test]
+async fn update_token_succeeds_even_with_no_session_active() {
+    // UpdateToken must be harmless when no session is running: the next Start
+    // overwrites current_token anyway, and the service must not require a
+    // refresh token or an active session to accept an access-token update.
+    let state = test_state();
+
+    let result = dispatch_request(
+        ipc::IpcRequest::UpdateToken {
+            token: "standalone-access".to_string(),
+        },
+        &state,
+    )
+    .await;
+    assert!(matches!(result, ipc::IpcResponse::Ok));
+
+    let guard = state.lock().await;
+    assert_eq!(
+        guard.current_token.lock().unwrap().clone(),
+        "standalone-access"
+    );
+    assert!(!guard.vpn_running.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn handle_start_request_preserves_config_fields() {
     let mut state = VpnServiceState::new();
     let mut config = test_config();

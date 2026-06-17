@@ -2,8 +2,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 /// Shared runtime handles for a single VPN service session. Bundles the flags
-/// and mutable state used by the connection loop, packet pumps, and refresh
-/// tasks so they do not have to be passed individually through every layer.
+/// and mutable state used by the connection loop, packet pumps, and the in-band
+/// reauth task so they do not have to be passed individually through every
+/// layer. The service only owns the current *access* token; the long-lived
+/// Keycloak refresh token stays in the user-session GUI, which pushes freshly
+/// minted access tokens here via IPC `UpdateToken`.
 #[derive(Clone)]
 pub(super) struct VpnRuntimeState {
     running: Arc<AtomicBool>,
@@ -11,7 +14,6 @@ pub(super) struct VpnRuntimeState {
     last_error: Arc<StdMutex<Option<String>>>,
     assigned_ip: Arc<StdMutex<Option<String>>>,
     current_token: Arc<StdMutex<String>>,
-    refresh_token: Arc<StdMutex<Option<String>>>,
 }
 
 impl VpnRuntimeState {
@@ -21,7 +23,6 @@ impl VpnRuntimeState {
         last_error: Arc<StdMutex<Option<String>>>,
         assigned_ip: Arc<StdMutex<Option<String>>>,
         current_token: Arc<StdMutex<String>>,
-        refresh_token: Arc<StdMutex<Option<String>>>,
     ) -> Self {
         Self {
             running,
@@ -29,7 +30,6 @@ impl VpnRuntimeState {
             last_error,
             assigned_ip,
             current_token,
-            refresh_token,
         }
     }
 
@@ -56,16 +56,10 @@ impl VpnRuntimeState {
             .unwrap_or_else(|_| fallback.to_string())
     }
 
-    /// Returns a clone of the `current_token` Arc so background tasks can
-    /// update it independently of the runtime state.
+    /// Returns a clone of the `current_token` Arc so the in-band reauth task
+    /// can read updates the GUI pushes via IPC `UpdateToken`.
     pub(super) fn current_token(&self) -> Arc<StdMutex<String>> {
         self.current_token.clone()
-    }
-
-    /// Returns a clone of the `refresh_token` Arc so the refresh task can
-    /// rotate the stored token.
-    pub(super) fn refresh_token(&self) -> Arc<StdMutex<Option<String>>> {
-        self.refresh_token.clone()
     }
 
     pub(super) fn set_last_error(&self, error: Option<String>) {

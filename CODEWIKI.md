@@ -85,12 +85,16 @@ Assignments of virtual IPs is handled by the **`IpGuard`** mechanism.
 ---
 
 ## 🧩 6. Advanced Authentication: Keycloak OIDC
-*Status: This is an ACTIVE feature in the `beta-keycloak` branch.*
+*Status: Active feature on `main` (merged from `beta-keycloak`).*
 
 This branch integrates enterprise-grade identity management via **Keycloak**.
-- **OIDC Flow**: The server acts as a Resource Server. It fetches public certificates from Keycloak's **JWKS endpoint** on startup.
-- **JWT Validation**: Every client connection is verified against the Keycloak realm. The server uses the `jsonwebtoken` crate to verify the signature, expiration, and audience of the client's Access Token.
-- **Benefits**: Centralized MFA, user session management, and granular access control via Keycloak's administration console.
+- **OIDC Flow**: The server acts as a Resource Server. It fetches public certificates from Keycloak's **JWKS endpoint** on startup (fail-closed — the backend refuses to start if JWKS cannot be loaded, no static-token fallback when `VPN_KEYCLOAK_ENABLED=true`).
+- **JWT Validation**: Every client connection is verified against the Keycloak realm. The server uses the `jsonwebtoken` crate (with `aws_lc_rs`) to verify the signature, issuer, and `exp`/`nbf` (30 s leeway). The `azp` (Authorized Party) claim is compared against the configured client ID in **constant time**; built-in audience validation is disabled because Keycloak access tokens default to `aud: account`.
+- **In-band Reauth**: A live tunnel is **not** torn down when the original access token expires. Clients silently refresh the token (via `grant_type=refresh_token`) and present the fresh JWT to the server over a **new bidirectional QUIC stream** (`ControlMessage::Reauth`). The server re-validates it against JWKS, binds it to the original `sub`, and pushes the new `exp` out — the session deadline is re-armed in place, no reconnect.
+- **Token Refresh Lifecycle**: Clients refresh **300 s before `exp`** (`REFRESH_SKEW_SECS`) and check every 30 s (`REFRESH_TICK`). Outcomes are classified as `Success`, `NetworkError` (5xx/transport — keep tunnel, retry), or `NeedsLogin` (4xx — refresh token dead, terminal stop + browser re-login). Refresh tokens are stored only in the OS keyring, never in config files or over IPC.
+- **Server Force-Close**: If no successful reauth lands before `exp + 30 s` (`SESSION_EXPIRY_LEEWAY`), the server closes the QUIC connection with reason `b"session token expired"` so revoked/expired credentials cannot keep a session alive.
+- **Auto-Imported Realm**: The Keycloak container mounts `backend/keycloak/mavi-vpn-realm.json` and starts with `--import-realm`, so on first start (empty DB) the `mavi-vpn` realm is created automatically with the `mavi-client` public PKCE client, the `vpn-user` realm role, and token lifespans tuned for the VPN refresh cycle (10 min access token / 1 h SSO idle / 24 h SSO max). Operators only need to create users in the Keycloak admin console; the realm and client setup is automated. The import is idempotent — restarts skip it once the realm exists.
+- **Benefits**: Centralized MFA, user session management, and granular access control via Keycloak's administration console. Optional fail-closed policy via `VPN_KEYCLOAK_REQUIRED_ROLE` / `VPN_KEYCLOAK_REQUIRED_SCOPE`.
 
 ---
 

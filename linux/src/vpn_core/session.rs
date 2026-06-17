@@ -17,10 +17,7 @@ const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
 const TUN_DEVICE_NAME: &str = "mavi0";
 
-/// How often the in-band reauth task checks whether the GUI has pushed a fresher
-/// access token (via `UpdateToken`) that needs presenting to the server. The GUI
-/// refreshes ~300s before expiry, so a 15s poll applies it with ample margin.
-const REAUTH_POLL_SECS: u64 = 15;
+mod reauth;
 
 /// Sleeps up to `delay`, but returns as soon as `running` is cleared.
 ///
@@ -121,39 +118,6 @@ fn is_permanent_setup_error(message: &str) -> bool {
 enum SessionEnd {
     UserStopped,
     ConnectionLost,
-}
-
-/// Presents a refreshed access token to the server over a fresh bidirectional
-/// QUIC stream so the *live* session's deadline is extended in place (no
-/// reconnect). Returns whether the server accepted it. Bounded by a timeout so a
-/// stalled stream cannot wedge the reauth task. Framed identically to the
-/// handshake `Auth` message (`u32` length prefix + bincode payload).
-async fn send_reauth(connection: &quinn::Connection, token: &str) -> Result<bool> {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let (mut send, mut recv) = connection.open_bi().await?;
-        let msg = ControlMessage::Reauth {
-            token: token.to_string(),
-        };
-        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard())?;
-        send.write_u32_le(encoded.len() as u32).await?;
-        send.write_all(&encoded).await?;
-        let _ = send.finish();
-
-        let len = recv.read_u32_le().await? as usize;
-        if len > 65_536 {
-            anyhow::bail!("Reauth response too large: {} bytes", len);
-        }
-        let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
-        let (resp, _): (ControlMessage, _) =
-            bincode::serde::decode_from_slice(&buf, bincode::config::standard())?;
-        match resp {
-            ControlMessage::ReauthResult { accepted } => Ok(accepted),
-            _ => anyhow::bail!("Unexpected reauth response"),
-        }
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("Reauth timed out"))?
 }
 
 /// Manages a single active VPN session (handshake + packet pumping).
@@ -291,31 +255,13 @@ async fn run_session(
     // token and pushes it via UpdateToken into current_token; present it to the
     // server over a fresh bidi stream so the live tunnel survives the original
     // token's expiry instead of being force-closed and reconnected.
-    let conn_reauth = connection.clone();
-    let alive_reauth = session_alive.clone();
-    let running_reauth = global_running.clone();
-    let token_cell = current_token.clone();
-    let mut last_token = token;
-    let reauth_task = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(REAUTH_POLL_SECS)).await;
-            if !running_reauth.load(Ordering::Relaxed) || !alive_reauth.load(Ordering::Relaxed) {
-                break;
-            }
-            let current = token_cell.lock().map(|t| t.clone()).unwrap_or_default();
-            if current.is_empty() || current == last_token {
-                continue;
-            }
-            match send_reauth(&conn_reauth, &current).await {
-                Ok(true) => {
-                    info!("In-band token reauth accepted; live session extended");
-                    last_token = current;
-                }
-                Ok(false) => warn!("In-band token reauth rejected by server"),
-                Err(e) => warn!("In-band token reauth attempt failed: {e}"),
-            }
-        }
-    });
+    let reauth_task = reauth::spawn_reauth_task(
+        connection.clone(),
+        session_alive.clone(),
+        global_running.clone(),
+        current_token.clone(),
+        token,
+    );
 
     // Task: MTU Monitor
     let conn_monitor = connection.clone();
@@ -505,60 +451,4 @@ async fn run_session(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{is_permanent_setup_error, sleep_unless_stopped};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    #[tokio::test]
-    async fn backoff_sleep_returns_promptly_when_stopped() {
-        let running = Arc::new(AtomicBool::new(true));
-        let stopper = running.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            stopper.store(false, Ordering::Relaxed);
-        });
-
-        let started = Instant::now();
-        // A long backoff that must be cut short by the Stop above.
-        sleep_unless_stopped(Duration::from_secs(30), &running).await;
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "Stop during backoff must return within ~1s, took {:?}",
-            started.elapsed()
-        );
-    }
-
-    #[tokio::test]
-    async fn backoff_sleep_completes_full_delay_when_running() {
-        let running = Arc::new(AtomicBool::new(true));
-        let started = Instant::now();
-        sleep_unless_stopped(Duration::from_millis(250), &running).await;
-        assert!(started.elapsed() >= Duration::from_millis(200));
-    }
-
-    #[test]
-    fn permanent_setup_errors_stop_reconnect_loop() {
-        for message in [
-            "AUTH_FAILED: Server returned HTTP 401",
-            "Server rejected connection: denied",
-            "MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360",
-            "Server pushed unsupported VPN MTU 1400",
-            "Failed to open /dev/net/tun: permission denied",
-            "Failed to install IPv6 split route ::/1",
-            "Failed to execute: ip route add 0.0.0.0/1",
-            "ip failed: RTNETLINK answers: Operation not permitted",
-        ] {
-            assert!(is_permanent_setup_error(message), "{message}");
-        }
-    }
-
-    #[test]
-    fn transient_transport_errors_keep_reconnect_loop() {
-        assert!(!is_permanent_setup_error("connection lost"));
-        assert!(!is_permanent_setup_error(
-            "timed out while reading datagram"
-        ));
-    }
-}
+mod tests;

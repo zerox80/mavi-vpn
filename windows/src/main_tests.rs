@@ -13,6 +13,7 @@ fn test_config() -> Config {
         kc_url: None,
         kc_realm: None,
         kc_client_id: None,
+        refresh_token: None,
         ech_config: None,
         vpn_mtu: None,
     }

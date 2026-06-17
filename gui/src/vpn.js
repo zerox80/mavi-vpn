@@ -40,9 +40,10 @@ export async function connect() {
   try {
     await invoke('save_config', { config });
     // connectionId scopes the Keycloak refresh token in the OS keyring.
-    // forceLogin: this is a manual, user-initiated connect, so force a fresh
-    // interactive Keycloak login instead of silently reusing a stored token.
-    await invoke('vpn_connect', { config, connectionId: conn.id, forceLogin: true });
+    // Manual connects reuse a stored refresh token when available, so the user
+    // does not have to log in every time. The backend only falls back to a
+    // browser login when there is no refresh token or it has been rejected.
+    await invoke('vpn_connect', { config, connectionId: conn.id, forceLogin: false });
     // Immediately fetch the real status instead of waiting up to 2s for
     // the next poller tick. This prevents the UI from showing "Connecting..."
     // when the service has already transitioned to Connected (or Failed).

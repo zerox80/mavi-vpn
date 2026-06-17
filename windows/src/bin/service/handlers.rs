@@ -118,6 +118,7 @@ pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) ->
     } else {
         guard.mark_session_starting(config.clone());
         let task_runtime = guard.runtime_handles();
+        let refresh_token = Arc::new(std::sync::Mutex::new(config.refresh_token.clone()));
 
         guard.set_task(tokio::spawn(async move {
             if let Err(e) = vpn_core::run_vpn(
@@ -127,6 +128,7 @@ pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) ->
                 task_runtime.last_error.clone(),
                 task_runtime.assigned_ip.clone(),
                 task_runtime.current_token.clone(),
+                refresh_token,
             )
             .await
             {

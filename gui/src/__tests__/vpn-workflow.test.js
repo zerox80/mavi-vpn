@@ -181,7 +181,11 @@ describe('vpn workflows', () => {
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce({ service_available: true, running: false, state: 'Starting' });
     await toggleConnection();
-    expect(invoke).toHaveBeenCalledWith('vpn_connect', expect.any(Object));
+    // A manual connect must force a fresh Keycloak login (forceLogin: true).
+    expect(invoke).toHaveBeenCalledWith(
+      'vpn_connect',
+      expect.objectContaining({ forceLogin: true }),
+    );
 
     vi.clearAllMocks();
     state.hero = 'on';

@@ -88,6 +88,30 @@ fn reauth_payload_rejects_non_reauth_and_malformed() {
 }
 
 #[test]
+fn reauth_decision_extends_on_matching_subject() {
+    let validated = Some(ValidatedToken {
+        exp: 4_102_444_800,
+        sub: "user-1".to_string(),
+    });
+    assert_eq!(reauth_decision(validated, "user-1"), Some(4_102_444_800));
+}
+
+#[test]
+fn reauth_decision_rejects_subject_mismatch() {
+    // A valid token for a *different* user must not extend the session.
+    let validated = Some(ValidatedToken {
+        exp: 4_102_444_800,
+        sub: "attacker".to_string(),
+    });
+    assert_eq!(reauth_decision(validated, "user-1"), None);
+}
+
+#[test]
+fn reauth_decision_rejects_invalid_token() {
+    assert_eq!(reauth_decision(None, "user-1"), None);
+}
+
+#[test]
 fn unauthorized_response_frame_is_generic() {
     let framed = encode_control_message_frame(&unauthorized_control_message()).unwrap();
     let len = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;

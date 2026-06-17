@@ -36,6 +36,16 @@ impl JwksFetcher for DefaultJwksFetcher {
     }
 }
 
+/// A successfully validated Keycloak access token. Carries the token's expiry
+/// (`exp`, Unix seconds) and the subject (`sub`) it was issued for, so that an
+/// in-band re-authentication can be bound to the same user that opened the
+/// session rather than extending it on any otherwise-valid token.
+#[derive(Debug, Clone)]
+pub struct ValidatedToken {
+    pub exp: i64,
+    pub sub: String,
+}
+
 pub struct KeycloakValidator {
     url: String,
     realm: String,
@@ -105,11 +115,11 @@ impl KeycloakValidator {
         self.fetcher.fetch_jwks(&jwks_url).await
     }
 
-    /// Validates the token. Returns `Ok(Some(exp))` (the token's expiry as a
-    /// Unix timestamp) when the token is accepted, `Ok(None)` when it fails a
-    /// policy check, and `Err` when validation could not be performed.
+    /// Validates the token. Returns `Ok(Some(ValidatedToken))` (carrying the
+    /// token's expiry and subject) when the token is accepted, `Ok(None)` when it
+    /// fails a policy check, and `Err` when validation could not be performed.
     #[allow(clippy::too_many_lines)]
-    pub async fn validate_token(&self, token: &str) -> Result<Option<i64>> {
+    pub async fn validate_token(&self, token: &str) -> Result<Option<ValidatedToken>> {
         let header = decode_header(token).context("Invalid JWT header")?;
         let kid = header
             .kid
@@ -208,12 +218,27 @@ impl KeycloakValidator {
                     return Ok(None);
                 };
 
+                // The subject binds the session to a specific user. Without it an
+                // in-band reauth could not verify that a refreshed token belongs to
+                // the same principal, so a missing/empty `sub` is rejected.
+                let Some(sub) = claims
+                    .get("sub")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                else {
+                    warn!("JWT missing 'sub' claim - rejecting token");
+                    return Ok(None);
+                };
+
                 info!(
                     "Keycloak JWT validated successfully (sub: {}, azp: {})",
-                    claims.get("sub").and_then(|v| v.as_str()).unwrap_or("?"),
+                    sub,
                     claims.get("azp").and_then(|v| v.as_str()).unwrap_or("?")
                 );
-                Ok(Some(exp))
+                Ok(Some(ValidatedToken {
+                    exp,
+                    sub: sub.to_string(),
+                }))
             }
             Err(e) => {
                 warn!("JWT validation failed: {}", e);

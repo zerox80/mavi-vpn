@@ -6,14 +6,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::keycloak::KeycloakValidator;
+use crate::keycloak::{KeycloakValidator, ValidatedToken};
 use crate::state::AppState;
 
-pub type TokenValidationFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<i64>>> + Send + 'a>>;
+pub type TokenValidationFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<ValidatedToken>>> + Send + 'a>>;
 
 pub trait TokenValidator: Send + Sync {
-    /// Resolves to `Ok(Some(exp))` (token expiry, Unix seconds) when the token
-    /// is accepted, `Ok(None)` when it is rejected.
+    /// Resolves to `Ok(Some(ValidatedToken))` (carrying the token's expiry and
+    /// subject) when the token is accepted, `Ok(None)` when it is rejected.
     fn validate_token<'a>(&'a self, token: &'a str) -> TokenValidationFuture<'a>;
 }
 
@@ -32,19 +33,20 @@ pub(crate) fn as_token_validator(
     keycloak.map(|kc| kc.as_ref() as &dyn TokenValidator)
 }
 
-/// On success returns the assigned IP pair and, for Keycloak auth, the token's
-/// expiry as a Unix timestamp. Static-token sessions have no expiry (`None`).
+/// On success returns the assigned IP pair and, for Keycloak auth, the validated
+/// token (its expiry and subject). Static-token sessions carry no expiry and no
+/// subject (`None`).
 pub async fn authenticate_client(
     token: &str,
     state: &Arc<AppState>,
     config: &Config,
     keycloak: Option<&dyn TokenValidator>,
-) -> Result<(Ipv4Addr, Ipv6Addr, Option<i64>)> {
-    let session_expiry = if let Some(kc) = keycloak {
-        let Some(exp) = kc.validate_token(token).await? else {
+) -> Result<(Ipv4Addr, Ipv6Addr, Option<ValidatedToken>)> {
+    let session_auth = if let Some(kc) = keycloak {
+        let Some(validated) = kc.validate_token(token).await? else {
             anyhow::bail!("Access Denied: Invalid Keycloak Token");
         };
-        Some(exp)
+        Some(validated)
     } else {
         let Some(auth_token) = config.auth_token.as_deref().filter(|t| !t.is_empty()) else {
             anyhow::bail!("Static auth is enabled but VPN_AUTH_TOKEN is not configured");
@@ -56,7 +58,7 @@ pub async fn authenticate_client(
     };
 
     let (ip4, ip6) = state.assign_ip_pair()?;
-    Ok((ip4, ip6, session_expiry))
+    Ok((ip4, ip6, session_auth))
 }
 
 #[cfg(test)]
@@ -98,12 +100,12 @@ mod tests {
     async fn valid_token_returns_ip_pair() {
         let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
         let config = test_config();
-        let (ip4, ip6, expiry) = authenticate_client("correct-token", &state, &config, None)
+        let (ip4, ip6, session_auth) = authenticate_client("correct-token", &state, &config, None)
             .await
             .unwrap();
         assert_eq!(ip4, Ipv4Addr::new(10, 8, 0, 2));
         assert_eq!(ip6, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
-        assert_eq!(expiry, None);
+        assert!(session_auth.is_none());
     }
 
     #[tokio::test]
@@ -136,7 +138,14 @@ mod tests {
             Box::pin(async move {
                 assert_eq!(token, "kc-token");
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                self.result.map_err(anyhow::Error::msg)
+                self.result
+                    .map(|opt| {
+                        opt.map(|exp| ValidatedToken {
+                            exp,
+                            sub: "user-1".to_string(),
+                        })
+                    })
+                    .map_err(anyhow::Error::msg)
             })
         }
     }
@@ -150,14 +159,15 @@ mod tests {
             calls: AtomicUsize::new(0),
         };
 
-        let (ip4, ip6, expiry) = authenticate_client("kc-token", &state, &config, Some(&validator))
-            .await
-            .unwrap();
+        let (ip4, ip6, session_auth) =
+            authenticate_client("kc-token", &state, &config, Some(&validator))
+                .await
+                .unwrap();
 
         assert_eq!(validator.calls.load(Ordering::SeqCst), 1);
         assert_eq!(ip4, Ipv4Addr::new(10, 8, 0, 2));
         assert_eq!(ip6, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
-        assert_eq!(expiry, Some(4_102_444_800));
+        assert_eq!(session_auth.map(|v| v.exp), Some(4_102_444_800));
     }
 
     #[tokio::test]

@@ -49,8 +49,14 @@ pub(crate) async fn vpn_connect(
     app: AppHandle,
     mut config: Config,
     connection_id: String,
+    // `true` for a user-initiated (manual) connect: forces a fresh interactive
+    // Keycloak login. `false` for an automatic/programmatic connect: a stored
+    // refresh token is used silently when available, so auto-connect does not
+    // pop a browser. Defaults to `false` when the caller omits it.
+    force_login: Option<bool>,
 ) -> Result<String, String> {
-    let kc_session = prepare_keycloak_config(&mut config, &connection_id).await?;
+    let force_login = force_login.unwrap_or(false);
+    let kc_session = prepare_keycloak_config(&mut config, &connection_id, force_login).await?;
     config.normalize_transport();
 
     match send_ipc_request(&IpcRequest::Start(config)).await? {
@@ -69,13 +75,17 @@ pub(crate) async fn vpn_connect(
 
 /// Ensures `config.token` holds a fresh Keycloak access token before connecting.
 ///
-/// Prefers a **silent** refresh using the stored refresh token (no browser); only
-/// falls back to the interactive browser login when there is no refresh token or
-/// it has been rejected. Returns the session coordinates when Keycloak is in use
+/// When `force_login` is `true` (a manual, user-initiated connect) this always
+/// runs the interactive browser login, so every manual connect re-authenticates.
+/// When `false` (an automatic/programmatic connect) it prefers a **silent**
+/// refresh using the stored refresh token and only falls back to the browser
+/// login when there is no refresh token or it has been rejected — so auto-connect
+/// never pops a browser. Returns the session coordinates when Keycloak is in use
 /// so the caller can start the background refresh ticker.
 async fn prepare_keycloak_config(
     config: &mut Config,
     connection_id: &str,
+    force_login: bool,
 ) -> Result<Option<KeycloakSession>, String> {
     if !config.kc_auth.unwrap_or(false) {
         return Ok(None);
@@ -95,11 +105,41 @@ async fn prepare_keycloak_config(
     let store = KeyringSecretStore;
     let refresh_account = connection_refresh_token_account(connection_id);
 
-    // Every manual connect requires a fresh interactive Keycloak login (PKCE):
-    // we deliberately do NOT silently reuse a stored refresh token here, so a
-    // disconnect always forces re-authentication. The refresh token obtained now
-    // is still persisted — the in-session ticker + in-band reauth use it to keep
-    // the *live* tunnel alive silently, without ever re-prompting mid-session.
+    // Automatic (non-manual) connect: silently refresh using a stored refresh
+    // token if we have one, so auto-connect does not pop a browser. A manual
+    // connect (`force_login`) deliberately skips this and re-authenticates below.
+    if !force_login {
+        if let Some(refresh_token) = store
+            .get_secret(&refresh_account)?
+            .filter(|t| !t.is_empty())
+        {
+            match kc_oauth::refresh_access_token(&kc_url, &realm, &client_id, &refresh_token).await {
+                RefreshOutcome::Success(tokens) => {
+                    persist_refresh_token(&store, &refresh_account, tokens.refresh_token.as_deref())?;
+                    config.token = tokens.access_token.clone();
+                    return Ok(Some(KeycloakSession {
+                        kc_url,
+                        realm,
+                        client_id,
+                        connection_id: connection_id.to_string(),
+                        access_token: tokens.access_token,
+                    }));
+                }
+                RefreshOutcome::NetworkError(e) => {
+                    return Err(format!("Could not reach Keycloak to refresh the session: {e}"));
+                }
+                RefreshOutcome::NeedsLogin(_) => {
+                    // Refresh token is dead — drop it and fall through to a browser login.
+                    let _ = store.delete_secret(&refresh_account);
+                }
+            }
+        }
+    }
+
+    // Interactive browser login (PKCE). For a manual connect this always runs, so
+    // every manual connect re-authenticates. The refresh token obtained now is
+    // persisted — the in-session ticker + in-band reauth use it to keep the *live*
+    // tunnel alive silently, without ever re-prompting mid-session.
     let tokens = oauth::start_oauth_flow(&kc_url, &realm, &client_id)
         .await
         .map_err(|e| format!("Keycloak login failed: {e}"))?;
@@ -318,7 +358,7 @@ mod tests {
         config.kc_auth = Some(true);
         config.kc_url = Some(String::new());
 
-        let result = prepare_keycloak_config(&mut config, "test-conn").await;
+        let result = prepare_keycloak_config(&mut config, "test-conn", true).await;
 
         // Avoid `unwrap_err` so the success type (which holds a token) needs no
         // Debug impl — `.err()` discards the Ok value entirely.
@@ -334,7 +374,7 @@ mod tests {
         config.kc_auth = None;
 
         // No Keycloak → no session, token left as-is, no keyring/network touched.
-        let result = prepare_keycloak_config(&mut config, "test-conn").await;
+        let result = prepare_keycloak_config(&mut config, "test-conn", true).await;
 
         assert!(result.unwrap().is_none());
         assert_eq!(config.token, "token");

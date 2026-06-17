@@ -207,7 +207,7 @@ pub async fn handle_h3_connection(
     )
     .await;
 
-    let (assigned_ip, assigned_ip6, session_expiry) = match auth_result {
+    let (assigned_ip, assigned_ip6, session_auth) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
             let error_msg = format!("Unauthorized: {e}");
@@ -226,6 +226,9 @@ pub async fn handle_h3_connection(
             return Err(anyhow::anyhow!("H3 Error: {error_msg}"));
         }
     };
+
+    let session_expiry = session_auth.as_ref().map(|v| v.exp);
+    let session_subject = session_auth.map(|v| v.sub);
 
     let _ip_guard = IpGuard {
         state: state.clone(),
@@ -266,6 +269,7 @@ pub async fn handle_h3_connection(
         assigned_ip,
         assigned_ip6,
         session_expiry,
+        session_subject,
         config.mtu,
         true, // is_h3
         keycloak,

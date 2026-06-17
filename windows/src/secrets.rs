@@ -37,6 +37,10 @@ pub const fn config_token_account() -> &'static str {
     "windows-cli-config-token"
 }
 
+pub const fn config_refresh_token_account() -> &'static str {
+    "windows-cli-config-refresh-token"
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::SecretStore;

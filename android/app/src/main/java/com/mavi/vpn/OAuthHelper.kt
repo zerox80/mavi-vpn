@@ -100,7 +100,9 @@ object OAuthHelper {
             .appendQueryParameter("code_challenge", challenge)
             .appendQueryParameter("code_challenge_method", "S256")
             .appendQueryParameter("state", state)
-            .appendQueryParameter("prompt", "login") // FORCES Keycloak to ignore cookies and show login!
+            // Allow Keycloak to reuse an existing SSO cookie so the user does not
+            // have to type credentials on every connect. A missing/invalid session
+            // is handled by the caller, which falls back to interactive login.
             .build()
 
         val customTabsIntent = CustomTabsIntent.Builder().build()

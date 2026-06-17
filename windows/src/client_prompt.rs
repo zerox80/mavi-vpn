@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::io::{self, Write};
 
 use crate::client_config::{load_config, save_config};
+use shared::kc_oauth::RefreshOutcome;
 use crate::client_ipc::{send_request, send_request_internal};
 use crate::ipc::{Config, IpcRequest, IpcResponse};
 use crate::oauth;
@@ -86,13 +87,7 @@ pub(crate) async fn load_or_prompt_config() -> Result<Config> {
         if input.is_empty() || is_affirmative(&input) {
             println!();
             if saved.kc_auth.unwrap_or(false) {
-                let kc_url = saved.kc_url.as_deref().unwrap_or("");
-                let realm = saved.kc_realm.as_deref().unwrap_or("mavi-vpn");
-                let client_id = saved.kc_client_id.as_deref().unwrap_or("mavi-client");
-                println!("Refreshing Keycloak session...");
-                let fresh_token = oauth::start_oauth_flow(kc_url, realm, client_id).await?;
-                println!("Session successfully refreshed!");
-                saved.token = fresh_token;
+                saved = refresh_keycloak_or_login(saved).await?;
                 save_config(&saved)?;
             }
             return Ok(saved);
@@ -114,20 +109,22 @@ async fn prompt_new_config() -> Result<Config> {
     stdout.flush()?;
     let is_keycloak = read_line()?.to_lowercase();
     let mut kc_auth = Some(false);
-    let (token, saved_kc_url, saved_kc_realm, saved_kc_client_id) = if is_affirmative(&is_keycloak) {
-        kc_auth = Some(true);
-        let config = prompt_keycloak_config().await?;
-        (
-            config.token,
-            Some(config.url),
-            Some(config.realm),
-            Some(config.client_id),
-        )
-    } else {
-        print!("Preshared Key: ");
-        stdout.flush()?;
-        (read_line()?, None, None, None)
-    };
+    let (token, refresh_token, saved_kc_url, saved_kc_realm, saved_kc_client_id) =
+        if is_affirmative(&is_keycloak) {
+            kc_auth = Some(true);
+            let tokens = prompt_keycloak_config().await?;
+            (
+                tokens.access_token,
+                tokens.refresh_token,
+                Some(tokens.url),
+                Some(tokens.realm),
+                Some(tokens.client_id),
+            )
+        } else {
+            print!("Preshared Key: ");
+            stdout.flush()?;
+            (read_line()?, None, None, None, None)
+        };
     print!("Certificate PIN (SHA256 hex): ");
     stdout.flush()?;
     let cert_pin = read_line()?;
@@ -186,13 +183,15 @@ async fn prompt_new_config() -> Result<Config> {
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,
         kc_client_id: saved_kc_client_id,
+        refresh_token,
         ech_config,
         vpn_mtu,
     })
 }
 
 struct KcPromptResult {
-    token: String,
+    access_token: String,
+    refresh_token: Option<String>,
     url: String,
     realm: String,
     client_id: String,
@@ -215,14 +214,54 @@ async fn prompt_keycloak_config() -> Result<KcPromptResult> {
     if client_id.is_empty() {
         client_id = "mavi-client".to_string();
     }
-    let token = oauth::start_oauth_flow(&url, &realm, &client_id).await?;
+    let tokens = oauth::start_oauth_flow(&url, &realm, &client_id).await?;
     println!("Keycloak login complete! Saving configuration...");
     Ok(KcPromptResult {
-        token,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
         url,
         realm,
         client_id,
     })
+}
+
+/// Tries to renew the Keycloak access token silently using the stored refresh
+/// token. Falls back to an interactive browser login when there is no refresh
+/// token or it has been rejected.
+async fn refresh_keycloak_or_login(mut config: Config) -> Result<Config> {
+    let kc_url = config.kc_url.as_deref().unwrap_or("");
+    let realm = config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into());
+    let client_id = config
+        .kc_client_id
+        .clone()
+        .unwrap_or_else(|| "mavi-client".into());
+
+    if let Some(refresh) = config.refresh_token.as_deref().filter(|r| !r.is_empty()) {
+        println!("Refreshing Keycloak session...");
+        match shared::kc_oauth::refresh_access_token(kc_url, &realm, &client_id, refresh).await {
+            RefreshOutcome::Success(tokens) => {
+                println!("Session successfully refreshed!");
+                config.token = tokens.access_token;
+                config.refresh_token = tokens.refresh_token;
+                return Ok(config);
+            }
+            RefreshOutcome::NetworkError(e) => {
+                eprintln!("Could not reach Keycloak to refresh session: {e}");
+                // Keep the existing tokens; the VPN core will retry.
+                return Ok(config);
+            }
+            RefreshOutcome::NeedsLogin(_) => {
+                println!("Stored Keycloak session expired; logging in again...");
+                config.refresh_token = None;
+            }
+        }
+    }
+
+    let tokens = oauth::start_oauth_flow(kc_url, &realm, &client_id).await?;
+    println!("Keycloak login complete!");
+    config.token = tokens.access_token;
+    config.refresh_token = tokens.refresh_token;
+    Ok(config)
 }
 
 pub(crate) fn read_line() -> Result<String> {

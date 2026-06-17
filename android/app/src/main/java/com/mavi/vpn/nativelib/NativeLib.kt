@@ -27,6 +27,11 @@ object NativeLib {
         fd: Int,
     )
 
+    external fun updateToken(
+        handle: Long,
+        token: String,
+    )
+
     external fun stop(handle: Long)
 
     external fun free(handle: Long)

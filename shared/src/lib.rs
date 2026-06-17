@@ -143,6 +143,21 @@ pub enum ControlMessage {
     /// Sent by the server when it rejects the connection (e.g. bad token, no IPs available).
     /// The client should log `message` and may retry after a backoff.
     Error { message: String },
+
+    /// Sent by an already-authenticated client over a *fresh* bidirectional QUIC
+    /// stream during an active session to present a silently refreshed Keycloak
+    /// access token. It lets the server extend the session deadline in place so
+    /// the live tunnel survives the original token's expiry without a reconnect.
+    ///
+    /// Framed exactly like the handshake `Auth` message (`u32` length prefix +
+    /// bincode payload). Appended after `Error` so existing variant indices stay
+    /// wire-compatible with older peers.
+    Reauth { token: String },
+
+    /// Server's reply to [`ControlMessage::Reauth`]. `accepted` is `true` when the
+    /// new token validated and the session deadline was extended; `false` when the
+    /// token was rejected (the client should let the session lapse and re-login).
+    ReauthResult { accepted: bool },
 }
 
 /// Validates that a Keycloak base URL uses HTTPS.
@@ -314,6 +329,50 @@ mod tests {
             }
             other => panic!("Expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reauth_message_roundtrip() {
+        let msg = ControlMessage::Reauth {
+            token: "fresh-access-token".to_string(),
+        };
+        match roundtrip(&msg) {
+            ControlMessage::Reauth { token } => assert_eq!(token, "fresh-access-token"),
+            other => panic!("Expected Reauth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reauth_result_roundtrip() {
+        for accepted in [true, false] {
+            match roundtrip(&ControlMessage::ReauthResult { accepted }) {
+                ControlMessage::ReauthResult { accepted: got } => assert_eq!(got, accepted),
+                other => panic!("Expected ReauthResult, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn existing_variant_indices_are_stable() {
+        // Appending Reauth/ReauthResult must not shift the wire index of the
+        // original variants — older peers still decode Auth/Config/Error.
+        let auth = bincode::serde::encode_to_vec(
+            &ControlMessage::Auth {
+                token: "t".to_string(),
+            },
+            bincode::config::standard(),
+        )
+        .unwrap();
+        assert_eq!(auth[0], 0, "Auth must stay variant 0");
+
+        let error = bincode::serde::encode_to_vec(
+            &ControlMessage::Error {
+                message: String::new(),
+            },
+            bincode::config::standard(),
+        )
+        .unwrap();
+        assert_eq!(error[0], 2, "Error must stay variant 2");
     }
 
     #[test]

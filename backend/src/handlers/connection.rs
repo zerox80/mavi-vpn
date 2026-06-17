@@ -91,27 +91,144 @@ pub(super) fn session_deadline(expiry: Option<i64>) -> Option<tokio::time::Insta
 /// Runs the tunnel future, force-closing the QUIC connection when the
 /// authenticating token expires so revoked/expired credentials cannot keep a
 /// session alive indefinitely.
+///
+/// The expiry arrives through a [`tokio::sync::watch`] channel rather than a
+/// fixed value so an in-band re-authentication (see [`reauth_listener`]) can
+/// push the deadline out while the tunnel keeps running — the live session then
+/// survives the original token's expiry without a reconnect.
 pub(super) async fn run_tunnel_until_session_expiry(
     connection: &quinn::Connection,
-    expiry: Option<i64>,
+    mut expiry_rx: tokio::sync::watch::Receiver<Option<i64>>,
     tunnel: impl Future<Output = Result<()>>,
 ) -> Result<()> {
-    match session_deadline(expiry) {
-        Some(deadline) => {
-            tokio::pin!(tunnel);
-            tokio::select! {
-                res = &mut tunnel => res,
-                () = tokio::time::sleep_until(deadline) => {
-                    warn!(
-                        "Closing connection from {}: session token expired",
-                        connection.remote_address()
-                    );
-                    connection.close(0u32.into(), b"session token expired");
-                    Ok(())
+    tokio::pin!(tunnel);
+    loop {
+        let Some(deadline) = session_deadline(*expiry_rx.borrow()) else {
+            // No expiry (static-token auth): run the tunnel to completion.
+            return tunnel.await;
+        };
+
+        tokio::select! {
+            res = &mut tunnel => return res,
+            // A reauth changed the expiry → re-arm with the new deadline. `Err`
+            // means every sender was dropped (session ending), so just await.
+            changed = expiry_rx.changed() => {
+                if changed.is_err() {
+                    return tunnel.await;
                 }
             }
+            () = tokio::time::sleep_until(deadline) => {
+                // A reauth may have landed in the same wakeup and pushed the
+                // deadline out; re-check before tearing the session down.
+                if session_deadline(*expiry_rx.borrow()).is_some_and(|d| d > deadline) {
+                    continue;
+                }
+                warn!(
+                    "Closing connection from {}: session token expired",
+                    connection.remote_address()
+                );
+                connection.close(0u32.into(), b"session token expired");
+                return Ok(());
+            }
         }
-        None => tunnel.await,
+    }
+}
+
+/// Upper bound on a single in-band reauth exchange (read request + send reply),
+/// so a stalled reauth stream cannot linger against the bidi-stream budget.
+const REAUTH_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Accepts in-band re-authentication streams for the lifetime of a Keycloak
+/// session. The client opens a *fresh* bidirectional stream and sends a
+/// length-prefixed [`ControlMessage::Reauth`] carrying a refreshed access token;
+/// on a valid token the session deadline is pushed out through `expiry_tx` so the
+/// tunnel is not force-closed at the original token's expiry.
+///
+/// Re-validation runs the *same* checks as the initial handshake (signature,
+/// issuer, `azp`, expiry, role/scope policy), so a revoked or downgraded token
+/// cannot extend a session. Exits when the connection closes.
+async fn reauth_listener(
+    connection: Arc<quinn::Connection>,
+    keycloak: Arc<KeycloakValidator>,
+    expiry_tx: tokio::sync::watch::Sender<Option<i64>>,
+) {
+    let remote = connection.remote_address();
+    loop {
+        let (send, recv) = match connection.accept_bi().await {
+            Ok(streams) => streams,
+            // Connection closed (or closing): no more reauths to service.
+            Err(_) => break,
+        };
+        let keycloak = keycloak.clone();
+        let expiry_tx = expiry_tx.clone();
+        // Service each reauth on its own task so a slow client stream cannot
+        // delay later refreshes. The work is bounded (one small frame + reply).
+        tokio::spawn(async move {
+            if let Err(e) = handle_reauth_stream(send, recv, &keycloak, &expiry_tx, remote).await {
+                warn!("In-band reauth from {remote} failed: {e}");
+            }
+        });
+    }
+}
+
+/// Reads one [`ControlMessage::Reauth`] from a reauth stream, re-validates the
+/// token, extends the session deadline on success, and replies with a
+/// [`ControlMessage::ReauthResult`].
+async fn handle_reauth_stream(
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    keycloak: &KeycloakValidator,
+    expiry_tx: &tokio::sync::watch::Sender<Option<i64>>,
+    remote: std::net::SocketAddr,
+) -> Result<()> {
+    let token = tokio::time::timeout(REAUTH_STREAM_TIMEOUT, async {
+        let len = recv.read_u32_le().await? as usize;
+        validate_raw_auth_len(len)?;
+        let mut buf = vec![0u8; len];
+        recv.read_exact(&mut buf).await?;
+        decode_reauth_payload(&buf)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Reauth read timeout"))??;
+
+    let accepted = match keycloak.validate_token(&token).await {
+        Ok(Some(exp)) => {
+            // Push the new expiry to the tunnel watcher. A send error only means
+            // the session is already ending, which is harmless here.
+            let _ = expiry_tx.send(Some(exp));
+            info!("In-band reauth accepted from {remote}; session extended (exp={exp})");
+            true
+        }
+        Ok(None) => {
+            warn!("In-band reauth from {remote} rejected by policy");
+            false
+        }
+        Err(e) => {
+            warn!("In-band reauth from {remote} validation error: {e}");
+            false
+        }
+    };
+
+    let reply = encode_control_message_frame(&ControlMessage::ReauthResult { accepted })?;
+    tokio::time::timeout(REAUTH_STREAM_TIMEOUT, async {
+        send.write_all(&reply).await?;
+        let _ = send.finish();
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Reauth reply timeout"))??;
+    Ok(())
+}
+
+/// Decodes a length-checked reauth payload into the carried token, rejecting any
+/// other control message.
+fn decode_reauth_payload(buf: &[u8]) -> Result<String> {
+    let msg: ControlMessage = bincode::serde::decode_from_slice(buf, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
+    match msg {
+        ControlMessage::Reauth { token } => Ok(token),
+        _ => anyhow::bail!("Protocol error: Expected Reauth"),
     }
 }
 
@@ -134,9 +251,25 @@ pub(super) async fn run_authenticated_tunnel(
     session_expiry: Option<i64>,
     mtu: u16,
     is_h3: bool,
+    keycloak: Option<Arc<KeycloakValidator>>,
 ) -> Result<()> {
     let (tx_client, rx_client) = tokio::sync::mpsc::channel::<Bytes>(CLIENT_CHANNEL_CAPACITY);
     state.register_client(assigned_ip, assigned_ip6, tx_client);
+
+    // The session deadline is delivered through a watch channel so an in-band
+    // reauth can extend it. `expiry_tx` is held until the tunnel ends so the
+    // receiver never sees a spurious "all senders dropped".
+    let (expiry_tx, expiry_rx) = tokio::sync::watch::channel(session_expiry);
+    let reauth_task = match keycloak {
+        // In-band reauth only applies to Keycloak sessions (those carry an
+        // expiry and a validator); static-token sessions never expire.
+        Some(kc) if session_expiry.is_some() => Some(tokio::spawn(reauth_listener(
+            connection.clone(),
+            kc,
+            expiry_tx.clone(),
+        ))),
+        _ => None,
+    };
 
     let tunnel = run_tunnel(
         connection.clone(),
@@ -149,7 +282,13 @@ pub(super) async fn run_authenticated_tunnel(
         mtu,
         is_h3,
     );
-    run_tunnel_until_session_expiry(&connection, session_expiry, tunnel).await
+    let result = run_tunnel_until_session_expiry(&connection, expiry_rx, tunnel).await;
+
+    if let Some(task) = reauth_task {
+        task.abort();
+    }
+    drop(expiry_tx);
+    result
 }
 
 pub(super) fn build_config_message(
@@ -393,6 +532,7 @@ pub async fn handle_connection(
         session_expiry,
         config.mtu,
         false, // is_h3
+        keycloak,
     )
     .await
 }

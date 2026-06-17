@@ -64,6 +64,30 @@ fn raw_auth_payload_rejects_non_auth_and_malformed() {
 }
 
 #[test]
+fn reauth_payload_extracts_token() {
+    let payload = encode_message(&ControlMessage::Reauth {
+        token: "fresh-token".to_string(),
+    });
+    assert_eq!(decode_reauth_payload(&payload).unwrap(), "fresh-token");
+}
+
+#[test]
+fn reauth_payload_rejects_non_reauth_and_malformed() {
+    let payload = encode_message(&ControlMessage::Auth {
+        token: "x".to_string(),
+    });
+    assert!(decode_reauth_payload(&payload)
+        .unwrap_err()
+        .to_string()
+        .contains("Expected Reauth"));
+
+    assert!(decode_reauth_payload(&[0xde, 0xad, 0xbe, 0xef])
+        .unwrap_err()
+        .to_string()
+        .contains("Protocol error"));
+}
+
+#[test]
 fn unauthorized_response_frame_is_generic() {
     let framed = encode_control_message_frame(&unauthorized_control_message()).unwrap();
     let len = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;

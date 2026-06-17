@@ -95,34 +95,11 @@ async fn prepare_keycloak_config(
     let store = KeyringSecretStore;
     let refresh_account = connection_refresh_token_account(connection_id);
 
-    // 1. Silent refresh if we already hold a refresh token for this connection.
-    if let Some(refresh_token) = store
-        .get_secret(&refresh_account)?
-        .filter(|t| !t.is_empty())
-    {
-        match kc_oauth::refresh_access_token(&kc_url, &realm, &client_id, &refresh_token).await {
-            RefreshOutcome::Success(tokens) => {
-                persist_refresh_token(&store, &refresh_account, tokens.refresh_token.as_deref())?;
-                config.token = tokens.access_token.clone();
-                return Ok(Some(KeycloakSession {
-                    kc_url,
-                    realm,
-                    client_id,
-                    connection_id: connection_id.to_string(),
-                    access_token: tokens.access_token,
-                }));
-            }
-            RefreshOutcome::NetworkError(e) => {
-                return Err(format!("Could not reach Keycloak to refresh the session: {e}"));
-            }
-            RefreshOutcome::NeedsLogin(_) => {
-                // Refresh token is dead — drop it and fall through to a browser login.
-                let _ = store.delete_secret(&refresh_account);
-            }
-        }
-    }
-
-    // 2. Interactive browser login (PKCE).
+    // Every manual connect requires a fresh interactive Keycloak login (PKCE):
+    // we deliberately do NOT silently reuse a stored refresh token here, so a
+    // disconnect always forces re-authentication. The refresh token obtained now
+    // is still persisted — the in-session ticker + in-band reauth use it to keep
+    // the *live* tunnel alive silently, without ever re-prompting mid-session.
     let tokens = oauth::start_oauth_flow(&kc_url, &realm, &client_id)
         .await
         .map_err(|e| format!("Keycloak login failed: {e}"))?;

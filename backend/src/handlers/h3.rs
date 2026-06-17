@@ -268,6 +268,7 @@ pub async fn handle_h3_connection(
         session_expiry,
         config.mtu,
         true, // is_h3
+        keycloak,
     )
     .await
 }

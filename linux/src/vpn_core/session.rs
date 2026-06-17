@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use tracing::{info, warn};
 
@@ -15,6 +16,11 @@ use crate::tun::TunDevice;
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
 const TUN_DEVICE_NAME: &str = "mavi0";
+
+/// How often the in-band reauth task checks whether the GUI has pushed a fresher
+/// access token (via `UpdateToken`) that needs presenting to the server. The GUI
+/// refreshes ~300s before expiry, so a 15s poll applies it with ample margin.
+const REAUTH_POLL_SECS: u64 = 15;
 
 /// Sleeps up to `delay`, but returns as soon as `running` is cleared.
 ///
@@ -117,6 +123,39 @@ enum SessionEnd {
     ConnectionLost,
 }
 
+/// Presents a refreshed access token to the server over a fresh bidirectional
+/// QUIC stream so the *live* session's deadline is extended in place (no
+/// reconnect). Returns whether the server accepted it. Bounded by a timeout so a
+/// stalled stream cannot wedge the reauth task. Framed identically to the
+/// handshake `Auth` message (`u32` length prefix + bincode payload).
+async fn send_reauth(connection: &quinn::Connection, token: &str) -> Result<bool> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (mut send, mut recv) = connection.open_bi().await?;
+        let msg = ControlMessage::Reauth {
+            token: token.to_string(),
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard())?;
+        send.write_u32_le(encoded.len() as u32).await?;
+        send.write_all(&encoded).await?;
+        let _ = send.finish();
+
+        let len = recv.read_u32_le().await? as usize;
+        if len > 65_536 {
+            anyhow::bail!("Reauth response too large: {} bytes", len);
+        }
+        let mut buf = vec![0u8; len];
+        recv.read_exact(&mut buf).await?;
+        let (resp, _): (ControlMessage, _) =
+            bincode::serde::decode_from_slice(&buf, bincode::config::standard())?;
+        match resp {
+            ControlMessage::ReauthResult { accepted } => Ok(accepted),
+            _ => anyhow::bail!("Unexpected reauth response"),
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Reauth timed out"))?
+}
+
 /// Manages a single active VPN session (handshake + packet pumping).
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
@@ -152,7 +191,9 @@ async fn run_session(
 
     let (connection, server_config, _h3_guard) = super::handshake::connect_and_handshake(
         socket,
-        token,
+        // Clone so the plaintext token survives as the reauth task's initial
+        // `last_token` baseline (the handshake takes ownership otherwise).
+        token.clone(),
         config.endpoint.clone(),
         cert_pin_bytes.to_vec(),
         config.censorship_resistant,
@@ -245,6 +286,36 @@ async fn run_session(
 
     let session_alive = Arc::new(AtomicBool::new(true));
     let connection = Arc::new(connection);
+
+    // Task: in-band Keycloak token reauth. The GUI silently refreshes the access
+    // token and pushes it via UpdateToken into current_token; present it to the
+    // server over a fresh bidi stream so the live tunnel survives the original
+    // token's expiry instead of being force-closed and reconnected.
+    let conn_reauth = connection.clone();
+    let alive_reauth = session_alive.clone();
+    let running_reauth = global_running.clone();
+    let token_cell = current_token.clone();
+    let mut last_token = token;
+    let reauth_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(REAUTH_POLL_SECS)).await;
+            if !running_reauth.load(Ordering::Relaxed) || !alive_reauth.load(Ordering::Relaxed) {
+                break;
+            }
+            let current = token_cell.lock().map(|t| t.clone()).unwrap_or_default();
+            if current.is_empty() || current == last_token {
+                continue;
+            }
+            match send_reauth(&conn_reauth, &current).await {
+                Ok(true) => {
+                    info!("In-band token reauth accepted; live session extended");
+                    last_token = current;
+                }
+                Ok(false) => warn!("In-band token reauth rejected by server"),
+                Err(e) => warn!("In-band token reauth attempt failed: {e}"),
+            }
+        }
+    });
 
     // Task: MTU Monitor
     let conn_monitor = connection.clone();
@@ -399,6 +470,16 @@ async fn run_session(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Capture WHY the tunnel dropped *before* we self-close below, so a
+    // server-initiated close (e.g. "session token expired") or a QUIC idle
+    // timeout is visible in the log instead of a silent reconnect.
+    if global_running.load(Ordering::Relaxed) {
+        match connection.close_reason() {
+            Some(reason) => warn!("VPN session ended - QUIC close reason: {reason}"),
+            None => warn!("VPN session ended without an explicit QUIC close reason"),
+        }
+    }
+
     // Signal shutdown to the QUIC->TUN task (unblocks read_datagram)
     drop(shutdown_tx);
     // Close the QUIC connection to unblock any remaining awaits
@@ -407,6 +488,7 @@ async fn run_session(
     tun_to_quic.abort();
     quic_to_tun.abort();
     mtu_monitor.abort();
+    reauth_task.abort();
 
     // Cleanup networking
     net_config.cleanup();

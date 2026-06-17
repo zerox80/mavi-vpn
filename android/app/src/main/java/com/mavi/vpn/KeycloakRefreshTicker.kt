@@ -8,6 +8,7 @@ internal fun startKeycloakRefreshTicker(
     prefs: PrefsManager,
     tokenManager: KeycloakTokenManager,
     isSessionActive: () -> Boolean,
+    onTokenRefreshed: (String) -> Unit,
     onSessionExpired: () -> Unit,
 ): Thread? {
     if (!prefs.savedUseKeycloak) {
@@ -28,6 +29,9 @@ internal fun startKeycloakRefreshTicker(
                     is TokenAcquireResult.Usable -> {
                         if (tokenResult.refreshed) {
                             Log.i("MaviVPN", "Refreshed Keycloak token while VPN session is active.")
+                            // Push the fresh token into the live native session so the
+                            // in-band reauth task presents it to the server (no reconnect).
+                            onTokenRefreshed(tokenResult.accessToken)
                         }
                     }
                     is TokenAcquireResult.TemporaryFailure -> {

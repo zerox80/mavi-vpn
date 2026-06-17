@@ -287,6 +287,7 @@ class MaviVpnService : VpnService() {
                                     prefs = prefs,
                                     tokenManager = tokenManager,
                                     isSessionActive = { isRunning && handleRegistry.isCurrent(workerGeneration) },
+                                    onTokenRefreshed = { newToken -> NativeLib.updateToken(handle, newToken) },
                                     onSessionExpired = {
                                         isRunning = false
                                         isConnected.value = false

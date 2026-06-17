@@ -6,11 +6,80 @@ use shared::{
     masque::{self, CAPSULE_MAVI_CONFIG},
     ControlMessage,
 };
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod validation;
+
+/// How often the in-band reauth task checks whether `updateToken` has pushed a
+/// fresher access token that needs presenting to the server.
+const REAUTH_POLL_SECS: u64 = 15;
+
+/// Background task: while the session is alive, present a GUI-refreshed access
+/// token to the server over a fresh bidirectional stream so the live tunnel
+/// survives the original token's expiry without a reconnect. The token cell is
+/// seeded with the handshake token and updated via `NativeLib.updateToken`.
+pub async fn run_reauth_task(
+    connection: quinn::Connection,
+    token_cell: Arc<Mutex<String>>,
+    stop_flag: Arc<AtomicBool>,
+) {
+    let mut last_token = token_cell.lock().map(|t| t.clone()).unwrap_or_default();
+    loop {
+        tokio::time::sleep(Duration::from_secs(REAUTH_POLL_SECS)).await;
+        if stop_flag.load(Ordering::SeqCst) {
+            break;
+        }
+        let current = token_cell.lock().map(|t| t.clone()).unwrap_or_default();
+        if current.is_empty() || current == last_token {
+            continue;
+        }
+        match send_reauth(&connection, &current).await {
+            Ok(true) => {
+                info!("In-band token reauth accepted; live session extended");
+                last_token = current;
+            }
+            Ok(false) => log::warn!("In-band token reauth rejected by server"),
+            Err(e) => log::warn!("In-band token reauth attempt failed: {e}"),
+        }
+    }
+}
+
+/// Presents `token` to the server over a fresh bidirectional QUIC stream and
+/// returns whether it was accepted. Framed identically to the handshake `Auth`
+/// message; bounded by a timeout so a stalled stream cannot wedge the task.
+async fn send_reauth(connection: &quinn::Connection, token: &str) -> anyhow::Result<bool> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (mut send, mut recv) = connection.open_bi().await?;
+        let msg = ControlMessage::Reauth {
+            token: token.to_string(),
+        };
+        let bytes = bincode::serde::encode_to_vec(&msg, bincode::config::standard())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        #[allow(clippy::cast_possible_truncation)]
+        send.write_u32_le(bytes.len() as u32).await?;
+        send.write_all(&bytes).await?;
+        let _ = send.finish();
+
+        let len = recv.read_u32_le().await? as usize;
+        if len > 65536 {
+            anyhow::bail!("Reauth response too large: {len} bytes");
+        }
+        let mut buf = vec![0u8; len];
+        recv.read_exact(&mut buf).await?;
+        let (resp, _): (ControlMessage, _) =
+            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        match resp {
+            ControlMessage::ReauthResult { accepted } => Ok(accepted),
+            _ => anyhow::bail!("Unexpected reauth response"),
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Reauth timed out"))?
+}
 
 use crate::crypto::{decode_hex, PinnedServerVerifier};
 use validation::validate_server_mtu;

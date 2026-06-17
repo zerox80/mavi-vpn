@@ -5,6 +5,7 @@
 mod handshake;
 mod network;
 mod pump;
+mod reauth;
 mod reconnect;
 mod wintun_mod;
 
@@ -164,7 +165,9 @@ impl ServerNetworkAssignment {
             ControlMessage::Error { message } => {
                 Err(anyhow::anyhow!("Server rejected connection: {message}"))
             }
-            ControlMessage::Auth { .. } => Err(anyhow::anyhow!(
+            ControlMessage::Auth { .. }
+            | ControlMessage::Reauth { .. }
+            | ControlMessage::ReauthResult { .. } => Err(anyhow::anyhow!(
                 "Unexpected server response during handshake"
             )),
         }
@@ -303,7 +306,9 @@ async fn run_session(
     let connect_started = Instant::now();
     let (connection, server_config, _h3_guard) = connect_and_handshake(HandshakeRequest {
         socket,
-        token,
+        // Clone so the plaintext token survives as the reauth task's initial
+        // `last_token` baseline (the request takes ownership otherwise).
+        token: token.clone(),
         endpoint_str: config.endpoint.clone(),
         cert_pin: cert_pin_bytes.to_vec(),
         censorship_resistant: config.censorship_resistant,
@@ -406,6 +411,18 @@ async fn run_session(
         }
     });
 
+    // Task: in-band Keycloak token reauth. The GUI silently refreshes the access
+    // token and pushes it via UpdateToken into current_token; present it to the
+    // server over a fresh bidi stream so the live tunnel survives the original
+    // token's expiry instead of being force-closed and reconnected.
+    let reauth_task = reauth::spawn_reauth_task(
+        connection.clone(),
+        session_alive.clone(),
+        runtime.running().clone(),
+        runtime.current_token.clone(),
+        token,
+    );
+
     // Thread: TUN -> QUIC (Read from WinTUN, Send via QUIC)
     let ptb_ctx = PtbContext {
         gateway: assignment.gateway,
@@ -437,7 +454,19 @@ async fn run_session(
     }
 
     quic_to_tun.abort();
+    reauth_task.abort();
     let _ = tun_to_quic.join();
+
+    // Surface WHY the tunnel dropped so disconnects are diagnosable instead of
+    // silent reconnects: a server-initiated close carries its reason string
+    // (e.g. "session token expired"), a QUIC idle timeout shows as `TimedOut`.
+    if runtime.is_running() {
+        match connection.close_reason() {
+            Some(reason) => warn!("VPN session ended - QUIC close reason: {reason}"),
+            None => warn!("VPN session ended without an explicit QUIC close reason"),
+        }
+    }
+
     runtime.set_connected(false);
     runtime.clear_assigned_ip();
     drop(route_cleanup);

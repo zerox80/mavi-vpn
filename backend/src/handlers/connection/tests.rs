@@ -1,4 +1,6 @@
+use super::reauth::{decode_reauth_payload, reauth_decision};
 use super::*;
+use crate::keycloak::ValidatedToken;
 use clap::Parser;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -61,6 +63,54 @@ fn raw_auth_payload_rejects_non_auth_and_malformed() {
         .unwrap_err()
         .to_string()
         .contains("Protocol error"));
+}
+
+#[test]
+fn reauth_payload_extracts_token() {
+    let payload = encode_message(&ControlMessage::Reauth {
+        token: "fresh-token".to_string(),
+    });
+    assert_eq!(decode_reauth_payload(&payload).unwrap(), "fresh-token");
+}
+
+#[test]
+fn reauth_payload_rejects_non_reauth_and_malformed() {
+    let payload = encode_message(&ControlMessage::Auth {
+        token: "x".to_string(),
+    });
+    assert!(decode_reauth_payload(&payload)
+        .unwrap_err()
+        .to_string()
+        .contains("Expected Reauth"));
+
+    assert!(decode_reauth_payload(&[0xde, 0xad, 0xbe, 0xef])
+        .unwrap_err()
+        .to_string()
+        .contains("Protocol error"));
+}
+
+#[test]
+fn reauth_decision_extends_on_matching_subject() {
+    let validated = Some(ValidatedToken {
+        exp: 4_102_444_800,
+        sub: "user-1".to_string(),
+    });
+    assert_eq!(reauth_decision(validated, "user-1"), Some(4_102_444_800));
+}
+
+#[test]
+fn reauth_decision_rejects_subject_mismatch() {
+    // A valid token for a *different* user must not extend the session.
+    let validated = Some(ValidatedToken {
+        exp: 4_102_444_800,
+        sub: "attacker".to_string(),
+    });
+    assert_eq!(reauth_decision(validated, "user-1"), None);
+}
+
+#[test]
+fn reauth_decision_rejects_invalid_token() {
+    assert_eq!(reauth_decision(None, "user-1"), None);
 }
 
 #[test]

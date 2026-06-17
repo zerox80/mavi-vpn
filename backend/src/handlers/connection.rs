@@ -17,6 +17,9 @@ use crate::handlers::h3::handle_h3_connection;
 use crate::handlers::tunnel::run_tunnel;
 use crate::handlers::utils::{emulate_http3, negotiated_alpn, negotiated_sni, IpGuard};
 
+mod reauth;
+use reauth::reauth_listener;
+
 enum InitialStreams {
     Raw {
         send_stream: quinn::SendStream,
@@ -37,7 +40,7 @@ const RAW_AUTH_MAX_BYTES: usize = 16_384;
 /// connection-slot exhaustion. Bounding the pre-auth phase releases stalled slots.
 pub(crate) const PREAUTH_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn validate_raw_auth_len(len: usize) -> Result<()> {
+pub(super) fn validate_raw_auth_len(len: usize) -> Result<()> {
     if len > RAW_AUTH_MAX_BYTES {
         anyhow::bail!("Auth message too big");
     }
@@ -55,7 +58,7 @@ fn decode_raw_auth_payload(buf: &[u8]) -> Result<String> {
     }
 }
 
-fn encode_control_message_frame(msg: &ControlMessage) -> Result<Vec<u8>> {
+pub(super) fn encode_control_message_frame(msg: &ControlMessage) -> Result<Vec<u8>> {
     let encoded = bincode::serde::encode_to_vec(msg, bincode::config::standard())?;
     let mut framed = Vec::with_capacity(4 + encoded.len());
     framed.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
@@ -91,27 +94,46 @@ pub(super) fn session_deadline(expiry: Option<i64>) -> Option<tokio::time::Insta
 /// Runs the tunnel future, force-closing the QUIC connection when the
 /// authenticating token expires so revoked/expired credentials cannot keep a
 /// session alive indefinitely.
+///
+/// The expiry arrives through a [`tokio::sync::watch`] channel rather than a
+/// fixed value so an in-band re-authentication (see [`reauth_listener`]) can
+/// push the deadline out while the tunnel keeps running — the live session then
+/// survives the original token's expiry without a reconnect.
 pub(super) async fn run_tunnel_until_session_expiry(
     connection: &quinn::Connection,
-    expiry: Option<i64>,
+    mut expiry_rx: tokio::sync::watch::Receiver<Option<i64>>,
     tunnel: impl Future<Output = Result<()>>,
 ) -> Result<()> {
-    match session_deadline(expiry) {
-        Some(deadline) => {
-            tokio::pin!(tunnel);
-            tokio::select! {
-                res = &mut tunnel => res,
-                () = tokio::time::sleep_until(deadline) => {
-                    warn!(
-                        "Closing connection from {}: session token expired",
-                        connection.remote_address()
-                    );
-                    connection.close(0u32.into(), b"session token expired");
-                    Ok(())
+    tokio::pin!(tunnel);
+    loop {
+        let Some(deadline) = session_deadline(*expiry_rx.borrow()) else {
+            // No expiry (static-token auth): run the tunnel to completion.
+            return tunnel.await;
+        };
+
+        tokio::select! {
+            res = &mut tunnel => return res,
+            // A reauth changed the expiry → re-arm with the new deadline. `Err`
+            // means every sender was dropped (session ending), so just await.
+            changed = expiry_rx.changed() => {
+                if changed.is_err() {
+                    return tunnel.await;
                 }
             }
+            () = tokio::time::sleep_until(deadline) => {
+                // A reauth may have landed in the same wakeup and pushed the
+                // deadline out; re-check before tearing the session down.
+                if session_deadline(*expiry_rx.borrow()).is_some_and(|d| d > deadline) {
+                    continue;
+                }
+                warn!(
+                    "Closing connection from {}: session token expired",
+                    connection.remote_address()
+                );
+                connection.close(0u32.into(), b"session token expired");
+                return Ok(());
+            }
         }
-        None => tunnel.await,
     }
 }
 
@@ -132,11 +154,30 @@ pub(super) async fn run_authenticated_tunnel(
     assigned_ip: std::net::Ipv4Addr,
     assigned_ip6: std::net::Ipv6Addr,
     session_expiry: Option<i64>,
+    session_subject: Option<String>,
     mtu: u16,
     is_h3: bool,
+    keycloak: Option<Arc<KeycloakValidator>>,
 ) -> Result<()> {
     let (tx_client, rx_client) = tokio::sync::mpsc::channel::<Bytes>(CLIENT_CHANNEL_CAPACITY);
     state.register_client(assigned_ip, assigned_ip6, tx_client);
+
+    // The session deadline is delivered through a watch channel so an in-band
+    // reauth can extend it. `expiry_tx` is held until the tunnel ends so the
+    // receiver never sees a spurious "all senders dropped".
+    let (expiry_tx, expiry_rx) = tokio::sync::watch::channel(session_expiry);
+    let reauth_task = match (keycloak, session_expiry, session_subject) {
+        // In-band reauth only applies to Keycloak sessions (those carry an
+        // expiry, a subject, and a validator); static-token sessions never expire.
+        // The reauth is bound to `subject` so only the same user can extend it.
+        (Some(kc), Some(_), Some(subject)) => Some(tokio::spawn(reauth_listener(
+            connection.clone(),
+            kc,
+            expiry_tx.clone(),
+            Arc::from(subject),
+        ))),
+        _ => None,
+    };
 
     let tunnel = run_tunnel(
         connection.clone(),
@@ -149,7 +190,13 @@ pub(super) async fn run_authenticated_tunnel(
         mtu,
         is_h3,
     );
-    run_tunnel_until_session_expiry(&connection, session_expiry, tunnel).await
+    let result = run_tunnel_until_session_expiry(&connection, expiry_rx, tunnel).await;
+
+    if let Some(task) = reauth_task {
+        task.abort();
+    }
+    drop(expiry_tx);
+    result
 }
 
 pub(super) fn build_config_message(
@@ -322,7 +369,7 @@ pub async fn handle_connection(
     }
     .await;
 
-    let (assigned_ip, assigned_ip6, session_expiry) = match auth_result {
+    let (assigned_ip, assigned_ip6, session_auth) = match auth_result {
         Ok(ips) => ips,
         Err(e) => {
             if config.censorship_resistant {
@@ -342,6 +389,9 @@ pub async fn handle_connection(
             return Err(anyhow::anyhow!("Unauthorized: {e}"));
         }
     };
+
+    let session_expiry = session_auth.as_ref().map(|v| v.exp);
+    let session_subject = session_auth.map(|v| v.sub);
 
     let _ip_guard = IpGuard {
         state: state.clone(),
@@ -391,8 +441,10 @@ pub async fn handle_connection(
         assigned_ip,
         assigned_ip6,
         session_expiry,
+        session_subject,
         config.mtu,
         false, // is_h3
+        keycloak,
     )
     .await
 }

@@ -157,7 +157,7 @@ pub async fn run_vpn(
         cleanup_routes(None);
         runtime.set_connected(false);
 
-        let outcome = run_session(&config, &cert_pin_bytes, &adapter, &runtime, &runtime.refresh_token).await;
+        let outcome = run_session(&config, &cert_pin_bytes, &adapter, &runtime, &runtime.refresh_token()).await;
 
         if !runtime.is_running() {
             break;
@@ -353,7 +353,7 @@ async fn run_session(
         connection.clone(),
         session_alive.clone(),
         runtime.running().clone(),
-        runtime.current_token.clone(),
+        runtime.current_token(),
         token,
     );
 
@@ -368,7 +368,7 @@ async fn run_session(
             .clone()
             .unwrap_or_else(|| "mavi-client".into());
         Some(kc_refresh::spawn_refresh_task(
-            runtime.current_token.clone(),
+            runtime.current_token(),
             refresh_token.clone(),
             runtime.running().clone(),
             session_alive.clone(),

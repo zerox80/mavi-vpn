@@ -181,10 +181,11 @@ mod tests {
             http3_framing: false,
             kc_auth: None,
             kc_url: None,
-            kc_realm: None,
-            kc_client_id: None,
-            ech_config: None,
-            vpn_mtu: None,
+        kc_realm: None,
+        kc_client_id: None,
+        refresh_token: None,
+        ech_config: None,
+        vpn_mtu: None,
         }
     }
 

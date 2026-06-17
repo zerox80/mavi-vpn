@@ -48,6 +48,11 @@ pub struct Config {
     pub kc_realm: Option<String>,
     /// Keycloak Client ID.
     pub kc_client_id: Option<String>,
+    /// Long-lived Keycloak refresh token. Used by the client to renew the
+    /// short-lived access token without an interactive browser login. Never
+    /// leaves the local machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
     /// Hex-encoded `ECHConfigList` bytes. When present and the client's crypto
     /// provider supports HPKE (aws-lc-rs), the client offers ECH GREASE and
     /// spoofs the SNI to the config's `public_name`.
@@ -156,6 +161,7 @@ mod tests {
             kc_url: None,
             kc_realm: None,
             kc_client_id: None,
+            refresh_token: None,
             ech_config: None,
             vpn_mtu: None,
         };
@@ -189,6 +195,7 @@ mod tests {
             kc_url: None,
             kc_realm: None,
             kc_client_id: None,
+            refresh_token: None,
             ech_config: None,
             vpn_mtu: None,
         };
@@ -222,6 +229,7 @@ mod tests {
                 kc_url: Some("https://auth.com".to_string()),
                 kc_realm: Some("master".to_string()),
                 kc_client_id: Some("vpn-client".to_string()),
+                refresh_token: Some("refresh-secret".to_string()),
                 ech_config: None,
                 vpn_mtu: Some(1300),
             }),

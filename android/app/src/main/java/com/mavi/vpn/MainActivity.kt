@@ -69,18 +69,32 @@ class MainActivity : ComponentActivity() {
                             viewModel = viewModel,
                             onConnect = { ip, port, token, pin ->
                                 if (viewModel.useKeycloak.value) {
-                                    // Force a fresh Keycloak browser login on every manual
-                                    // connect; the tunnel starts in handleIntent once the
-                                    // redirect returns new tokens.
-                                    pendingConnect = true
                                     viewModel.saveServerDetails()
                                     viewModel.saveKeycloakDetails()
-                                    OAuthHelper.startAuth(
-                                        this@MainActivity,
-                                        viewModel.kcUrl.value,
-                                        viewModel.kcRealm.value,
-                                        viewModel.kcClientId.value,
-                                    )
+                                    if (
+                                        viewModel.hasSavedKeycloakRefreshToken() &&
+                                        !viewModel.isSavedKeycloakSessionInvalid()
+                                    ) {
+                                        // Reuse the stored access token. The service will
+                                        // silently refresh it while the tunnel is active.
+                                        prepareAndStartVpn(
+                                            ip,
+                                            port,
+                                            viewModel.authToken.value,
+                                            pin,
+                                            viewModel.splitMode.value,
+                                            viewModel.splitPackages.value,
+                                        )
+                                    } else {
+                                        // No usable stored session -> interactive login.
+                                        pendingConnect = true
+                                        OAuthHelper.startAuth(
+                                            this@MainActivity,
+                                            viewModel.kcUrl.value,
+                                            viewModel.kcRealm.value,
+                                            viewModel.kcClientId.value,
+                                        )
+                                    }
                                 } else {
                                     prepareAndStartVpn(
                                         ip,

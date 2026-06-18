@@ -189,6 +189,7 @@ fn run_ipc_start(config_path: Option<PathBuf>) -> Result<()> {
         Ok(shared::ipc::IpcResponse::Ok) => println!("\x1b[1;32mVPN started.\x1b[0m"),
         Ok(shared::ipc::IpcResponse::Error(e)) => eprintln!("Error: {}", e),
         Ok(shared::ipc::IpcResponse::Status { .. }) => eprintln!("Unexpected response"),
+        Ok(_) => eprintln!("Unexpected response"),
         Err(e) => eprintln!("Failed to communicate with daemon: {}\nIs the daemon running? (sudo mavi-vpn daemon)", e),
     }
     Ok(())

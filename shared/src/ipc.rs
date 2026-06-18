@@ -9,9 +9,14 @@
 //! Transport: TCP on `127.0.0.1:14433`.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Address for the local TCP IPC server.
 pub const LOCAL_IPC_ADDR: &str = "127.0.0.1:14433";
+
+/// Prefix used in service status errors when Keycloak requires a fresh browser
+/// login for the active session.
+pub const KEYCLOAK_LOGIN_REQUIRED_PREFIX: &str = "KEYCLOAK_LOGIN_REQUIRED:";
 
 /// Path to the authentication token file used to secure the local TCP IPC socket.
 #[cfg(windows)]
@@ -27,7 +32,7 @@ pub fn ipc_token_path() -> std::path::PathBuf {
 
 /// Configuration required to establish a VPN session.
 /// Passed from the client to the service via IPC.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Remote VPN server address (e.g., "vpn.example.com:4433").
     pub endpoint: String,
@@ -64,6 +69,24 @@ pub struct Config {
     pub vpn_mtu: Option<u16>,
 }
 
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("endpoint", &self.endpoint)
+            .field("token", &"<redacted>")
+            .field("cert_pin", &self.cert_pin)
+            .field("censorship_resistant", &self.censorship_resistant)
+            .field("http3_framing", &self.http3_framing)
+            .field("kc_auth", &self.kc_auth)
+            .field("kc_url", &self.kc_url)
+            .field("kc_realm", &self.kc_realm)
+            .field("kc_client_id", &self.kc_client_id)
+            .field("ech_config", &self.ech_config)
+            .field("vpn_mtu", &self.vpn_mtu)
+            .finish()
+    }
+}
+
 impl Config {
     /// CR mode must look like HTTP/3 on the wire and therefore always uses
     /// CONNECT-IP/H3 framing internally as well.
@@ -79,8 +102,37 @@ impl Config {
     }
 }
 
+/// Active Keycloak session data passed to the Windows service for in-service
+/// refresh. This data is for RAM-only runtime use; clients must not persist or
+/// log the refresh token through IPC diagnostics.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeycloakRuntimeAuth {
+    /// GUI connection identifier used as the keyring account for rotated tokens.
+    pub connection_id: String,
+    /// Keycloak issuer/server URL.
+    pub kc_url: String,
+    /// Keycloak realm.
+    pub realm: String,
+    /// Keycloak client ID.
+    pub client_id: String,
+    /// Current refresh token for the active session only.
+    pub refresh_token: String,
+}
+
+impl fmt::Debug for KeycloakRuntimeAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeycloakRuntimeAuth")
+            .field("connection_id", &self.connection_id)
+            .field("kc_url", &self.kc_url)
+            .field("realm", &self.realm)
+            .field("client_id", &self.client_id)
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Commands sent from the client UI to the background service.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpcRequest {
     /// Start the VPN tunnel with the given configuration.
     Start(Config),
@@ -90,12 +142,41 @@ pub enum IpcRequest {
     Status,
     /// Remove stale `MaviVPN` routes and DNS/NRPT state without starting a tunnel.
     RepairNetwork,
-    /// Replace the access token used for the next (re)handshake. Sent by the GUI
-    /// after it has silently refreshed a short-lived Keycloak access token so the
-    /// service's reconnect loop authenticates with a valid token instead of the
-    /// stale one captured at `Start`. The long-lived refresh token never leaves
-    /// the user-session GUI; only the freshly minted access token crosses IPC.
+    /// Replace the access token used for the next (re)handshake. Used by clients
+    /// that refresh Keycloak outside the service so the reconnect loop
+    /// authenticates with a valid token instead of the stale one captured at
+    /// `Start`. Windows service-side refresh uses `StartWithKeycloak` instead.
     UpdateToken { token: String },
+    /// Start the VPN tunnel and let the Windows service refresh the active
+    /// Keycloak session in RAM while the tunnel is running.
+    StartWithKeycloak {
+        config: Config,
+        keycloak: KeycloakRuntimeAuth,
+    },
+    /// Atomically fetch and clear the latest rotated refresh token produced by
+    /// the service-side Keycloak refresh task, if any.
+    TakeRefreshTokenUpdate,
+}
+
+impl fmt::Debug for IpcRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Start(config) => f.debug_tuple("Start").field(config).finish(),
+            Self::Stop => f.write_str("Stop"),
+            Self::Status => f.write_str("Status"),
+            Self::RepairNetwork => f.write_str("RepairNetwork"),
+            Self::UpdateToken { .. } => f
+                .debug_struct("UpdateToken")
+                .field("token", &"<redacted>")
+                .finish(),
+            Self::StartWithKeycloak { config, keycloak } => f
+                .debug_struct("StartWithKeycloak")
+                .field("config", config)
+                .field("keycloak", keycloak)
+                .finish(),
+            Self::TakeRefreshTokenUpdate => f.write_str("TakeRefreshTokenUpdate"),
+        }
+    }
 }
 
 /// More precise lifecycle state for clients that need to distinguish setup
@@ -115,7 +196,7 @@ pub enum VpnState {
 
 /// A wrapper around `IpcRequest` that includes the authentication token.
 /// This ensures only authorized local users can command the background service.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecureIpcRequest {
     /// The secret token read from `ipc_token_path()`.
     pub auth_token: String,
@@ -123,8 +204,17 @@ pub struct SecureIpcRequest {
     pub request: IpcRequest,
 }
 
+impl fmt::Debug for SecureIpcRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecureIpcRequest")
+            .field("auth_token", &"<redacted>")
+            .field("request", &self.request)
+            .finish()
+    }
+}
+
 /// Responses sent from the background service back to the client UI.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub enum IpcResponse {
     /// Command accepted and executed successfully.
     Ok,
@@ -144,6 +234,45 @@ pub enum IpcResponse {
         /// The local IP address assigned to the VPN tunnel.
         assigned_ip: Option<String>,
     },
+    /// Rotated Keycloak refresh token for the GUI to persist in the user
+    /// keyring. Empty when there is no pending update to fetch.
+    RefreshTokenUpdate {
+        connection_id: Option<String>,
+        refresh_token: Option<String>,
+    },
+}
+
+impl fmt::Debug for IpcResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok => f.write_str("Ok"),
+            Self::Error(error) => f.debug_tuple("Error").field(error).finish(),
+            Self::Status {
+                running,
+                endpoint,
+                state,
+                last_error,
+                assigned_ip,
+            } => f
+                .debug_struct("Status")
+                .field("running", running)
+                .field("endpoint", endpoint)
+                .field("state", state)
+                .field("last_error", last_error)
+                .field("assigned_ip", assigned_ip)
+                .finish(),
+            Self::RefreshTokenUpdate {
+                connection_id,
+                refresh_token,
+            } => {
+                let redacted = refresh_token.as_ref().map(|_| "<redacted>");
+                f.debug_struct("RefreshTokenUpdate")
+                    .field("connection_id", connection_id)
+                    .field("refresh_token", &redacted)
+                    .finish()
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -239,6 +368,29 @@ mod tests {
             IpcRequest::UpdateToken {
                 token: "fresh-access-token".to_string(),
             },
+            IpcRequest::StartWithKeycloak {
+                config: Config {
+                    endpoint: "vpn.example.com:4433".to_string(),
+                    token: "secret".to_string(),
+                    cert_pin: "pinned".to_string(),
+                    censorship_resistant: true,
+                    http3_framing: true,
+                    kc_auth: Some(true),
+                    kc_url: Some("https://auth.com".to_string()),
+                    kc_realm: Some("master".to_string()),
+                    kc_client_id: Some("vpn-client".to_string()),
+                    ech_config: None,
+                    vpn_mtu: Some(1300),
+                },
+                keycloak: KeycloakRuntimeAuth {
+                    connection_id: "conn-1".to_string(),
+                    kc_url: "https://auth.com".to_string(),
+                    realm: "master".to_string(),
+                    client_id: "vpn-client".to_string(),
+                    refresh_token: "refresh-token".to_string(),
+                },
+            },
+            IpcRequest::TakeRefreshTokenUpdate,
         ];
 
         for req in configs {
@@ -274,6 +426,14 @@ mod tests {
                 state: VpnState::Reconnecting,
                 last_error: Some("H3 recv_response failed".to_string()),
                 assigned_ip: None,
+            },
+            IpcResponse::RefreshTokenUpdate {
+                connection_id: Some("conn-1".to_string()),
+                refresh_token: Some("rotated-refresh-token".to_string()),
+            },
+            IpcResponse::RefreshTokenUpdate {
+                connection_id: None,
+                refresh_token: None,
             },
         ];
 

@@ -7,6 +7,7 @@ use tracing::{error, info};
 
 use super::state::VpnServiceState;
 use super::utils::{classify_status, run_network_repair_cleanup};
+use super::keycloak_refresh;
 use crate::ipc;
 use crate::vpn_core;
 
@@ -98,7 +99,10 @@ pub async fn dispatch_request(
             run_network_repair_cleanup();
             ipc::IpcResponse::Ok
         }
-        ipc::IpcRequest::Start(config) => handle_start_request(config, &mut guard),
+        ipc::IpcRequest::Start(config) => handle_start_request(config, None, &mut guard),
+        ipc::IpcRequest::StartWithKeycloak { config, keycloak } => {
+            handle_start_request(config, Some(keycloak), &mut guard)
+        }
         ipc::IpcRequest::UpdateToken { token } => {
             // The GUI owns the Keycloak refresh token and silently refreshes the
             // short-lived access token itself; it pushes only the fresh access
@@ -109,10 +113,26 @@ pub async fn dispatch_request(
             guard.set_current_token(token);
             ipc::IpcResponse::Ok
         }
+        ipc::IpcRequest::TakeRefreshTokenUpdate => {
+            match guard.take_pending_keycloak_refresh_token() {
+                Some(update) => ipc::IpcResponse::RefreshTokenUpdate {
+                    connection_id: Some(update.connection_id),
+                    refresh_token: Some(update.refresh_token),
+                },
+                None => ipc::IpcResponse::RefreshTokenUpdate {
+                    connection_id: None,
+                    refresh_token: None,
+                },
+            }
+        }
     }
 }
 
-pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) -> ipc::IpcResponse {
+pub fn handle_start_request(
+    config: ipc::Config,
+    keycloak: Option<ipc::KeycloakRuntimeAuth>,
+    guard: &mut VpnServiceState,
+) -> ipc::IpcResponse {
     info!("Handling Start request for endpoint: {}", config.endpoint);
     if guard.is_stopping() {
         ipc::IpcResponse::Error("VPN is stopping; retry shortly".to_string())
@@ -122,6 +142,14 @@ pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) ->
         guard.mark_session_starting(config.clone());
         let task_runtime = guard.runtime_handles();
 
+        if let Some(keycloak) = keycloak {
+            guard.set_keycloak_refresh_task(keycloak_refresh::spawn_keycloak_refresh_task(
+                keycloak,
+                config.token.clone(),
+                task_runtime.clone(),
+            ));
+        }
+
         guard.set_task(tokio::spawn(async move {
             if let Err(e) = vpn_core::run_vpn(
                 config,
@@ -130,6 +158,7 @@ pub fn handle_start_request(config: ipc::Config, guard: &mut VpnServiceState) ->
                 task_runtime.last_error.clone(),
                 task_runtime.assigned_ip.clone(),
                 task_runtime.current_token.clone(),
+                task_runtime.token_updated.clone(),
             )
             .await
             {

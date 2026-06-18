@@ -161,7 +161,7 @@ async fn handle_start_request_sets_config_and_flags() {
     let mut state = VpnServiceState::new();
     let config = test_config();
 
-    let result = handle_start_request(config.clone(), &mut state);
+    let result = handle_start_request(config.clone(), None, &mut state);
     assert!(matches!(result, ipc::IpcResponse::Ok));
     assert!(state.vpn_running.load(Ordering::SeqCst));
     assert!(!state.vpn_connected.load(Ordering::SeqCst));
@@ -182,7 +182,7 @@ async fn handle_start_request_clears_last_error() {
     let mut state = VpnServiceState::new();
     *state.last_error.lock().unwrap() = Some("previous error".to_string());
 
-    let result = handle_start_request(test_config(), &mut state);
+    let result = handle_start_request(test_config(), None, &mut state);
     assert!(matches!(result, ipc::IpcResponse::Ok));
     assert!(state.last_error.lock().unwrap().is_none());
 
@@ -323,7 +323,7 @@ async fn handle_start_request_preserves_config_fields() {
     config.kc_auth = Some(true);
     config.kc_url = Some("https://auth.example.com".to_string());
 
-    let result = handle_start_request(config.clone(), &mut state);
+    let result = handle_start_request(config.clone(), None, &mut state);
     assert!(matches!(result, ipc::IpcResponse::Ok));
 
     let saved_config = state.active_config.as_ref().unwrap();

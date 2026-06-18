@@ -5,6 +5,8 @@ use crate::secret_store::{
 };
 use crate::storage::{load_config_from_dir, load_prefs_from_dir, save_config_to_dir};
 use crate::storage::{save_prefs_to_dir, Prefs};
+#[cfg(target_os = "windows")]
+use shared::ipc::KeycloakRuntimeAuth;
 use shared::ipc::{Config, IpcRequest, IpcResponse, VpnState};
 use shared::kc_oauth::{self, RefreshOutcome};
 use std::time::Duration;
@@ -14,24 +16,29 @@ use tauri::{AppHandle, Emitter, Manager};
 /// Refresh the access token this many seconds before its `exp`, leaving headroom
 /// for the refresh round-trip and the reconnect handshake (matches Android's
 /// active-session skew).
+#[cfg(not(target_os = "windows"))]
 const REFRESH_SKEW_SECS: u64 = 300;
 
 /// How often the background ticker checks whether the access token needs a refresh.
+#[cfg(not(target_os = "windows"))]
 const REFRESH_TICK: Duration = Duration::from_secs(30);
 
-/// Tauri-managed handle to the running Keycloak refresh ticker, so a new connect
-/// can replace it and a disconnect can abort it.
+/// Tauri-managed handle to the running Keycloak background task, so a new
+/// connect can replace it and a disconnect can abort it.
 #[derive(Default)]
 pub(crate) struct TokenRefreshHandle(pub(crate) std::sync::Mutex<Option<JoinHandle<()>>>);
 
-/// Keycloak coordinates captured at connect time so the background ticker can
-/// renew the access token without re-reading config.
+/// Keycloak coordinates captured at connect time so the active session can be
+/// renewed without re-reading config.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 struct KeycloakSession {
     kc_url: String,
     realm: String,
     client_id: String,
     connection_id: String,
     access_token: String,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    refresh_token: String,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -59,17 +66,44 @@ pub(crate) async fn vpn_connect(
     let kc_session = prepare_keycloak_config(&mut config, &connection_id, force_login).await?;
     config.normalize_transport();
 
-    match send_ipc_request(&IpcRequest::Start(config)).await? {
+    #[cfg(target_os = "windows")]
+    let request = match kc_session.as_ref() {
+        Some(session) => IpcRequest::StartWithKeycloak {
+            config,
+            keycloak: KeycloakRuntimeAuth {
+                connection_id: session.connection_id.clone(),
+                kc_url: session.kc_url.clone(),
+                realm: session.realm.clone(),
+                client_id: session.client_id.clone(),
+                refresh_token: session.refresh_token.clone(),
+            },
+        },
+        None => IpcRequest::Start(config),
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let request = IpcRequest::Start(config);
+
+    match send_ipc_request(&request).await? {
         IpcResponse::Ok => {
-            // Only once the service accepted the Start do we arm the refresh
-            // ticker, so a rejected connect does not leave a ticker running.
+            // Only once the service accepted the Start do we arm the Keycloak
+            // background task, so a rejected connect does not leave one running.
             if let Some(session) = kc_session {
+                #[cfg(target_os = "windows")]
+                {
+                    drop(session);
+                    start_service_refresh_token_sync(&app);
+                }
+                #[cfg(not(target_os = "windows"))]
                 start_token_refresh_ticker(&app, session);
             }
             Ok("Connected".into())
         }
         IpcResponse::Error(e) => Err(e),
         IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
+        IpcResponse::RefreshTokenUpdate { .. } => {
+            Err("Unexpected response: RefreshTokenUpdate instead of Ok".into())
+        }
     }
 }
 
@@ -81,7 +115,7 @@ pub(crate) async fn vpn_connect(
 /// refresh using the stored refresh token and only falls back to the browser
 /// login when there is no refresh token or it has been rejected — so auto-connect
 /// never pops a browser. Returns the session coordinates when Keycloak is in use
-/// so the caller can start the background refresh ticker.
+/// so the caller can start the platform-specific in-session refresh work.
 async fn prepare_keycloak_config(
     config: &mut Config,
     connection_id: &str,
@@ -115,7 +149,9 @@ async fn prepare_keycloak_config(
         {
             match kc_oauth::refresh_access_token(&kc_url, &realm, &client_id, &refresh_token).await {
                 RefreshOutcome::Success(tokens) => {
-                    persist_refresh_token(&store, &refresh_account, tokens.refresh_token.as_deref())?;
+                    let active_refresh_token =
+                        required_refresh_token(tokens.refresh_token.as_deref())?;
+                    persist_refresh_token(&store, &refresh_account, Some(&active_refresh_token))?;
                     config.token = tokens.access_token.clone();
                     return Ok(Some(KeycloakSession {
                         kc_url,
@@ -123,6 +159,7 @@ async fn prepare_keycloak_config(
                         client_id,
                         connection_id: connection_id.to_string(),
                         access_token: tokens.access_token,
+                        refresh_token: active_refresh_token,
                     }));
                 }
                 RefreshOutcome::NetworkError(e) => {
@@ -138,12 +175,14 @@ async fn prepare_keycloak_config(
 
     // Interactive browser login (PKCE). For a manual connect this always runs, so
     // every manual connect re-authenticates. The refresh token obtained now is
-    // persisted — the in-session ticker + in-band reauth use it to keep the *live*
-    // tunnel alive silently, without ever re-prompting mid-session.
+    // persisted. Windows hands the active refresh token to the service for this
+    // session; other platforms use the GUI ticker + in-band reauth to keep the
+    // live tunnel alive silently, without ever re-prompting mid-session.
     let tokens = oauth::start_oauth_flow(&kc_url, &realm, &client_id)
         .await
         .map_err(|e| format!("Keycloak login failed: {e}"))?;
-    persist_refresh_token(&store, &refresh_account, tokens.refresh_token.as_deref())?;
+    let active_refresh_token = required_refresh_token(tokens.refresh_token.as_deref())?;
+    persist_refresh_token(&store, &refresh_account, Some(&active_refresh_token))?;
     config.token = tokens.access_token.clone();
     Ok(Some(KeycloakSession {
         kc_url,
@@ -151,7 +190,16 @@ async fn prepare_keycloak_config(
         client_id,
         connection_id: connection_id.to_string(),
         access_token: tokens.access_token,
+        refresh_token: active_refresh_token,
     }))
+}
+
+fn required_refresh_token(refresh: Option<&str>) -> Result<String, String> {
+    refresh
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Keycloak did not issue a refresh token; please log in again.".to_string())
 }
 
 /// Stores a (possibly rotated) refresh token in the OS keyring. A `None`/empty
@@ -167,7 +215,8 @@ fn persist_refresh_token(
     }
 }
 
-/// Spawns the background refresh ticker, replacing any previous one.
+/// Spawns the non-Windows background refresh ticker, replacing any previous one.
+#[cfg(not(target_os = "windows"))]
 fn start_token_refresh_ticker(app: &AppHandle, session: KeycloakSession) {
     stop_token_refresh_ticker(app);
     let app_for_task = app.clone();
@@ -179,7 +228,19 @@ fn start_token_refresh_ticker(app: &AppHandle, session: KeycloakSession) {
     }
 }
 
-/// Aborts a running refresh ticker, if any.
+#[cfg(target_os = "windows")]
+fn start_service_refresh_token_sync(app: &AppHandle) {
+    stop_token_refresh_ticker(app);
+    let app_for_task = app.clone();
+    let handle = tauri::async_runtime::spawn(service_refresh_token_sync_loop(app_for_task));
+    if let Some(state) = app.try_state::<TokenRefreshHandle>() {
+        if let Ok(mut slot) = state.0.lock() {
+            *slot = Some(handle);
+        }
+    }
+}
+
+/// Aborts a running Keycloak background task, if any.
 pub(crate) fn stop_token_refresh_ticker(app: &AppHandle) {
     if let Some(state) = app.try_state::<TokenRefreshHandle>() {
         if let Ok(mut slot) = state.0.lock() {
@@ -190,9 +251,38 @@ pub(crate) fn stop_token_refresh_ticker(app: &AppHandle) {
     }
 }
 
+#[cfg(target_os = "windows")]
+async fn service_refresh_token_sync_loop(app: AppHandle) {
+    let store = KeyringSecretStore;
+
+    loop {
+        match send_ipc_request(&IpcRequest::TakeRefreshTokenUpdate).await {
+            Ok(IpcResponse::RefreshTokenUpdate {
+                connection_id: Some(connection_id),
+                refresh_token: Some(refresh_token),
+            }) if !connection_id.is_empty() && !refresh_token.trim().is_empty() => {
+                let refresh_account = connection_refresh_token_account(&connection_id);
+                if let Err(e) = persist_refresh_token(&store, &refresh_account, Some(&refresh_token))
+                {
+                    let _ = send_ipc_request(&IpcRequest::Stop).await;
+                    let _ = app.emit(
+                        "kc-needs-login",
+                        format!("Session could not be saved; please log in again. {e}"),
+                    );
+                    break;
+                }
+            }
+            Ok(_) | Err(_) => {}
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
 /// Background loop: while connected, refresh the access token before it expires
 /// and push it to the service via `UpdateToken`. Distinguishes transient network
 /// failures (keep retrying) from a dead refresh token (`kc-needs-login` → stop).
+#[cfg(not(target_os = "windows"))]
 async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
     let store = KeyringSecretStore;
     let refresh_account = connection_refresh_token_account(&session.connection_id);
@@ -260,6 +350,9 @@ pub(crate) async fn vpn_disconnect(app: AppHandle) -> Result<String, String> {
         IpcResponse::Ok => Ok("Disconnected".into()),
         IpcResponse::Error(e) => Err(e),
         IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
+        IpcResponse::RefreshTokenUpdate { .. } => {
+            Err("Unexpected response: RefreshTokenUpdate instead of Ok".into())
+        }
     }
 }
 
@@ -269,6 +362,9 @@ pub(crate) async fn vpn_repair_network() -> Result<String, String> {
         IpcResponse::Ok => Ok("Network repaired".into()),
         IpcResponse::Error(e) => Err(e),
         IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
+        IpcResponse::RefreshTokenUpdate { .. } => {
+            Err("Unexpected response: RefreshTokenUpdate instead of Ok".into())
+        }
     }
 }
 
@@ -392,5 +488,13 @@ mod tests {
 
         persist_refresh_token(&store, "acc", Some("refresh-xyz")).unwrap();
         assert_eq!(store.secret("acc").as_deref(), Some("refresh-xyz"));
+    }
+
+    #[test]
+    fn required_refresh_token_rejects_empty_values() {
+        assert_eq!(required_refresh_token(Some(" refresh ")).unwrap(), "refresh");
+        assert!(required_refresh_token(None).is_err());
+        assert!(required_refresh_token(Some("")).is_err());
+        assert!(required_refresh_token(Some("   ")).is_err());
     }
 }

@@ -33,6 +33,8 @@ use self::reconnect::{
 use self::runtime_state::VpnRuntimeState;
 use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter};
 
+const HANDSHAKE_TIMEOUT_SECS: u64 = 15;
+
 #[cfg_attr(test, allow(dead_code))]
 pub fn cleanup_stale_network_state() {
     network::cleanup_stale_network_state();
@@ -216,6 +218,12 @@ fn determine_session_result(still_running: bool) -> SessionEnd {
     }
 }
 
+async fn wait_until_stopped(running: &Arc<AtomicBool>) {
+    while running.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Manages a single active VPN session (handshake + packet pumping).
 async fn run_session(
     config: &Config,
@@ -237,19 +245,31 @@ async fn run_session(
     let token = runtime.current_token_or(&config.token);
 
     let connect_started = Instant::now();
-    let (connection, server_config, _h3_guard) = connect_and_handshake(HandshakeRequest {
-        socket,
-        // Clone so the plaintext token survives as the reauth task's initial
-        // `last_token` baseline (the request takes ownership otherwise).
-        token: token.clone(),
-        endpoint_str: config.endpoint.clone(),
-        cert_pin: cert_pin_bytes.to_vec(),
-        censorship_resistant: config.censorship_resistant,
-        http3_framing: config.effective_http3_framing(),
-        ech_config_list: ech_bytes,
-        vpn_mtu: config.vpn_mtu,
-    })
-    .await?;
+    let handshake = tokio::time::timeout(
+        Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+        connect_and_handshake(HandshakeRequest {
+            socket,
+            // Clone so the plaintext token survives as the reauth task's initial
+            // `last_token` baseline (the request takes ownership otherwise).
+            token: token.clone(),
+            endpoint_str: config.endpoint.clone(),
+            cert_pin: cert_pin_bytes.to_vec(),
+            censorship_resistant: config.censorship_resistant,
+            http3_framing: config.effective_http3_framing(),
+            ech_config_list: ech_bytes,
+            vpn_mtu: config.vpn_mtu,
+        }),
+    );
+    let (connection, server_config, _h3_guard) = tokio::select! {
+        result = handshake => result
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Connection attempt timed out after {}s. Check endpoint, port and firewall.",
+                    HANDSHAKE_TIMEOUT_SECS
+                )
+            })??,
+        () = wait_until_stopped(runtime.running()) => return Ok(SessionEnd::UserStopped),
+    };
     info!(
         "Windows session handshake/config completed in {} ms",
         connect_started.elapsed().as_millis()

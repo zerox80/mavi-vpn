@@ -116,7 +116,8 @@ journalctl -u mavi-vpn -f
 Sobald der Service laeuft, kann die GUI oder CLI fuer Benutzer in `mavivpn` ohne `sudo` Verbindungen aufbauen und trennen.
 
 Der systemd-Service laeuft mit einer eingeschraenkten Sandbox:
-`CAP_NET_ADMIN`, Zugriff auf `/dev/net/tun`, Runtime-Token unter
+`CAP_NET_ADMIN` fuer VPN-Netzwerkoperationen, `CAP_CHOWN` fuer die
+Gruppenfreigabe des IPC-Tokens, Zugriff auf `/dev/net/tun`, Runtime-Token unter
 `/run/mavi-vpn/ipc.token`, persistente DNS-Backups unter `/var/lib/mavi-vpn`
 und explizite Schreibrechte fuer `/etc/resolv.conf` beziehungsweise
 `/run/systemd/resolve`. Wenn die GUI den Daemon nicht erreicht, zuerst

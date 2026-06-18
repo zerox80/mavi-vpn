@@ -2,6 +2,7 @@ export const state = {
   // UI state machine: 'off' | 'connecting' | 'disconnecting' | 'on'
   hero: 'off',
   disconnecting: false,
+  connectAttempt: 0,
   // From vpn_status
   serviceAvailable: false,
   running: false,

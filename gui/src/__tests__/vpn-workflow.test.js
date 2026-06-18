@@ -52,8 +52,10 @@ describe('vpn workflows', () => {
     setupVpnDom();
     state.hero = 'off';
     state.disconnecting = false;
+    state.connectAttempt = 0;
     state.running = false;
     state.serviceAvailable = true;
+    state.vpnState = 'Stopped';
     state.sessionStart = null;
     state.prefs.active_id = 'conn-1';
     state.prefs.connections = [
@@ -160,11 +162,16 @@ describe('vpn workflows', () => {
     expect(document.getElementById('connect-btn').disabled).toBe(true);
   });
 
-  it('toggleConnection ignores transitional states and routes on/off states', async () => {
+  it('toggleConnection cancels connecting states and routes on/off states', async () => {
     state.hero = 'connecting';
+    invoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Stopped' })
+      .mockResolvedValueOnce({ service_available: true, running: false, state: 'Stopped' });
     await toggleConnection();
-    expect(invoke).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith('vpn_disconnect');
 
+    vi.clearAllMocks();
     state.vpnState = 'Reconnecting';
     invoke
       .mockResolvedValueOnce(undefined)
@@ -209,7 +216,7 @@ describe('vpn workflows', () => {
 
   it('setHero renders each hero state label', () => {
     setHero('connecting');
-    expect(document.getElementById('connect-btn').textContent).toBe('CONNECTING...');
+    expect(document.getElementById('connect-btn').textContent).toBe('CANCEL');
     expect(document.getElementById('core-label').textContent).toBe('HANDSHAKE');
 
     setHero('disconnecting');

@@ -13,8 +13,8 @@ RestartSec=5
 # inherit broad root filesystem or device access beyond those operations.
 UMask=0077
 NoNewPrivileges=true
-CapabilityBoundingSet=CAP_NET_ADMIN
-AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN
+AmbientCapabilities=CAP_NET_ADMIN CAP_CHOWN
 DevicePolicy=closed
 DeviceAllow=/dev/net/tun rw
 PrivateTmp=true

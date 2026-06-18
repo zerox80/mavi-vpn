@@ -15,8 +15,7 @@ export function activeConn() {
 export async function toggleConnection() {
   if (state.hero === 'disconnecting') return;
   if (state.hero === 'connecting') {
-    if (state.vpnState === 'Reconnecting') return disconnect();
-    return;
+    return disconnect();
   }
   if (state.hero === 'on') return disconnect();
   return connect();
@@ -24,6 +23,8 @@ export async function toggleConnection() {
 
 export async function connect() {
   state.disconnecting = false;
+  state.connectAttempt += 1;
+  const attempt = state.connectAttempt;
   const conn = activeConn();
   if (!conn) {
     showToast('Select a saved connection first, or add one.', 'error');
@@ -36,25 +37,33 @@ export async function connect() {
     return;
   }
 
+  state.vpnState = 'Starting';
   setHero('connecting');
   try {
     await invoke('save_config', { config });
+    if (isStaleConnectAttempt(attempt)) return;
     // connectionId scopes the Keycloak refresh token in the OS keyring.
     // Manual connects reuse a stored refresh token when available, so the user
     // does not have to log in every time. The backend only falls back to a
     // browser login when there is no refresh token or it has been rejected.
     await invoke('vpn_connect', { config, connectionId: conn.id, forceLogin: false });
+    if (isStaleConnectAttempt(attempt)) {
+      await invoke('vpn_disconnect').catch(() => {});
+      return;
+    }
     // Immediately fetch the real status instead of waiting up to 2s for
     // the next poller tick. This prevents the UI from showing "Connecting..."
     // when the service has already transitioned to Connected (or Failed).
     await refreshStatus();
   } catch (e) {
+    if (isStaleConnectAttempt(attempt)) return;
     showToast(friendlyError(e), 'error');
     setHero('off');
   }
 }
 
 export async function disconnect() {
+  state.connectAttempt += 1;
   state.disconnecting = true;
   state.sessionStart = null;
   setHero('disconnecting');
@@ -67,6 +76,10 @@ export async function disconnect() {
   } finally {
     await refreshStatus();
   }
+}
+
+function isStaleConnectAttempt(attempt) {
+  return state.connectAttempt !== attempt || state.disconnecting;
 }
 
 async function waitForStopped() {
@@ -144,7 +157,8 @@ export function applyStatus(status) {
       btn.title = 'Disconnect';
       showToast('Connection dropped — reconnecting…', 'hint', 0);
     } else {
-      btn.title = '';
+      btn.disabled = false;
+      btn.title = 'Cancel connection attempt';
       hideToast('hint');
     }
   } else {
@@ -171,12 +185,12 @@ export function setHero(s) {
       : s === 'connecting'
         ? state.vpnState === 'Reconnecting'
           ? 'DISCONNECT'
-          : 'CONNECTING...'
+          : 'CANCEL'
         : s === 'disconnecting'
           ? 'DISCONNECTING...'
           : 'CONNECT';
   if (s === 'connecting' || s === 'disconnecting') {
-    btn.disabled = !(s === 'connecting' && state.vpnState === 'Reconnecting');
+    btn.disabled = s === 'disconnecting';
   }
 
   const labels = {
@@ -225,7 +239,6 @@ export function applyHeroForSelection() {
   const btn = $('connect-btn');
   if (btn) {
     btn.disabled =
-      (state.hero === 'connecting' && state.vpnState !== 'Reconnecting') ||
       state.hero === 'disconnecting' ||
       (!state.running && !state.serviceAvailable) ||
       (state.hero === 'off' && !conn);

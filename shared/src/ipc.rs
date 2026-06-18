@@ -379,6 +379,7 @@ mod tests {
                     kc_url: Some("https://auth.com".to_string()),
                     kc_realm: Some("master".to_string()),
                     kc_client_id: Some("vpn-client".to_string()),
+                    refresh_token: Some("refresh-secret".to_string()),
                     ech_config: None,
                     vpn_mtu: Some(1300),
                 },

@@ -9,11 +9,16 @@ const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Clone)]
 struct SharedLogFile {
-    file: Arc<Mutex<File>>,
+    state: Arc<Mutex<SharedLogState>>,
+}
+
+struct SharedLogState {
+    path: PathBuf,
+    file: Option<File>,
 }
 
 struct SharedLogWriter {
-    file: Arc<Mutex<File>>,
+    state: Arc<Mutex<SharedLogState>>,
 }
 
 impl<'a> MakeWriter<'a> for SharedLogFile {
@@ -21,26 +26,52 @@ impl<'a> MakeWriter<'a> for SharedLogFile {
 
     fn make_writer(&'a self) -> Self::Writer {
         SharedLogWriter {
-            file: Arc::clone(&self.file),
+            state: Arc::clone(&self.state),
         }
     }
 }
 
 impl Write for SharedLogWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut file = self
-            .file
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| io::Error::other("log file lock poisoned"))?;
-        file.write(buf)
+        state.rotate_if_needed()?;
+        state.file_mut()?.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut file = self
-            .file
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| io::Error::other("log file lock poisoned"))?;
-        file.flush()
+        state.file_mut()?.flush()
+    }
+}
+
+impl SharedLogState {
+    fn file_mut(&mut self) -> io::Result<&mut File> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("log file is temporarily unavailable"))
+    }
+
+    fn rotate_if_needed(&mut self) -> io::Result<()> {
+        if self
+            .file_mut()?
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() < MAX_LOG_BYTES)
+        {
+            return Ok(());
+        }
+
+        if let Some(mut file) = self.file.take() {
+            file.flush()?;
+        }
+        rotate_if_needed(&self.path)?;
+        self.file = Some(open_append_file(&self.path)?);
+        Ok(())
     }
 }
 
@@ -51,7 +82,10 @@ pub(crate) fn init_gui_logging() -> Option<PathBuf> {
     match open_log_file(&log_path) {
         Ok(file) => {
             let writer = SharedLogFile {
-                file: Arc::new(Mutex::new(file)),
+                state: Arc::new(Mutex::new(SharedLogState {
+                    path: log_path.clone(),
+                    file: Some(file),
+                })),
             };
             if tracing_subscriber::fmt()
                 .with_env_filter(env_filter)
@@ -120,6 +154,10 @@ fn open_log_file(path: &Path) -> io::Result<File> {
         fs::create_dir_all(parent)?;
     }
     rotate_if_needed(path)?;
+    open_append_file(path)
+}
+
+fn open_append_file(path: &Path) -> io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
 

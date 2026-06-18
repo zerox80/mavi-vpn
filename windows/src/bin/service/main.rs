@@ -42,12 +42,16 @@ const SERVICE_TYPE: windows_service::service::ServiceType =
 define_windows_service!(ffi_service_main, my_service_main);
 
 pub fn main() -> Result<(), windows_service::Error> {
-    if let Some(path) = logging::init_service_logging() {
+    let args: Vec<OsString> = std::env::args_os().collect();
+    let foreground = args
+        .iter()
+        .any(|arg| arg == "--console" || arg == "install" || arg == "uninstall");
+
+    if let Some(path) = logging::init_service_logging(foreground) {
         info!("Service log file: {}", path.display());
     }
 
     info!("Starting service dispatcher for {}", SERVICE_NAME);
-    let args: Vec<OsString> = std::env::args_os().collect();
 
     if args.iter().any(|arg| arg == "--console") {
         info!("Running in console mode");

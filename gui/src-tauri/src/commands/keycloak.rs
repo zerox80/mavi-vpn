@@ -1,9 +1,7 @@
 use crate::ipc::send_ipc_request;
 use crate::oauth;
 use crate::secret_store::{connection_refresh_token_account, KeyringSecretStore, SecretStore};
-#[cfg(target_os = "windows")]
-use shared::ipc::IpcResponse;
-use shared::ipc::{Config, IpcRequest};
+use shared::ipc::{Config, IpcRequest, IpcResponse};
 use shared::kc_oauth::{self, RefreshOutcome};
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
@@ -325,9 +323,19 @@ async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
                 })
                 .await
                 {
-                    Ok(_) => info!(
+                    Ok(IpcResponse::Ok) => info!(
                         connection_id = %session.connection_id,
                         "Refreshed Keycloak access token and notified service"
+                    ),
+                    Ok(IpcResponse::Error(error)) => warn!(
+                        connection_id = %session.connection_id,
+                        error = %error,
+                        "Service rejected refreshed Keycloak access token"
+                    ),
+                    Ok(response) => warn!(
+                        connection_id = %session.connection_id,
+                        response = ?response,
+                        "Service returned unexpected response to refreshed Keycloak access token"
                     ),
                     Err(error) => warn!(
                         connection_id = %session.connection_id,

@@ -14,6 +14,7 @@ use crate::tun::TunDevice;
 
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 30;
+const HANDSHAKE_TIMEOUT_SECS: u64 = 15;
 const TUN_DEVICE_NAME: &str = "mavi0";
 
 mod reauth;
@@ -27,6 +28,12 @@ mod reauth;
 async fn sleep_unless_stopped(delay: Duration, running: &Arc<AtomicBool>) {
     let deadline = std::time::Instant::now() + delay;
     while running.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_until_stopped(running: &Arc<AtomicBool>) {
+    while running.load(Ordering::Relaxed) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -156,19 +163,31 @@ async fn run_session(
         .map(|t| t.clone())
         .unwrap_or_else(|_| config.token.clone());
 
-    let (connection, server_config, _h3_guard) = super::handshake::connect_and_handshake(
-        socket,
-        // Clone so the plaintext token survives as the reauth task's initial
-        // `last_token` baseline (the handshake takes ownership otherwise).
-        token.clone(),
-        config.endpoint.clone(),
-        cert_pin_bytes.to_vec(),
-        config.censorship_resistant,
-        config.effective_http3_framing(),
-        ech_bytes,
-        config.vpn_mtu,
-    )
-    .await?;
+    let handshake = tokio::time::timeout(
+        Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+        super::handshake::connect_and_handshake(
+            socket,
+            // Clone so the plaintext token survives as the reauth task's initial
+            // `last_token` baseline (the handshake takes ownership otherwise).
+            token.clone(),
+            config.endpoint.clone(),
+            cert_pin_bytes.to_vec(),
+            config.censorship_resistant,
+            config.effective_http3_framing(),
+            ech_bytes,
+            config.vpn_mtu,
+        ),
+    );
+    let (connection, server_config, _h3_guard) = tokio::select! {
+        result = handshake => result
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Connection attempt timed out after {}s. Check endpoint, port and firewall.",
+                    HANDSHAKE_TIMEOUT_SECS
+                )
+            })??,
+        () = wait_until_stopped(global_running) => return Ok(SessionEnd::UserStopped),
+    };
 
     // 2. Extract Network Configuration
     let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =

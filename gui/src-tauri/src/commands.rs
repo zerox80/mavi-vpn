@@ -12,6 +12,7 @@ use shared::kc_oauth::{self, RefreshOutcome};
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager};
+use tracing::{debug, info, warn};
 
 /// Refresh the access token this many seconds before its `exp`, leaving headroom
 /// for the refresh round-trip and the reconnect handshake (matches Android's
@@ -65,6 +66,21 @@ pub(crate) async fn vpn_connect(
     let force_login = force_login.unwrap_or(false);
     let kc_session = prepare_keycloak_config(&mut config, &connection_id, force_login).await?;
     config.normalize_transport();
+    let endpoint = config.endpoint.clone();
+    let keycloak_enabled = kc_session.is_some();
+    let transport = if config.effective_http3_framing() {
+        "http3"
+    } else {
+        "raw"
+    };
+
+    info!(
+        connection_id = %connection_id,
+        endpoint = %endpoint,
+        keycloak_enabled,
+        transport,
+        "VPN connect requested"
+    );
 
     #[cfg(target_os = "windows")]
     let request = match kc_session.as_ref() {
@@ -84,8 +100,26 @@ pub(crate) async fn vpn_connect(
     #[cfg(not(target_os = "windows"))]
     let request = IpcRequest::Start(config);
 
-    match send_ipc_request(&request).await? {
+    let response = match send_ipc_request(&request).await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(
+                connection_id = %connection_id,
+                endpoint = %endpoint,
+                error = %error,
+                "VPN connect IPC request failed"
+            );
+            return Err(error);
+        }
+    };
+
+    match response {
         IpcResponse::Ok => {
+            info!(
+                connection_id = %connection_id,
+                endpoint = %endpoint,
+                "VPN start accepted by service"
+            );
             // Only once the service accepted the Start do we arm the Keycloak
             // background task, so a rejected connect does not leave one running.
             if let Some(session) = kc_session {
@@ -99,7 +133,15 @@ pub(crate) async fn vpn_connect(
             }
             Ok("Connected".into())
         }
-        IpcResponse::Error(e) => Err(e),
+        IpcResponse::Error(e) => {
+            warn!(
+                connection_id = %connection_id,
+                endpoint = %endpoint,
+                error = %e,
+                "VPN start rejected by service"
+            );
+            Err(e)
+        }
         IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
         IpcResponse::RefreshTokenUpdate { .. } => {
             Err("Unexpected response: RefreshTokenUpdate instead of Ok".into())
@@ -122,6 +164,7 @@ async fn prepare_keycloak_config(
     force_login: bool,
 ) -> Result<Option<KeycloakSession>, String> {
     if !config.kc_auth.unwrap_or(false) {
+        debug!(connection_id = %connection_id, "Keycloak disabled for connection");
         return Ok(None);
     }
 
@@ -133,8 +176,18 @@ async fn prepare_keycloak_config(
         .unwrap_or_else(|| "mavi-client".into());
 
     if kc_url.is_empty() {
+        warn!(connection_id = %connection_id, "Keycloak URL missing");
         return Err("Keycloak URL is not configured.".into());
     }
+
+    info!(
+        connection_id = %connection_id,
+        kc_url = %kc_url,
+        realm = %realm,
+        client_id = %client_id,
+        force_login,
+        "Preparing Keycloak session"
+    );
 
     let store = KeyringSecretStore;
     let refresh_account = connection_refresh_token_account(connection_id);
@@ -147,12 +200,21 @@ async fn prepare_keycloak_config(
             .get_secret(&refresh_account)?
             .filter(|t| !t.is_empty())
         {
-            match kc_oauth::refresh_access_token(&kc_url, &realm, &client_id, &refresh_token).await {
+            info!(
+                connection_id = %connection_id,
+                "Attempting silent Keycloak refresh before connect"
+            );
+            match kc_oauth::refresh_access_token(&kc_url, &realm, &client_id, &refresh_token).await
+            {
                 RefreshOutcome::Success(tokens) => {
                     let active_refresh_token =
                         required_refresh_token(tokens.refresh_token.as_deref())?;
                     persist_refresh_token(&store, &refresh_account, Some(&active_refresh_token))?;
                     config.token = tokens.access_token.clone();
+                    info!(
+                        connection_id = %connection_id,
+                        "Silent Keycloak refresh succeeded before connect"
+                    );
                     return Ok(Some(KeycloakSession {
                         kc_url,
                         realm,
@@ -163,9 +225,18 @@ async fn prepare_keycloak_config(
                     }));
                 }
                 RefreshOutcome::NetworkError(e) => {
+                    warn!(
+                        connection_id = %connection_id,
+                        error = %e,
+                        "Silent Keycloak refresh failed due to network error"
+                    );
                     return Err(format!("Could not reach Keycloak to refresh the session: {e}"));
                 }
                 RefreshOutcome::NeedsLogin(_) => {
+                    info!(
+                        connection_id = %connection_id,
+                        "Stored Keycloak refresh token requires a fresh browser login"
+                    );
                     // Refresh token is dead — drop it and fall through to a browser login.
                     let _ = store.delete_secret(&refresh_account);
                 }
@@ -178,12 +249,14 @@ async fn prepare_keycloak_config(
     // persisted. Windows hands the active refresh token to the service for this
     // session; other platforms use the GUI ticker + in-band reauth to keep the
     // live tunnel alive silently, without ever re-prompting mid-session.
+    info!(connection_id = %connection_id, "Starting interactive Keycloak login");
     let tokens = oauth::start_oauth_flow(&kc_url, &realm, &client_id)
         .await
         .map_err(|e| format!("Keycloak login failed: {e}"))?;
     let active_refresh_token = required_refresh_token(tokens.refresh_token.as_deref())?;
     persist_refresh_token(&store, &refresh_account, Some(&active_refresh_token))?;
     config.token = tokens.access_token.clone();
+    info!(connection_id = %connection_id, "Interactive Keycloak login succeeded");
     Ok(Some(KeycloakSession {
         kc_url,
         realm,
@@ -231,6 +304,7 @@ fn start_token_refresh_ticker(app: &AppHandle, session: KeycloakSession) {
 #[cfg(target_os = "windows")]
 fn start_service_refresh_token_sync(app: &AppHandle) {
     stop_token_refresh_ticker(app);
+    info!("Starting Windows service refresh-token sync loop");
     let app_for_task = app.clone();
     let handle = tauri::async_runtime::spawn(service_refresh_token_sync_loop(app_for_task));
     if let Some(state) = app.try_state::<TokenRefreshHandle>() {
@@ -262,8 +336,14 @@ async fn service_refresh_token_sync_loop(app: AppHandle) {
                 refresh_token: Some(refresh_token),
             }) if !connection_id.is_empty() && !refresh_token.trim().is_empty() => {
                 let refresh_account = connection_refresh_token_account(&connection_id);
-                if let Err(e) = persist_refresh_token(&store, &refresh_account, Some(&refresh_token))
+                if let Err(e) =
+                    persist_refresh_token(&store, &refresh_account, Some(&refresh_token))
                 {
+                    warn!(
+                        connection_id = %connection_id,
+                        error = %e,
+                        "Failed to persist rotated Keycloak refresh token from service"
+                    );
                     let _ = send_ipc_request(&IpcRequest::Stop).await;
                     let _ = app.emit(
                         "kc-needs-login",
@@ -271,8 +351,18 @@ async fn service_refresh_token_sync_loop(app: AppHandle) {
                     );
                     break;
                 }
+                info!(
+                    connection_id = %connection_id,
+                    "Persisted rotated Keycloak refresh token from service"
+                );
             }
-            Ok(_) | Err(_) => {}
+            Ok(_) => {}
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    "Could not poll service for rotated Keycloak refresh token"
+                );
+            }
         }
 
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -286,6 +376,10 @@ async fn service_refresh_token_sync_loop(app: AppHandle) {
 async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
     let store = KeyringSecretStore;
     let refresh_account = connection_refresh_token_account(&session.connection_id);
+    info!(
+        connection_id = %session.connection_id,
+        "Starting GUI Keycloak access-token refresh loop"
+    );
 
     loop {
         tokio::time::sleep(REFRESH_TICK).await;
@@ -300,6 +394,10 @@ async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
             .flatten()
             .filter(|t| !t.is_empty())
         else {
+            warn!(
+                connection_id = %session.connection_id,
+                "Stored Keycloak refresh token is missing during active session"
+            );
             let _ = send_ipc_request(&IpcRequest::Stop).await;
             let _ = app.emit("kc-needs-login", "Session expired; please log in again.");
             break;
@@ -317,6 +415,11 @@ async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
                 if let Err(e) =
                     persist_refresh_token(&store, &refresh_account, tokens.refresh_token.as_deref())
                 {
+                    warn!(
+                        connection_id = %session.connection_id,
+                        error = %e,
+                        "Failed to persist rotated Keycloak refresh token"
+                    );
                     let _ = send_ipc_request(&IpcRequest::Stop).await;
                     let _ = app.emit(
                         "kc-needs-login",
@@ -326,14 +429,35 @@ async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
                 }
 
                 session.access_token = tokens.access_token.clone();
-                let _ = send_ipc_request(&IpcRequest::UpdateToken {
+                match send_ipc_request(&IpcRequest::UpdateToken {
                     token: tokens.access_token,
                 })
-                .await;
+                .await
+                {
+                    Ok(_) => info!(
+                        connection_id = %session.connection_id,
+                        "Refreshed Keycloak access token and notified service"
+                    ),
+                    Err(error) => warn!(
+                        connection_id = %session.connection_id,
+                        error = %error,
+                        "Failed to notify service about refreshed Keycloak access token"
+                    ),
+                }
             }
             // Transient: keep the tunnel up and try again on the next tick.
-            RefreshOutcome::NetworkError(_) => {}
+            RefreshOutcome::NetworkError(error) => {
+                warn!(
+                    connection_id = %session.connection_id,
+                    error = %error,
+                    "Keycloak access-token refresh failed due to network error"
+                );
+            }
             RefreshOutcome::NeedsLogin(msg) => {
+                warn!(
+                    connection_id = %session.connection_id,
+                    "Keycloak refresh token requires a fresh login during active session"
+                );
                 let _ = store.delete_secret(&refresh_account);
                 let _ = send_ipc_request(&IpcRequest::Stop).await;
                 let _ = app.emit("kc-needs-login", msg);
@@ -345,10 +469,25 @@ async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
 
 #[tauri::command]
 pub(crate) async fn vpn_disconnect(app: AppHandle) -> Result<String, String> {
+    info!("VPN disconnect requested");
     stop_token_refresh_ticker(&app);
-    match send_ipc_request(&IpcRequest::Stop).await? {
-        IpcResponse::Ok => Ok("Disconnected".into()),
-        IpcResponse::Error(e) => Err(e),
+    let response = match send_ipc_request(&IpcRequest::Stop).await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(error = %error, "VPN disconnect IPC request failed");
+            return Err(error);
+        }
+    };
+
+    match response {
+        IpcResponse::Ok => {
+            info!("VPN stop accepted by service");
+            Ok("Disconnected".into())
+        }
+        IpcResponse::Error(e) => {
+            warn!(error = %e, "VPN stop rejected by service");
+            Err(e)
+        }
         IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
         IpcResponse::RefreshTokenUpdate { .. } => {
             Err("Unexpected response: RefreshTokenUpdate instead of Ok".into())
@@ -358,9 +497,24 @@ pub(crate) async fn vpn_disconnect(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub(crate) async fn vpn_repair_network() -> Result<String, String> {
-    match send_ipc_request(&IpcRequest::RepairNetwork).await? {
-        IpcResponse::Ok => Ok("Network repaired".into()),
-        IpcResponse::Error(e) => Err(e),
+    info!("VPN network repair requested");
+    let response = match send_ipc_request(&IpcRequest::RepairNetwork).await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(error = %error, "VPN network repair IPC request failed");
+            return Err(error);
+        }
+    };
+
+    match response {
+        IpcResponse::Ok => {
+            info!("VPN network repair accepted by service");
+            Ok("Network repaired".into())
+        }
+        IpcResponse::Error(e) => {
+            warn!(error = %e, "VPN network repair rejected by service");
+            Err(e)
+        }
         IpcResponse::Status { .. } => Err("Unexpected response: Status instead of Ok".into()),
         IpcResponse::RefreshTokenUpdate { .. } => {
             Err("Unexpected response: RefreshTokenUpdate instead of Ok".into())

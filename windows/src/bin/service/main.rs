@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use windows_service::{
     define_windows_service,
     service::{
@@ -26,6 +26,7 @@ mod vpn_core;
 mod cli;
 mod handlers;
 mod keycloak_refresh;
+mod logging;
 mod main_loop;
 mod state;
 mod utils;
@@ -41,14 +42,9 @@ const SERVICE_TYPE: windows_service::service::ServiceType =
 define_windows_service!(ffi_service_main, my_service_main);
 
 pub fn main() -> Result<(), windows_service::Error> {
-    let mut env_filter = tracing_subscriber::EnvFilter::from_default_env();
-    for directive in ["mavi_vpn=info", "wintun=off"] {
-        match directive.parse() {
-            Ok(parsed) => env_filter = env_filter.add_directive(parsed),
-            Err(e) => warn!("Ignoring invalid tracing directive {directive:?}: {e}"),
-        }
+    if let Some(path) = logging::init_service_logging() {
+        info!("Service log file: {}", path.display());
     }
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     info!("Starting service dispatcher for {}", SERVICE_NAME);
     let args: Vec<OsString> = std::env::args_os().collect();

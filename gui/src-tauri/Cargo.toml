@@ -42,6 +42,8 @@ url = "2"
 reqwest = { version = "0.13", features = ["json", "rustls-no-provider", "form"], default-features = false }
 webbrowser = "1.0"
 keyring = "3.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

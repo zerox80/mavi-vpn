@@ -56,7 +56,9 @@ pub struct Config {
     /// Long-lived Keycloak refresh token. Used by the client to renew the
     /// short-lived access token without an interactive browser login. Never
     /// leaves the local machine.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Keep this serialized even when absent: IPC uses positional bincode, so
+    /// skipping a middle field shifts all following fields on the wire.
+    #[serde(default)]
     pub refresh_token: Option<String>,
     /// Hex-encoded `ECHConfigList` bytes. When present and the client's crypto
     /// provider supports HPKE (aws-lc-rs), the client offers ECH GREASE and
@@ -65,7 +67,8 @@ pub struct Config {
     pub ech_config: Option<String>,
     /// Inner TUN MTU override. Must match the server's `VPN_MTU` (1280–1360).
     /// `None` or absent → fall back to `VPN_MTU` env var, then `DEFAULT_TUN_MTU` (1280).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Keep this serialized even when absent; see `refresh_token`.
+    #[serde(default)]
     pub vpn_mtu: Option<u16>,
 }
 
@@ -361,6 +364,20 @@ mod tests {
                 refresh_token: Some("refresh-secret".to_string()),
                 ech_config: None,
                 vpn_mtu: Some(1300),
+            }),
+            IpcRequest::Start(Config {
+                endpoint: "vpn.example.com:4433".to_string(),
+                token: "secret".to_string(),
+                cert_pin: "pinned".to_string(),
+                censorship_resistant: false,
+                http3_framing: true,
+                kc_auth: Some(false),
+                kc_url: None,
+                kc_realm: None,
+                kc_client_id: None,
+                refresh_token: None,
+                ech_config: Some("ech-config".to_string()),
+                vpn_mtu: None,
             }),
             IpcRequest::Stop,
             IpcRequest::Status,

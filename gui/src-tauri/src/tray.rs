@@ -6,6 +6,7 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager,
 };
+use tracing::{info, warn};
 
 pub(crate) fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -38,6 +39,7 @@ pub(crate) fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
 pub(crate) fn start_status_poller(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut last_kc_login_error: Option<String> = None;
+        let mut last_status_signature: Option<String> = None;
 
         loop {
             let status = match send_ipc_request(&IpcRequest::Status).await {
@@ -57,6 +59,39 @@ pub(crate) fn start_status_poller(app: AppHandle) {
                 },
                 _ => VpnStatus::service_unavailable(),
             };
+
+            let status_signature = format!(
+                "{:?}|{}|{:?}|{:?}|{:?}|{}",
+                status.state,
+                status.running,
+                status.endpoint,
+                status.assigned_ip,
+                status.last_error,
+                status.service_available
+            );
+            if last_status_signature.as_deref() != Some(status_signature.as_str()) {
+                if let Some(error) = status.last_error.as_deref() {
+                    warn!(
+                        state = ?status.state,
+                        running = status.running,
+                        endpoint = ?status.endpoint,
+                        assigned_ip = ?status.assigned_ip,
+                        service_available = status.service_available,
+                        error = %error,
+                        "VPN status changed with error"
+                    );
+                } else {
+                    info!(
+                        state = ?status.state,
+                        running = status.running,
+                        endpoint = ?status.endpoint,
+                        assigned_ip = ?status.assigned_ip,
+                        service_available = status.service_available,
+                        "VPN status changed"
+                    );
+                }
+                last_status_signature = Some(status_signature);
+            }
 
             let kc_login_error = status
                 .last_error

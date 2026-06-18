@@ -25,6 +25,7 @@ mod vpn_core;
 
 mod cli;
 mod handlers;
+mod keycloak_refresh;
 mod main_loop;
 mod state;
 mod utils;

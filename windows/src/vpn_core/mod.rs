@@ -16,6 +16,7 @@ use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 use tracing::{info, warn};
 use wintun::Adapter;
 
@@ -126,6 +127,7 @@ pub async fn run_vpn(
     last_error: Arc<StdMutex<Option<String>>>,
     assigned_ip: Arc<StdMutex<Option<String>>>,
     current_token: Arc<StdMutex<String>>,
+    token_updated: Arc<Notify>,
 ) -> Result<()> {
     let runtime = VpnRuntimeState::new(
         running,
@@ -133,6 +135,7 @@ pub async fn run_vpn(
         last_error,
         assigned_ip,
         current_token,
+        token_updated,
     );
 
     config.normalize_transport();
@@ -228,7 +231,7 @@ async fn run_session(
         .as_deref()
         .and_then(crate::ech_client::decode_hex);
 
-    // Read the freshest access token (GUI may have refreshed it via UpdateToken
+    // Read the freshest access token (service refresh or IPC may have updated it
     // since this session's config was captured). Fall back to the seed token if
     // the lock is poisoned.
     let token = runtime.current_token_or(&config.token);
@@ -341,8 +344,8 @@ async fn run_session(
         }
     });
 
-    // Task: in-band Keycloak token reauth. The GUI silently refreshes the access
-    // token and pushes it via UpdateToken into current_token; present it to the
+    // Task: in-band Keycloak token reauth. A service-side refresh task or IPC
+    // client pushes a fresh access token into current_token; present it to the
     // server over a fresh bidi stream so the live tunnel survives the original
     // token's expiry instead of being force-closed and reconnected.
     let reauth_task = reauth::spawn_reauth_task(
@@ -350,6 +353,7 @@ async fn run_session(
         session_alive.clone(),
         runtime.running().clone(),
         runtime.current_token(),
+        runtime.token_updated(),
         token,
     );
 

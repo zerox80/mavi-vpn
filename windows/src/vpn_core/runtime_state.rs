@@ -1,12 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::Notify;
 
 /// Shared runtime handles for a single VPN service session. Bundles the flags
 /// and mutable state used by the connection loop, packet pumps, and the in-band
 /// reauth task so they do not have to be passed individually through every
-/// layer. The service only owns the current *access* token; the long-lived
-/// Keycloak refresh token stays in the user-session GUI, which pushes freshly
-/// minted access tokens here via IPC `UpdateToken`.
+/// layer. The service stores the current *access* token here and wakes the
+/// reauth task when service-side refresh or IPC pushes a fresher value.
 #[derive(Clone)]
 pub(super) struct VpnRuntimeState {
     running: Arc<AtomicBool>,
@@ -14,6 +14,7 @@ pub(super) struct VpnRuntimeState {
     last_error: Arc<StdMutex<Option<String>>>,
     assigned_ip: Arc<StdMutex<Option<String>>>,
     current_token: Arc<StdMutex<String>>,
+    token_updated: Arc<Notify>,
 }
 
 impl VpnRuntimeState {
@@ -23,6 +24,7 @@ impl VpnRuntimeState {
         last_error: Arc<StdMutex<Option<String>>>,
         assigned_ip: Arc<StdMutex<Option<String>>>,
         current_token: Arc<StdMutex<String>>,
+        token_updated: Arc<Notify>,
     ) -> Self {
         Self {
             running,
@@ -30,6 +32,7 @@ impl VpnRuntimeState {
             last_error,
             assigned_ip,
             current_token,
+            token_updated,
         }
     }
 
@@ -60,6 +63,12 @@ impl VpnRuntimeState {
     /// can read updates the GUI pushes via IPC `UpdateToken`.
     pub(super) fn current_token(&self) -> Arc<StdMutex<String>> {
         self.current_token.clone()
+    }
+
+    /// Returns a clone of the reauth wake-up handle so token refresh can be
+    /// applied immediately instead of waiting for the fallback poll interval.
+    pub(super) fn token_updated(&self) -> Arc<Notify> {
+        self.token_updated.clone()
     }
 
     pub(super) fn set_last_error(&self, error: Option<String>) {

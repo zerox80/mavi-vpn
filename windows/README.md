@@ -228,6 +228,30 @@ net stop MaviVPNService
 .\mavi-vpn-service.exe --console
 ```
 
+### Log-Dateien
+
+Der Windows-Service und die GUI schreiben eigene rotierende Log-Dateien. Die
+aktuellen Dateien liegen hier, alte Dateien werden als `.log.old` behalten:
+
+```powershell
+# Service-Log (Windows-Service / Tunnel / IPC / Keycloak-Refresh)
+$env:PROGRAMDATA\mavi-vpn\logs\mavi-vpn-service.log
+
+# GUI-Log (Tauri-GUI / Connection-Flow / Keycloak-Login)
+$env:LOCALAPPDATA\MaviVPN\logs\mavi-vpn-gui.log
+```
+
+Der Service-Log gehoert zum installierten Windows-Service. Fuer Console-Debugging
+den Service aus einer Administrator-PowerShell starten:
+
+```powershell
+$env:RUST_LOG = "debug"
+.\mavi-vpn-service.exe --console
+```
+
+Tokens, Refresh Tokens und JWT-Inhalte duerfen nicht in Logs auftauchen. Wenn
+Logs weitergegeben werden, trotzdem vorher kurz nach Secrets suchen.
+
 ---
 
 ## Features
@@ -249,6 +273,13 @@ net stop MaviVPNService
 ---
 
 ## Debugging
+
+Die Log-Dateien koennen live mitgelesen werden:
+
+```powershell
+Get-Content -Wait "$env:PROGRAMDATA\mavi-vpn\logs\mavi-vpn-service.log"
+Get-Content -Wait "$env:LOCALAPPDATA\MaviVPN\logs\mavi-vpn-gui.log"
+```
 
 ```powershell
 # Detaillierte Logs im Console-Modus

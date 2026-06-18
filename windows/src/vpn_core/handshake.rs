@@ -234,10 +234,16 @@ pub(super) async fn connect_and_handshake(
         send.write_all(&bytes).await?;
         let _ = send.finish(); // properly close the send side of the auth stream
 
-        let len = recv.read_u32_le().await? as usize;
+        let len = recv
+            .read_u32_le()
+            .await
+            .context("Server closed raw auth response before sending length")?
+            as usize;
         validate_raw_response_len(len)?;
         let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
+        recv.read_exact(&mut buf)
+            .await
+            .context("Server closed raw auth response before sending the full body")?;
 
         // In censorship-resistant mode the server returns a fake nginx HTML
         // page on auth failure. Detect by content, not magic length.

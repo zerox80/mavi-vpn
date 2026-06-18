@@ -6,6 +6,7 @@
 
 mod commands;
 mod ipc;
+mod logging;
 mod oauth;
 mod secret_store;
 mod storage;
@@ -23,6 +24,10 @@ use tray::{setup_tray, start_status_poller};
 /// # Panics
 /// Panics if the Tauri application fails to start.
 pub fn run() {
+    if let Some(path) = logging::init_gui_logging() {
+        tracing::info!("GUI log file: {}", path.display());
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(commands::TokenRefreshHandle::default())

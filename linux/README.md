@@ -123,6 +123,51 @@ und explizite Schreibrechte fuer `/etc/resolv.conf` beziehungsweise
 Gruppenmitgliedschaft, Token-Berechtigungen und `systemctl status mavi-vpn`
 pruefen.
 
+### Logs
+
+Der Linux-Daemon laeuft unter systemd und schreibt in das Journal:
+
+```bash
+sudo journalctl -u mavi-vpn -f
+sudo journalctl -u mavi-vpn -b -n 300 --no-pager
+```
+
+Wenn mehr Details gebraucht werden, kann `RUST_LOG` fuer den Service gesetzt
+werden:
+
+```bash
+sudo systemctl edit mavi-vpn
+```
+
+```ini
+[Service]
+Environment=RUST_LOG=debug,linux_vpn=debug,shared=debug
+```
+
+Danach den Service neu laden und starten:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart mavi-vpn
+sudo journalctl -u mavi-vpn -f
+```
+
+Die GUI schreibt eine eigene rotierende Log-Datei:
+
+```bash
+# Wenn XDG_STATE_HOME gesetzt ist:
+$XDG_STATE_HOME/mavi-vpn/logs/mavi-vpn-gui.log
+
+# Fallback:
+~/.local/state/mavi-vpn/logs/mavi-vpn-gui.log
+
+# Live ansehen:
+tail -f ~/.local/state/mavi-vpn/logs/mavi-vpn-gui.log
+```
+
+Tokens, Refresh Tokens und JWT-Inhalte duerfen nicht in Logs auftauchen. Wenn
+Logs weitergegeben werden, trotzdem vorher kurz nach Secrets suchen.
+
 ---
 
 ## GUI
@@ -217,6 +262,12 @@ RUST_LOG=debug sudo mavi-vpn
 
 # Nur VPN-Core Logs
 RUST_LOG=linux_vpn=debug sudo mavi-vpn
+
+# systemd-Daemon live ansehen
+sudo journalctl -u mavi-vpn -f
+
+# GUI-Log live ansehen
+tail -f ~/.local/state/mavi-vpn/logs/mavi-vpn-gui.log
 
 # TUN-Interface live beobachten
 ip addr show mavi0

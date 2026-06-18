@@ -130,6 +130,7 @@ fn default_env_filter() -> EnvFilter {
 }
 
 fn gui_log_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
         return PathBuf::from(local_app_data).join("MaviVPN").join("logs");
     }

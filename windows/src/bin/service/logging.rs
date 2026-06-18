@@ -130,6 +130,15 @@ pub fn init_service_logging(console: bool) -> Option<PathBuf> {
     }
 }
 
+pub fn init_console_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(default_env_filter())
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_line_number(true)
+        .try_init();
+}
+
 fn default_env_filter() -> EnvFilter {
     std::env::var("RUST_LOG").map_or_else(
         |_| {

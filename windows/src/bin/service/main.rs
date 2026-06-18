@@ -43,31 +43,31 @@ define_windows_service!(ffi_service_main, my_service_main);
 
 pub fn main() -> Result<(), windows_service::Error> {
     let args: Vec<OsString> = std::env::args_os().collect();
-    let foreground = args
-        .iter()
-        .any(|arg| arg == "--console" || arg == "install" || arg == "uninstall");
+    let console = args.iter().any(|arg| arg == "--console");
+    let install = args.iter().any(|arg| arg == "install");
+    let uninstall = args.iter().any(|arg| arg == "uninstall");
 
-    if let Some(path) = logging::init_service_logging(foreground) {
+    if install || uninstall {
+        logging::init_console_logging();
+        if install {
+            cli::install_service();
+        } else {
+            cli::uninstall_service();
+        }
+        return Ok(());
+    }
+
+    if let Some(path) = logging::init_service_logging(console) {
         info!("Service log file: {}", path.display());
     }
 
     info!("Starting service dispatcher for {}", SERVICE_NAME);
 
-    if args.iter().any(|arg| arg == "--console") {
+    if console {
         info!("Running in console mode");
         if let Err(e) = cli::run_standalone() {
             error!("Console service run failed: {e:#}");
         }
-        return Ok(());
-    }
-
-    if args.iter().any(|arg| arg == "install") {
-        cli::install_service();
-        return Ok(());
-    }
-
-    if args.iter().any(|arg| arg == "uninstall") {
-        cli::uninstall_service();
         return Ok(());
     }
 

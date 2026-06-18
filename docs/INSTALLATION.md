@@ -200,11 +200,30 @@ mavi-vpn-client status    # Check connection status
 ```
 
 ### Troubleshooting
-Run the service in console mode to see debug logs:
+The Windows service and GUI write rotating log files:
+
+```powershell
+# Windows Service log
+$env:PROGRAMDATA\mavi-vpn\logs\mavi-vpn-service.log
+
+# Tauri GUI log
+$env:LOCALAPPDATA\MaviVPN\logs\mavi-vpn-gui.log
+```
+
+Run the service in console mode from an Administrator PowerShell for foreground
+debugging:
+
 ```powershell
 $env:RUST_LOG = "debug"
 .\mavi-vpn-service.exe --console
+
+# Or follow the installed service and GUI logs:
+Get-Content -Wait "$env:PROGRAMDATA\mavi-vpn\logs\mavi-vpn-service.log"
+Get-Content -Wait "$env:LOCALAPPDATA\MaviVPN\logs\mavi-vpn-gui.log"
 ```
+
+Logs must not contain access tokens, refresh tokens, JWT bodies, private keys,
+or full token exchange responses. Redact logs before sharing.
 
 ---
 
@@ -271,7 +290,34 @@ The CLI searches in order: `./config.json` → `~/.config/mavi-vpn/config.json` 
 ```bash
 RUST_LOG=debug sudo mavi-vpn           # Debug direct mode
 sudo journalctl -u mavi-vpn -f         # Debug systemd daemon
+tail -f ~/.local/state/mavi-vpn/logs/mavi-vpn-gui.log  # Debug GUI
 ```
+
+For persistent systemd debug logging, create an override:
+
+```bash
+sudo systemctl edit mavi-vpn
+```
+
+```ini
+[Service]
+Environment=RUST_LOG=debug,linux_vpn=debug,shared=debug
+```
+
+Then reload and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart mavi-vpn
+sudo journalctl -u mavi-vpn -f
+```
+
+GUI logs are written to `$XDG_STATE_HOME/mavi-vpn/logs/mavi-vpn-gui.log` when
+`XDG_STATE_HOME` is set, otherwise to
+`~/.local/state/mavi-vpn/logs/mavi-vpn-gui.log`.
+
+Logs must not contain access tokens, refresh tokens, JWT bodies, private keys,
+or full token exchange responses. Redact logs before sharing.
 
 ---
 

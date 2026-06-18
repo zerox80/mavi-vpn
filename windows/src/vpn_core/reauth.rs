@@ -5,7 +5,7 @@
 //! server over a *fresh* bidirectional QUIC stream so the live tunnel survives
 //! the original token's expiry instead of being force-closed and reconnected.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use shared::ControlMessage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -74,12 +74,18 @@ async fn send_reauth(connection: &quinn::Connection, token: &str) -> Result<bool
         send.write_all(&bytes).await?;
         let _ = send.finish();
 
-        let len = recv.read_u32_le().await? as usize;
+        let len = recv
+            .read_u32_le()
+            .await
+            .context("Server closed reauth response before sending length")?
+            as usize;
         if len > 65_536 {
             anyhow::bail!("Reauth response too large: {len} bytes");
         }
         let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
+        recv.read_exact(&mut buf)
+            .await
+            .context("Server closed reauth response before sending the full body")?;
         let (resp, _): (ControlMessage, _) =
             bincode::serde::decode_from_slice(&buf, bincode::config::standard())?;
         match resp {

@@ -50,7 +50,7 @@ base64 = "0.22"
 constant_time_eq = "0.5"
 url = "2.5"
 webbrowser = "1.0"
-keyring = "3.6"
+keyring = "4.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"

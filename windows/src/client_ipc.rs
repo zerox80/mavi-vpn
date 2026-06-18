@@ -44,7 +44,10 @@ pub(crate) async fn send_request_internal(req: IpcRequest) -> Result<IpcResponse
 }
 
 pub(crate) async fn send_request(req: IpcRequest) -> Result<()> {
-    let is_start = matches!(req, IpcRequest::Start(_));
+    let is_start = matches!(
+        req,
+        IpcRequest::Start(_) | IpcRequest::StartWithKeycloak { .. }
+    );
     match send_request_internal(req).await {
         Ok(IpcResponse::Ok) => {
             if is_start {
@@ -74,6 +77,9 @@ pub(crate) async fn send_request(req: IpcRequest) -> Result<()> {
             if let Some(err) = last_error {
                 println!("Last error: {err}");
             }
+        }
+        Ok(IpcResponse::RefreshTokenUpdate { .. }) => {
+            println!("Unexpected refresh-token response.");
         }
         Err(e) => {
             println!("Failed to communicate with service: {e}");

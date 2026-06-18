@@ -1,6 +1,6 @@
 use crate::commands::VpnStatus;
 use crate::ipc::send_ipc_request;
-use shared::ipc::{IpcRequest, IpcResponse};
+use shared::ipc::{IpcRequest, IpcResponse, KEYCLOAK_LOGIN_REQUIRED_PREFIX};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -37,6 +37,8 @@ pub(crate) fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
 
 pub(crate) fn start_status_poller(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        let mut last_kc_login_error: Option<String> = None;
+
         loop {
             let status = match send_ipc_request(&IpcRequest::Status).await {
                 Ok(IpcResponse::Status {
@@ -55,6 +57,22 @@ pub(crate) fn start_status_poller(app: AppHandle) {
                 },
                 _ => VpnStatus::service_unavailable(),
             };
+
+            let kc_login_error = status
+                .last_error
+                .as_deref()
+                .and_then(|error| error.strip_prefix(KEYCLOAK_LOGIN_REQUIRED_PREFIX))
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .map(str::to_string);
+
+            if kc_login_error != last_kc_login_error {
+                if let Some(message) = kc_login_error.as_deref() {
+                    let _ = app.emit("kc-needs-login", message.to_string());
+                }
+                last_kc_login_error = kc_login_error;
+            }
+
             let _ = app.emit("vpn-status-update", &status);
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }

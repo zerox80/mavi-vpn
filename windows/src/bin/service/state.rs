@@ -1,6 +1,8 @@
 use crate::ipc;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 pub struct VpnStatusSnapshot {
@@ -12,6 +14,21 @@ pub struct VpnStatusSnapshot {
     pub endpoint: Option<String>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct PendingKeycloakRefreshToken {
+    pub connection_id: String,
+    pub refresh_token: String,
+}
+
+impl fmt::Debug for PendingKeycloakRefreshToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingKeycloakRefreshToken")
+            .field("connection_id", &self.connection_id)
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct VpnRuntimeHandles {
     pub running: Arc<AtomicBool>,
@@ -20,6 +37,8 @@ pub struct VpnRuntimeHandles {
     pub last_error: Arc<StdMutex<Option<String>>>,
     pub assigned_ip: Arc<StdMutex<Option<String>>>,
     pub current_token: Arc<StdMutex<String>>,
+    pub token_updated: Arc<Notify>,
+    pub pending_keycloak_refresh_token: Arc<StdMutex<Option<PendingKeycloakRefreshToken>>>,
 }
 
 impl VpnRuntimeHandles {
@@ -28,7 +47,7 @@ impl VpnRuntimeHandles {
             if let Ok(mut last_error) = self.last_error.lock() {
                 *last_error = Some(message);
             }
-        } else {
+        } else if !self.has_keycloak_login_required_error() {
             self.clear_last_error();
         }
     }
@@ -44,6 +63,27 @@ impl VpnRuntimeHandles {
             *last_error = None;
         }
     }
+
+    fn has_keycloak_login_required_error(&self) -> bool {
+        self.last_error
+            .lock()
+            .ok()
+            .and_then(|last_error| last_error.clone())
+            .is_some_and(|error| error.starts_with(ipc::KEYCLOAK_LOGIN_REQUIRED_PREFIX))
+    }
+
+    pub fn set_current_token(&self, token: String) {
+        if let Ok(mut current_token) = self.current_token.lock() {
+            *current_token = token;
+        }
+        self.token_updated.notify_waiters();
+    }
+
+    pub fn publish_keycloak_refresh_token(&self, update: PendingKeycloakRefreshToken) {
+        if let Ok(mut pending) = self.pending_keycloak_refresh_token.lock() {
+            *pending = Some(update);
+        }
+    }
 }
 
 pub struct VpnServiceState {
@@ -53,11 +93,14 @@ pub struct VpnServiceState {
     pub last_error: Arc<StdMutex<Option<String>>>,
     pub assigned_ip: Arc<StdMutex<Option<String>>>,
     /// The access token used for the next (re)handshake. Seeded from the
-    /// `Start` config and overwritten by `UpdateToken` so the reconnect loop
-    /// always authenticates with the freshest token the GUI has refreshed,
-    /// rather than the (possibly expired) one captured when the session began.
+    /// `Start` config and overwritten by service-side refresh or `UpdateToken`
+    /// so the reconnect loop authenticates with a fresh token rather than the
+    /// possibly expired one captured when the session began.
     pub current_token: Arc<StdMutex<String>>,
+    pub token_updated: Arc<Notify>,
+    pub pending_keycloak_refresh_token: Arc<StdMutex<Option<PendingKeycloakRefreshToken>>>,
     pub vpn_task: Option<tokio::task::JoinHandle<()>>,
+    pub keycloak_refresh_task: Option<tokio::task::JoinHandle<()>>,
     pub active_config: Option<ipc::Config>,
 }
 
@@ -70,7 +113,10 @@ impl VpnServiceState {
             last_error: Arc::new(StdMutex::new(None)),
             assigned_ip: Arc::new(StdMutex::new(None)),
             current_token: Arc::new(StdMutex::new(String::new())),
+            token_updated: Arc::new(Notify::new()),
+            pending_keycloak_refresh_token: Arc::new(StdMutex::new(None)),
             vpn_task: None,
+            keycloak_refresh_task: None,
             active_config: None,
         }
     }
@@ -119,11 +165,17 @@ impl VpnServiceState {
             last_error: self.last_error.clone(),
             assigned_ip: self.assigned_ip.clone(),
             current_token: self.current_token.clone(),
+            token_updated: self.token_updated.clone(),
+            pending_keycloak_refresh_token: self.pending_keycloak_refresh_token.clone(),
         }
     }
 
     pub fn set_task(&mut self, task: JoinHandle<()>) {
         self.vpn_task = Some(task);
+    }
+
+    pub fn set_keycloak_refresh_task(&mut self, task: JoinHandle<()>) {
+        self.keycloak_refresh_task = Some(task);
     }
 
     pub fn take_task(&mut self) -> Option<JoinHandle<()>> {
@@ -135,9 +187,14 @@ impl VpnServiceState {
         self.vpn_running.store(false, Ordering::SeqCst);
         self.vpn_connected.store(false, Ordering::SeqCst);
         self.vpn_stopping.store(task_running, Ordering::SeqCst);
+        if let Some(task) = self.keycloak_refresh_task.take() {
+            task.abort();
+        }
         self.active_config = None;
         self.clear_last_error();
         self.clear_assigned_ip();
+        self.clear_pending_keycloak_refresh_token();
+        self.set_current_token(String::new());
     }
 
     pub fn mark_session_starting(&mut self, config: ipc::Config) {
@@ -146,6 +203,7 @@ impl VpnServiceState {
         self.vpn_connected.store(false, Ordering::SeqCst);
         self.vpn_stopping.store(false, Ordering::SeqCst);
         self.clear_last_error();
+        self.clear_pending_keycloak_refresh_token();
         self.set_current_token(config.token);
     }
 
@@ -164,6 +222,20 @@ impl VpnServiceState {
     pub fn set_current_token(&self, token: String) {
         if let Ok(mut current_token) = self.current_token.lock() {
             *current_token = token;
+        }
+        self.token_updated.notify_waiters();
+    }
+
+    pub fn take_pending_keycloak_refresh_token(&self) -> Option<PendingKeycloakRefreshToken> {
+        self.pending_keycloak_refresh_token
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
+    }
+
+    pub fn clear_pending_keycloak_refresh_token(&self) {
+        if let Ok(mut pending) = self.pending_keycloak_refresh_token.lock() {
+            *pending = None;
         }
     }
 }

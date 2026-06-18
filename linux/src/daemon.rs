@@ -408,6 +408,13 @@ async fn dispatch_request_with_hooks(
             }
             IpcResponse::Ok
         }
+        IpcRequest::StartWithKeycloak { .. } => IpcResponse::Error(
+            "Service-side Keycloak refresh is only supported on Windows".to_string(),
+        ),
+        IpcRequest::TakeRefreshTokenUpdate => IpcResponse::RefreshTokenUpdate {
+            connection_id: None,
+            refresh_token: None,
+        },
     }
 }
 

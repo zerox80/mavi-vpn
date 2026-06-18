@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::util::SubscriberInitExt;
 
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -32,7 +31,7 @@ impl Write for SharedLogWriter {
         let mut file = self
             .file
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "log file lock poisoned"))?;
+            .map_err(|_| io::Error::other("log file lock poisoned"))?;
         file.write(buf)
     }
 
@@ -40,7 +39,7 @@ impl Write for SharedLogWriter {
         let mut file = self
             .file
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "log file lock poisoned"))?;
+            .map_err(|_| io::Error::other("log file lock poisoned"))?;
         file.flush()
     }
 }
@@ -113,7 +112,7 @@ fn open_log_file(path: &Path) -> io::Result<File> {
 }
 
 fn rotate_if_needed(path: &Path) -> io::Result<()> {
-    if fs::metadata(path).map_or(false, |metadata| metadata.len() >= MAX_LOG_BYTES) {
+    if fs::metadata(path).is_ok_and(|metadata| metadata.len() >= MAX_LOG_BYTES) {
         let old_path = path.with_extension("log.old");
         let _ = fs::remove_file(&old_path);
         fs::rename(path, old_path)?;

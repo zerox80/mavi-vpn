@@ -17,7 +17,10 @@ const RECONNECT_MAX_SECS: u64 = 30;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 15;
 const TUN_DEVICE_NAME: &str = "mavi0";
 
+mod lifecycle;
 mod reauth;
+
+use self::lifecycle::{is_permanent_setup_error, SessionEnd};
 
 /// Sleeps up to `delay`, but returns as soon as `running` is cleared.
 ///
@@ -110,23 +113,6 @@ pub async fn run_vpn(
 
     info!("VPN stopped.");
     Ok(())
-}
-
-fn is_permanent_setup_error(message: &str) -> bool {
-    message.contains("AUTH_FAILED")
-        || message.contains("Server rejected connection")
-        || message.contains("MTU mismatch")
-        || message.contains("unsupported VPN MTU")
-        || message.contains("Failed to open /dev/net/tun")
-        || message.contains("Failed to create TUN device")
-        || message.contains("Failed to install IPv6 split route")
-        || message.contains("Failed to execute: ip ")
-        || message.contains("ip failed:")
-}
-
-enum SessionEnd {
-    UserStopped,
-    ConnectionLost,
 }
 
 /// Manages a single active VPN session (handshake + packet pumping).

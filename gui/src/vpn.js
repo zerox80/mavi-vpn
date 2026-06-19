@@ -14,7 +14,11 @@ export function activeConn() {
 
 export async function toggleConnection() {
   if (state.hero === 'disconnecting') return;
-  if (state.hero === 'connecting') {
+  if (
+    state.hero === 'connecting' ||
+    state.vpnState === 'Starting' ||
+    state.vpnState === 'Reconnecting'
+  ) {
     return disconnect();
   }
   if (state.hero === 'on') return disconnect();
@@ -149,6 +153,9 @@ export function applyStatus(status) {
     hideToast('hint');
   } else if (nextHero === 'connecting') {
     setHero('connecting');
+    if (state.vpnState === 'Starting') {
+      btn.textContent = 'CONNECTING...';
+    }
     // A mid-session drop that is being auto-retried: show a calm, non-error
     // hint instead of the old red failure toast. First-time connects (Starting)
     // stay silent — the hero already reads "ESTABLISHING TUNNEL".

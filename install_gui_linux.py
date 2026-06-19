@@ -71,6 +71,15 @@ def is_root():
 def sudo(*cmd):
     return run(([] if is_root() else ["sudo"]) + list(cmd))
 
+def sudo_try(*cmd):
+    """Privileged command that does NOT abort the script on failure.
+
+    Returns True on success. Used when trying a series of candidate packages.
+    """
+    full = ([] if is_root() else ["sudo"]) + list(cmd)
+    info(f"Running: {' '.join(full)}")
+    return subprocess.run(full).returncode == 0
+
 # ---------------------------------------------------------------------------
 # System dependency installation
 # ---------------------------------------------------------------------------
@@ -192,6 +201,72 @@ def ensure_rust():
     else:
         err("cargo is required. Install Rust: https://rustup.rs")
         sys.exit(1)
+
+# Node.js + npm are required by the Tauri frontend build (`npm run build`).
+# Package names differ per distro and Fedora ships only versioned packages
+# (e.g. nodejs22) on recent releases, so we try candidates in order.
+NODE_PKG_CANDIDATES = {
+    "fedora": [["nodejs"], ["nodejs22"], ["nodejs20"], ["nodejs18"]],
+    "debian": [["nodejs", "npm"]],
+    "arch":   [["nodejs", "npm"]],
+    "suse":   [["nodejs", "npm"], ["nodejs22"], ["nodejs20"]],
+}
+
+def have_node():
+    return bool(shutil.which("node") and shutil.which("npm"))
+
+def ensure_node():
+    """Ensure Node.js + npm are installed (needed for the GUI frontend build)."""
+    step("Checking Node.js / npm")
+    if have_node():
+        node_v = run_capture(["node", "--version"]).stdout.strip()
+        npm_v = run_capture(["npm", "--version"]).stdout.strip()
+        ok(f"Node.js {node_v} / npm {npm_v} found")
+        return
+
+    warn("Node.js / npm not found – required to build the GUI frontend.")
+    distro = detect_distro()
+    candidates = NODE_PKG_CANDIDATES.get(distro) if distro else None
+    if not candidates:
+        err("Could not auto-install Node.js for this distro.")
+        err("Install Node.js 20+ and npm manually, then re-run:")
+        err("  https://nodejs.org/en/download/package-manager")
+        sys.exit(1)
+
+    if not ask("Install Node.js + npm now?"):
+        err("Node.js + npm are required to build the GUI. Aborting.")
+        sys.exit(1)
+
+    for pkgs in candidates:
+        sudo_try(*(_PKG_INSTALL_CMD[distro] + pkgs))
+        if have_node():
+            break
+
+    if not have_node():
+        err("Node.js / npm still not available after install attempts.")
+        err("Please install Node.js 20+ manually and re-run.")
+        sys.exit(1)
+
+    node_v = run_capture(["node", "--version"]).stdout.strip()
+    npm_v = run_capture(["npm", "--version"]).stdout.strip()
+    ok(f"Node.js {node_v} / npm {npm_v} installed")
+
+def install_frontend_deps():
+    """Install the GUI's npm dependencies so `npm run build` (vite) works."""
+    step("Installing GUI frontend dependencies (npm)")
+    if (GUI_DIR / "node_modules").exists():
+        ok("node_modules already present")
+        return
+    cmd = ["npm", "ci"] if (GUI_DIR / "package-lock.json").exists() else ["npm", "install"]
+    info(f"Running: {' '.join(cmd)} (in {GUI_DIR})")
+    result = subprocess.run(cmd, cwd=GUI_DIR)
+    if result.returncode != 0 and cmd[1] == "ci":
+        warn("npm ci failed (lockfile out of sync?) – falling back to npm install")
+        result = subprocess.run(["npm", "install"], cwd=GUI_DIR)
+    if result.returncode != 0:
+        err("npm dependency installation failed")
+        sys.exit(result.returncode)
+    ok("Frontend dependencies installed")
 
 def ensure_tauri_cli():
     step("Checking cargo-tauri")
@@ -334,6 +409,7 @@ def main():
     print()
 
     ensure_rust()
+    ensure_node()
     install_system_deps(GUI_SYSTEM_DEPS)
     ensure_tauri_cli()
 
@@ -346,6 +422,9 @@ def main():
         if (ROOT / "Cargo.lock").exists():
             chown_paths.append(str(ROOT / "Cargo.lock"))
         sudo("chown", "-R", f"{user}:{user}", *chown_paths)
+
+    # ── Frontend deps ────────────────────────────────────────────────────────
+    install_frontend_deps()
 
     # ── Build ────────────────────────────────────────────────────────────────
     step("Building GUI (Release)")

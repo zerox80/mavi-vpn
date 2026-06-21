@@ -1,36 +1,125 @@
-# Context Management and Compaction
+# CLAUDE.md
 
-You must keep the working context compact and clean.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Do not maximize context length. Long context reduces coding quality because stale logs, failed attempts, outdated assumptions, repeated explanations, and irrelevant exploration details distract from the current task.
+Mavi VPN is a Rust Cargo workspace that tunnels all traffic over QUIC (via forked `quinn`/`h3`),
+disguised as HTTP/3 for censorship resistance. It targets a Linux server plus Windows, Linux, and
+Android clients, with an optional cross-platform Tauri GUI. `README.md` and `CODEWIKI.md` cover
+features and deep internals; this file covers the things that bite you when building and editing.
 
-When the active context approaches approximately 80,000 tokens, you must run `/compact` before continuing with implementation or further analysis.
+## Crate name ≠ directory name
 
-Also compact earlier if the context becomes noisy, repetitive, or after a major implementation phase.
+Cargo `-p` flags use the package name, which often differs from the folder. Get this wrong and you'll
+target the wrong crate or get "package not found":
 
-Before compacting, preserve all task-critical state:
+| Directory | Package name | Notes |
+|---|---|---|
+| `backend/` | `mavi-vpn` | The Linux VPN **server** |
+| `linux/` | `linux-vpn` | Linux client/daemon |
+| `windows/` | `windows-vpn` | Windows client + service; **only compiles on Windows** |
+| `android/app/src/main/rust/` | `mavivpn` | JNI core (no hyphen) |
+| `gui/src-tauri/` | `mavi-vpn-gui` | Tauri backend |
+| `shared/` | `shared` | Protocol + shared logic, depended on by all |
+| `quic-tester/` | `quic-tester` | DPI probe simulator |
 
-* Current objective
-* User constraints and preferences
-* Relevant files and paths
-* Important repository structure
-* Code changes already made
-* Commands run and important outputs
-* Failing tests, errors, warnings, and unresolved bugs
-* Environment details, services, ports, variables, and config assumptions
-* Important decisions and why they were made
-* Discarded approaches and why they were discarded
-* Next concrete actions
+Note `backend` and `linux` *both* produce a binary literally named `mavi-vpn`, but the server is
+package `mavi-vpn` and the Linux client is package `linux-vpn`.
 
-Remove or compress:
+## Build, test, lint
 
-* Long logs that are no longer needed
-* Repeated explanations
-* Failed attempts that are no longer relevant
-* Old file contents that have changed
-* Irrelevant exploration details
-* Stale assumptions that were later corrected
+```bash
+# Tests — portable core only (no Tauri/WebView or OS service deps). Use this by default.
+cargo test-core-workspace        # alias: -p shared -p mavivpn -p mavi-vpn -p quic-tester
+cargo test -p shared             # focused single-crate runs
+cargo test -p shared some_test_name   # a single test by name
 
-After `/compact`, continue from the compacted state as the source of truth. Do not restart the task, repeat completed work, or ask again for information already preserved in the compacted summary.
+# Linux client and (on Windows) the Windows client are not in the core alias:
+cargo test -p linux-vpn
+cargo test -p windows-vpn        # Windows host only
 
-For long coding tasks, work in phases: inspect briefly, plan, implement one coherent phase, run checks, compact if near 80,000 tokens, then continue.
+# GUI Rust backend: frontend assets MUST be built first — Tauri embeds them at compile time.
+cd gui && npm ci && npm run build && cd ..
+cargo test-gui-backend           # alias: -p mavi-vpn-gui
+
+# Lint / format (CI runs clippy with -D warnings)
+cargo fmt
+cargo clippy --workspace --exclude windows-vpn --all-targets -- -D warnings   # Linux
+cargo clippy -p windows-vpn --all-targets -- -D warnings                      # Windows host
+
+# Frontend (gui/)
+cd gui
+npm test            # vitest
+npm run lint        # eslint
+npm run tauri -- dev      # run GUI in dev
+npm run tauri -- build    # production bundle (MSI/NSIS/DEB/RPM)
+```
+
+Per-platform release builds: `cargo build --release -p linux-vpn` / `-p windows-vpn`. Android builds
+through Gradle (`cd android && ./gradlew assembleDebug`, tests `./gradlew testDebugUnitTest`), which
+invokes `cargo-ndk` automatically; install it with `cargo install cargo-ndk` and add the Android
+rust targets first.
+
+### CI constraints that fail PRs
+
+- **500-line file limit.** `.github/workflows/lint.yml` fails if any `.rs/.kt/.py/.ts/.tsx/.js` file
+  exceeds 500 lines. Split into modules rather than letting a file grow past it.
+- **`-D warnings` clippy** across the workspace; `Cargo.toml` sets `unsafe_code = "warn"` and
+  `clippy::all = "warn"` workspace-wide, so warnings become hard errors in CI.
+- `windows-vpn` is excluded from the Linux clippy/test jobs (uses `wintun`, `windows-sys`, stdcall
+  ABI) and gets its own `windows-latest` jobs.
+
+## Architecture
+
+### `shared/` is the protocol source of truth
+Everything client/server agree on lives here, so changes ripple across all crates. Most important is
+`ControlMessage` in `shared/src/lib.rs`, the control-plane handshake exchanged over a **QUIC
+bidirectional stream** (length-prefixed `u32` + bincode):
+
+1. Client opens a bidi stream and sends `Auth { token }` (static token, or a Keycloak JWT).
+2. Server replies `Config { assigned_ip, gateway, dns, mtu, optional IPv6… }` or `Error { message }`.
+3. The stream closes; **all subsequent packet data flows as QUIC datagrams**, not streams.
+4. Mid-session, a client may open a fresh bidi stream and send `Reauth { token }` (silently refreshed
+   Keycloak token) to extend the session deadline without tearing down the tunnel; server answers
+   `ReauthResult { accepted }`.
+
+When adding a `ControlMessage` variant, **append it** — variant order is the bincode wire format, so
+reordering breaks compatibility with older peers.
+
+`shared/` also owns `masque.rs` (MASQUE connect-ip capsule framing for HTTP/3 mode), `icmp.rs`
+(Packet-Too-Big generation), `ipc.rs` (GUI↔service IPC protocol), and the MTU logic below.
+
+### MTU coupling (a frequent source of bugs)
+The operator turns exactly one knob: the inner **TUN MTU** (`VPN_MTU`, allowed range **1280–1360**,
+default 1280). The outer **QUIC payload MTU is always derived** as `tun_mtu + QUIC_OVERHEAD_BYTES`
+(+80) — never set independently. Server and client must agree on `tun_mtu` or the larger side emits
+packets the smaller side rejects. See `resolve_tun_mtu*` and the `mtu` module in `shared/`.
+
+### Per-platform clients share a shape
+Each client crate (`linux/`, `windows/`, `android/.../rust/`) has its own `vpn_core` that drives the
+QUIC tunnel (ECH GREASE, optional MASQUE framing, certificate pinning, connection-migration handling
+on network change) plus platform-specific TUN + routing + DNS:
+- `linux/` raw TUN via ioctl (`tun.rs`), routes/DNS in `network.rs`, and a `daemon.rs` IPC server.
+- `windows/` WinTUN + a Windows Service (`bin/service.rs`) with NRPT DNS, plus PKCE OAuth (`oauth.rs`).
+- `android/` Kotlin `VpnService` + Jetpack Compose UI calling the Rust JNI core in `lib.rs`.
+
+The GUI and CLI talk to the privileged background service over **IPC on TCP port 14433** — the GUI
+never touches the TUN directly.
+
+### Server (`backend/`)
+`main.rs` accept loop → per-connection handler in `handlers/`; `state.rs` holds the v4+v6 IP pool and
+a `DashMap` peer table; `routing.rs` runs the TUN reader/writer tasks. TLS cert + SHA-256 pin in
+`cert.rs`, ECH keypair in `ech.rs`, Keycloak JWKS validation in `keycloak.rs`. Runs as a hardened,
+non-privileged Docker container (`backend/docker-compose.yml`, `entrypoint.sh` does iptables NAT and
+IPv6 forwarding) — it **cannot** set host sysctls, so IPv6 forwarding must be enabled on the host.
+
+### Censorship-resistance modes (escalating)
+Standard raw QUIC → CR mode (ALPN `h3` + fake nginx H3 page for unauthorized probes) → full MASQUE
+connect-ip capsule framing. ECH (SNI spoofing via HPKE GREASE) layers on top. `quic-tester/` acts as
+a DPI probe to verify the server looks like a plain web server.
+
+## Forked dependencies — do not bump casually
+`Cargo.toml` `[patch.crates-io]` pins `quinn`/`quinn-proto`/`quinn-udp` and `h3`/`h3-quinn`/
+`h3-datagram` to specific revs of the `zerox80` forks (QUIC 0.12 + datagram/ECH support), plus a
+pinned `time` rev. These patches are load-bearing — changing the revs can pull in an incompatible
+second Quinn version or break the ECH/MASQUE paths. The release profile uses `lto=true`,
+`codegen-units=1`, `panic="abort"`, `strip=true`.

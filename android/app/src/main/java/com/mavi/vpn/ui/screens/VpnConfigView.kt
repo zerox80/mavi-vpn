@@ -65,6 +65,7 @@ fun ConfigView(
     val serverIp by viewModel.serverIp.collectAsState()
     val serverPort by viewModel.serverPort.collectAsState()
     val authToken by viewModel.authToken.collectAsState()
+    val presharedKey by viewModel.presharedKey.collectAsState()
     val certPin by viewModel.certPin.collectAsState()
     val echConfig by viewModel.echConfig.collectAsState()
 
@@ -174,11 +175,7 @@ fun ConfigView(
                     Switch(
                         checked = useKeycloak,
                         onCheckedChange = { checked ->
-                            if (checked && !useKeycloak) {
-                                viewModel.saveServerDetails()
-                            }
-                            viewModel.useKeycloak.value = checked
-                            viewModel.updateErrorMessage("")
+                            viewModel.setKeycloakEnabled(checked)
                         },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.White,
@@ -260,8 +257,8 @@ fun ConfigView(
                     }
                 } else {
                     MaviTextField(
-                        value = authToken,
-                        onValueChange = { viewModel.authToken.value = it },
+                        value = presharedKey,
+                        onValueChange = { viewModel.presharedKey.value = it },
                         label = "Preshared Key",
                         placeholder = "Pre-shared token",
                         modifier = Modifier.fillMaxWidth(),

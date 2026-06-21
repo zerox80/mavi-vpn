@@ -64,6 +64,13 @@ class VpnViewModel(
         // unusable and refresh fails, but for the viewModel startup,
         // we can just leave it. If it fails to refresh during connection,
         // MaviVpnService handles the clearing.
+
+        // Persist a migrated preshared key (legacy installs kept it in the
+        // `savedToken` slot) so the one-time fallback survives even if the user
+        // never reconnects.
+        if (prefs.savedPresharedKey.isEmpty() && presharedKey.value.isNotEmpty()) {
+            prefs.savedPresharedKey = presharedKey.value
+        }
     }
 
     fun updateErrorMessage(message: String) {
@@ -106,6 +113,13 @@ class VpnViewModel(
             // Persist the preshared key before switching so a later Keycloak login
             // (which writes savedToken/savedRefreshToken) cannot clobber it.
             prefs.savedPresharedKey = presharedKey.value
+        } else if (!isConnected.value) {
+            // Leaving Keycloak mode: drop the OAuth session so a stale access or
+            // refresh token can't masquerade as a valid session (and skip the
+            // interactive login) the next time Keycloak is enabled. Skip while a
+            // tunnel is live so we don't pull the credential out from under the
+            // running Keycloak session.
+            clearAuthToken()
         }
         useKeycloak.value = enabled
         prefs.savedUseKeycloak = enabled

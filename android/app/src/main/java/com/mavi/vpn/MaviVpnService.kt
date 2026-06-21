@@ -62,7 +62,7 @@ class MaviVpnService : VpnService() {
 
         if (action == "CONNECT" || action == null) {
             val request = resolveVpnStartRequest(intent, prefs)
-            val currentToken = prefs.savedToken
+            val currentToken = request.token
             val hasCredentials = vpnStartHasCredentials(prefs, currentToken)
 
             if (request.ip.isNotEmpty() && hasCredentials) {

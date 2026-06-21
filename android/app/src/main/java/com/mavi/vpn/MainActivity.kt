@@ -41,10 +41,16 @@ class MainActivity : ComponentActivity() {
             androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
         ) { result ->
             if (result.resultCode == Activity.RESULT_OK) {
+                val token =
+                    if (viewModel.useKeycloak.value) {
+                        viewModel.authToken.value
+                    } else {
+                        viewModel.presharedKey.value
+                    }
                 startVpnService(
                     viewModel.serverIp.value,
                     viewModel.serverPort.value,
-                    viewModel.authToken.value,
+                    token,
                     viewModel.certPin.value,
                     viewModel.splitMode.value,
                     viewModel.splitPackages.value,

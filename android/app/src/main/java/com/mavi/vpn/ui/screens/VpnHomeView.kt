@@ -68,6 +68,7 @@ fun HomeView(
     val serverIp by viewModel.serverIp.collectAsState()
     val serverPort by viewModel.serverPort.collectAsState()
     val authToken by viewModel.authToken.collectAsState()
+    val presharedKey by viewModel.presharedKey.collectAsState()
     val certPin by viewModel.certPin.collectAsState()
     val useKeycloak by viewModel.useKeycloak.collectAsState()
     val kcUrl by viewModel.kcUrl.collectAsState()
@@ -163,12 +164,12 @@ fun HomeView(
                             onConnect(serverIp, serverPort, authToken, certPin)
                         }
                     } else {
-                        if (authToken.isEmpty()) {
+                        if (presharedKey.isEmpty()) {
                             viewModel.updateErrorMessage("Please enter a Preshared Key in Config.")
                             onGoToConfig()
                         } else {
                             viewModel.saveServerDetails()
-                            onConnect(serverIp, serverPort, authToken, certPin)
+                            onConnect(serverIp, serverPort, presharedKey, certPin)
                         }
                     }
                 }

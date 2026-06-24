@@ -171,6 +171,11 @@ async fn dispatch_failed_idle_state_accepts_new_start() {
 async fn dispatch_repair_network_clears_state_without_real_cleanup() {
     let state = test_state();
     dispatch_request_with_hooks(IpcRequest::Start(test_config()), &state, false, no_cleanup).await;
+    {
+        let guard = state.lock().await;
+        *guard.last_error.lock().unwrap() = Some("boom".to_string());
+        *guard.assigned_ip.lock().unwrap() = Some("10.8.0.2".to_string());
+    }
 
     assert_eq!(
         dispatch_request_with_hooks(IpcRequest::RepairNetwork, &state, false, no_cleanup).await,

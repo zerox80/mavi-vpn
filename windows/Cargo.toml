@@ -64,9 +64,3 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 tempfile = { workspace = true }
 
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
-

@@ -196,6 +196,25 @@ pub async fn refresh_access_token(
 /// the client into unbounded growth.
 pub const MAX_CALLBACK_REQUEST_BYTES: usize = 64 * 1024;
 
+/// Per-connection budget for reading one callback request head.
+///
+/// The legitimate browser callback arrives in a single round-trip; a connection
+/// that opens but never finishes its request head (a stray probe, a browser
+/// pre-connect that holds the socket, or a local process stalling on purpose)
+/// is abandoned after this deadline so it cannot wedge the accept loop until the
+/// outer 5-minute login timeout. The listener simply moves on to the next
+/// connection.
+pub const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The `state`, `code` and `error` query parameters extracted from one loopback
+/// OAuth callback request. Feed these into [`classify_oauth_callback`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallbackParams {
+    pub state: Option<String>,
+    pub code: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Classification of a parsed OAuth loopback callback request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallbackOutcome {
@@ -268,6 +287,71 @@ pub fn classify_oauth_callback(
         // Unreachable: the early return above guarantees at least one is `Some`.
         (None, None) => CallbackOutcome::Ignore,
     }
+}
+
+/// Reads one loopback HTTP callback request from `reader` and extracts its
+/// `state`/`code`/`error` query parameters.
+///
+/// The single shared implementation behind the GUI, Windows and Linux desktop
+/// clients. It reads the **full request head** — up to the blank-line
+/// terminator, capped at [`MAX_CALLBACK_REQUEST_BYTES`] and
+/// [`CALLBACK_READ_TIMEOUT`] — rather than a single fixed-size read, so a
+/// callback split across TCP segments is never parsed half-formed.
+///
+/// Returns `Ok(None)` when the caller should just keep listening: an empty
+/// connection, a request that is not a parseable `GET` callback, or a
+/// connection that stalled past [`CALLBACK_READ_TIMEOUT`]. Only an underlying
+/// I/O error surfaces as `Err`.
+pub async fn read_callback_params<R>(reader: &mut R) -> std::io::Result<Option<CallbackParams>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let read_head = async {
+        let mut buf = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 1024];
+        loop {
+            let n = reader.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if http_request_head_complete(&buf) || buf.len() >= MAX_CALLBACK_REQUEST_BYTES {
+                break;
+            }
+        }
+        std::io::Result::Ok(buf)
+    };
+
+    // A stalled connection yields `None` (skip it) instead of blocking the
+    // accept loop until the outer login timeout.
+    let buf = match tokio::time::timeout(CALLBACK_READ_TIMEOUT, read_head).await {
+        Ok(result) => result?,
+        Err(_elapsed) => return Ok(None),
+    };
+    if buf.is_empty() {
+        return Ok(None);
+    }
+
+    let request = String::from_utf8_lossy(&buf);
+    let Some(target) = callback_request_target(&request) else {
+        return Ok(None);
+    };
+    let Ok(url) = url::Url::parse(&format!("http://localhost{target}")) else {
+        return Ok(None);
+    };
+
+    let find = |key: &str| {
+        url.query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
+    };
+    Ok(Some(CallbackParams {
+        state: find("state"),
+        code: find("code"),
+        error: find("error"),
+    }))
 }
 
 #[cfg(test)]
@@ -420,5 +504,86 @@ mod tests {
             classify_oauth_callback(Some("st8"), Some(""), Some(""), "st8"),
             CallbackOutcome::Ignore
         );
+    }
+
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    /// `AsyncRead` that hands out `data` in fixed-size pieces to exercise the
+    /// reader's reassembly across TCP segments, then signals EOF.
+    struct Segmented {
+        data: Vec<u8>,
+        pos: usize,
+        step: usize,
+    }
+
+    impl AsyncRead for Segmented {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let remaining = &self.data[self.pos..];
+            let take = remaining.len().min(self.step).min(buf.remaining());
+            buf.put_slice(&remaining[..take]);
+            self.pos += take;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// `AsyncRead` that never produces data — models a connection that opens and
+    /// then stalls without ever finishing its request head.
+    struct Stalled;
+
+    impl AsyncRead for Stalled {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn read_callback_params_extracts_query() {
+        let mut reader: &[u8] =
+            b"GET /callback?state=st8&code=the-code HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let params = read_callback_params(&mut reader).await.unwrap().unwrap();
+        assert_eq!(params.state.as_deref(), Some("st8"));
+        assert_eq!(params.code.as_deref(), Some("the-code"));
+        assert_eq!(params.error, None);
+    }
+
+    #[tokio::test]
+    async fn read_callback_params_reassembles_segmented_request() {
+        // One byte per read forces the head terminator to land across chunks;
+        // the reader must still see the complete request.
+        let mut reader = Segmented {
+            data: b"GET /callback?state=st8&code=abc HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(),
+            pos: 0,
+            step: 1,
+        };
+        let params = read_callback_params(&mut reader).await.unwrap().unwrap();
+        assert_eq!(params.state.as_deref(), Some("st8"));
+        assert_eq!(params.code.as_deref(), Some("abc"));
+    }
+
+    #[tokio::test]
+    async fn read_callback_params_skips_empty_and_non_get() {
+        let mut empty: &[u8] = b"";
+        assert_eq!(read_callback_params(&mut empty).await.unwrap(), None);
+
+        let mut post: &[u8] = b"POST /callback HTTP/1.1\r\n\r\n";
+        assert_eq!(read_callback_params(&mut post).await.unwrap(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_callback_params_abandons_stalled_connection() {
+        // With time paused, the runtime auto-advances to the read timeout, so a
+        // stalled connection resolves to `None` (skip it) without a real wait.
+        let mut reader = Stalled;
+        assert_eq!(read_callback_params(&mut reader).await.unwrap(), None);
     }
 }

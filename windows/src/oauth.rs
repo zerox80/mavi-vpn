@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 /// Fixed callback port - register `http://127.0.0.1:18923/callback` in Keycloak.
@@ -13,52 +13,6 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-/// Reads one loopback HTTP callback request and extracts its `(state, code,
-/// error)` query parameters.
-///
-/// Reads the full request head — up to the blank-line terminator or
-/// [`shared::kc_oauth::MAX_CALLBACK_REQUEST_BYTES`] — rather than a single
-/// fixed-size read, so a callback split across TCP segments is not parsed
-/// half-formed. Returns `Ok(None)` for an empty connection or a request that is
-/// not a parseable `GET` callback (the caller should keep listening).
-#[allow(clippy::type_complexity)]
-async fn read_callback_params(
-    socket: &mut tokio::net::TcpStream,
-) -> Result<Option<(Option<String>, Option<String>, Option<String>)>> {
-    let mut buf = Vec::with_capacity(1024);
-    let mut chunk = [0u8; 1024];
-    loop {
-        let n = socket.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if shared::kc_oauth::http_request_head_complete(&buf)
-            || buf.len() >= shared::kc_oauth::MAX_CALLBACK_REQUEST_BYTES
-        {
-            break;
-        }
-    }
-    if buf.is_empty() {
-        return Ok(None);
-    }
-
-    let request = String::from_utf8_lossy(&buf);
-    let Some(target) = shared::kc_oauth::callback_request_target(&request) else {
-        return Ok(None);
-    };
-    let Ok(u) = url::Url::parse(&format!("http://localhost{target}")) else {
-        return Ok(None);
-    };
-
-    let find = |key: &str| {
-        u.query_pairs()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.into_owned())
-    };
-    Ok(Some((find("state"), find("code"), find("error"))))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -123,14 +77,14 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     let auth_code = tokio::time::timeout(Duration::from_secs(300), async {
         loop {
             let (mut socket, _) = listener.accept().await?;
-            let Some((state, code, error)) = read_callback_params(&mut socket).await? else {
+            let Some(params) = shared::kc_oauth::read_callback_params(&mut socket).await? else {
                 continue;
             };
 
             match shared::kc_oauth::classify_oauth_callback(
-                state.as_deref(),
-                code.as_deref(),
-                error.as_deref(),
+                params.state.as_deref(),
+                params.code.as_deref(),
+                params.error.as_deref(),
                 &oauth_state,
             ) {
                 shared::kc_oauth::CallbackOutcome::Code(code) => {

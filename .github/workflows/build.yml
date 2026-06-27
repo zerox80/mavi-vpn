@@ -17,7 +17,7 @@ jobs:
     name: Linux CLI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -81,7 +81,7 @@ jobs:
     env:
       NDK_VERSION: 28.1.13356709
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -129,7 +129,7 @@ jobs:
     name: Linux GUI (Tauri)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -186,7 +186,7 @@ jobs:
     name: Windows GUI (Tauri)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 

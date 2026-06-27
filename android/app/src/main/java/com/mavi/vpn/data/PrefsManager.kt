@@ -3,6 +3,13 @@ package com.mavi.vpn.data
 import android.content.Context
 import android.content.SharedPreferences
 
+private const val DEFAULT_VPN_MTU = 0
+private const val MIN_VPN_MTU = 1280
+private const val MAX_VPN_MTU = 1360
+
+internal fun sanitizeVpnMtu(value: Int): Int =
+    if (value == DEFAULT_VPN_MTU || value in MIN_VPN_MTU..MAX_VPN_MTU) value else DEFAULT_VPN_MTU
+
 class PrefsManager(
     context: Context,
 ) {
@@ -74,8 +81,8 @@ class PrefsManager(
         set(value) = secrets.setString("saved_preshared_key", value)
 
     var savedVpnMtu: Int
-        get() = prefs.getInt("saved_vpn_mtu", 0)
-        set(value) = prefs.edit().putInt("saved_vpn_mtu", value).apply()
+        get() = sanitizeVpnMtu(prefs.getInt("saved_vpn_mtu", DEFAULT_VPN_MTU))
+        set(value) = prefs.edit().putInt("saved_vpn_mtu", sanitizeVpnMtu(value)).apply()
 
     var savedOauthCodeVerifier: String
         get() = prefs.getString("saved_oauth_code_verifier", "") ?: ""

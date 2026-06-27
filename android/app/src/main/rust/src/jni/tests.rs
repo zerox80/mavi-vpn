@@ -42,9 +42,7 @@ fn classify_config_errors() {
 fn classify_mtu_errors_as_permanent_config() {
     // A server/client MTU mismatch cannot be fixed by retrying.
     assert_eq!(
-        classify_init_error(
-            "MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360"
-        ),
+        classify_init_error("MTU mismatch: local/client VPN MTU is 1280, but server pushed 1360"),
         INIT_FATAL_CONFIG
     );
     assert_eq!(
@@ -65,6 +63,27 @@ fn classify_unknown_returns_retryable() {
         classify_init_error("network unreachable"),
         INIT_RETRYABLE_FAILURE
     );
+}
+
+#[test]
+fn validate_vpn_mtu_accepts_disabled_and_supported_range() {
+    assert_eq!(validated_vpn_mtu(0).unwrap(), None);
+    assert_eq!(validated_vpn_mtu(-1).unwrap(), None);
+    assert_eq!(
+        validated_vpn_mtu(i32::from(shared::MIN_TUN_MTU)).unwrap(),
+        Some(shared::MIN_TUN_MTU)
+    );
+    assert_eq!(
+        validated_vpn_mtu(i32::from(shared::MAX_TUN_MTU)).unwrap(),
+        Some(shared::MAX_TUN_MTU)
+    );
+}
+
+#[test]
+fn validate_vpn_mtu_rejects_out_of_range_without_wraparound() {
+    assert!(validated_vpn_mtu(i32::from(shared::MIN_TUN_MTU) - 1).is_err());
+    assert!(validated_vpn_mtu(i32::from(shared::MAX_TUN_MTU) + 1).is_err());
+    assert!(validated_vpn_mtu(i32::MAX).is_err());
 }
 
 #[test]

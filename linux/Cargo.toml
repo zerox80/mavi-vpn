@@ -48,9 +48,3 @@ nix = { version = "0.31", features = ["ioctl", "net", "fs", "user"] }
 [dev-dependencies]
 tempfile = { workspace = true }
 
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
-

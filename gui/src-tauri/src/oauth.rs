@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 /// Fixed callback port so the redirect URI is predictable and can be registered
@@ -83,41 +83,17 @@ pub async fn start_oauth_flow(
     let auth_code = tokio::time::timeout(Duration::from_secs(300), async {
         loop {
             let (mut socket, _) = listener.accept().await?;
-            let mut buf = [0u8; 4096];
-            let n = socket.read(&mut buf).await?;
-            if n == 0 {
+            let Some(params) = shared::kc_oauth::read_callback_params(&mut socket).await? else {
                 continue;
-            }
+            };
 
-            let request = String::from_utf8_lossy(&buf[..n]);
-            let first_line = request.lines().next().unwrap_or("");
-            if !first_line.starts_with("GET ") {
-                continue;
-            }
-
-            let path = first_line.split_whitespace().nth(1).unwrap_or("/");
-            let parsed =
-                url::Url::parse(&format!("http://localhost{path}")).ok();
-
-            if let Some(u) = parsed {
-                let returned_state = u
-                    .query_pairs()
-                    .find(|(k, _)| k == "state")
-                    .map(|(_, v)| v.into_owned());
-                if returned_state.as_deref() != Some(oauth_state.as_str()) {
-                    let html = "<html><body><h1 style='color:red'>Login failed</h1><p>OAuth state invalid.</p></body></html>";
-                    let resp = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}"
-                    );
-                    let _ = socket.write_all(resp.as_bytes()).await;
-                    return Err(anyhow::anyhow!("OAuth state mismatch"));
-                }
-
-                if let Some(code) = u
-                    .query_pairs()
-                    .find(|(k, _)| k == "code")
-                    .map(|(_, v)| v.into_owned())
-                {
+            match shared::kc_oauth::classify_oauth_callback(
+                params.state.as_deref(),
+                params.code.as_deref(),
+                params.error.as_deref(),
+                &oauth_state,
+            ) {
+                shared::kc_oauth::CallbackOutcome::Code(code) => {
                     let html = "<html><head><title>Login successful</title></head>\
                         <body style='font-family:sans-serif;text-align:center;padding-top:50px'>\
                         <h1 style='color:green'>Login successful!</h1>\
@@ -129,12 +105,7 @@ pub async fn start_oauth_flow(
                     let _ = socket.write_all(resp.as_bytes()).await;
                     return Ok::<String, anyhow::Error>(code);
                 }
-
-                if let Some(err) = u
-                    .query_pairs()
-                    .find(|(k, _)| k == "error")
-                    .map(|(_, v)| v.into_owned())
-                {
+                shared::kc_oauth::CallbackOutcome::Error(err) => {
                     let html = format!(
                         "<html><body><h1 style='color:red'>Login failed</h1><p>{}</p></body></html>",
                         html_escape(&err)
@@ -144,6 +115,20 @@ pub async fn start_oauth_flow(
                     );
                     let _ = socket.write_all(resp.as_bytes()).await;
                     return Err(anyhow::anyhow!("Keycloak error: {err}"));
+                }
+                shared::kc_oauth::CallbackOutcome::StateMismatch => {
+                    let html = "<html><body><h1 style='color:red'>Login failed</h1><p>OAuth state invalid.</p></body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}"
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    return Err(anyhow::anyhow!("OAuth state mismatch"));
+                }
+                shared::kc_oauth::CallbackOutcome::Ignore => {
+                    // Stray request (e.g. favicon) — answer politely, keep waiting.
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                        .await;
                 }
             }
         }

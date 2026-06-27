@@ -25,13 +25,21 @@ serde_json = { version = "1.0", optional = true }
 base64 = { version = "0.22", optional = true }
 reqwest = { version = "0.13", features = ["json", "rustls-no-provider", "form"], default-features = false, optional = true }
 rustls = { workspace = true, optional = true }
+constant_time_eq = { version = "0.5", optional = true }
+# Loopback PKCE callback reader (shared by gui/windows/linux). `io-util` for the
+# bounded async read, `time` for the per-connection read timeout.
+tokio = { version = "1.0", default-features = false, features = ["io-util", "time"], optional = true }
+url = { version = "2", optional = true }
 
 [dev-dependencies]
 bincode = { workspace = true }
 proptest = { workspace = true }
+# Async runtime + test macro for the loopback callback-reader tests.
+# `test-util` enables paused-time tests of the per-connection read timeout.
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = []
 # Pulls in the `kc_oauth` module and its HTTP/JSON/base64 dependencies.
-oauth-client = ["dep:serde_json", "dep:base64", "dep:reqwest", "dep:rustls"]
+oauth-client = ["dep:serde_json", "dep:base64", "dep:reqwest", "dep:rustls", "dep:constant_time_eq", "dep:tokio", "dep:url"]
 

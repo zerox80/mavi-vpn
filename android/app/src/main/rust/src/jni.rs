@@ -147,6 +147,17 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
                 return INIT_FATAL_CERT;
             }
 
+            // Validate the MTU before allocating any sockets or the runtime so an
+            // out-of-range value fails fast instead of after expensive setup.
+            let vpn_mtu_opt = match validated_vpn_mtu(vpn_mtu) {
+                Ok(vpn_mtu) => vpn_mtu,
+                Err(message) => {
+                    error!("{message}");
+                    set_last_init_error(&message);
+                    return INIT_FATAL_CONFIG;
+                }
+            };
+
             let socket2_sock = match socket2::Socket::new(
                 socket2::Domain::IPV6,
                 socket2::Type::DGRAM,
@@ -242,14 +253,6 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
                 }
             };
 
-            let vpn_mtu_opt = match validated_vpn_mtu(vpn_mtu) {
-                Ok(vpn_mtu) => vpn_mtu,
-                Err(message) => {
-                    error!("{message}");
-                    set_last_init_error(&message);
-                    return INIT_FATAL_CONFIG;
-                }
-            };
             let effective_http3_framing =
                 crate::connection::effective_http3_framing(censorship_resistant, http3_framing);
 

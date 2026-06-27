@@ -66,6 +66,19 @@ fn classify_init_error(message: &str) -> jlong {
     INIT_RETRYABLE_FAILURE
 }
 
+fn validated_vpn_mtu(vpn_mtu: jint) -> Result<Option<u16>, String> {
+    if vpn_mtu <= 0 {
+        return Ok(None);
+    }
+
+    let mtu = u16::try_from(vpn_mtu).map_err(|_| format!("Unsupported VPN MTU: {vpn_mtu}"))?;
+    if (shared::MIN_TUN_MTU..=shared::MAX_TUN_MTU).contains(&mtu) {
+        Ok(Some(mtu))
+    } else {
+        Err(format!("Unsupported VPN MTU: {vpn_mtu}"))
+    }
+}
+
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 #[allow(clippy::too_many_lines)]
@@ -133,6 +146,17 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
                 set_last_init_error(message);
                 return INIT_FATAL_CERT;
             }
+
+            // Validate the MTU before allocating any sockets or the runtime so an
+            // out-of-range value fails fast instead of after expensive setup.
+            let vpn_mtu_opt = match validated_vpn_mtu(vpn_mtu) {
+                Ok(vpn_mtu) => vpn_mtu,
+                Err(message) => {
+                    error!("{message}");
+                    set_last_init_error(&message);
+                    return INIT_FATAL_CONFIG;
+                }
+            };
 
             let socket2_sock = match socket2::Socket::new(
                 socket2::Domain::IPV6,
@@ -229,13 +253,6 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
                 }
             };
 
-            let vpn_mtu_opt = if vpn_mtu > 0 {
-                #[allow(clippy::cast_possible_truncation)]
-                #[allow(clippy::cast_sign_loss)]
-                Some(vpn_mtu as u16)
-            } else {
-                None
-            };
             let effective_http3_framing =
                 crate::connection::effective_http3_framing(censorship_resistant, http3_framing);
 

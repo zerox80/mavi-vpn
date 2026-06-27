@@ -48,9 +48,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 tempfile = { workspace = true }
 
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
-

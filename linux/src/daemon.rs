@@ -335,6 +335,9 @@ async fn dispatch_request_with_hooks(
             if let Ok(mut last) = guard.last_error.lock() {
                 *last = None;
             }
+            if let Ok(mut ip) = guard.assigned_ip.lock() {
+                *ip = None;
+            }
             guard.active_config = None;
             drop(guard);
             cleanup_stale_network_state();

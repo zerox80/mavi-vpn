@@ -26,9 +26,13 @@ base64 = { version = "0.22", optional = true }
 reqwest = { version = "0.13", features = ["json", "rustls-no-provider", "form"], default-features = false, optional = true }
 rustls = { workspace = true, optional = true }
 constant_time_eq = { version = "0.5", optional = true }
-# Loopback PKCE callback reader (shared by gui/windows/linux). `io-util` for the
-# bounded async read, `time` for the per-connection read timeout.
-tokio = { version = "1.0", default-features = false, features = ["io-util", "time"], optional = true }
+# Loopback PKCE callback listener (shared by gui/windows/linux). The shared crate
+# owns the concurrent accept loop so a stray/stalled local connection can never
+# delay the real browser callback. A curated (non-`full`) feature set keeps the
+# footprint minimal: io-util (bounded read + response write), time (per-connection
+# read timeout), net (loopback TcpListener/TcpStream), rt (JoinSet to serve
+# connections concurrently), macros (tokio::select! over accept vs. completion).
+tokio = { version = "1.0", default-features = false, features = ["io-util", "time", "net", "rt", "macros"], optional = true }
 url = { version = "2", optional = true }
 
 [dev-dependencies]

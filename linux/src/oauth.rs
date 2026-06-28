@@ -8,7 +8,6 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 /// Fixed callback port — register `http://127.0.0.1:18923/callback` in Keycloak.
@@ -80,65 +79,13 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     }
     println!("Waiting for login in browser (timeout: 5 minutes)...");
 
-    // 5. Wait for callback
-    let auth_code = tokio::time::timeout(Duration::from_secs(300), async {
-        loop {
-            let (mut socket, _) = listener.accept().await?;
-            let Some(params) = shared::kc_oauth::read_callback_params(&mut socket).await? else {
-                continue;
-            };
-
-            match shared::kc_oauth::classify_oauth_callback(
-                params.state.as_deref(),
-                params.code.as_deref(),
-                params.error.as_deref(),
-                &oauth_state,
-            ) {
-                shared::kc_oauth::CallbackOutcome::Code(code) => {
-                    let html = "<html><head><title>Login Successful</title></head>\
-                        <body style=\"font-family: sans-serif; text-align: center; padding-top: 50px;\">\
-                        <h1 style=\"color: green;\">Login successful!</h1>\
-                        <p>You can close this window and return to your terminal.</p>\
-                        <script>setTimeout(function(){window.close();}, 3000);</script>\
-                        </body></html>";
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
-                        html
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                    return Ok::<String, anyhow::Error>(code);
-                }
-                shared::kc_oauth::CallbackOutcome::Error(err) => {
-                    let html = format!(
-                        "<html><body><h1 style=\"color: red;\">Login failed!</h1><p>Error: {}</p></body></html>",
-                        html_escape(&err)
-                    );
-                    let response = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
-                        html
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                    return Err(anyhow::anyhow!("Keycloak error: {}", err));
-                }
-                shared::kc_oauth::CallbackOutcome::StateMismatch => {
-                    let html =
-                        "<html><body><h1 style=\"color: red;\">Login failed!</h1><p>OAuth state invalid.</p></body></html>";
-                    let response = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
-                        html
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                    return Err(anyhow::anyhow!("OAuth state mismatch"));
-                }
-                shared::kc_oauth::CallbackOutcome::Ignore => {
-                    // Stray request (e.g. favicon) — answer politely, keep waiting.
-                    let _ = socket
-                        .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-                        .await;
-                }
-            }
-        }
-    })
+    // 5. Wait for the redirect callback. The shared listener serves connections
+    //    concurrently, so a stray or stalled local probe cannot delay the real
+    //    browser callback, and validates `state` in constant time.
+    let auth_code = tokio::time::timeout(
+        Duration::from_secs(300),
+        shared::kc_oauth::recv_oauth_callback(&listener, &oauth_state),
+    )
     .await
     .context("Login timeout (5 minutes)")??;
 
@@ -176,13 +123,6 @@ pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Res
     let body = res.text().await?;
     shared::kc_oauth::parse_token_response(&body, None)
         .ok_or_else(|| anyhow::anyhow!("Token response missing access_token or refresh_token"))
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 /// Open a URL in the user's default browser.
@@ -231,32 +171,4 @@ fn open_browser_for_user(url: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .spawn()
         .is_ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn html_escape_empty() {
-        assert_eq!(html_escape(""), "");
-    }
-
-    #[test]
-    fn html_escape_no_special_chars() {
-        assert_eq!(html_escape("hello world"), "hello world");
-    }
-
-    #[test]
-    fn html_escape_special_chars() {
-        assert_eq!(
-            html_escape("<b>\"test\"&</b>"),
-            "&lt;b&gt;&quot;test&quot;&amp;&lt;/b&gt;"
-        );
-    }
-
-    #[test]
-    fn html_escape_only_ampersand() {
-        assert_eq!(html_escape("a&b"), "a&amp;b");
-    }
 }

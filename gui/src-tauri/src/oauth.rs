@@ -2,19 +2,11 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 /// Fixed callback port so the redirect URI is predictable and can be registered
 /// once in Keycloak: `http://127.0.0.1:18923/callback`
 const OAUTH_CALLBACK_PORT: u16 = 18923;
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
 
 /// Run the Keycloak PKCE `OAuth2` flow in the user's browser session.
 ///
@@ -79,60 +71,14 @@ pub async fn start_oauth_flow(
     let url_str = auth_url.as_str().to_string();
     open_browser(&url_str);
 
-    // 5. Wait for the redirect callback (5 minute timeout)
-    let auth_code = tokio::time::timeout(Duration::from_secs(300), async {
-        loop {
-            let (mut socket, _) = listener.accept().await?;
-            let Some(params) = shared::kc_oauth::read_callback_params(&mut socket).await? else {
-                continue;
-            };
-
-            match shared::kc_oauth::classify_oauth_callback(
-                params.state.as_deref(),
-                params.code.as_deref(),
-                params.error.as_deref(),
-                &oauth_state,
-            ) {
-                shared::kc_oauth::CallbackOutcome::Code(code) => {
-                    let html = "<html><head><title>Login successful</title></head>\
-                        <body style='font-family:sans-serif;text-align:center;padding-top:50px'>\
-                        <h1 style='color:green'>Login successful!</h1>\
-                        <p>You can close this window and return to Mavi VPN.</p>\
-                        <script>setTimeout(()=>window.close(),3000)</script></body></html>";
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}"
-                    );
-                    let _ = socket.write_all(resp.as_bytes()).await;
-                    return Ok::<String, anyhow::Error>(code);
-                }
-                shared::kc_oauth::CallbackOutcome::Error(err) => {
-                    let html = format!(
-                        "<html><body><h1 style='color:red'>Login failed</h1><p>{}</p></body></html>",
-                        html_escape(&err)
-                    );
-                    let resp = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}"
-                    );
-                    let _ = socket.write_all(resp.as_bytes()).await;
-                    return Err(anyhow::anyhow!("Keycloak error: {err}"));
-                }
-                shared::kc_oauth::CallbackOutcome::StateMismatch => {
-                    let html = "<html><body><h1 style='color:red'>Login failed</h1><p>OAuth state invalid.</p></body></html>";
-                    let resp = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{html}"
-                    );
-                    let _ = socket.write_all(resp.as_bytes()).await;
-                    return Err(anyhow::anyhow!("OAuth state mismatch"));
-                }
-                shared::kc_oauth::CallbackOutcome::Ignore => {
-                    // Stray request (e.g. favicon) — answer politely, keep waiting.
-                    let _ = socket
-                        .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-                        .await;
-                }
-            }
-        }
-    })
+    // 5. Wait for the redirect callback (5 minute timeout). The shared listener
+    //    serves connections concurrently, so a stray or stalled local probe
+    //    cannot delay the real browser callback, and validates `state` in
+    //    constant time.
+    let auth_code = tokio::time::timeout(
+        Duration::from_secs(300),
+        shared::kc_oauth::recv_oauth_callback(&listener, &oauth_state),
+    )
     .await
     .context("Login timed out (5 minutes)")??;
 
@@ -176,42 +122,4 @@ pub async fn start_oauth_flow(
 /// Open a URL in the default browser (cross-platform via `webbrowser` crate).
 fn open_browser(url: &str) {
     let _ = webbrowser::open(url);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn html_escape_empty() {
-        assert_eq!(html_escape(""), "");
-    }
-
-    #[test]
-    fn html_escape_no_special_chars() {
-        assert_eq!(html_escape("hello world"), "hello world");
-    }
-
-    #[test]
-    fn html_escape_angle_brackets() {
-        assert_eq!(html_escape("a<b>c"), "a&lt;b&gt;c");
-    }
-
-    #[test]
-    fn html_escape_ampersand() {
-        assert_eq!(html_escape("a&b"), "a&amp;b");
-    }
-
-    #[test]
-    fn html_escape_quotes() {
-        assert_eq!(html_escape("say \"hello\""), "say &quot;hello&quot;");
-    }
-
-    #[test]
-    fn html_escape_double_escapes_already_escaped_ampersand() {
-        assert_eq!(
-            html_escape("<script>alert(\"xss\")&amp;</script>"),
-            "&lt;script&gt;alert(&quot;xss&quot;)&amp;amp;&lt;/script&gt;"
-        );
-    }
 }

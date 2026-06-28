@@ -9,13 +9,25 @@
 //! - read a JWT's `exp` and decide whether an access token is still usable,
 //! - refresh a short-lived access token via `grant_type=refresh_token`,
 //!   classifying the outcome into *usable again*, *temporary/network failure*
-//!   (keep the session, retry) and *needs interactive login* (refresh rejected).
+//!   (keep the session, retry) and *needs interactive login* (refresh rejected),
+//! - the loopback PKCE callback (parsing in [`callback`], the concurrent
+//!   listener in [`server`]).
 //!
 //! This module is gated behind the `oauth-client` cargo feature so the backend
 //! (which only validates tokens) never pulls in a HTTP client.
 
 use base64::Engine;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod callback;
+mod server;
+
+pub use callback::{
+    callback_request_target, classify_oauth_callback, http_request_head_complete,
+    read_callback_params, CallbackOutcome, CallbackParams, CALLBACK_READ_TIMEOUT,
+    MAX_CALLBACK_REQUEST_BYTES,
+};
+pub use server::{recv_oauth_callback, CallbackError};
 
 /// Tokens returned by the Keycloak token endpoint. `refresh_token` is optional
 /// because not every realm/flow issues one; without it the session simply
@@ -183,6 +195,16 @@ pub async fn refresh_access_token(
     }
 }
 
+/// Minimal HTML-escaping for text interpolated into a loopback callback response
+/// page (e.g. a Keycloak `error` string). Escapes `& < > "` — the characters
+/// that could otherwise break out of the surrounding element or attribute.
+pub(crate) fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +280,27 @@ mod tests {
     fn is_access_token_usable_rejects_expired_and_empty() {
         assert!(!is_access_token_usable(&jwt_with_exp(now() - 60), 0));
         assert!(!is_access_token_usable("", 0));
+    }
+
+    #[test]
+    fn html_escape_escapes_markup_characters() {
+        assert_eq!(html_escape(""), "");
+        assert_eq!(html_escape("hello world"), "hello world");
+        assert_eq!(html_escape("a<b>c"), "a&lt;b&gt;c");
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+        assert_eq!(html_escape("say \"hi\""), "say &quot;hi&quot;");
+        // Single quotes are intentionally left as-is (we never interpolate into
+        // single-quoted attributes), and already-escaped text is escaped again.
+        assert_eq!(html_escape("it's &amp;"), "it's &amp;amp;");
+    }
+
+    #[test]
+    fn html_escape_handles_combined_and_unicode_input() {
+        assert_eq!(
+            html_escape("<script>alert(\"xss\")&</script>"),
+            "&lt;script&gt;alert(&quot;xss&quot;)&amp;&lt;/script&gt;"
+        );
+        // Non-markup characters (whitespace, Unicode) pass through unchanged.
+        assert_eq!(html_escape("Hello 世界 🌍\n\t"), "Hello 世界 🌍\n\t");
     }
 }

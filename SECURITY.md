@@ -43,6 +43,36 @@ Reports around these areas are especially welcome:
 * QUIC transport edge cases
 * anything that could leak traffic outside the tunnel
 
+## Operational trust boundaries
+
+Certificate pins are the trust anchor for clients. Pins do not expire on their
+own and they do not provide revocation by themselves, so treat a compromised or
+retired server certificate as trusted until every client config has been rotated
+away from it. Use the supported multi-pin window only for planned rotation, then
+remove the old pin as soon as the fleet has moved.
+
+The desktop IPC boundary is local-user scoped. A process running as the same
+console user on Windows, or as a member of the `mavivpn` group on Linux, can ask
+the privileged service to connect, disconnect, report status, and synchronize
+refresh-token updates. This is the intended desktop VPN trust model, not a
+cross-user authorization boundary.
+
+The failed-authentication limiter is keyed by source IP address. That keeps
+unauthenticated validation cheap, but users behind the same NAT or CGNAT address
+can be blocked together for the limiter window if one peer repeatedly fails
+authentication.
+
+The server container starts as root because the entrypoint must create the TUN
+device plumbing and install iptables rules. Compose drops all capabilities first
+and adds back only the small set required for that job, with `no-new-privileges`
+and a restricted tmpfs, but a server-side container escape or runtime RCE should
+still be treated as high impact.
+
+The optional Traefik profile mounts `/var/run/docker.sock` read-only. That is
+convenient for local demos, but Docker socket access is still a powerful host
+trust boundary; production deployments should prefer a socket proxy or an
+externally managed reverse proxy.
+
 ## Out of scope
 
 Please do not run tests against systems you do not own.

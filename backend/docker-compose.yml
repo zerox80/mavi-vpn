@@ -37,6 +37,8 @@ services:
       VPN_KEYCLOAK_URL: ${VPN_KEYCLOAK_URL:-}
       VPN_KEYCLOAK_REALM: ${VPN_KEYCLOAK_REALM:-mavi-vpn}
       VPN_KEYCLOAK_CLIENT_ID: ${VPN_KEYCLOAK_CLIENT_ID:-mavi-client}
+      VPN_KEYCLOAK_REQUIRED_ROLE: ${VPN_KEYCLOAK_REQUIRED_ROLE:-}
+      VPN_KEYCLOAK_REQUIRED_SCOPE: ${VPN_KEYCLOAK_REQUIRED_SCOPE:-}
     healthcheck:
       test: ["CMD-SHELL", "ip -details link show type tun | grep -q 'tun' || exit 1"]
       interval: 30s

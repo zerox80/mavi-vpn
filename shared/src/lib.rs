@@ -174,7 +174,13 @@ pub fn validate_keycloak_url(url: &str) -> Result<(), String> {
         return Ok(());
     }
     if let Some(rest) = url.strip_prefix("http://") {
-        let authority = rest.split('/').next().unwrap_or("");
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if authority.contains('@') {
+            return Err(
+                "Keycloak URL must not contain userinfo; plain HTTP is only allowed for localhost"
+                    .to_string(),
+            );
+        }
         let host = authority
             .strip_prefix('[')
             .and_then(|h| h.split(']').next())

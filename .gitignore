@@ -2,7 +2,6 @@
 /target
 /debug
 **/*.rs.bk
-Cargo.lock
 
 # --- Python ---
 __pycache__/
@@ -21,6 +20,7 @@ build/
 app/build/
 android/build/
 android/app/build/
+android/app/src/main/jniLibs/
 android/app/release/
 local.properties
 *.iml
@@ -42,6 +42,7 @@ mavi-vpn.json
 
 # --- Logs, Reports & OS ---
 *.log
+ci_logs.txt
 .DS_Store
 problems-report.html
 pr_commit.patch

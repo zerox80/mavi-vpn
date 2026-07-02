@@ -313,6 +313,9 @@ fn validate_keycloak_url_rules() {
     // Substring tricks must not bypass the loopback exemption.
     assert!(validate_keycloak_url("http://localhost.evil.com").is_err());
     assert!(validate_keycloak_url("http://evil.com/localhost").is_err());
+    let loopback_userinfo_bypass = format!("http://{}@evil.com/realms/x", "localhost:8080");
+    assert!(validate_keycloak_url(&loopback_userinfo_bypass).is_err());
+    assert!(validate_keycloak_url("http://localhost@evil.com").is_err());
 }
 
 #[test]

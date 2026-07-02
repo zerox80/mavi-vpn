@@ -50,6 +50,12 @@ pub const fn classify_status(
 pub enum IpcAclTarget {
     Directory,
     TokenFile,
+    /// The IPC named pipe. Unlike `Directory`/`TokenFile`, a pipe's ACL is
+    /// applied at creation time via `SECURITY_ATTRIBUTES` (see
+    /// [`ipc_pipe_sddl`]), not through `harden_ipc_permissions`'s PowerShell
+    /// `SetAccessControl` path — `.NET System.IO.File`/`Directory` don't
+    /// operate on named pipe paths.
+    Pipe,
 }
 
 pub fn prepare_ipc_auth_token(token_path: &Path, auth_token: &str) -> Result<()> {
@@ -112,6 +118,27 @@ pub fn harden_ipc_token_permissions(token_path: &Path) -> Result<()> {
     harden_ipc_permissions(token_path, IpcAclTarget::TokenFile)
 }
 
+/// Computes the SDDL string used to secure the IPC named pipe at creation
+/// time (via `SECURITY_ATTRIBUTES.lpSecurityDescriptor` on `CreateNamedPipeW`),
+/// granting the active console user read+write and SYSTEM/Administrators full
+/// control.
+///
+/// Unlike the token file/directory, a pipe has no filesystem ACL that needs
+/// re-hardening after a session change: every connecting client is served by
+/// a freshly created pipe instance (see `named_pipe::accept_loop`), and each
+/// new instance calls this function again, so it naturally picks up the
+/// current console user without an explicit re-harden step.
+pub fn ipc_pipe_sddl() -> String {
+    let user_sid = active_console_user_sid().filter(|sid| is_valid_sid(sid));
+    if user_sid.is_none() {
+        warn!(
+            "No interactive user detected while computing IPC pipe ACL; \
+             local clients may need to run elevated until a user logs in"
+        );
+    }
+    ipc_acl_sddl(IpcAclTarget::Pipe, user_sid.as_deref())
+}
+
 pub fn harden_ipc_permissions(path: &Path, target: IpcAclTarget) -> Result<()> {
     let user_sid = active_console_user_sid().filter(|sid| is_valid_sid(sid));
     if user_sid.is_none() {
@@ -137,6 +164,9 @@ fn ipc_acl_sddl(target: IpcAclTarget, user_sid: Option<&str>) -> String {
     let (inherit, user_rights) = match target {
         IpcAclTarget::Directory => ("OICI", "FRFX"),
         IpcAclTarget::TokenFile => ("", "FR"),
+        // Pipe I/O is bidirectional, unlike the read-only token file, so the
+        // console user needs both file-generic-read and file-generic-write.
+        IpcAclTarget::Pipe => ("", "FRFW"),
     };
 
     let mut sddl = String::from("D:P");
@@ -171,6 +201,9 @@ fn ipc_acl_script(path: &Path, target: IpcAclTarget, user_sid: Option<&str>) -> 
     let dotnet_class = match target {
         IpcAclTarget::Directory => "System.IO.Directory",
         IpcAclTarget::TokenFile => "System.IO.File",
+        IpcAclTarget::Pipe => {
+            unreachable!("pipe ACLs are applied via SECURITY_ATTRIBUTES at creation time, not through harden_ipc_permissions")
+        }
     };
     format!(
         "$ErrorActionPreference = 'Stop'; \

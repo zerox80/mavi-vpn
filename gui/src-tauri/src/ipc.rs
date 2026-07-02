@@ -1,6 +1,47 @@
-use shared::ipc::{IpcRequest, IpcResponse, LOCAL_IPC_ADDR};
+use shared::ipc::{IpcRequest, IpcResponse};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+
+/// Windows returns this OS error when every server-side pipe instance is
+/// momentarily connected (`ERROR_PIPE_BUSY`) — unlike TCP's backlog queue, a
+/// named pipe client must retry rather than block.
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+#[cfg(windows)]
+const PIPE_BUSY_RETRY_ATTEMPTS: u32 = 5;
+#[cfg(windows)]
+const PIPE_BUSY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+#[cfg(unix)]
+async fn connect() -> Result<tokio::net::UnixStream, String> {
+    tokio::net::UnixStream::connect(shared::ipc::ipc_socket_path())
+        .await
+        .map_err(|e| format!("Service not running: {e}"))
+}
+
+/// Opens the IPC named pipe, retrying briefly on `ERROR_PIPE_BUSY`. With
+/// `MAX_CONCURRENT_IPC_CLIENTS` server-side instances this should be rare in
+/// practice, but the retry is required for correctness rather than assumed
+/// away.
+#[cfg(windows)]
+async fn connect() -> Result<tokio::net::windows::named_pipe::NamedPipeClient, String> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let mut last_busy_err = None;
+    for _ in 0..PIPE_BUSY_RETRY_ATTEMPTS {
+        match ClientOptions::new().open(shared::ipc::ipc_pipe_name()) {
+            Ok(client) => return Ok(client),
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                last_busy_err = Some(e);
+                tokio::time::sleep(PIPE_BUSY_RETRY_DELAY).await;
+            }
+            Err(e) => return Err(format!("Service not running: {e}")),
+        }
+    }
+    Err(format!(
+        "Mavi VPN service is busy (too many concurrent clients); retry shortly: {}",
+        last_busy_err.map_or_else(String::new, |e| e.to_string())
+    ))
+}
 
 pub(crate) async fn send_ipc_request(req: &IpcRequest) -> Result<IpcResponse, String> {
     let token_path = shared::ipc::ipc_token_path();
@@ -14,9 +55,7 @@ pub(crate) async fn send_ipc_request(req: &IpcRequest) -> Result<IpcResponse, St
         request: req.clone(),
     };
 
-    let mut stream = TcpStream::connect(LOCAL_IPC_ADDR)
-        .await
-        .map_err(|e| format!("Service not running: {e}"))?;
+    let mut stream = connect().await?;
 
     let encoded = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())
         .map_err(|e| e.to_string())?;

@@ -14,7 +14,7 @@ mod h3;
 #[cfg(test)]
 mod tests;
 
-pub use self::cert::decode_hex;
+pub use self::cert::decode_hex_pins;
 use self::cert::PinnedServerVerifier;
 pub use self::h3::H3SessionGuard;
 
@@ -26,7 +26,7 @@ pub(super) struct HandshakeRequest {
     pub(super) socket: std::net::UdpSocket,
     pub(super) token: String,
     pub(super) endpoint_str: String,
-    pub(super) cert_pin: Vec<u8>,
+    pub(super) cert_pin: Vec<Vec<u8>>,
     pub(super) censorship_resistant: bool,
     pub(super) http3_framing: bool,
     pub(super) ech_config_list: Option<Vec<u8>>,

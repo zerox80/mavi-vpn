@@ -17,6 +17,10 @@ workspace = true
 serde = { version = "1.0", features = ["derive"] }
 etherparse = { workspace = true }
 # We don't need many deps here, just types.
+# Used by cert_pin's multi-pin SHA-256 matching (already pulled in transitively
+# by backend/linux/windows via rustls; listing it here just makes the direct
+# dependency explicit for this crate).
+sha2 = "0.11"
 
 # Keycloak OAuth client helpers (token parse / JWT-exp / refresh). Optional so
 # the backend — which only validates tokens — does not pull a HTTP client.

@@ -201,6 +201,7 @@ pub async fn handle_h3_connection(
 
     let auth_result = authenticate_client(
         &token,
+        remote_addr.ip(),
         &state,
         &config,
         as_token_validator(keycloak.as_ref()),

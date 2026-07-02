@@ -361,6 +361,7 @@ pub async fn handle_connection(
         let token = decode_raw_auth_payload(&buf)?;
         authenticate_client(
             &token,
+            remote_addr.ip(),
             &state,
             &config,
             crate::handlers::auth::as_token_validator(keycloak.as_ref()),

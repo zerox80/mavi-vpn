@@ -6,29 +6,25 @@
 //! The wire format uses length-prefixed bincode:
 //! `[u32 little-endian length][bincode payload]`
 //!
-//! Transport: TCP on `127.0.0.1:14433`.
+//! Transport: a Unix domain socket on Linux (see [`ipc_socket_path`]) or a
+//! Windows Named Pipe on Windows (see [`ipc_pipe_name`]) — client and service
+//! always run on the same machine, so this is local IPC, not a network
+//! protocol. An auth token (see [`ipc_token_path`]) is layered on top as
+//! defense-in-depth.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Address for the local TCP IPC server.
-pub const LOCAL_IPC_ADDR: &str = "127.0.0.1:14433";
+mod transport;
+#[cfg(windows)]
+pub use transport::ipc_pipe_name;
+#[cfg(unix)]
+pub use transport::ipc_socket_path;
+pub use transport::ipc_token_path;
 
 /// Prefix used in service status errors when Keycloak requires a fresh browser
 /// login for the active session.
 pub const KEYCLOAK_LOGIN_REQUIRED_PREFIX: &str = "KEYCLOAK_LOGIN_REQUIRED:";
-
-/// Path to the authentication token file used to secure the local TCP IPC socket.
-#[cfg(windows)]
-#[must_use]
-pub fn ipc_token_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(r"C:\ProgramData\mavi-vpn\ipc.token")
-}
-
-#[cfg(unix)]
-pub fn ipc_token_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("/run/mavi-vpn/ipc.token")
-}
 
 /// Configuration required to establish a VPN session.
 /// Passed from the client to the service via IPC.
@@ -38,7 +34,10 @@ pub struct Config {
     pub endpoint: String,
     /// Pre-shared authentication token or Keycloak JWT.
     pub token: String,
-    /// SHA-256 fingerprint (hex) of the server's TLS certificate.
+    /// SHA-256 fingerprint(s) (hex) of the server's TLS certificate. Normally
+    /// a single 64-char value; during a manual server cert rotation this may
+    /// be a comma-separated list ("<old_pin>,<new_pin>") — see
+    /// `shared::hex::decode_hex_pins`.
     pub cert_pin: String,
     /// Enable Layer 7 obfuscation (pretend to be HTTP/3).
     pub censorship_resistant: bool,
@@ -475,14 +474,5 @@ mod tests {
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
 
         assert_eq!(req, decoded);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unix_ipc_token_lives_under_runtime_directory() {
-        assert_eq!(
-            ipc_token_path(),
-            std::path::PathBuf::from("/run/mavi-vpn/ipc.token")
-        );
     }
 }

@@ -11,6 +11,10 @@ struct SavedConn {
     endpoint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    /// SHA-256 fingerprint(s) of the server's TLS cert, hex-encoded. Normally
+    /// a single 64-char value; during a manual server cert rotation this may
+    /// be a comma-separated list ("<old_pin>,<new_pin>") so already-saved
+    /// connections keep working until every client has picked up the new pin.
     cert_pin: String,
     #[serde(default)]
     ech_config: Option<String>,

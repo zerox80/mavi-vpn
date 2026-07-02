@@ -132,7 +132,10 @@ async fn handle_reauth_stream(
 /// (`Some`) *and* carry the same subject the session was opened with. Returns the
 /// new expiry to extend to, or `None` to reject (invalid token or subject
 /// mismatch). Pure and side-effect free so the policy is unit-testable.
-pub(super) fn reauth_decision(validated: Option<ValidatedToken>, expected_sub: &str) -> Option<i64> {
+pub(super) fn reauth_decision(
+    validated: Option<ValidatedToken>,
+    expected_sub: &str,
+) -> Option<i64> {
     let token = validated?;
     (token.sub == expected_sub).then_some(token.exp)
 }

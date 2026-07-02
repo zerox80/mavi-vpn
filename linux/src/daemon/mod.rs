@@ -1,48 +1,23 @@
 //! # Mavi VPN Daemon
 //!
 //! IPC server that runs as a background daemon (like the Windows service).
-//! Listens on `127.0.0.1:14433` for commands from the CLI or GUI.
+//! Listens on a Unix domain socket (see `shared::ipc::ipc_socket_path`) for
+//! commands from the CLI or GUI.
 
 use anyhow::Result;
 use base64::Engine;
-use constant_time_eq::constant_time_eq;
-use nix::unistd::{chown, Gid, Group};
-use shared::ipc::{self, Config, IpcRequest, IpcResponse, LOCAL_IPC_ADDR};
-use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use shared::ipc::{self, Config, IpcRequest, IpcResponse};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 use tracing::{error, info, warn};
 
-/// Hard limit on how long an IPC client may take to send the length prefix and
-/// the request body combined. Prevents a local process from holding the daemon
-/// state lock indefinitely by opening a connection and stalling mid-read.
-const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-const IPC_CONTROL_GROUP: &str = "mavivpn";
-const IPC_TOKEN_ROOT_ONLY_MODE: u32 = 0o600;
-const IPC_TOKEN_GROUP_MODE: u32 = 0o640;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IpcTokenAccess {
-    RootOnly,
-    Group(Gid),
-}
-
-impl IpcTokenAccess {
-    const fn mode(self) -> u32 {
-        match self {
-            Self::RootOnly => IPC_TOKEN_ROOT_ONLY_MODE,
-            Self::Group(_) => IPC_TOKEN_GROUP_MODE,
-        }
-    }
-}
+mod transport;
+pub use transport::send_request;
+use transport::{bind_ipc_socket, handle_ipc_client, resolve_ipc_token_access};
 
 struct DaemonState {
     vpn_running: Arc<AtomicBool>,
@@ -79,12 +54,15 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
 
     let token_bytes: [u8; 32] = rand::random();
     let auth_token = base64::engine::general_purpose::STANDARD.encode(token_bytes);
-    write_ipc_token(&ipc::ipc_token_path(), &auth_token)?;
+    // Resolved once and shared by the token file and the socket so both land
+    // on the same root-only-vs-group access model.
+    let access = resolve_ipc_token_access()?;
+    transport::write_ipc_token_with_access(&ipc::ipc_token_path(), &auth_token, access)?;
 
-    let listener = TcpListener::bind(LOCAL_IPC_ADDR).await?;
+    let listener = bind_ipc_socket(access)?;
     info!(
-        "Daemon listening on {} (Auth token generated)",
-        LOCAL_IPC_ADDR
+        "Daemon listening on {:?} (Auth token generated)",
+        ipc::ipc_socket_path()
     );
 
     let auth_token = Arc::new(auth_token);
@@ -108,10 +86,10 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(500)) => continue,
             conn_res = listener.accept() => {
-                let (socket, peer) = match conn_res {
+                let (socket, _peer_addr) = match conn_res {
                     Ok(res) => res,
                     Err(e) => {
-                        error!("TCP accept error: {}", e);
+                        error!("IPC accept error: {}", e);
                         continue;
                     }
                 };
@@ -123,135 +101,17 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
                 let state = state.clone();
                 let auth_token = auth_token.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_ipc_client(socket, peer, state, auth_token).await {
-                        warn!("IPC client {} handler exited: {}", peer, e);
+                    if let Err(e) = handle_ipc_client(socket, state, auth_token).await {
+                        warn!("IPC client handler exited: {}", e);
                     }
                 });
             }
         }
     }
 
-    // Clean up the IPC auth token file on shutdown
+    // Clean up the IPC auth token and socket files on shutdown.
     let _ = std::fs::remove_file(ipc::ipc_token_path());
-
-    Ok(())
-}
-
-fn resolve_ipc_token_access() -> Result<IpcTokenAccess> {
-    match Group::from_name(IPC_CONTROL_GROUP)? {
-        Some(group) => Ok(IpcTokenAccess::Group(group.gid)),
-        None => {
-            warn!(
-                "Unix group '{}' does not exist; IPC token will be root-only. \
-                 Run the Linux installer or create the group and add trusted users.",
-                IPC_CONTROL_GROUP
-            );
-            Ok(IpcTokenAccess::RootOnly)
-        }
-    }
-}
-
-fn write_ipc_token(token_path: &Path, auth_token: &str) -> Result<()> {
-    let access = resolve_ipc_token_access()?;
-    write_ipc_token_with_access(token_path, auth_token, access)
-}
-
-fn write_ipc_token_with_access(
-    token_path: &Path,
-    auth_token: &str,
-    access: IpcTokenAccess,
-) -> Result<()> {
-    if let Some(parent) = token_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Remove stale world-readable files left by older versions, then create the
-    // new token as root-only. Permissions are widened only after chown succeeds.
-    match std::fs::remove_file(token_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
-
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(IPC_TOKEN_ROOT_ONLY_MODE)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(token_path)
-        .and_then(|mut f| f.write_all(auth_token.as_bytes()))?;
-
-    if let IpcTokenAccess::Group(gid) = access {
-        chown(token_path, None, Some(gid))?;
-    }
-
-    std::fs::set_permissions(token_path, std::fs::Permissions::from_mode(access.mode()))?;
-
-    match access {
-        IpcTokenAccess::RootOnly => warn!(
-            "IPC token at {:?} is root-only. Non-root CLI/GUI users must be added to '{}' \
-             after running the installer, then log out and back in.",
-            token_path, IPC_CONTROL_GROUP
-        ),
-        IpcTokenAccess::Group(gid) => info!(
-            "IPC token permissions hardened at {:?}: mode {:o}, group {}",
-            token_path,
-            access.mode(),
-            gid.as_raw()
-        ),
-    }
-
-    Ok(())
-}
-
-async fn handle_ipc_client(
-    socket: TcpStream,
-    peer: std::net::SocketAddr,
-    state: Arc<Mutex<DaemonState>>,
-    auth_token: Arc<String>,
-) -> Result<()> {
-    info!("IPC client connected from {}", peer);
-    let (mut rx, mut tx) = socket.into_split();
-
-    // Bound the entire header+body read with a single timeout so a client that
-    // opens a socket and then goes silent cannot hold resources indefinitely.
-    let req_msg = tokio::time::timeout(IPC_REQUEST_TIMEOUT, async {
-        let mut len_buf = [0u8; 4];
-        rx.read_exact(&mut len_buf).await?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len > 65536 {
-            anyhow::bail!("IPC request too large: {} bytes", len);
-        }
-        let mut buf = vec![0u8; len];
-        rx.read_exact(&mut buf).await?;
-        let (msg, _): (ipc::SecureIpcRequest, _) =
-            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-                .map_err(|e| anyhow::anyhow!("IPC decode error: {}", e))?;
-        Ok::<_, anyhow::Error>(msg)
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("IPC request timeout from {}", peer))??;
-
-    let resp = if !constant_time_eq(req_msg.auth_token.as_bytes(), auth_token.as_bytes()) {
-        error!(
-            "Rejecting IPC request from {} due to invalid auth token",
-            peer
-        );
-        IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
-    } else {
-        dispatch_request(req_msg.request, &state).await
-    };
-
-    let resp_buf = bincode::serde::encode_to_vec(&resp, bincode::config::standard())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize IPC response: {}", e))?;
-
-    tokio::time::timeout(IPC_REQUEST_TIMEOUT, async {
-        tx.write_u32_le(resp_buf.len() as u32).await?;
-        tx.write_all(&resp_buf).await?;
-        Ok::<_, std::io::Error>(())
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("IPC response write timeout to {}", peer))??;
+    let _ = std::fs::remove_file(ipc::ipc_socket_path());
 
     Ok(())
 }
@@ -418,56 +278,6 @@ async fn dispatch_request_with_hooks(
             connection_id: None,
             refresh_token: None,
         },
-    }
-}
-
-/// Sends a single IPC request to the running daemon and returns the response.
-pub async fn send_request(req: IpcRequest) -> Result<IpcResponse> {
-    let token_path = ipc::ipc_token_path();
-    let auth_token = std::fs::read_to_string(&token_path)
-        .map_err(|e| ipc_token_read_error(&token_path, e))?
-        .trim()
-        .to_string();
-
-    let req_msg = ipc::SecureIpcRequest {
-        auth_token,
-        request: req,
-    };
-
-    let mut stream = TcpStream::connect(LOCAL_IPC_ADDR).await?;
-
-    let req_buf = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())?;
-    stream.write_u32_le(req_buf.len() as u32).await?;
-    stream.write_all(&req_buf).await?;
-
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > 65536 {
-        return Err(anyhow::anyhow!("Response too large"));
-    }
-
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
-
-    let (resp, _) = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-        .map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
-
-    Ok(resp)
-}
-
-fn ipc_token_read_error(token_path: &Path, error: io::Error) -> anyhow::Error {
-    if error.kind() == io::ErrorKind::PermissionDenied {
-        anyhow::anyhow!(
-            "Failed to read IPC token from {:?}: permission denied. \
-             Your user must be in the '{}' group to control the daemon. \
-             Run `sudo usermod -aG {} $USER`, log out and back in, then retry.",
-            token_path,
-            IPC_CONTROL_GROUP,
-            IPC_CONTROL_GROUP
-        )
-    } else {
-        anyhow::anyhow!("Failed to read IPC token from {:?}: {}", token_path, error)
     }
 }
 

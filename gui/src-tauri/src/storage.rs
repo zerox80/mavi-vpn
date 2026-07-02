@@ -1,5 +1,6 @@
 use crate::secret_store::{
-    connection_token_account, legacy_config_token_account, KeyringSecretStore, SecretStore,
+    connection_refresh_token_account, connection_token_account, legacy_config_token_account,
+    KeyringSecretStore, SecretStore,
 };
 use shared::ipc::Config;
 use std::path::Path;
@@ -207,6 +208,7 @@ fn save_prefs_to_dir_with_store(
     for old in previous.connections {
         if !current_ids.contains(&old.id) {
             store.delete_secret(&connection_token_account(&old.id))?;
+            store.delete_secret(&connection_refresh_token_account(&old.id))?;
         }
     }
 
@@ -362,11 +364,17 @@ mod tests {
         };
         let store = MemorySecretStore::default();
         save_prefs_to_dir_with_store(dir.path(), &mut prefs, &store).unwrap();
+        store
+            .set_secret(&connection_refresh_token_account("one"), "refresh")
+            .unwrap();
 
         prefs.connections.clear();
         save_prefs_to_dir_with_store(dir.path(), &mut prefs, &store).unwrap();
 
         assert!(store.deleted().contains(&connection_token_account("one")));
+        assert!(store
+            .deleted()
+            .contains(&connection_refresh_token_account("one")));
     }
 
     #[test]

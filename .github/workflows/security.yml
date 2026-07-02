@@ -41,4 +41,5 @@ jobs:
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
       - name: Run cargo-audit
-        run: cargo audit --deny warnings
+        # Keep these in sync with deny.toml until tauri/plist can consume quick-xml >= 0.41.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195

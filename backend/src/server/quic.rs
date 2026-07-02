@@ -7,7 +7,9 @@ use crate::config::Config;
 use shared::QUIC_OVERHEAD_BYTES;
 
 #[cfg(target_os = "linux")]
-use std::os::unix::io::AsRawFd;
+use anyhow::Context;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::{AsRawFd, RawFd};
 
 pub fn create_quic_endpoint(
     config: &Config,
@@ -37,33 +39,17 @@ pub fn create_quic_endpoint(
 
     let socket = std::net::UdpSocket::bind(config.bind_addr)?;
     let socket2_sock = socket2::Socket::from(socket);
-    let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
-    let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
+    if let Err(err) = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024) {
+        tracing::warn!(%err, "failed to increase UDP receive buffer");
+    }
+    if let Err(err) = socket2_sock.set_send_buffer_size(4 * 1024 * 1024) {
+        tracing::warn!(%err, "failed to increase UDP send buffer");
+    }
 
     // Disabling kernel PMTU discovery needs a raw setsockopt; socket2 has no
     // safe wrapper for IP_MTU_DISCOVER / IPV6_MTU_DISCOVER.
     #[cfg(target_os = "linux")]
-    #[allow(unsafe_code)]
-    {
-        let fd = socket2_sock.as_raw_fd();
-        unsafe {
-            let val: libc::c_int = 0;
-            let _ = libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_MTU_DISCOVER,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&val) as libc::socklen_t,
-            );
-            let _ = libc::setsockopt(
-                fd,
-                libc::IPPROTO_IPV6,
-                libc::IPV6_MTU_DISCOVER,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&val) as libc::socklen_t,
-            );
-        }
-    }
+    disable_kernel_pmtu_discovery(socket2_sock.as_raw_fd(), config.bind_addr)?;
 
     let socket = std::net::UdpSocket::from(socket2_sock);
     let endpoint = Endpoint::new(
@@ -74,6 +60,36 @@ pub fn create_quic_endpoint(
     )?;
 
     Ok(endpoint)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn disable_kernel_pmtu_discovery(fd: RawFd, bind_addr: std::net::SocketAddr) -> Result<()> {
+    let (level, opt_name, label) = if bind_addr.is_ipv4() {
+        (libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, "IP_MTU_DISCOVER")
+    } else {
+        (
+            libc::IPPROTO_IPV6,
+            libc::IPV6_MTU_DISCOVER,
+            "IPV6_MTU_DISCOVER",
+        )
+    };
+    let val: libc::c_int = 0;
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            opt_name,
+            &val as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&val) as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to disable kernel PMTU discovery via {label}"))
+    }
 }
 
 fn setup_transport_config(transport_config: &mut TransportConfig, quic_payload_mtu: u16) {

@@ -39,10 +39,14 @@ android {
     }
 }
 
-tasks.register<Exec>("cargoBuild") {
+val cargoBuild = tasks.register<Exec>("cargoBuild") {
     workingDir = file("src/main/rust")
 
     val cargoCommand = if (Os.isFamily(Os.FAMILY_WINDOWS)) "cargo.exe" else "cargo"
+
+    doFirst {
+        file("src/main/jniLibs").mkdirs()
+    }
 
     commandLine(
         cargoCommand,
@@ -62,9 +66,9 @@ tasks.register<Exec>("cargoBuild") {
     )
 }
 
-tasks.whenTaskAdded {
-    if (name == "mergeDebugJniLibFolders" || name == "mergeReleaseJniLibFolders") {
-        dependsOn("cargoBuild")
+tasks.configureEach {
+    if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
+        dependsOn(cargoBuild)
     }
 }
 

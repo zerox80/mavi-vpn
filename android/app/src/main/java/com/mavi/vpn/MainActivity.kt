@@ -10,6 +10,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -27,18 +28,17 @@ import com.mavi.vpn.viewmodel.VpnViewModel
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
-
     private val viewModel: VpnViewModel by viewModels()
 
-    /// Set when the user taps Connect with Keycloak enabled: we launch a fresh
-    /// interactive login first and only start the tunnel once the redirect brings
-    /// back new tokens. Forces re-authentication on every manual connect instead
-    /// of silently reusing the stored token.
+    // Set when the user taps Connect with Keycloak enabled: we launch a fresh
+    // interactive login first and only start the tunnel once the redirect brings
+    // back new tokens. Forces re-authentication on every manual connect instead
+    // of silently reusing the stored token.
     private var pendingConnect = false
 
     private val vpnPrepareLauncher =
         registerForActivityResult(
-            androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+            ActivityResultContracts.StartActivityForResult(),
         ) { result ->
             if (result.resultCode == Activity.RESULT_OK) {
                 val token =
@@ -61,12 +61,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleIntent(intent)
-        
+
         setContent {
             MaviVpnTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    color = MaterialTheme.colorScheme.background,
                 ) {
                     var currentScreen by remember { mutableStateOf("home") }
 
@@ -75,10 +75,10 @@ class MainActivity : ComponentActivity() {
                             viewModel = viewModel,
                             onConnect = { ip, port, token, pin ->
                                 if (viewModel.useKeycloak.value) {
-                                    val keycloakUrlError =
-                                        OAuthHelper.validateKeycloakUrl(viewModel.kcUrl.value)
-                                    if (keycloakUrlError != null) {
-                                        viewModel.updateErrorMessage(keycloakUrlError)
+                                    val authConfigError =
+                                        OAuthHelper.validateAuthConfiguration(viewModel.kcUrl.value)
+                                    if (authConfigError != null) {
+                                        viewModel.updateErrorMessage(authConfigError)
                                     } else {
                                         viewModel.updateErrorMessage("")
                                         viewModel.saveServerDetails()
@@ -100,12 +100,19 @@ class MainActivity : ComponentActivity() {
                                         } else {
                                             // No usable stored session -> interactive login.
                                             pendingConnect = true
-                                            OAuthHelper.startAuth(
-                                                this@MainActivity,
-                                                viewModel.kcUrl.value,
-                                                viewModel.kcRealm.value,
-                                                viewModel.kcClientId.value,
-                                            )
+                                            val started =
+                                                OAuthHelper.startAuth(
+                                                    this@MainActivity,
+                                                    viewModel.kcUrl.value,
+                                                    viewModel.kcRealm.value,
+                                                    viewModel.kcClientId.value,
+                                                )
+                                            if (!started) {
+                                                pendingConnect = false
+                                                viewModel.updateErrorMessage(
+                                                    "Could not start Keycloak login.",
+                                                )
+                                            }
                                         }
                                     }
                                 } else {
@@ -152,7 +159,7 @@ class MainActivity : ComponentActivity() {
             startVpnService(ip, port, token, pin, splitMode, splitPackages)
         }
     }
-    
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)
@@ -160,40 +167,59 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIntent(intent: Intent) {
         val data: Uri? = intent.data
-        if (data != null && data.scheme == "mavivpn" && data.host == "oauth") {
+        if (data != null && OAuthHelper.isOAuthRedirect(data)) {
+            intent.setData(null)
+
+            val oauthError = data.getQueryParameter("error")
+            if (oauthError != null) {
+                pendingConnect = false
+                val description = data.getQueryParameter("error_description") ?: oauthError
+                viewModel.updateErrorMessage("Keycloak login failed: $description")
+                return
+            }
+
             val code = data.getQueryParameter("code")
-            if (code != null) {
-                intent.setData(null)
-                
-                val returnedState = data.getQueryParameter("state")
-                lifecycleScope.launch {
-                    val tokens =
-                        OAuthHelper.exchangeCodeForToken(
-                            this@MainActivity,
-                            code,
-                            returnedState,
-                            viewModel.kcUrl.value,
-                            viewModel.kcRealm.value,
-                            viewModel.kcClientId.value,
-                        )
-                    if (tokens != null) {
-                        viewModel.saveOAuthTokens(tokens)
-                        if (pendingConnect) {
-                            // The user tapped Connect: now that a fresh login
-                            // succeeded, bring the tunnel up with the new token.
-                            pendingConnect = false
-                            prepareAndStartVpn(
-                                viewModel.serverIp.value,
-                                viewModel.serverPort.value,
-                                tokens.accessToken,
-                                viewModel.certPin.value,
-                                viewModel.splitMode.value,
-                                viewModel.splitPackages.value,
-                            )
-                        } else {
-                            recreate()
-                        }
-                    }
+            if (code.isNullOrBlank()) {
+                pendingConnect = false
+                viewModel.updateErrorMessage(
+                    "Keycloak login did not return an authorization code.",
+                )
+                return
+            }
+
+            val returnedState = data.getQueryParameter("state")
+            lifecycleScope.launch {
+                val tokens =
+                    OAuthHelper.exchangeCodeForToken(
+                        this@MainActivity,
+                        code,
+                        returnedState,
+                        viewModel.kcUrl.value,
+                        viewModel.kcRealm.value,
+                        viewModel.kcClientId.value,
+                    )
+                if (tokens == null) {
+                    pendingConnect = false
+                    viewModel.updateErrorMessage("Keycloak login failed. Please try again.")
+                    return@launch
+                }
+
+                viewModel.updateErrorMessage("")
+                viewModel.saveOAuthTokens(tokens)
+                if (pendingConnect) {
+                    // The user tapped Connect: now that a fresh login
+                    // succeeded, bring the tunnel up with the new token.
+                    pendingConnect = false
+                    prepareAndStartVpn(
+                        viewModel.serverIp.value,
+                        viewModel.serverPort.value,
+                        tokens.accessToken,
+                        viewModel.certPin.value,
+                        viewModel.splitMode.value,
+                        viewModel.splitPackages.value,
+                    )
+                } else {
+                    recreate()
                 }
             }
         }
@@ -207,15 +233,16 @@ class MainActivity : ComponentActivity() {
         splitMode: String,
         splitPackages: String,
     ) {
-        val intent = Intent(this, MaviVpnService::class.java).apply {
-            action = "CONNECT"
-            putExtra("IP", ip)
-            putExtra("PORT", port)
-            putExtra("TOKEN", token)
-            putExtra("PIN", pin)
-            putExtra("SPLIT_MODE", splitMode)
-            putExtra("SPLIT_PACKAGES", splitPackages)
-        }
+        val intent =
+            Intent(this, MaviVpnService::class.java).apply {
+                action = "CONNECT"
+                putExtra("IP", ip)
+                putExtra("PORT", port)
+                putExtra("TOKEN", token)
+                putExtra("PIN", pin)
+                putExtra("SPLIT_MODE", splitMode)
+                putExtra("SPLIT_PACKAGES", splitPackages)
+            }
         startService(intent)
     }
 

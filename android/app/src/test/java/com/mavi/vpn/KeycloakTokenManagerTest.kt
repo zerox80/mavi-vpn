@@ -1,13 +1,13 @@
 package com.mavi.vpn
 
 import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.json.JSONObject
 import java.util.Base64
 
 class KeycloakTokenManagerTest {
@@ -102,6 +102,44 @@ class KeycloakTokenManagerTest {
         ).forEach { url ->
             assertNotNull(url, OAuthHelper.validateKeycloakUrl(url))
         }
+    }
+
+    @Test
+    fun oauthRedirectValidationRequiresHttpsAppLinkForStrictBuilds() {
+        assertNull(
+            OAuthHelper.validateOAuthRedirectUri(
+                "https://vpn.example.com/oauth/callback",
+                allowCustomScheme = false,
+            ),
+        )
+
+        listOf(
+            "com.mavi.vpn://oauth/callback",
+            "mavivpn://oauth",
+            "https://vpn.example.com",
+            "https://vpn.example.com/oauth/callback?code=abc",
+        ).forEach { uri ->
+            assertNotNull(
+                uri,
+                OAuthHelper.validateOAuthRedirectUri(uri, allowCustomScheme = false),
+            )
+        }
+    }
+
+    @Test
+    fun oauthRedirectValidationAllowsReverseDnsCustomSchemeOnlyForDebug() {
+        assertNull(
+            OAuthHelper.validateOAuthRedirectUri(
+                "com.mavi.vpn://oauth/callback",
+                allowCustomScheme = true,
+            ),
+        )
+        assertNotNull(
+            OAuthHelper.validateOAuthRedirectUri(
+                "mavivpn://oauth",
+                allowCustomScheme = true,
+            ),
+        )
     }
 
     @Test

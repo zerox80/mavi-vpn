@@ -121,11 +121,10 @@ pub async fn dispatch_request(
             handle_start_request(config, Some(keycloak), &mut guard)
         }
         ipc::IpcRequest::UpdateToken { token } => {
-            // The GUI owns the Keycloak refresh token and silently refreshes the
-            // short-lived access token itself; it pushes only the fresh access
-            // token here. Store it so the next (re)handshake authenticates with
-            // a valid token, and the in-band reauth task forwards it to the VPN
-            // server. The service never receives or stores the refresh token.
+            // Non-Windows clients refresh Keycloak outside the service and push
+            // only the fresh access token here. Windows service-side refresh is
+            // seeded by StartWithKeycloak and keeps the refresh token in RAM for
+            // the active session only.
             // Harmless when no session is active - the next Start overwrites it.
             guard.set_current_token(token);
             ipc::IpcResponse::Ok

@@ -260,9 +260,9 @@ async fn start_request_with_finished_task_succeeds() {
 
 #[tokio::test]
 async fn update_token_replaces_current_token_without_refresh_dependency() {
-    // The GUI owns the Keycloak refresh token; the service only ever receives
-    // the freshly minted access token via UpdateToken. Verify that UpdateToken
-    // overwrites current_token and never touches any refresh-token state.
+    // UpdateToken is the non-service-refresh path: it receives only the freshly
+    // minted access token. Windows sessions that use service-side refresh seed
+    // the RAM-only refresh task through StartWithKeycloak instead.
     let state = test_state();
     {
         let guard = state.lock().await;

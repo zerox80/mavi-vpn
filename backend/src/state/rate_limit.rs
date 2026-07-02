@@ -29,7 +29,7 @@ struct FailureWindow {
 }
 
 /// Tracks failed authentication attempts per source IP and blocks an IP for
-/// `block_duration` once it exceeds `max_failures` within `window`.
+/// `block_duration` once it reaches `max_failures` within `window`.
 pub struct AuthRateLimiter {
     entries: DashMap<IpAddr, FailureWindow>,
     max_failures: u32,
@@ -65,7 +65,7 @@ impl AuthRateLimiter {
     }
 
     /// Records a failed authentication attempt for `ip`. If this pushes the
-    /// IP's failure count over `max_failures` within `window`, the IP becomes
+    /// IP's failure count to `max_failures` within `window`, the IP becomes
     /// blocked for `block_duration` starting now.
     pub fn record_failure(&self, ip: IpAddr) {
         let now = Instant::now();
@@ -83,7 +83,7 @@ impl AuthRateLimiter {
         }
 
         entry.count += 1;
-        if entry.count > self.max_failures {
+        if entry.count >= self.max_failures {
             entry.blocked_until = Some(now + self.block_duration);
         }
     }
@@ -137,15 +137,7 @@ mod tests {
         for _ in 0..3 {
             limiter.record_failure(ip);
         }
-        assert!(
-            !limiter.is_blocked(ip),
-            "exactly max_failures should not block yet"
-        );
-        limiter.record_failure(ip);
-        assert!(
-            limiter.is_blocked(ip),
-            "exceeding max_failures should block"
-        );
+        assert!(limiter.is_blocked(ip), "exactly max_failures should block");
     }
 
     #[test]
@@ -163,7 +155,6 @@ mod tests {
         let limiter = AuthRateLimiter::new(1, Duration::from_secs(60), Duration::from_millis(50));
         let ip = test_ip(1);
         limiter.record_failure(ip);
-        limiter.record_failure(ip);
         assert!(limiter.is_blocked(ip));
         sleep(Duration::from_millis(80));
         assert!(!limiter.is_blocked(ip));
@@ -176,13 +167,17 @@ mod tests {
         limiter.record_failure(ip);
         limiter.record_failure(ip);
         limiter.record_success(ip);
-        // If the counter hadn't reset, one more failure would exceed max_failures (3).
-        limiter.record_failure(ip);
+        // If the counter hadn't reset, this would already be blocked.
         limiter.record_failure(ip);
         limiter.record_failure(ip);
         assert!(
             !limiter.is_blocked(ip),
             "success should have reset the failure count"
+        );
+        limiter.record_failure(ip);
+        assert!(
+            limiter.is_blocked(ip),
+            "exactly max_failures after the reset should block"
         );
     }
 
@@ -191,12 +186,10 @@ mod tests {
         let limiter = AuthRateLimiter::new(2, Duration::from_millis(30), Duration::from_secs(60));
         let ip = test_ip(1);
         limiter.record_failure(ip);
-        limiter.record_failure(ip);
         assert!(!limiter.is_blocked(ip));
         sleep(Duration::from_millis(50));
-        // Window has expired; these two failures start a fresh window and must
-        // not accumulate with the earlier two.
-        limiter.record_failure(ip);
+        // Window has expired; this failure starts a fresh window and must not
+        // accumulate with the earlier one.
         limiter.record_failure(ip);
         assert!(
             !limiter.is_blocked(ip),
@@ -209,7 +202,6 @@ mod tests {
         let limiter = AuthRateLimiter::new(1, Duration::from_secs(60), Duration::from_secs(60));
         let ip_a = test_ip(1);
         let ip_b = test_ip(2);
-        limiter.record_failure(ip_a);
         limiter.record_failure(ip_a);
         assert!(limiter.is_blocked(ip_a));
         assert!(!limiter.is_blocked(ip_b));
@@ -231,7 +223,6 @@ mod tests {
         let limiter = AuthRateLimiter::new(1, Duration::from_millis(20), Duration::from_secs(60));
         let ip = test_ip(1);
         limiter.record_failure(ip);
-        limiter.record_failure(ip);
         assert!(limiter.is_blocked(ip));
         sleep(Duration::from_millis(40));
         // The window has expired but the block has not — the entry must survive.
@@ -252,7 +243,6 @@ mod tests {
     fn ipv6_addresses_are_tracked() {
         let limiter = AuthRateLimiter::new(1, Duration::from_secs(60), Duration::from_secs(60));
         let ip = IpAddr::V6(Ipv6Addr::LOCALHOST);
-        limiter.record_failure(ip);
         limiter.record_failure(ip);
         assert!(limiter.is_blocked(ip));
     }

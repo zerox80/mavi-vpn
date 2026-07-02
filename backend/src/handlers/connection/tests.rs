@@ -120,7 +120,7 @@ fn reauth_failures_share_auth_rate_limiter() {
     let state = AppState::new("10.8.0.0/24").unwrap();
     let remote_ip = Ipv4Addr::new(203, 0, 113, 10).into();
 
-    for _ in 0..10 {
+    for _ in 0..9 {
         record_reauth_result(&state, remote_ip, false);
     }
     assert!(!reauth_rate_limited(&state, remote_ip));
@@ -139,10 +139,13 @@ fn accepted_reauth_clears_failure_history() {
     }
     record_reauth_result(&state, remote_ip, true);
 
-    for _ in 0..10 {
+    for _ in 0..9 {
         record_reauth_result(&state, remote_ip, false);
     }
     assert!(!reauth_rate_limited(&state, remote_ip));
+
+    record_reauth_result(&state, remote_ip, false);
+    assert!(reauth_rate_limited(&state, remote_ip));
 }
 
 #[test]

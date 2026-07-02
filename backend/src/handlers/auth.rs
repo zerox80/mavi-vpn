@@ -262,7 +262,7 @@ mod tests {
             assert!(result.is_err());
             assert_eq!(validator.calls.load(Ordering::SeqCst), 1);
         }
-        assert!(!state.auth_rate_limiter.is_blocked(ip));
+        assert!(state.auth_rate_limiter.is_blocked(ip));
 
         let validator = MockValidator {
             result: Err("invalid jwt header"),
@@ -272,6 +272,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(state.auth_rate_limiter.is_blocked(ip));
+        assert_eq!(validator.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -283,7 +284,7 @@ mod tests {
         // Exhaust the default limit (10 failures/60s) with a static-token
         // config so the IP becomes blocked, then switch to a Keycloak
         // validator and prove it is never even invoked.
-        for _ in 0..11 {
+        for _ in 0..10 {
             let _ = authenticate_client("wrong-token", ip, &state, &config, None).await;
         }
         assert!(state.auth_rate_limiter.is_blocked(ip));
@@ -308,19 +309,19 @@ mod tests {
         let config = test_config();
         let ip = test_ip(12);
 
-        for _ in 0..10 {
+        for _ in 0..9 {
             let result = authenticate_client("wrong-token", ip, &state, &config, None).await;
             assert!(result.is_err());
         }
         assert!(
             !state.auth_rate_limiter.is_blocked(ip),
-            "exactly the threshold should not block yet"
+            "below the threshold should not block yet"
         );
 
         let _ = authenticate_client("wrong-token", ip, &state, &config, None).await;
         assert!(
             state.auth_rate_limiter.is_blocked(ip),
-            "one more failure past the threshold should block"
+            "exactly the threshold should block"
         );
     }
 
@@ -334,9 +335,17 @@ mod tests {
             let _ = authenticate_client("wrong-token", ip, &state, &config, None).await;
             let _ = authenticate_client("correct-token", ip, &state, &config, None).await;
         }
+        for _ in 0..9 {
+            let _ = authenticate_client("wrong-token", ip, &state, &config, None).await;
+        }
         assert!(
             !state.auth_rate_limiter.is_blocked(ip),
             "successes interleaved with failures must reset the failure count each time"
+        );
+        let _ = authenticate_client("wrong-token", ip, &state, &config, None).await;
+        assert!(
+            state.auth_rate_limiter.is_blocked(ip),
+            "exactly the threshold after a success should block"
         );
     }
 
@@ -347,7 +356,7 @@ mod tests {
         let ip_a = test_ip(14);
         let ip_b = test_ip(15);
 
-        for _ in 0..11 {
+        for _ in 0..10 {
             let _ = authenticate_client("wrong-token", ip_a, &state, &config, None).await;
         }
         assert!(state.auth_rate_limiter.is_blocked(ip_a));

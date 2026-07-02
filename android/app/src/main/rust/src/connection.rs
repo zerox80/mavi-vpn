@@ -81,7 +81,7 @@ async fn send_reauth(connection: &quinn::Connection, token: &str) -> anyhow::Res
     .map_err(|_| anyhow::anyhow!("Reauth timed out"))?
 }
 
-use crate::crypto::{decode_hex, PinnedServerVerifier};
+use crate::crypto::{decode_hex_pins, PinnedServerVerifier};
 use validation::validate_server_mtu;
 
 /// Holds the h3 CONNECT-IP request state for the lifetime of the VPN session.
@@ -136,9 +136,9 @@ pub async fn connect_and_handshake(
     let effective_http3_framing = effective_http3_framing(censorship_resistant, http3_framing);
 
     // Verifier Setup
-    let verifier = if let Some(bytes) = decode_hex(&cert_pin) {
-        info!("Pin decoded successfully. Len: {}", bytes.len());
-        Arc::new(PinnedServerVerifier::new(bytes))
+    let verifier = if let Some(hashes) = decode_hex_pins(&cert_pin) {
+        info!("Pin(s) decoded successfully. Count: {}", hashes.len());
+        Arc::new(PinnedServerVerifier::new(hashes))
     } else {
         return Err(anyhow::anyhow!("Invalid Certificate PIN hex string"));
     };

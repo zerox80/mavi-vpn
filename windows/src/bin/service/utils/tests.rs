@@ -28,6 +28,20 @@ fn sddl_without_user_grants_only_system_and_admins() {
 }
 
 #[test]
+fn pipe_sddl_grants_read_write_to_user() {
+    let sddl = ipc_acl_sddl(IpcAclTarget::Pipe, Some("S-1-5-21-1000"));
+
+    assert_eq!(sddl, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFW;;;S-1-5-21-1000)");
+}
+
+#[test]
+fn pipe_sddl_without_user_grants_only_system_and_admins() {
+    let sddl = ipc_acl_sddl(IpcAclTarget::Pipe, None);
+
+    assert_eq!(sddl, "D:P(A;;FA;;;SY)(A;;FA;;;BA)");
+}
+
+#[test]
 fn acl_script_replaces_dacl_atomically_and_preserves_owner() {
     let script = ipc_acl_script(
         Path::new(r"C:\ProgramData\mavi-vpn\ipc.token"),

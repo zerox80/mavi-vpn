@@ -13,7 +13,11 @@ use tokio::net::TcpListener;
 /// Fixed callback port — register `http://127.0.0.1:18923/callback` in Keycloak.
 const OAUTH_CALLBACK_PORT: u16 = 18923;
 
-pub async fn start_oauth_flow(kc_url: &str, realm: &str, client_id: &str) -> Result<shared::kc_oauth::OAuthTokens> {
+pub async fn start_oauth_flow(
+    kc_url: &str,
+    realm: &str,
+    client_id: &str,
+) -> Result<shared::kc_oauth::OAuthTokens> {
     // Plain-HTTP Keycloak would expose the authorization code and tokens to a
     // MITM; only loopback is exempt (dev setups).
     shared::validate_keycloak_url(kc_url).map_err(|e| anyhow::anyhow!(e))?;

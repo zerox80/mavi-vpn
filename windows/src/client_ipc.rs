@@ -1,10 +1,44 @@
 use anyhow::Result;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
 use crate::ipc::{self, IpcRequest, IpcResponse};
 
 const MAX_IPC_RESPONSE_BYTES: usize = 65_536;
+
+/// Windows returns this OS error when every server-side pipe instance is
+/// momentarily connected (`ERROR_PIPE_BUSY`) — unlike TCP's backlog queue, a
+/// named pipe client must retry rather than block.
+const ERROR_PIPE_BUSY: i32 = 231;
+const PIPE_BUSY_RETRY_ATTEMPTS: u32 = 5;
+const PIPE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Opens the IPC named pipe, retrying briefly on `ERROR_PIPE_BUSY`. With
+/// `MAX_CONCURRENT_IPC_CLIENTS` server-side instances this should be rare in
+/// practice, but the retry is required for correctness rather than assumed
+/// away.
+async fn connect_ipc_pipe() -> Result<NamedPipeClient> {
+    let mut last_busy_err = None;
+    for _ in 0..PIPE_BUSY_RETRY_ATTEMPTS {
+        match ClientOptions::new().open(ipc::ipc_pipe_name()) {
+            Ok(client) => return Ok(client),
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                last_busy_err = Some(e);
+                tokio::time::sleep(PIPE_BUSY_RETRY_DELAY).await;
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to connect to Mavi VPN service (is the service running?): {e}"
+                ));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "Mavi VPN service is busy (too many concurrent clients); retry shortly: {}",
+        last_busy_err.map_or_else(String::new, |e| e.to_string())
+    ))
+}
 
 pub(crate) async fn send_request_internal(req: IpcRequest) -> Result<IpcResponse> {
     let token_path = ipc::ipc_token_path();
@@ -30,7 +64,7 @@ pub(crate) async fn send_request_internal(req: IpcRequest) -> Result<IpcResponse
         request: req,
     };
 
-    let mut client = TcpStream::connect(ipc::LOCAL_IPC_ADDR).await?;
+    let mut client = connect_ipc_pipe().await?;
     let req_buf = bincode::serde::encode_to_vec(&req_msg, bincode::config::standard())?;
     #[allow(clippy::cast_possible_truncation)]
     client.write_u32_le(req_buf.len() as u32).await?;
@@ -127,7 +161,7 @@ async fn wait_for_connected() -> Result<()> {
     anyhow::bail!("VPN is still starting. Run status to check progress.")
 }
 
-async fn read_response_len(client: &mut TcpStream) -> Result<usize> {
+async fn read_response_len(client: &mut NamedPipeClient) -> Result<usize> {
     let mut len_buf = [0u8; 4];
     client.read_exact(&mut len_buf).await?;
     validate_response_len(u32::from_le_bytes(len_buf) as usize)

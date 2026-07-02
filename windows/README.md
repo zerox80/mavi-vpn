@@ -8,8 +8,8 @@ VPN-Client für Windows mit QUIC-Transport und WinTUN. Verfügbar als CLI und gr
 
 ```
 mavi-vpn-client.exe  ──┐
-                        ├── IPC (127.0.0.1:14433) ──► mavi-vpn-service.exe
-mavi-vpn-gui.exe     ──┘                               (läuft als Windows-Service)
+                        ├── IPC (Windows Named Pipe) ──► mavi-vpn-service.exe
+mavi-vpn-gui.exe     ──┘                                      (läuft als Windows-Service)
 ```
 
 Der **Service** muss einmalig als Administrator installiert werden und läuft danach automatisch im Hintergrund. CLI und GUI brauchen danach **keine Admin-Rechte** mehr.

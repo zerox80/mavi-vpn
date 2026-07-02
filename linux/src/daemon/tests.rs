@@ -1,7 +1,14 @@
+use super::transport::{
+    bind_ipc_socket_at, handle_ipc_client, write_ipc_token_with_access, IpcTokenAccess,
+};
 use super::*;
-use shared::ipc::VpnState;
+use nix::unistd::Gid;
+use shared::ipc::{SecureIpcRequest, VpnState};
 use std::fs;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use tempfile::tempdir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 
 fn no_cleanup() {}
 
@@ -35,6 +42,20 @@ fn ipc_token_modes_are_not_world_readable() {
 }
 
 #[test]
+fn ipc_socket_modes_are_not_world_accessible() {
+    assert_eq!(IpcTokenAccess::RootOnly.socket_mode(), 0o600);
+    assert_eq!(
+        IpcTokenAccess::Group(Gid::from_raw(123)).socket_mode(),
+        0o660
+    );
+    assert_eq!(IpcTokenAccess::RootOnly.socket_mode() & 0o007, 0);
+    assert_eq!(
+        IpcTokenAccess::Group(Gid::from_raw(123)).socket_mode() & 0o007,
+        0
+    );
+}
+
+#[test]
 fn root_only_token_file_is_created_with_0600() {
     let dir = tempdir().unwrap();
     let token_path = dir.path().join("mavi-vpn.token");
@@ -58,6 +79,172 @@ fn existing_token_is_replaced_without_world_readable_bits() {
     let metadata = fs::metadata(&token_path).unwrap();
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     assert_eq!(fs::read_to_string(&token_path).unwrap(), "new");
+}
+
+#[tokio::test]
+async fn bind_ipc_socket_creates_socket_file_with_correct_mode() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("mavi-vpn.sock");
+
+    let _listener = bind_ipc_socket_at(&socket_path, IpcTokenAccess::RootOnly).unwrap();
+
+    let metadata = fs::metadata(&socket_path).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert!(metadata.file_type().is_socket());
+}
+
+#[tokio::test]
+async fn bind_ipc_socket_removes_stale_socket_file() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("mavi-vpn.sock");
+
+    // Simulate a stale socket file left behind by a crashed daemon.
+    {
+        let _first = bind_ipc_socket_at(&socket_path, IpcTokenAccess::RootOnly).unwrap();
+    }
+    assert!(socket_path.exists());
+
+    // Binding again must succeed by removing the stale path first, not fail
+    // with AddrInUse.
+    let _second = bind_ipc_socket_at(&socket_path, IpcTokenAccess::RootOnly).unwrap();
+    assert!(socket_path.exists());
+}
+
+#[tokio::test]
+async fn bind_ipc_socket_root_only_mode_when_no_group() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("mavi-vpn.sock");
+
+    let _listener = bind_ipc_socket_at(&socket_path, IpcTokenAccess::RootOnly).unwrap();
+
+    let metadata = fs::metadata(&socket_path).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+}
+
+#[tokio::test]
+async fn handle_ipc_client_over_unix_socket_roundtrip() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("mavi-vpn.sock");
+    let listener = bind_ipc_socket_at(&socket_path, IpcTokenAccess::RootOnly).unwrap();
+
+    let state = test_state();
+    let auth_token = Arc::new("secret-token".to_string());
+
+    let server_auth_token = auth_token.clone();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        handle_ipc_client(socket, state, server_auth_token)
+            .await
+            .unwrap();
+    });
+
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+    let req = SecureIpcRequest {
+        auth_token: (*auth_token).clone(),
+        request: IpcRequest::Status,
+    };
+    let req_buf = bincode::serde::encode_to_vec(&req, bincode::config::standard()).unwrap();
+    client.write_u32_le(req_buf.len() as u32).await.unwrap();
+    client.write_all(&req_buf).await.unwrap();
+
+    let mut len_buf = [0u8; 4];
+    client.read_exact(&mut len_buf).await.unwrap();
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    client.read_exact(&mut buf).await.unwrap();
+    let (resp, _): (IpcResponse, usize) =
+        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).unwrap();
+
+    assert_eq!(
+        resp,
+        IpcResponse::Status {
+            running: false,
+            endpoint: None,
+            state: VpnState::Stopped,
+            last_error: None,
+            assigned_ip: None,
+        }
+    );
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn handle_ipc_client_rejects_wrong_auth_token() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("mavi-vpn.sock");
+    let listener = bind_ipc_socket_at(&socket_path, IpcTokenAccess::RootOnly).unwrap();
+
+    let state = test_state();
+    let auth_token = Arc::new("secret-token".to_string());
+
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        handle_ipc_client(socket, state, auth_token).await.unwrap();
+    });
+
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+    let req = SecureIpcRequest {
+        auth_token: "wrong-token".to_string(),
+        request: IpcRequest::Status,
+    };
+    let req_buf = bincode::serde::encode_to_vec(&req, bincode::config::standard()).unwrap();
+    client.write_u32_le(req_buf.len() as u32).await.unwrap();
+    client.write_all(&req_buf).await.unwrap();
+
+    let mut len_buf = [0u8; 4];
+    client.read_exact(&mut len_buf).await.unwrap();
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    client.read_exact(&mut buf).await.unwrap();
+    let (resp, _): (IpcResponse, usize) =
+        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).unwrap();
+
+    assert!(matches!(resp, IpcResponse::Error(msg) if msg.contains("Unauthorized")));
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn send_request_connects_to_unix_socket() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("mavi-vpn.sock");
+    let token_path = dir.path().join("mavi-vpn.token");
+    write_ipc_token_with_access(&token_path, "secret-token", IpcTokenAccess::RootOnly).unwrap();
+    let listener = bind_ipc_socket_at(&socket_path, IpcTokenAccess::RootOnly).unwrap();
+
+    let state = test_state();
+    let auth_token = Arc::new("secret-token".to_string());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        handle_ipc_client(socket, state, auth_token).await.unwrap();
+    });
+
+    // send_request() reads the token from the real ipc_token_path() and
+    // connects to the real ipc_socket_path(), neither of which are
+    // overridable in tests, so this test exercises the same wire protocol
+    // send_request() uses (length-prefixed bincode SecureIpcRequest/
+    // IpcResponse over a Unix stream) directly against tempdir paths instead.
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+    let auth_token = fs::read_to_string(&token_path).unwrap();
+    let req = SecureIpcRequest {
+        auth_token,
+        request: IpcRequest::Status,
+    };
+    let req_buf = bincode::serde::encode_to_vec(&req, bincode::config::standard()).unwrap();
+    client.write_u32_le(req_buf.len() as u32).await.unwrap();
+    client.write_all(&req_buf).await.unwrap();
+
+    let mut len_buf = [0u8; 4];
+    client.read_exact(&mut len_buf).await.unwrap();
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    client.read_exact(&mut buf).await.unwrap();
+    let (resp, _): (IpcResponse, usize) =
+        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).unwrap();
+    assert!(matches!(resp, IpcResponse::Status { .. }));
+
+    server.await.unwrap();
 }
 
 #[tokio::test]

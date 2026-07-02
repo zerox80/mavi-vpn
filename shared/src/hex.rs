@@ -13,6 +13,28 @@ pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Parses a `cert_pin` config value that may contain one or more
+/// comma-separated SHA-256 hex fingerprints (64 hex chars each). Supports the
+/// dual-pin rotation workflow: during a manual cert rotation window an admin
+/// sets this to `"<old_pin>,<new_pin>"` so already-deployed clients keep
+/// trusting the old cert while newly-configured clients pick up the new one;
+/// the server itself only ever writes a single pin to `cert_pin.txt`.
+///
+/// Fails closed: an empty string, an empty segment (leading/trailing/double
+/// comma), a segment of the wrong length, or invalid hex all return `None`
+/// rather than silently accepting a partial or malformed pin list.
+#[must_use]
+pub fn decode_hex_pins(s: &str) -> Option<Vec<Vec<u8>>> {
+    let pins: Option<Vec<Vec<u8>>> = s
+        .split(',')
+        .map(|segment| {
+            let bytes = decode_hex(segment.trim())?;
+            (bytes.len() == 32).then_some(bytes)
+        })
+        .collect();
+    pins.filter(|p| !p.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +94,83 @@ mod tests {
         assert_eq!(decode_hex("ff"), Some(vec![0xff]));
         assert_eq!(decode_hex("00"), Some(vec![0x00]));
         assert_eq!(decode_hex("01"), Some(vec![0x01]));
+    }
+
+    fn pin(byte: u8) -> String {
+        hex_of(&[byte; 32])
+    }
+
+    fn hex_of(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
+    }
+
+    #[test]
+    fn decode_hex_pins_single_pin() {
+        let pin_a = pin(0xaa);
+        assert_eq!(decode_hex_pins(&pin_a), Some(vec![vec![0xaa; 32]]));
+    }
+
+    #[test]
+    fn decode_hex_pins_two_pins_comma_separated() {
+        let combined = format!("{},{}", pin(0xaa), pin(0xbb));
+        assert_eq!(
+            decode_hex_pins(&combined),
+            Some(vec![vec![0xaa; 32], vec![0xbb; 32]])
+        );
+    }
+
+    #[test]
+    fn decode_hex_pins_trims_whitespace_around_commas() {
+        let combined = format!("{} , {}", pin(0xaa), pin(0xbb));
+        assert_eq!(
+            decode_hex_pins(&combined),
+            Some(vec![vec![0xaa; 32], vec![0xbb; 32]])
+        );
+    }
+
+    #[test]
+    fn decode_hex_pins_rejects_empty_string() {
+        assert_eq!(decode_hex_pins(""), None);
+    }
+
+    #[test]
+    fn decode_hex_pins_rejects_trailing_comma() {
+        let s = format!("{},", pin(0xaa));
+        assert_eq!(decode_hex_pins(&s), None);
+    }
+
+    #[test]
+    fn decode_hex_pins_rejects_double_comma() {
+        let s = format!("{},,{}", pin(0xaa), pin(0xbb));
+        assert_eq!(decode_hex_pins(&s), None);
+    }
+
+    #[test]
+    fn decode_hex_pins_rejects_wrong_length_segment() {
+        assert_eq!(decode_hex_pins("aabbcc"), None);
+    }
+
+    #[test]
+    fn decode_hex_pins_rejects_invalid_hex_segment() {
+        let s = "z".repeat(64);
+        assert_eq!(decode_hex_pins(&s), None);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn decode_hex_pins_roundtrip_proptest(
+            pins in proptest::collection::vec(
+                proptest::collection::vec(0u8..=255, 32..=32),
+                1..=4,
+            )
+        ) {
+            let joined = pins.iter().map(|p| hex_of(p)).collect::<Vec<_>>().join(",");
+            assert_eq!(decode_hex_pins(&joined), Some(pins));
+        }
     }
 }

@@ -102,8 +102,8 @@ on network change) plus platform-specific TUN + routing + DNS:
 - `windows/` WinTUN + a Windows Service (`bin/service.rs`) with NRPT DNS, plus PKCE OAuth (`oauth.rs`).
 - `android/` Kotlin `VpnService` + Jetpack Compose UI calling the Rust JNI core in `lib.rs`.
 
-The GUI and CLI talk to the privileged background service over **IPC on TCP port 14433** — the GUI
-never touches the TUN directly.
+The GUI and CLI talk to the privileged background service over **OS-native local IPC** (Unix socket
+on Linux, Windows Named Pipe on Windows) — the GUI never touches the TUN directly.
 
 ### Server (`backend/`)
 `main.rs` accept loop → per-connection handler in `handlers/`; `state.rs` holds the v4+v6 IP pool and

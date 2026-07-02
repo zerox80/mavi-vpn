@@ -58,7 +58,7 @@ mavi-vpn status
 
 ### Modus 2: Daemon (für GUI oder Hintergrund-Betrieb)
 
-Der Daemon läuft als Root im Hintergrund und nimmt Befehle über einen lokalen IPC-Port (`127.0.0.1:14433`) entgegen. Die GUI nutzt diesen Modus automatisch.
+Der Daemon läuft als Root im Hintergrund und nimmt Befehle über einen lokalen Unix-Domain-Socket (`/run/mavi-vpn/mavi-vpn.sock`) entgegen. Die GUI nutzt diesen Modus automatisch.
 
 ```bash
 # Daemon manuell starten

@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+pub mod cert_pin;
 pub mod endpoint;
 pub mod hex;
 pub mod icmp;

@@ -145,7 +145,10 @@ impl VpnServiceState {
             .lock()
             .ok()
             .and_then(|assigned_ip| assigned_ip.clone());
-        let endpoint = self.active_config.as_ref().map(|config| config.endpoint.clone());
+        let endpoint = self
+            .active_config
+            .as_ref()
+            .map(|config| config.endpoint.clone());
 
         VpnStatusSnapshot {
             connected,

@@ -1,6 +1,8 @@
 import org.apache.tools.ant.taskdefs.condition.Os
+import org.gradle.api.GradleException
 import org.gradle.testing.jacoco.tasks.JacocoCoverageVerification
 import org.gradle.testing.jacoco.tasks.JacocoReport
+import java.net.URI
 
 plugins {
     id("com.android.application")
@@ -8,6 +10,31 @@ plugins {
     id("org.jlleitschuh.gradle.ktlint")
     id("jacoco")
 }
+
+val debugOAuthRedirectUri = "com.mavi.vpn://oauth/callback"
+val oauthRedirectUriProvider =
+    providers.gradleProperty("mavi.oauthRedirectUri").orElse(debugOAuthRedirectUri)
+val oauthRedirectUri = URI(oauthRedirectUriProvider.get())
+
+fun javaStringLiteral(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+fun oauthRedirectPath(uri: URI): String =
+    uri.rawPath?.takeIf { it.isNotBlank() }
+        ?: throw GradleException(
+            "mavi.oauthRedirectUri must include a callback path, " +
+                "for example https://vpn.example.com/oauth/callback",
+        )
+
+fun requireOAuthRedirectHost(uri: URI): String =
+    uri.host?.takeIf { it.isNotBlank() }
+        ?: throw GradleException("mavi.oauthRedirectUri must include a host")
+
+fun isHttpsAppLinkRedirect(uri: URI): Boolean =
+    uri.scheme?.equals("https", ignoreCase = true) == true &&
+        !uri.host.isNullOrBlank() &&
+        !uri.rawPath.isNullOrBlank() &&
+        uri.rawQuery == null &&
+        uri.rawFragment == null
 
 android {
     namespace = "com.mavi.vpn"
@@ -22,6 +49,18 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["oauthRedirectScheme"] =
+            oauthRedirectUri.scheme
+                ?: throw GradleException("mavi.oauthRedirectUri must include a scheme")
+        manifestPlaceholders["oauthRedirectHost"] = requireOAuthRedirectHost(oauthRedirectUri)
+        manifestPlaceholders["oauthRedirectPath"] = oauthRedirectPath(oauthRedirectUri)
+        manifestPlaceholders["oauthRedirectAutoVerify"] =
+            (oauthRedirectUri.scheme?.equals("https", ignoreCase = true) == true).toString()
+        buildConfigField(
+            "String",
+            "OAUTH_REDIRECT_URI",
+            javaStringLiteral(oauthRedirectUri.toString()),
+        )
     }
 
     buildTypes {
@@ -36,7 +75,25 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
+}
+
+tasks.register("validateReleaseOAuthRedirectUri") {
+    doLast {
+        val releaseRedirectUri = URI(oauthRedirectUriProvider.get())
+        if (!isHttpsAppLinkRedirect(releaseRedirectUri)) {
+            throw GradleException(
+                "Release Android builds require " +
+                    "-Pmavi.oauthRedirectUri=https://<verified-domain>/<callback-path>. " +
+                    "Configure the same URI in Keycloak and host assetlinks.json for com.mavi.vpn.",
+            )
+        }
+    }
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn("validateReleaseOAuthRedirectUri")
 }
 
 val cargoBuild =

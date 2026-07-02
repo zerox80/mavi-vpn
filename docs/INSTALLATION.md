@@ -79,7 +79,7 @@ The Keycloak container ships with a **pre-configured realm import** (`backend/ke
 
 **What gets imported automatically on first start:**
 - Realm **`mavi-vpn`** (enabled, `sslRequired: external`, brute-force protection on)
-- Client **`mavi-client`** — public PKCE client (`S256`), standard flow enabled, redirect URIs `http://127.0.0.1:18923/callback` (desktop clients) and `mavivpn://oauth` (Android)
+- Client **`mavi-client`** — public PKCE client (`S256`), standard flow enabled, redirect URIs `http://127.0.0.1:18923/callback` (desktop clients) and `com.mavi.vpn://oauth/callback` (Android debug builds)
 - Realm role **`vpn-user`** — optional, only enforced when `VPN_KEYCLOAK_REQUIRED_ROLE=vpn-user` is set on the server (off by default)
 - Token lifespans tuned for the VPN refresh cycle:
   - **Access Token Lifespan: 10 min (600 s)** — gives the client's 300 s refresh skew real headroom
@@ -337,7 +337,7 @@ The Android client is built as a native Kotlin app with a bundled Rust core for 
 ### Step-by-Step Guide
 
 **1. Configure the Backend:**
-Ensure your Keycloak client is configured with the `mavivpn://oauth` redirect URI as described in Section 1, Step 4.
+Ensure your Keycloak client is configured with `com.mavi.vpn://oauth/callback` for debug builds. Release builds must use a verified HTTPS App Link; build with `-Pmavi.oauthRedirectUri=https://<verified-domain>/<callback-path>` and register that exact URI in Keycloak.
 
 **2. Build the App:**
 1. Open the `/android` folder in Android Studio.

@@ -35,11 +35,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             
-            <intent-filter android:autoVerify="true">
+            <intent-filter android:autoVerify="${oauthRedirectAutoVerify}">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="mavivpn" android:host="oauth" />
+                <data
+                    android:scheme="${oauthRedirectScheme}"
+                    android:host="${oauthRedirectHost}"
+                    android:path="${oauthRedirectPath}" />
             </intent-filter>
         </activity>
 

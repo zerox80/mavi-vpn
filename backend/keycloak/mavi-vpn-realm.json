@@ -44,7 +44,7 @@
       "secret": "",
       "redirectUris": [
         "http://127.0.0.1:18923/callback",
-        "mavivpn://oauth"
+        "com.mavi.vpn://oauth/callback"
       ],
       "webOrigins": [],
       "notBefore": 0,

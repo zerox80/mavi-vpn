@@ -1,7 +1,7 @@
 use anyhow::Result;
 use shared::ipc::Config;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CONFIG_FILE: &str = "mavi-vpn.json";
 
@@ -46,13 +46,70 @@ fn save_config(config: &Config, path: &PathBuf) -> Result<()> {
     let mut config = config.clone();
     config.normalize_transport();
     let content = serde_json::to_string_pretty(&config)?;
-    std::fs::write(path, content)?;
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    write_config_file(path, content.as_bytes())?;
     println!("Config saved to {}", path.display());
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_config_file(path: &Path, content: &[u8]) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    const CONFIG_MODE: u32 = 0o600;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(CONFIG_FILE);
+    let pid = std::process::id();
+
+    let mut last_error = None;
+    for attempt in 0..100 {
+        let tmp_path = parent.join(format!(".{file_name}.{pid}.{attempt}.tmp"));
+        let file_result = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(CONFIG_MODE)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp_path);
+
+        let mut file = match file_result {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                last_error = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let write_result = file
+            .write_all(content)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| {
+                std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(CONFIG_MODE))
+            })
+            .and_then(|()| std::fs::rename(&tmp_path, path));
+
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(CONFIG_MODE))?;
+        return Ok(());
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::AlreadyExists, "could not create temp config")
+        })
+        .into())
+}
+
+#[cfg(not(unix))]
+fn write_config_file(path: &Path, content: &[u8]) -> Result<()> {
+    std::fs::write(path, content)?;
     Ok(())
 }
 
@@ -275,4 +332,51 @@ fn read_line() -> Result<String> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn save_config_replaces_symlink_without_touching_target() -> Result<()> {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir()?;
+        let config_path = temp.path().join("mavi-vpn.json");
+        let symlink_target = temp.path().join("target.json");
+        std::fs::write(&symlink_target, "do-not-overwrite")?;
+        symlink(&symlink_target, &config_path)?;
+
+        save_config(&sample_config(), &config_path)?;
+
+        assert!(!std::fs::symlink_metadata(&config_path)?
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&symlink_target)?,
+            "do-not-overwrite"
+        );
+        let mode = std::fs::metadata(&config_path)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        Ok(())
+    }
+
+    fn sample_config() -> Config {
+        Config {
+            endpoint: "vpn.example.com:443".to_string(),
+            token: "access-token".to_string(),
+            cert_pin: "pin".to_string(),
+            censorship_resistant: false,
+            http3_framing: false,
+            kc_auth: Some(true),
+            kc_url: Some("https://auth.example.com".to_string()),
+            kc_realm: Some("mavi-vpn".to_string()),
+            kc_client_id: Some("mavi-client".to_string()),
+            refresh_token: Some("refresh-token".to_string()),
+            ech_config: None,
+            vpn_mtu: None,
+        }
+    }
 }

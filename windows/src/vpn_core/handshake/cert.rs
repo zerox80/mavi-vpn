@@ -1,18 +1,17 @@
-use sha2::{Digest, Sha256};
+pub use shared::hex::decode_hex_pins;
 
-pub use shared::hex::decode_hex;
-
-/// Custom certificate verifier that trusts only a specific SHA-256 fingerprint.
+/// Custom certificate verifier that trusts only a set of SHA-256 fingerprints
+/// (usually one, or two during a manual cert-rotation window).
 #[derive(Debug)]
 pub(super) struct PinnedServerVerifier {
-    expected_hash: Vec<u8>,
+    expected_hashes: Vec<Vec<u8>>,
     supported: rustls::crypto::WebPkiSupportedAlgorithms,
 }
 
 impl PinnedServerVerifier {
-    pub(super) fn new(expected_hash: Vec<u8>) -> Self {
+    pub(super) fn new(expected_hashes: Vec<Vec<u8>>) -> Self {
         Self {
-            expected_hash,
+            expected_hashes,
             supported: rustls::crypto::aws_lc_rs::default_provider()
                 .signature_verification_algorithms,
         }
@@ -28,8 +27,7 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let cert_hash = Sha256::digest(end_entity.as_ref());
-        if cert_hash.as_slice() == self.expected_hash.as_slice() {
+        if shared::cert_pin::matches_any_pin(end_entity.as_ref(), &self.expected_hashes) {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General("Certificate PIN mismatch".into()))
@@ -62,60 +60,79 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use sha2::{Digest, Sha256};
+
+    // decode_hex_pins itself is tested exhaustively in shared::hex; these
+    // tests cover the verifier's use of it plus the dual-pin match behavior.
 
     #[test]
-    fn decode_hex_empty_string() {
-        assert_eq!(decode_hex(""), Some(vec![]));
+    fn decode_hex_pins_single_pin_roundtrips() {
+        let pin = "aa".repeat(32);
+        assert_eq!(decode_hex_pins(&pin), Some(vec![vec![0xaa; 32]]));
     }
 
     #[test]
-    fn decode_hex_valid_lowercase() {
-        assert_eq!(decode_hex("deadbeef"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    fn test_pinned_server_verifier_matches() {
+        let dummy_cert_bytes = b"dummy certificate";
+        let hash = Sha256::digest(dummy_cert_bytes).to_vec();
+
+        let verifier = PinnedServerVerifier::new(vec![hash]);
+
+        let end_entity = CertificateDer::from(dummy_cert_bytes.as_slice());
+        let server_name = ServerName::try_from("example.com").unwrap();
+        let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(0));
+
+        let result = verifier.verify_server_cert(&end_entity, &[], &server_name, &[], now);
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn decode_hex_valid_uppercase() {
-        assert_eq!(decode_hex("DEADBEEF"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    fn test_pinned_server_verifier_mismatches() {
+        let expected_hash = vec![0; 32];
+        let verifier = PinnedServerVerifier::new(vec![expected_hash]);
+
+        let dummy_cert_bytes = b"wrong certificate";
+        let end_entity = CertificateDer::from(dummy_cert_bytes.as_slice());
+        let server_name = ServerName::try_from("example.com").unwrap();
+        let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(0));
+
+        let result = verifier.verify_server_cert(&end_entity, &[], &server_name, &[], now);
+        assert!(result.is_err());
+        if let Err(rustls::Error::General(msg)) = result {
+            assert_eq!(msg, "Certificate PIN mismatch");
+        } else {
+            panic!("Expected General error, got {:?}", result);
+        }
     }
 
     #[test]
-    fn decode_hex_valid_mixed_case() {
-        assert_eq!(decode_hex("DeAdBeEf"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    fn test_pinned_server_verifier_matches_second_of_two_pins() {
+        let dummy_cert_bytes = b"dummy certificate";
+        let hash = Sha256::digest(dummy_cert_bytes).to_vec();
+        let other_hash = vec![0; 32];
+
+        let verifier = PinnedServerVerifier::new(vec![other_hash, hash]);
+
+        let end_entity = CertificateDer::from(dummy_cert_bytes.as_slice());
+        let server_name = ServerName::try_from("example.com").unwrap();
+        let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(0));
+
+        let result = verifier.verify_server_cert(&end_entity, &[], &server_name, &[], now);
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn decode_hex_odd_length_returns_none() {
-        assert_eq!(decode_hex("abc"), None);
-        assert_eq!(decode_hex("1"), None);
-        assert_eq!(decode_hex("deadbee"), None);
-    }
+    fn test_pinned_server_verifier_rejects_when_no_pin_matches() {
+        let dummy_cert_bytes = b"dummy certificate";
+        let verifier = PinnedServerVerifier::new(vec![vec![0; 32], vec![1; 32]]);
 
-    #[test]
-    fn decode_hex_invalid_chars_returns_none() {
-        assert_eq!(decode_hex("gg"), None);
-        assert_eq!(decode_hex("zzzz"), None);
-        assert_eq!(decode_hex("12abXX"), None);
-    }
+        let end_entity = CertificateDer::from(dummy_cert_bytes.as_slice());
+        let server_name = ServerName::try_from("example.com").unwrap();
+        let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(0));
 
-    #[test]
-    fn decode_hex_non_ascii_returns_none_instead_of_panicking() {
-        assert_eq!(decode_hex("€€"), None);
-        assert_eq!(decode_hex("aaé"), None);
-    }
-
-    #[test]
-    fn decode_hex_single_byte() {
-        assert_eq!(decode_hex("ff"), Some(vec![0xff]));
-        assert_eq!(decode_hex("00"), Some(vec![0x00]));
-    }
-
-    #[test]
-    fn decode_hex_all_zeros() {
-        assert_eq!(decode_hex("00000000"), Some(vec![0, 0, 0, 0]));
-    }
-
-    #[test]
-    fn decode_hex_all_ff() {
-        assert_eq!(decode_hex("ffffffff"), Some(vec![0xff, 0xff, 0xff, 0xff]));
+        let result = verifier.verify_server_cert(&end_entity, &[], &server_name, &[], now);
+        assert!(result.is_err());
     }
 }

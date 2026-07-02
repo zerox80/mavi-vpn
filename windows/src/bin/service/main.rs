@@ -28,6 +28,7 @@ mod handlers;
 mod keycloak_refresh;
 mod logging;
 mod main_loop;
+mod named_pipe;
 mod state;
 mod utils;
 

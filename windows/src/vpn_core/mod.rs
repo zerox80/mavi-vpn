@@ -20,7 +20,7 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 use wintun::Adapter;
 
-use self::handshake::{connect_and_handshake, decode_hex, HandshakeRequest};
+use self::handshake::{connect_and_handshake, decode_hex_pins, HandshakeRequest};
 use self::network::{
     cleanup_routes, create_udp_socket, remove_nrpt_dns_rule, set_adapter_network_config,
     AdapterNetworkConfig, SessionRouteGuard,
@@ -143,8 +143,9 @@ pub async fn run_vpn(
     config.normalize_transport();
     runtime.set_connected(false);
     // 1. Prepare environment
-    let cert_pin_bytes =
-        decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
+    let cert_pin_hashes = decode_hex_pins(&config.cert_pin).context(
+        "Invalid certificate PIN hex format (expected one or more comma-separated 64-char SHA-256 hex fingerprints)",
+    )?;
 
     // 2. Open or create the virtual adapter (cached globally)
     let adapter = get_global_adapter()?;
@@ -158,7 +159,7 @@ pub async fn run_vpn(
         cleanup_routes(None);
         runtime.set_connected(false);
 
-        let outcome = run_session(&config, &cert_pin_bytes, &adapter, &runtime).await;
+        let outcome = run_session(&config, &cert_pin_hashes, &adapter, &runtime).await;
 
         if !runtime.is_running() {
             break;
@@ -227,7 +228,7 @@ async fn wait_until_stopped(running: &Arc<AtomicBool>) {
 /// Manages a single active VPN session (handshake + packet pumping).
 async fn run_session(
     config: &Config,
-    cert_pin_bytes: &[u8],
+    cert_pin_hashes: &[Vec<u8>],
     adapter: &Arc<Adapter>,
     runtime: &VpnRuntimeState,
 ) -> Result<SessionEnd> {
@@ -253,7 +254,7 @@ async fn run_session(
             // `last_token` baseline (the request takes ownership otherwise).
             token: token.clone(),
             endpoint_str: config.endpoint.clone(),
-            cert_pin: cert_pin_bytes.to_vec(),
+            cert_pin: cert_pin_hashes.to_vec(),
             censorship_resistant: config.censorship_resistant,
             http3_framing: config.effective_http3_framing(),
             ech_config_list: ech_bytes,

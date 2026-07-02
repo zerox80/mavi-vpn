@@ -1,12 +1,10 @@
 use base64::Engine;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Semaphore};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-use super::handlers::handle_ipc_client;
+use super::named_pipe;
 use super::state::VpnServiceState;
 use super::utils::{
     prepare_ipc_auth_token, reharden_ipc_token_permissions, run_network_repair_cleanup,
@@ -29,87 +27,59 @@ pub async fn run_service_loop(
 
     run_network_repair_cleanup();
 
-    // Generate secure token for IPC and save it securely BEFORE binding listener.
+    // Generate secure token for IPC and save it securely BEFORE serving the
+    // named pipe.
     let (auth_token, _token_bytes) = build_auth_token();
 
     let token_path = ipc::ipc_token_path();
     prepare_ipc_auth_token(&token_path, &auth_token)?;
     info!("Auth token generated, saved, and hardened");
 
-    let listener = match TcpListener::bind(ipc::LOCAL_IPC_ADDR).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!(
-                "Failed to bind TCP IPC listener on {}: {}",
-                ipc::LOCAL_IPC_ADDR,
-                e
-            );
-            return Err(e.into());
-        }
-    };
-    info!("Service listening for IPC on {}", ipc::LOCAL_IPC_ADDR);
+    info!("Service listening for IPC on {}", ipc::ipc_pipe_name());
 
     let auth_token = Arc::new(auth_token);
     let ipc_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_IPC_CLIENTS));
 
-    loop {
-        if stop_signal.load(Ordering::SeqCst) {
-            info!("Stop signal flag is true, terminating service loop.");
-            let task = {
-                let mut guard = state.lock().await;
-                guard.stop_session();
-                guard.take_task()
-            };
-
-            if let Some(task) = task {
-                let _ = task.await;
-            }
-            break;
-        }
-
-        if reharden_signal.swap(false, Ordering::SeqCst) {
-            info!("Re-hardening IPC token ACL after session change");
-            if let Err(e) = reharden_ipc_token_permissions(&token_path) {
-                warn!("Failed to re-harden IPC token ACL after session change: {e:#}");
-            }
-        }
-
-        tokio::select! {
-            () = tokio::time::sleep(Duration::from_millis(500)) => {
-                // Periodically wake up to check stop_signal
-            }
-            conn_res = listener.accept() => {
-                let (socket, peer) = match conn_res {
-                    Ok(res) => res,
-                    Err(e) => {
-                        error!("TCP accept error: {}", e);
-                        continue;
+    // The named-pipe re-harden signal (fast-user-switching) is a no-op for
+    // the pipe itself: each recycled instance computes its ACL fresh from
+    // the current console user (see `named_pipe::create_pipe_instance`). The
+    // token file's ACL still needs the explicit re-harden below.
+    let reharden_task = {
+        let stop_signal = stop_signal.clone();
+        let reharden_signal = reharden_signal.clone();
+        let token_path = token_path.clone();
+        tokio::spawn(async move {
+            loop {
+                if stop_signal.load(Ordering::SeqCst) {
+                    break;
+                }
+                if reharden_signal.swap(false, Ordering::SeqCst) {
+                    info!("Re-hardening IPC token ACL after session change");
+                    if let Err(e) = reharden_ipc_token_permissions(&token_path) {
+                        warn!("Failed to re-harden IPC token ACL after session change: {e:#}");
                     }
-                };
-
-                let state = state.clone();
-                let auth_token = auth_token.clone();
-                let permit = match ipc_slots.clone().try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        warn!(
-                            "Rejecting IPC client {} because the connection limit ({}) is reached",
-                            peer, MAX_CONCURRENT_IPC_CLIENTS
-                        );
-                        continue;
-                    }
-                };
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    if let Err(e) = handle_ipc_client(socket, peer, state, auth_token).await {
-                        warn!("IPC client {} handler exited: {}", peer, e);
-                    }
-                });
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-        }
+        })
+    };
+
+    let result =
+        named_pipe::accept_loop(state.clone(), auth_token, ipc_slots, stop_signal.clone()).await;
+
+    reharden_task.abort();
+
+    info!("Stop signal flag is true, terminating service loop.");
+    let task = {
+        let mut guard = state.lock().await;
+        guard.stop_session();
+        guard.take_task()
+    };
+    if let Some(task) = task {
+        let _ = task.await;
     }
 
-    Ok(())
+    result
 }
 
 #[cfg(test)]

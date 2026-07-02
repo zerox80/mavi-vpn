@@ -19,7 +19,7 @@ pub(super) async fn connect_and_handshake(
     socket: std::net::UdpSocket,
     token: String,
     endpoint_str: String,
-    cert_pin: Vec<u8>,
+    cert_pin: Vec<Vec<u8>>,
     censorship_resistant: bool,
     http3_framing: bool,
     ech_config_list: Option<Vec<u8>>,

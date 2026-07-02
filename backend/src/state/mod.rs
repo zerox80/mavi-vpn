@@ -6,6 +6,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 use tokio::sync::mpsc;
 
+pub mod rate_limit;
+
 /// A channel for sending raw IP packets to the specific task handling a client connection.
 pub type ClientTx = mpsc::Sender<bytes::Bytes>;
 
@@ -44,6 +46,9 @@ pub struct AppState {
     /// idempotent: a second `release_ips` for the same address is a no-op.
     leased_ips: Mutex<HashSet<Ipv4Addr>>,
     leased_ips_v6: Mutex<HashSet<Ipv6Addr>>,
+
+    /// Per-source-IP failed-authentication rate limiter. See [`rate_limit`].
+    pub auth_rate_limiter: rate_limit::AuthRateLimiter,
 }
 
 impl AppState {
@@ -111,6 +116,7 @@ impl AppState {
             next_ipv6_host: Mutex::new(2),
             leased_ips: Mutex::new(HashSet::new()),
             leased_ips_v6: Mutex::new(HashSet::new()),
+            auth_rate_limiter: rate_limit::AuthRateLimiter::with_defaults(),
         })
     }
 

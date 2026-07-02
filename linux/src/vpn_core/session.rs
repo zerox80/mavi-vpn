@@ -54,15 +54,16 @@ pub async fn run_vpn(
 ) -> Result<()> {
     config.normalize_transport();
 
-    let cert_pin_bytes =
-        cert_pin::decode_hex(&config.cert_pin).context("Invalid certificate PIN hex format")?;
+    let cert_pin_hashes = cert_pin::decode_hex_pins(&config.cert_pin).context(
+        "Invalid certificate PIN hex format (expected one or more comma-separated 64-char SHA-256 hex fingerprints)",
+    )?;
 
     let mut backoff = Duration::from_secs(RECONNECT_INITIAL_SECS);
 
     while running.load(Ordering::Relaxed) {
         let outcome = run_session(
             &config,
-            &cert_pin_bytes,
+            &cert_pin_hashes,
             &running,
             &connected,
             &last_error,
@@ -119,7 +120,7 @@ pub async fn run_vpn(
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
     config: &Config,
-    cert_pin_bytes: &[u8],
+    cert_pin_hashes: &[Vec<u8>],
     global_running: &Arc<AtomicBool>,
     connected_flag: &Arc<AtomicBool>,
     last_error_state: &Arc<StdMutex<Option<String>>>,
@@ -157,7 +158,7 @@ async fn run_session(
             // `last_token` baseline (the handshake takes ownership otherwise).
             token.clone(),
             config.endpoint.clone(),
-            cert_pin_bytes.to_vec(),
+            cert_pin_hashes.to_vec(),
             config.censorship_resistant,
             config.effective_http3_framing(),
             ech_bytes,

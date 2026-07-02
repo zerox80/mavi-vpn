@@ -201,6 +201,19 @@ async fn main() -> Result<()> {
 
     let connection_semaphore = Arc::new(tokio::sync::Semaphore::new(1000));
 
+    // Periodically evict stale auth-rate-limiter entries so the map doesn't
+    // grow unboundedly under sustained probing from many distinct source IPs.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                state.auth_rate_limiter.evict_expired();
+            }
+        });
+    }
+
     // Accept incoming connections
     while let Some(conn) = endpoint.accept().await {
         let Ok(permit) = connection_semaphore.clone().try_acquire_owned() else {

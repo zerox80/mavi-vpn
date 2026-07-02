@@ -1,6 +1,6 @@
 import org.apache.tools.ant.taskdefs.condition.Os
-import org.gradle.testing.jacoco.tasks.JacocoReport
 import org.gradle.testing.jacoco.tasks.JacocoCoverageVerification
+import org.gradle.testing.jacoco.tasks.JacocoReport
 
 plugins {
     id("com.android.application")
@@ -39,32 +39,33 @@ android {
     }
 }
 
-val cargoBuild = tasks.register<Exec>("cargoBuild") {
-    workingDir = file("src/main/rust")
+val cargoBuild =
+    tasks.register<Exec>("cargoBuild") {
+        workingDir = file("src/main/rust")
 
-    val cargoCommand = if (Os.isFamily(Os.FAMILY_WINDOWS)) "cargo.exe" else "cargo"
+        val cargoCommand = if (Os.isFamily(Os.FAMILY_WINDOWS)) "cargo.exe" else "cargo"
 
-    doFirst {
-        file("src/main/jniLibs").mkdirs()
+        doFirst {
+            file("src/main/jniLibs").mkdirs()
+        }
+
+        commandLine(
+            cargoCommand,
+            "ndk",
+            "-t",
+            "armeabi-v7a",
+            "-t",
+            "arm64-v8a",
+            "-t",
+            "x86",
+            "-t",
+            "x86_64",
+            "-o",
+            "../jniLibs",
+            "build",
+            "--release",
+        )
     }
-
-    commandLine(
-        cargoCommand,
-        "ndk",
-        "-t",
-        "armeabi-v7a",
-        "-t",
-        "arm64-v8a",
-        "-t",
-        "x86",
-        "-t",
-        "x86_64",
-        "-o",
-        "../jniLibs",
-        "build",
-        "--release",
-    )
-}
 
 tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {

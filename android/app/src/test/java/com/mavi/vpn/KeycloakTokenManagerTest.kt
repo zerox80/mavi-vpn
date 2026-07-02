@@ -80,6 +80,31 @@ class KeycloakTokenManagerTest {
     }
 
     @Test
+    fun keycloakUrlValidationMatchesSharedPolicy() {
+        listOf(
+            "https://auth.example.com",
+            "http://localhost",
+            "http://localhost:8080/realms/x",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ).forEach { url ->
+            assertNull(url, OAuthHelper.validateKeycloakUrl(url))
+        }
+
+        listOf(
+            "http://auth.example.com",
+            "http://10.0.0.5:8080",
+            "ftp://auth.example.com",
+            "",
+            "http://localhost.evil.com",
+            "http://evil.com/localhost",
+            "http://localhost@evil.com",
+        ).forEach { url ->
+            assertNotNull(url, OAuthHelper.validateKeycloakUrl(url))
+        }
+    }
+
+    @Test
     fun jsonNullConfigFieldsAreNotTreatedAsPresent() {
         val config = JSONObject("""{"assigned_ipv6":null,"dns_server_v6":null}""")
 

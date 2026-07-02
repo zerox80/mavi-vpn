@@ -1,5 +1,9 @@
 package com.mavi.vpn.ui.screens
 
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,14 +22,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -107,26 +111,33 @@ fun SettingsScreen(
     LaunchedEffect(Unit) {
         val appList = withContext(Dispatchers.IO) {
              val pm = context.packageManager
-             val packages = pm.getInstalledPackages(0)
-             packages.mapNotNull { pkg ->
-                 val appInfo = pkg.applicationInfo ?: return@mapNotNull null
-                 val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
-                 val isUpdatedSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-                 val launchIntent = pm.getLaunchIntentForPackage(pkg.packageName)
-                 
-                 if (launchIntent != null && (!isSystem || isUpdatedSystem)) {
+             val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+             val launchableActivities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                 pm.queryIntentActivities(launcherIntent, PackageManager.ResolveInfoFlags.of(0))
+             } else {
+                 @Suppress("DEPRECATION")
+                 pm.queryIntentActivities(launcherIntent, 0)
+             }
+             launchableActivities.mapNotNull { activity ->
+                 val activityInfo = activity.activityInfo ?: return@mapNotNull null
+                 val appInfo = activityInfo.applicationInfo ?: return@mapNotNull null
+                 val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                 val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+
+                 if (!isSystem || isUpdatedSystem) {
                      val iconDrawable = appInfo.loadIcon(pm)
                      val imageBitmap = drawableToBitmap(iconDrawable)?.toImageBitmap()
                      
                      InstalledApp(
                          name = appInfo.loadLabel(pm).toString(),
-                         packageName = pkg.packageName,
+                         packageName = activityInfo.packageName,
                          icon = imageBitmap
                      )
                  } else {
                      null
                  }
-             }.sortedBy { it.name.lowercase() }
+             }.distinctBy { it.packageName }
+                 .sortedBy { it.name.lowercase() }
         }
         apps = appList
         isLoading = false
@@ -143,7 +154,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
         ) {
             IconButton(onClick = { saveAndBack() }) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
             Text(
                 text = "Settings",
@@ -318,7 +329,7 @@ fun SettingsScreen(
                             colors = CheckboxDefaults.colors(checkedColor = Color(0xFF007AFF), uncheckedColor = Color.Gray, checkmarkColor = Color.White)
                         )
                     }
-                    Divider(color = Color(0xFF2C2C2C))
+                    HorizontalDivider(color = Color(0xFF2C2C2C))
                 }
             }
         }

@@ -75,31 +75,38 @@ class MainActivity : ComponentActivity() {
                             viewModel = viewModel,
                             onConnect = { ip, port, token, pin ->
                                 if (viewModel.useKeycloak.value) {
-                                    viewModel.saveServerDetails()
-                                    viewModel.saveKeycloakDetails()
-                                    if (
-                                        viewModel.hasSavedKeycloakRefreshToken() &&
-                                        !viewModel.isSavedKeycloakSessionInvalid()
-                                    ) {
-                                        // Reuse the stored access token. The service will
-                                        // silently refresh it while the tunnel is active.
-                                        prepareAndStartVpn(
-                                            ip,
-                                            port,
-                                            viewModel.authToken.value,
-                                            pin,
-                                            viewModel.splitMode.value,
-                                            viewModel.splitPackages.value,
-                                        )
+                                    val keycloakUrlError =
+                                        OAuthHelper.validateKeycloakUrl(viewModel.kcUrl.value)
+                                    if (keycloakUrlError != null) {
+                                        viewModel.updateErrorMessage(keycloakUrlError)
                                     } else {
-                                        // No usable stored session -> interactive login.
-                                        pendingConnect = true
-                                        OAuthHelper.startAuth(
-                                            this@MainActivity,
-                                            viewModel.kcUrl.value,
-                                            viewModel.kcRealm.value,
-                                            viewModel.kcClientId.value,
-                                        )
+                                        viewModel.updateErrorMessage("")
+                                        viewModel.saveServerDetails()
+                                        viewModel.saveKeycloakDetails()
+                                        if (
+                                            viewModel.hasSavedKeycloakRefreshToken() &&
+                                            !viewModel.isSavedKeycloakSessionInvalid()
+                                        ) {
+                                            // Reuse the stored access token. The service will
+                                            // silently refresh it while the tunnel is active.
+                                            prepareAndStartVpn(
+                                                ip,
+                                                port,
+                                                viewModel.authToken.value,
+                                                pin,
+                                                viewModel.splitMode.value,
+                                                viewModel.splitPackages.value,
+                                            )
+                                        } else {
+                                            // No usable stored session -> interactive login.
+                                            pendingConnect = true
+                                            OAuthHelper.startAuth(
+                                                this@MainActivity,
+                                                viewModel.kcUrl.value,
+                                                viewModel.kcRealm.value,
+                                                viewModel.kcClientId.value,
+                                            )
+                                        }
                                     }
                                 } else {
                                     prepareAndStartVpn(

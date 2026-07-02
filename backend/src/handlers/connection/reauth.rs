@@ -119,6 +119,7 @@ async fn handle_reauth_stream(
         Ok(opt) => opt,
         Err(e) => {
             warn!("In-band reauth from {remote} validation error: {e}");
+            record_reauth_result(state, remote_ip, false);
             send_reauth_result(send, false).await?;
             return Ok(());
         }

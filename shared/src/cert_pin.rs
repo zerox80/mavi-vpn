@@ -2,6 +2,7 @@
 //! (Linux, Windows, Android), so the multi-pin comparison logic that backs
 //! the dual-pin certificate-rotation workflow exists in exactly one place.
 
+use constant_time_eq::constant_time_eq;
 use sha2::{Digest, Sha256};
 
 /// Returns `true` if `cert_der`'s SHA-256 digest matches any entry in
@@ -13,7 +14,7 @@ pub fn matches_any_pin(cert_der: &[u8], expected_hashes: &[Vec<u8>]) -> bool {
     let cert_hash = Sha256::digest(cert_der);
     expected_hashes
         .iter()
-        .any(|expected| cert_hash.as_slice() == expected.as_slice())
+        .any(|expected| constant_time_eq(cert_hash.as_slice(), expected.as_slice()))
 }
 
 #[cfg(test)]

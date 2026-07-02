@@ -60,11 +60,18 @@ pub async fn authenticate_client(
     }
 
     let session_auth = if let Some(kc) = keycloak {
-        let Some(validated) = kc.validate_token(token).await? else {
-            state.auth_rate_limiter.record_failure(remote_addr);
-            anyhow::bail!("Access Denied: Invalid Keycloak Token");
-        };
-        Some(validated)
+        match kc.validate_token(token).await {
+            Ok(Some(validated)) => Some(validated),
+            Ok(None) => {
+                state.auth_rate_limiter.record_failure(remote_addr);
+                anyhow::bail!("Access Denied: Invalid Keycloak Token");
+            }
+            Err(e) => {
+                warn!("Keycloak token validation error for {}: {}", remote_addr, e);
+                state.auth_rate_limiter.record_failure(remote_addr);
+                anyhow::bail!("Access Denied: Invalid Keycloak Token");
+            }
+        }
     } else {
         let Some(auth_token) = config.auth_token.as_deref().filter(|t| !t.is_empty()) else {
             anyhow::bail!("Static auth is enabled but VPN_AUTH_TOKEN is not configured");
@@ -235,8 +242,36 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("validator unavailable"));
+            .contains("Invalid Keycloak Token"));
         assert_eq!(validator.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_keycloak_validator_errors_eventually_block() {
+        let state = Arc::new(AppState::new("10.8.0.0/24").unwrap());
+        let config = test_config();
+        let ip = test_ip(16);
+
+        for _ in 0..10 {
+            let validator = MockValidator {
+                result: Err("invalid jwt header"),
+                calls: AtomicUsize::new(0),
+            };
+            let result =
+                authenticate_client("kc-token", ip, &state, &config, Some(&validator)).await;
+            assert!(result.is_err());
+            assert_eq!(validator.calls.load(Ordering::SeqCst), 1);
+        }
+        assert!(!state.auth_rate_limiter.is_blocked(ip));
+
+        let validator = MockValidator {
+            result: Err("invalid jwt header"),
+            calls: AtomicUsize::new(0),
+        };
+        let result = authenticate_client("kc-token", ip, &state, &config, Some(&validator)).await;
+
+        assert!(result.is_err());
+        assert!(state.auth_rate_limiter.is_blocked(ip));
     }
 
     #[tokio::test]

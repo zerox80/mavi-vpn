@@ -11,13 +11,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use tracing::{error, info, warn};
 
 mod transport;
 pub use transport::send_request;
 use transport::{bind_ipc_socket, handle_ipc_client, resolve_ipc_token_access};
+
+pub(super) const MAX_CONCURRENT_IPC_CLIENTS: usize = 32;
+
+fn try_acquire_ipc_slot(ipc_slots: &Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
+    ipc_slots.clone().try_acquire_owned().ok()
+}
 
 struct DaemonState {
     vpn_running: Arc<AtomicBool>,
@@ -66,6 +72,7 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
     );
 
     let auth_token = Arc::new(auth_token);
+    let ipc_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_IPC_CLIENTS));
 
     loop {
         if !running_flag.load(Ordering::SeqCst) {
@@ -94,6 +101,17 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
                     }
                 };
 
+                let permit = match try_acquire_ipc_slot(&ipc_slots) {
+                    Some(permit) => permit,
+                    None => {
+                        warn!(
+                            "Rejecting IPC client because the connection limit ({}) is reached",
+                            MAX_CONCURRENT_IPC_CLIENTS
+                        );
+                        continue;
+                    }
+                };
+
                 // Hand each client off to its own task so a stalled peer cannot
                 // block the accept loop (previously: inline read_exact with no
                 // timeout made the daemon trivially DoS-able by any local
@@ -101,6 +119,7 @@ pub async fn run_daemon(running_flag: Arc<AtomicBool>) -> Result<()> {
                 let state = state.clone();
                 let auth_token = auth_token.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = handle_ipc_client(socket, state, auth_token).await {
                         warn!("IPC client handler exited: {}", e);
                     }
@@ -281,5 +300,7 @@ async fn dispatch_request_with_hooks(
     }
 }
 
+#[cfg(test)]
+mod ipc_limit_tests;
 #[cfg(test)]
 mod tests;

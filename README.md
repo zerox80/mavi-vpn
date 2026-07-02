@@ -54,7 +54,7 @@ graph TD
         SVC["Background Service / Daemon / JNI Core"]
         TUN_C["Virtual TUN Adapter"]
 
-        GUI <-->|"IPC (TCP 14433)"| SVC
+        GUI <-->|"Local IPC\n(Unix socket / Named Pipe)"| SVC
         SVC <-->|"Packet I/O"| TUN_C
     end
 
@@ -107,7 +107,7 @@ mavi-vpn/
 │   └── src/
 │       ├── main.rs           # CLI + daemon mode + IPC client
 │       ├── vpn_core.rs       # QUIC tunnel logic with network change detection
-│       ├── daemon.rs         # IPC server (TCP 14433) for GUI integration
+│       ├── daemon/           # Unix socket IPC server for GUI/CLI integration
 │       ├── network.rs        # Route setup, DNS config, cleanup
 │       └── tun.rs            # Raw TUN device via ioctl
 │

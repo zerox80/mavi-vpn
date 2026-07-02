@@ -1,7 +1,7 @@
 #![allow(clippy::multiple_crate_versions)]
 //! # Mavi VPN GUI - Tauri Backend
 //!
-//! Communicates with the VPN daemon/service via TCP IPC on 127.0.0.1:14433.
+//! Communicates with the VPN daemon/service via OS-native local IPC.
 //! Exposes Tauri commands for the web frontend and manages the system tray.
 
 mod commands;

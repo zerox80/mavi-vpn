@@ -258,7 +258,10 @@ mod tests {
 
     #[test]
     fn access_token_exp_reads_exp_claim() {
-        assert_eq!(access_token_exp(&jwt_with_exp(1_700_000_000)), Some(1_700_000_000));
+        assert_eq!(
+            access_token_exp(&jwt_with_exp(1_700_000_000)),
+            Some(1_700_000_000)
+        );
     }
 
     #[test]

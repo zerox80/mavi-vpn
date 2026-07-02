@@ -7,6 +7,7 @@
 //! and tunnel lifecycle.
 
 use anyhow::Result;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -15,6 +16,7 @@ use tracing::{info, warn};
 use shared::ControlMessage;
 
 use crate::keycloak::{KeycloakValidator, ValidatedToken};
+use crate::state::AppState;
 
 use super::{encode_control_message_frame, validate_raw_auth_len};
 
@@ -41,6 +43,7 @@ const MAX_CONCURRENT_REAUTH: usize = 4;
 /// user's valid token can extend a session. Exits when the connection closes.
 pub(super) async fn reauth_listener(
     connection: Arc<quinn::Connection>,
+    state: Arc<AppState>,
     keycloak: Arc<KeycloakValidator>,
     expiry_tx: tokio::sync::watch::Sender<Option<i64>>,
     expected_sub: Arc<str>,
@@ -58,6 +61,7 @@ pub(super) async fn reauth_listener(
         let Ok(permit) = limiter.clone().acquire_owned().await else {
             break;
         };
+        let state = state.clone();
         let keycloak = keycloak.clone();
         let expiry_tx = expiry_tx.clone();
         let expected_sub = expected_sub.clone();
@@ -65,8 +69,16 @@ pub(super) async fn reauth_listener(
         // delay later refreshes. The work is bounded (one small frame + reply).
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) =
-                handle_reauth_stream(send, recv, &keycloak, &expiry_tx, &expected_sub, remote).await
+            if let Err(e) = handle_reauth_stream(
+                send,
+                recv,
+                &state,
+                &keycloak,
+                &expiry_tx,
+                &expected_sub,
+                remote,
+            )
+            .await
             {
                 warn!("In-band reauth from {remote} failed: {e}");
             }
@@ -78,8 +90,9 @@ pub(super) async fn reauth_listener(
 /// token, extends the session deadline on success, and replies with a
 /// [`ControlMessage::ReauthResult`].
 async fn handle_reauth_stream(
-    mut send: quinn::SendStream,
+    send: quinn::SendStream,
     mut recv: quinn::RecvStream,
+    state: &AppState,
     keycloak: &KeycloakValidator,
     expiry_tx: &tokio::sync::watch::Sender<Option<i64>>,
     expected_sub: &str,
@@ -95,11 +108,19 @@ async fn handle_reauth_stream(
     .await
     .map_err(|_| anyhow::anyhow!("Reauth read timeout"))??;
 
+    let remote_ip = remote.ip();
+    if reauth_rate_limited(state, remote_ip) {
+        warn!("Rejecting in-band reauth from {remote}: auth rate limited");
+        send_reauth_result(send, false).await?;
+        return Ok(());
+    }
+
     let validated = match keycloak.validate_token(&token).await {
         Ok(opt) => opt,
         Err(e) => {
             warn!("In-band reauth from {remote} validation error: {e}");
-            None
+            send_reauth_result(send, false).await?;
+            return Ok(());
         }
     };
 
@@ -108,15 +129,22 @@ async fn handle_reauth_stream(
             // Push the new expiry to the tunnel watcher. A send error only means
             // the session is already ending, which is harmless here.
             let _ = expiry_tx.send(Some(exp));
+            record_reauth_result(state, remote_ip, true);
             info!("In-band reauth accepted from {remote}; session extended (exp={exp})");
             true
         }
         None => {
+            record_reauth_result(state, remote_ip, false);
             warn!("In-band reauth from {remote} rejected (invalid token or subject mismatch)");
             false
         }
     };
 
+    send_reauth_result(send, accepted).await?;
+    Ok(())
+}
+
+async fn send_reauth_result(mut send: quinn::SendStream, accepted: bool) -> Result<()> {
     let reply = encode_control_message_frame(&ControlMessage::ReauthResult { accepted })?;
     tokio::time::timeout(REAUTH_STREAM_TIMEOUT, async {
         send.write_all(&reply).await?;
@@ -138,6 +166,18 @@ pub(super) fn reauth_decision(
 ) -> Option<i64> {
     let token = validated?;
     (token.sub == expected_sub).then_some(token.exp)
+}
+
+pub(super) fn reauth_rate_limited(state: &AppState, remote_ip: IpAddr) -> bool {
+    state.auth_rate_limiter.is_blocked(remote_ip)
+}
+
+pub(super) fn record_reauth_result(state: &AppState, remote_ip: IpAddr, accepted: bool) {
+    if accepted {
+        state.auth_rate_limiter.record_success(remote_ip);
+    } else {
+        state.auth_rate_limiter.record_failure(remote_ip);
+    }
 }
 
 /// Decodes a length-checked reauth payload into the carried token, rejecting any

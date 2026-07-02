@@ -181,9 +181,11 @@ mod tests {
         // The real browser callback arrives on a second connection and must be
         // served straight away despite the stalled one.
         let mut good = TcpStream::connect(addr).await.unwrap();
-        good.write_all(b"GET /callback?state=st8&code=the-code HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
+        good.write_all(
+            b"GET /callback?state=st8&code=the-code HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await
+        .unwrap();
 
         let code = server.await.unwrap().unwrap();
         assert_eq!(code, "the-code");

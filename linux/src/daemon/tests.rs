@@ -81,8 +81,8 @@ fn existing_token_is_replaced_without_world_readable_bits() {
     assert_eq!(fs::read_to_string(&token_path).unwrap(), "new");
 }
 
-#[test]
-fn bind_ipc_socket_creates_socket_file_with_correct_mode() {
+#[tokio::test]
+async fn bind_ipc_socket_creates_socket_file_with_correct_mode() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("mavi-vpn.sock");
 
@@ -93,8 +93,8 @@ fn bind_ipc_socket_creates_socket_file_with_correct_mode() {
     assert!(metadata.file_type().is_socket());
 }
 
-#[test]
-fn bind_ipc_socket_removes_stale_socket_file() {
+#[tokio::test]
+async fn bind_ipc_socket_removes_stale_socket_file() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("mavi-vpn.sock");
 
@@ -110,8 +110,8 @@ fn bind_ipc_socket_removes_stale_socket_file() {
     assert!(socket_path.exists());
 }
 
-#[test]
-fn bind_ipc_socket_root_only_mode_when_no_group() {
+#[tokio::test]
+async fn bind_ipc_socket_root_only_mode_when_no_group() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("mavi-vpn.sock");
 

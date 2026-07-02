@@ -149,7 +149,7 @@ const CLIENT_CHANNEL_CAPACITY: usize = 4096;
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_authenticated_tunnel(
     connection: Arc<quinn::Connection>,
-    state: &AppState,
+    state: Arc<AppState>,
     tx_tun: tokio::sync::mpsc::Sender<Bytes>,
     assigned_ip: std::net::Ipv4Addr,
     assigned_ip6: std::net::Ipv6Addr,
@@ -172,6 +172,7 @@ pub(super) async fn run_authenticated_tunnel(
         // The reauth is bound to `subject` so only the same user can extend it.
         (Some(kc), Some(_), Some(subject)) => Some(tokio::spawn(reauth_listener(
             connection.clone(),
+            state.clone(),
             kc,
             expiry_tx.clone(),
             Arc::from(subject),
@@ -437,7 +438,7 @@ pub async fn handle_connection(
 
     run_authenticated_tunnel(
         connection_arc,
-        &state,
+        state.clone(),
         tx_tun,
         assigned_ip,
         assigned_ip6,

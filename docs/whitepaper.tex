@@ -52,7 +52,7 @@ The architecture separates unprivileged UI tasks from highly privileged network 
 \begin{verbatim}
 [ Graphical User Interface (Tauri) ] --------------+
   (Cross-Platform: Windows, Linux)                 |
-                                                   | (TCP 14433 IPC)
+                                                   | (Local IPC: Unix socket / Named Pipe)
                                                    |
 +-----------------------------------+              |
 |   Platform Core (Windows/Linux)   | <------------+     [ Mobile Client ]

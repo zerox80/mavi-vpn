@@ -2,10 +2,10 @@ use anyhow::Result;
 use std::io::{self, Write};
 
 use crate::client_config::{load_config, save_config};
-use shared::kc_oauth::RefreshOutcome;
 use crate::client_ipc::{send_request, send_request_internal};
 use crate::ipc::{Config, IpcRequest, IpcResponse};
 use crate::oauth;
+use shared::kc_oauth::RefreshOutcome;
 
 pub(crate) async fn interactive_mode() -> Result<()> {
     let status_res = send_request_internal(IpcRequest::Status).await;

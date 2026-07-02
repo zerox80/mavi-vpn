@@ -265,7 +265,7 @@ pub async fn handle_h3_connection(
 
     run_authenticated_tunnel(
         connection_arc,
-        &state,
+        state.clone(),
         tx_tun,
         assigned_ip,
         assigned_ip6,

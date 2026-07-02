@@ -52,6 +52,42 @@ object OAuthHelper {
 
     fun normalizeKeycloakBaseUrl(kcUrl: String): String = kcUrl.trim().trimEnd('/')
 
+    fun validateKeycloakUrl(kcUrl: String): String? {
+        val normalized = normalizeKeycloakBaseUrl(kcUrl)
+        if (normalized.startsWith("https://")) {
+            return null
+        }
+        if (normalized.startsWith("http://")) {
+            val authority = normalized
+                .removePrefix("http://")
+                .split('/', '?', '#')
+                .firstOrNull()
+                .orEmpty()
+            if (authority.contains('@')) {
+                return "Keycloak URL must not contain userinfo; plain HTTP is only allowed for localhost"
+            }
+            val host = if (authority.startsWith("[")) {
+                authority.removePrefix("[").substringBefore(']')
+            } else {
+                authority.substringBeforeLast(':', authority)
+            }
+            if (host == "localhost" || host == "127.0.0.1" || host == "::1") {
+                return null
+            }
+            return "Keycloak URL must use https://; plain HTTP is only allowed for localhost"
+        }
+        return "Keycloak URL must start with https://"
+    }
+
+    private fun validatedKeycloakBaseUrl(kcUrl: String): String? {
+        val error = validateKeycloakUrl(kcUrl)
+        if (error != null) {
+            Log.e("OAuthHelper", error)
+            return null
+        }
+        return normalizeKeycloakBaseUrl(kcUrl)
+    }
+
     private fun generateRandomBase64(): String {
         val sr = SecureRandom()
         val bytes = ByteArray(32)
@@ -69,7 +105,8 @@ object OAuthHelper {
         return Base64.encodeToString(digest, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
     }
 
-    fun startAuth(context: Context, kcUrl: String, realm: String, clientId: String) {
+    fun startAuth(context: Context, kcUrl: String, realm: String, clientId: String): Boolean {
+        val keycloakBaseUrl = validatedKeycloakBaseUrl(kcUrl) ?: return false
         val challenge: String
         val state: String
         val verifier: String
@@ -87,7 +124,7 @@ object OAuthHelper {
         }
         val redirectUri = "mavivpn://oauth"
 
-        val url = Uri.parse(normalizeKeycloakBaseUrl(kcUrl)).buildUpon()
+        val url = Uri.parse(keycloakBaseUrl).buildUpon()
             .appendPath("realms")
             .appendPath(realm)
             .appendPath("protocol")
@@ -107,6 +144,7 @@ object OAuthHelper {
 
         val customTabsIntent = CustomTabsIntent.Builder().build()
         customTabsIntent.launchUrl(context, url)
+        return true
     }
 
     fun isAccessTokenUsable(token: String, skewSeconds: Long = 60): Boolean {
@@ -168,7 +206,8 @@ object OAuthHelper {
             return@withContext null
         }
 
-        val userInfoUrl = "${kcUrl.trimEnd('/')}/realms/$realm/protocol/openid-connect/userinfo"
+        val keycloakBaseUrl = validatedKeycloakBaseUrl(kcUrl) ?: return@withContext null
+        val userInfoUrl = "$keycloakBaseUrl/realms/$realm/protocol/openid-connect/userinfo"
         val request = Request.Builder()
             .url(userInfoUrl)
             .header("Authorization", "Bearer $token")
@@ -225,7 +264,8 @@ object OAuthHelper {
         verifier ?: return@withContext null
 
         val redirectUri = "mavivpn://oauth"
-        val tokenUrl = "${normalizeKeycloakBaseUrl(kcUrl)}/realms/$realm/protocol/openid-connect/token"
+        val keycloakBaseUrl = validatedKeycloakBaseUrl(kcUrl) ?: return@withContext null
+        val tokenUrl = "$keycloakBaseUrl/realms/$realm/protocol/openid-connect/token"
 
         val formBody = FormBody.Builder()
             .add("grant_type", "authorization_code")
@@ -269,7 +309,9 @@ object OAuthHelper {
         withContext(Dispatchers.IO) {
         if (refreshToken.isBlank()) return@withContext RefreshResult.Error("No refresh token available")
 
-        val tokenUrl = "${normalizeKeycloakBaseUrl(kcUrl)}/realms/$realm/protocol/openid-connect/token"
+        val keycloakBaseUrl = validatedKeycloakBaseUrl(kcUrl)
+            ?: return@withContext RefreshResult.Error("Invalid Keycloak URL")
+        val tokenUrl = "$keycloakBaseUrl/realms/$realm/protocol/openid-connect/token"
 
         val formBody = FormBody.Builder()
             .add("grant_type", "refresh_token")

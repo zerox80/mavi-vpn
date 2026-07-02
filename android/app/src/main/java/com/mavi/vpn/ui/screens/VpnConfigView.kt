@@ -217,8 +217,11 @@ fun ConfigView(
 
                     Button(
                         onClick = {
-                            if (kcUrl.isEmpty()) {
+                            val keycloakUrlError = OAuthHelper.validateKeycloakUrl(kcUrl)
+                            if (kcUrl.isBlank()) {
                                 viewModel.updateErrorMessage("Please enter a Keycloak Server URL.")
+                            } else if (keycloakUrlError != null) {
+                                viewModel.updateErrorMessage(keycloakUrlError)
                             } else {
                                 viewModel.saveKeycloakDetails()
                                 viewModel.updateErrorMessage("")

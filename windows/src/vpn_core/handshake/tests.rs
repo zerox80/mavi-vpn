@@ -274,48 +274,9 @@ fn endpoint_host_is_not_ipv6_for_ipv4() {
     assert!(!endpoint_host_is_explicit_ipv6("10.0.0.1:443"));
 }
 
-#[test]
-fn raw_response_len_accepts_valid_sizes() {
-    assert!(validate_raw_response_len(0).is_ok());
-    assert!(validate_raw_response_len(1).is_ok());
-    assert!(validate_raw_response_len(1024).is_ok());
-    assert!(validate_raw_response_len(65_536).is_ok());
-}
-
-#[test]
-fn raw_response_len_rejects_oversized() {
-    assert!(validate_raw_response_len(65_537).is_err());
-    assert!(validate_raw_response_len(100_000).is_err());
-    assert!(validate_raw_response_len(usize::MAX).is_err());
-}
-
-#[test]
-fn raw_response_len_accepts_formerly_magic_length() {
-    // 0x1901 was the magic auth-failure length. Now handled by
-    // looks_like_html_response() on content. validate_raw_response_len
-    // only checks the size bound.
-    assert!(validate_raw_response_len(0x1901).is_ok());
-}
-
-#[test]
-fn raw_response_len_accepts_exact_max() {
-    assert!(validate_raw_response_len(65_536).is_ok());
-}
-
-#[test]
-fn raw_response_len_rejects_one_over_max() {
-    assert!(validate_raw_response_len(65_537).is_err());
-}
-
-#[test]
-fn raw_response_len_accepts_just_below_magic() {
-    assert!(validate_raw_response_len(0x1900).is_ok());
-}
-
-#[test]
-fn raw_response_len_accepts_just_above_magic() {
-    assert!(validate_raw_response_len(0x1902).is_ok());
-}
+// Frame-length bounds (including the former 0x1901 magic-length regression
+// guard) are enforced and tested in `shared::control` now, which this client's
+// handshake and reauth paths delegate to.
 
 #[test]
 fn validate_server_mtu_ignores_auth_message() {

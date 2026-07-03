@@ -28,7 +28,7 @@ fn default_config_path() -> PathBuf {
     PathBuf::from(CONFIG_FILE)
 }
 
-fn load_config(path: &PathBuf) -> Option<Config> {
+fn load_config(path: &Path) -> Option<Config> {
     if path.exists() {
         let content = std::fs::read_to_string(path).ok()?;
         let mut config: Config = serde_json::from_str(&content).ok()?;
@@ -39,7 +39,7 @@ fn load_config(path: &PathBuf) -> Option<Config> {
     }
 }
 
-fn save_config(config: &Config, path: &PathBuf) -> Result<()> {
+fn save_config(config: &Config, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

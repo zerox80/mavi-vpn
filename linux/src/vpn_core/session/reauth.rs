@@ -6,11 +6,10 @@
 //! the original token's expiry instead of being force-closed and reconnected.
 
 use anyhow::Result;
-use shared::ControlMessage;
+use shared::control;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 
 /// How often the in-band reauth task checks whether the GUI has pushed a fresher
@@ -55,31 +54,13 @@ pub(super) fn spawn_reauth_task(
 /// Presents a refreshed access token to the server over a fresh bidirectional
 /// QUIC stream so the *live* session's deadline is extended in place (no
 /// reconnect). Returns whether the server accepted it. Bounded by a timeout so a
-/// stalled stream cannot wedge the reauth task. Framed identically to the
-/// handshake `Auth` message (`u32` length prefix + bincode payload).
+/// stalled stream cannot wedge the reauth task. Framing and the exchange itself
+/// live in [`shared::control`], shared with the Windows and Android cores.
 async fn send_reauth(connection: &quinn::Connection, token: &str) -> Result<bool> {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (mut send, mut recv) = connection.open_bi().await?;
-        let msg = ControlMessage::Reauth {
-            token: token.to_string(),
-        };
-        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard())?;
-        send.write_u32_le(encoded.len() as u32).await?;
-        send.write_all(&encoded).await?;
-        let _ = send.finish();
-
-        let len = recv.read_u32_le().await? as usize;
-        if len > 65_536 {
-            anyhow::bail!("Reauth response too large: {} bytes", len);
-        }
-        let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
-        let (resp, _): (ControlMessage, _) =
-            bincode::serde::decode_from_slice(&buf, bincode::config::standard())?;
-        match resp {
-            ControlMessage::ReauthResult { accepted } => Ok(accepted),
-            _ => anyhow::bail!("Unexpected reauth response"),
-        }
+        let accepted = control::reauth_over_stream(&mut send, &mut recv, token).await?;
+        Ok::<bool, anyhow::Error>(accepted)
     })
     .await
     .map_err(|_| anyhow::anyhow!("Reauth timed out"))?

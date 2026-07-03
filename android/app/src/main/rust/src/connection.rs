@@ -2,14 +2,13 @@ use bytes::{Buf, Bytes};
 use h3_quinn::Connection as H3QuinnConnection;
 use log::info;
 use shared::{
-    compute_quic_mtu_config, looks_like_html_response,
+    compute_quic_mtu_config, control, looks_like_html_response,
     masque::{self, CAPSULE_MAVI_CONFIG},
     ControlMessage,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod validation;
 
@@ -48,34 +47,14 @@ pub async fn run_reauth_task(
 }
 
 /// Presents `token` to the server over a fresh bidirectional QUIC stream and
-/// returns whether it was accepted. Framed identically to the handshake `Auth`
-/// message; bounded by a timeout so a stalled stream cannot wedge the task.
+/// returns whether it was accepted. Bounded by a timeout so a stalled stream
+/// cannot wedge the task. Framing and the exchange itself live in
+/// [`shared::control`], shared with the Linux and Windows cores.
 async fn send_reauth(connection: &quinn::Connection, token: &str) -> anyhow::Result<bool> {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (mut send, mut recv) = connection.open_bi().await?;
-        let msg = ControlMessage::Reauth {
-            token: token.to_string(),
-        };
-        let bytes = bincode::serde::encode_to_vec(&msg, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        #[allow(clippy::cast_possible_truncation)]
-        send.write_u32_le(bytes.len() as u32).await?;
-        send.write_all(&bytes).await?;
-        let _ = send.finish();
-
-        let len = recv.read_u32_le().await? as usize;
-        if len > 65536 {
-            anyhow::bail!("Reauth response too large: {len} bytes");
-        }
-        let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
-        let (resp, _): (ControlMessage, _) =
-            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-        match resp {
-            ControlMessage::ReauthResult { accepted } => Ok(accepted),
-            _ => anyhow::bail!("Unexpected reauth response"),
-        }
+        let accepted = control::reauth_over_stream(&mut send, &mut recv, token).await?;
+        Ok::<bool, anyhow::Error>(accepted)
     })
     .await
     .map_err(|_| anyhow::anyhow!("Reauth timed out"))?
@@ -274,20 +253,12 @@ pub async fn connect_and_handshake(
         info!("Stream opened");
 
         let auth_msg = ControlMessage::Auth { token };
-        let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        #[allow(clippy::cast_possible_truncation)]
-        send_stream.write_u32_le(bytes.len() as u32).await?;
-        send_stream.write_all(&bytes).await?;
+        control::write_control_frame(&mut send_stream, &auth_msg).await?;
         info!("Auth sent");
 
         // Read Config
-        let len = recv_stream.read_u32_le().await? as usize;
-        if len > 65536 {
-            return Err(anyhow::anyhow!("Server response too large: {len} bytes"));
-        }
-        let mut buf = vec![0u8; len];
-        recv_stream.read_exact(&mut buf).await?;
+        let buf =
+            control::read_control_frame(&mut recv_stream, control::MAX_CONTROL_FRAME_BYTES).await?;
 
         // In censorship-resistant mode the server returns a fake nginx HTML
         // page on auth failure. Detect by content, not a magic length.
@@ -308,9 +279,7 @@ pub async fn connect_and_handshake(
 }
 
 fn decode_raw_server_config(buf: &[u8]) -> anyhow::Result<ControlMessage> {
-    let cfg: ControlMessage = bincode::serde::decode_from_slice(buf, bincode::config::standard())
-        .map(|(v, _)| v)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cfg = control::decode_control_message(buf)?;
 
     if let ControlMessage::Error { message } = &cfg {
         return Err(anyhow::anyhow!("Server Error: {message}"));

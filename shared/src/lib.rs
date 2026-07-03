@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub mod cert_pin;
+// Also compiled for plain `cargo test -p shared` (via the `test` cfg and the
+// matching dev-dependencies) so its unit tests run without feature flags.
+#[cfg(any(feature = "control-client", test))]
+pub mod control;
 pub mod endpoint;
 pub mod hex;
 pub mod icmp;

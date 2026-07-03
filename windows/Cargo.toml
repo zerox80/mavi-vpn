@@ -22,7 +22,7 @@ path = "src/bin/service/main.rs"
 workspace = true
 
 [dependencies]
-shared = { workspace = true, features = ["oauth-client"] }
+shared = { workspace = true, features = ["oauth-client", "control-client"] }
 tokio = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }

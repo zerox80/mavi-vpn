@@ -2,12 +2,11 @@ use super::cert_pin::PinnedServerVerifier;
 use super::h3::H3SessionGuard;
 use anyhow::{Context, Result};
 use shared::{
-    compute_quic_mtu_config, looks_like_html_response, resolve_server_name,
+    compute_quic_mtu_config, control, looks_like_html_response, resolve_server_name,
     validate_control_message_mtu, ControlMessage,
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::info;
 
 const KEEPALIVE_SECS: u64 = 10;
@@ -153,15 +152,10 @@ pub(super) async fn connect_and_handshake(
     } else {
         let (mut send, mut recv) = connection.open_bi().await?;
         let auth_msg = ControlMessage::Auth { token };
-        let encoded = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
-        send.write_u32_le(encoded.len() as u32).await?;
-        send.write_all(&encoded).await?;
+        control::write_control_frame(&mut send, &auth_msg).await?;
         let _ = send.finish();
 
-        let len = recv.read_u32_le().await? as usize;
-        validate_raw_response_len(len)?;
-        let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
+        let buf = control::read_control_frame(&mut recv, control::MAX_CONTROL_FRAME_BYTES).await?;
         let cfg = decode_raw_response_body(&buf)?;
         (cfg, None)
     };
@@ -169,13 +163,6 @@ pub(super) async fn connect_and_handshake(
     validate_control_message_mtu(&config, mtu_cfg.local_tun_mtu).map_err(|e| anyhow::anyhow!(e))?;
 
     Ok((connection, config, h3_guard))
-}
-
-fn validate_raw_response_len(len: usize) -> Result<()> {
-    if len > 65_536 {
-        anyhow::bail!("Server response too large: {} bytes", len);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -193,9 +180,7 @@ fn decode_raw_response_body(buf: &[u8]) -> Result<ControlMessage> {
              Check token validity or Keycloak configuration."
         );
     }
-    bincode::serde::decode_from_slice(buf, bincode::config::standard())
-        .map(|(v, _)| v)
-        .map_err(Into::into)
+    Ok(control::decode_control_message(buf)?)
 }
 
 #[cfg(test)]
@@ -237,12 +222,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_response_len_rejects_oversized_server_response() {
-        assert!(validate_raw_response_len(65_536).is_ok());
-        assert!(validate_raw_response_len(65_537).is_err());
-    }
-
-    #[test]
     fn raw_response_body_decodes_config_and_error() {
         let config = decode_raw_response_body(&encode(&config_with_mtu(1280))).unwrap();
         assert!(matches!(config, ControlMessage::Config { mtu: 1280, .. }));
@@ -268,18 +247,6 @@ mod tests {
         assert!(validate_server_mtu(&config_with_mtu(1340), 1280).is_err());
         assert!(validate_server_mtu(&config_with_mtu(1280), 1340).is_err());
         assert!(validate_server_mtu(&config_with_mtu(1400), 1280).is_err());
-    }
-
-    #[test]
-    fn raw_response_len_accepts_zero_and_boundary() {
-        assert!(validate_raw_response_len(0).is_ok());
-        assert!(validate_raw_response_len(1).is_ok());
-        assert!(validate_raw_response_len(65_536).is_ok());
-    }
-
-    #[test]
-    fn raw_response_len_rejects_far_above_limit() {
-        assert!(validate_raw_response_len(usize::MAX).is_err());
     }
 
     #[test]

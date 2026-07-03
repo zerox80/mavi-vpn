@@ -331,6 +331,21 @@ fn html_detection_html_tag() {
 }
 
 #[test]
+fn html_detection_is_case_insensitive() {
+    // Camouflage pages are attacker- or middlebox-shaped; any casing of the
+    // doctype/html prefix must be detected, not just the four exact variants
+    // the previous implementation listed.
+    assert!(looks_like_html_response(b"<!DocType html>"));
+    assert!(looks_like_html_response(b"<Html lang=\"en\">"));
+    assert!(looks_like_html_response(b"\t <hTmL>"));
+}
+
+#[test]
+fn html_detection_rejects_whitespace_only() {
+    assert!(!looks_like_html_response(b"   \n\t  "));
+}
+
+#[test]
 fn html_detection_rejects_bincode() {
     // Typical bincode output: starts with enum variant index, not HTML
     assert!(!looks_like_html_response(&[0x01, 0x00, 0x00, 0x00]));

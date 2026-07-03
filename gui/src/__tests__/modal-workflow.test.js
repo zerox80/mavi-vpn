@@ -18,6 +18,10 @@ vi.mock('../toast.js', () => ({
   showToast: vi.fn(),
 }));
 
+// A syntactically valid 64-hex-char cert pin placeholder - saveModal() now
+// validates the format, so tests exercising it need a value that passes.
+const VALID_PIN = 'a'.repeat(64);
+
 function setupModalDom() {
   document.body.innerHTML = `
     <div id="modal-backdrop"></div>
@@ -69,7 +73,7 @@ describe('modal workflows', () => {
     document.getElementById('m_label').value = 'Primary';
     document.getElementById('m_endpoint').value = 'vpn.example.com:443';
     document.getElementById('m_token').value = 'secret';
-    document.getElementById('m_cert_pin').value = 'pin';
+    document.getElementById('m_cert_pin').value = VALID_PIN;
     document.getElementById('m_vpn_mtu').value = '1340';
 
     await saveModal();
@@ -80,7 +84,7 @@ describe('modal workflows', () => {
       label: 'Primary',
       endpoint: 'vpn.example.com:443',
       token: 'secret',
-      cert_pin: 'pin',
+      cert_pin: VALID_PIN,
       vpn_mtu: 1340,
     });
     expect(state.prefs.active_id).toBe('generated-id');
@@ -107,7 +111,7 @@ describe('modal workflows', () => {
     await saveModal();
     expect(showToast).toHaveBeenLastCalledWith('Certificate PIN is required.', 'error');
 
-    document.getElementById('m_cert_pin').value = 'pin';
+    document.getElementById('m_cert_pin').value = VALID_PIN;
     document.getElementById('m_vpn_mtu').value = '1500';
     await saveModal();
     expect(showToast).toHaveBeenLastCalledWith('VPN MTU must be between 1280 and 1360.', 'error');
@@ -118,7 +122,7 @@ describe('modal workflows', () => {
     document.getElementById('m_label').value = 'SSO Node';
     document.getElementById('m_endpoint').value = 'vpn.example.com:443';
     document.getElementById('m_token').value = 'ignored';
-    document.getElementById('m_cert_pin').value = 'pin';
+    document.getElementById('m_cert_pin').value = VALID_PIN;
     document.getElementById('m_kc_auth').checked = true;
     document.getElementById('m_kc_url').value = ' https://auth.example.com ';
 
@@ -155,7 +159,7 @@ describe('modal workflows', () => {
     document.getElementById('m_label').value = 'Updated';
     document.getElementById('m_endpoint').value = 'vpn.example.com:443';
     document.getElementById('m_token').value = 'stale';
-    document.getElementById('m_cert_pin').value = 'pin';
+    document.getElementById('m_cert_pin').value = VALID_PIN;
     document.getElementById('m_ech_config').value = 'ech';
     document.getElementById('m_cr_mode').checked = true;
     document.getElementById('m_h3_framing').checked = true;
@@ -173,7 +177,7 @@ describe('modal workflows', () => {
         label: 'Updated',
         endpoint: 'vpn.example.com:443',
         token: null,
-        cert_pin: 'pin',
+        cert_pin: VALID_PIN,
         ech_config: 'ech',
         censorship_resistant: true,
         http3_framing: true,

@@ -76,6 +76,9 @@ pub(crate) async fn send_ipc_request(req: &IpcRequest) -> Result<IpcResponse, St
         .await
         .map_err(|e| e.to_string())?;
     let len = u32::from_le_bytes(len_buf) as usize;
+    if len == 0 {
+        return Err("Service sent an empty IPC response".into());
+    }
     if len > 65536 {
         return Err("Response too large".into());
     }

@@ -56,9 +56,16 @@ impl ServerCertVerifier for SkipServerVerification {
     }
 }
 
+/// Default DPI-probe target, used when no address is given on the command line.
+const DEFAULT_SERVER_ADDR: &str = "194.242.56.169:10443";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server_addr: SocketAddr = "194.242.56.169:10443".parse()?;
+    // Usage: quic-tester [host:port]  (defaults to DEFAULT_SERVER_ADDR)
+    let target = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_SERVER_ADDR.to_string());
+    let server_addr: SocketAddr = target.parse()?;
 
     // 1. Create QUIC Endpoint
     let endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
@@ -161,7 +168,7 @@ mod tests {
 
     #[test]
     fn server_addr_parses() {
-        let addr: SocketAddr = "194.242.56.169:10443".parse().unwrap();
+        let addr: SocketAddr = DEFAULT_SERVER_ADDR.parse().unwrap();
         assert_eq!(addr.port(), 10443);
     }
 }

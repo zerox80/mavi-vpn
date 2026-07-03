@@ -113,10 +113,11 @@ function Test-MaviDnsPolicy {
     if ($comment -eq 'MaviVPN' -or $displayName -eq 'MaviVPN DNS Force') { return $true }
     $isRootPolicy = ($namespace -contains '.') -or $name -eq '.'
     if (-not $isRootPolicy) { return $false }
+    if ($servers.Count -eq 0) { return $false }
     foreach ($server in $servers) {
-        if ($maviDns -contains $server) { return $true }
+        if ($maviDns -notcontains $server) { return $false }
     }
-    return $false
+    return $true
 }
 function Test-MaviDnsPolicyRegistryEntry {
     param($Props)

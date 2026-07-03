@@ -23,14 +23,18 @@ pub struct QuicMtuConfig {
 pub fn compute_quic_mtu_config(vpn_mtu: Option<u16>) -> QuicMtuConfig {
     let (local_tun_mtu, mtu_source) = crate::resolve_tun_mtu_with_source(vpn_mtu);
     let transport_tun_mtu = local_tun_mtu;
-    let quic_mtu = transport_tun_mtu + QUIC_OVERHEAD_BYTES;
+    // Saturating rather than plain `+`: MIN_TUN_MTU/MAX_TUN_MTU keep this well
+    // under u16::MAX today, but overflow-checks are off in release builds, so
+    // a future bump of MAX_TUN_MTU closer to u16::MAX must saturate instead of
+    // silently wrapping.
+    let quic_mtu = transport_tun_mtu.saturating_add(QUIC_OVERHEAD_BYTES);
 
     QuicMtuConfig {
         quic_mtu,
         transport_tun_mtu,
         mtu_source,
-        wire_mtu_ipv4: quic_mtu + 20 + 8,
-        wire_mtu_ipv6: quic_mtu + 40 + 8,
+        wire_mtu_ipv4: quic_mtu.saturating_add(20).saturating_add(8),
+        wire_mtu_ipv6: quic_mtu.saturating_add(40).saturating_add(8),
         local_tun_mtu,
     }
 }

@@ -138,7 +138,9 @@ def main():
     raw = input(c("1;37", f"  ? Install to [{default_dest}]: ")).strip()
     dest = Path(raw) if raw else Path(default_dest)
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Via sudo, not a plain mkdir: dest may be a custom path under a
+    # root-owned directory the current user can't create on their own.
+    sudo("mkdir", "-p", str(dest.parent))
     sudo("install", "-m", "755", str(binary), str(dest))
     ok(f"Binary installed to {dest}")
 

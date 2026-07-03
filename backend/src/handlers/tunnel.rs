@@ -182,7 +182,8 @@ pub async fn run_tunnel(
             received_udp_bytes_last = quic.udp_rx.bytes;
 
             info!(
-                "[SERVER TUNNEL STATS] s2c_app={:.1}mbit c2s_app={:.1}mbit quic_udp_tx={:.1}mbit quic_udp_rx={:.1}mbit rtt={}ms cwnd={} lost_pkts={} lost_bytes={} max_dgram={} dgram_space={} s2c_pkts={} s2c_queue_len={} s2c_send_err={} s2c_too_large={} c2s_pkts={} c2s_tun_drops={}",
+                "[SERVER TUNNEL STATS] peer_ip={} s2c_app={:.1}mbit c2s_app={:.1}mbit quic_udp_tx={:.1}mbit quic_udp_rx={:.1}mbit rtt={}ms cwnd={} lost_pkts={} lost_bytes={} max_dgram={} dgram_space={} s2c_pkts={} s2c_queue_len={} s2c_send_err={} s2c_too_large={} c2s_pkts={} c2s_tun_drops={}",
+                assigned_ip,
                 server_to_client_mbps,
                 client_to_server_mbps,
                 egress_mbps,

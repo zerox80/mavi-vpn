@@ -415,26 +415,11 @@ pub async fn handle_connection(
         assigned_ip6
     );
 
+    // Per-connection QUIC/tunnel stats are logged by run_tunnel's own
+    // 5-second stats task (tagged with this connection's assigned_ip), which
+    // is a superset of RTT/CWND/lost-packets/max-datagram — no separate
+    // coarser task is spawned here to avoid double-logging the same metrics.
     let connection_arc = Arc::new(connection);
-    let conn_stats = connection_arc.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let conn_metrics = conn_stats.stats();
-            info!(
-                "[SERVER QUIC STATS] Peer: {} | RTT: {}ms | CWND: {} bytes | Lost Packets: {} | Max Datagram: {}",
-                remote_addr,
-                conn_metrics.path.rtt.as_millis(),
-                conn_metrics.path.cwnd,
-                conn_metrics.path.lost_packets,
-                conn_stats.max_datagram_size().unwrap_or(0)
-            );
-            if conn_stats.close_reason().is_some() {
-                break;
-            }
-        }
-    });
 
     run_authenticated_tunnel(
         connection_arc,

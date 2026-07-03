@@ -2,6 +2,7 @@ use crate::secret_store::{
     connection_refresh_token_account, connection_token_account, legacy_config_token_account,
     KeyringSecretStore, SecretStore,
 };
+use serde::Deserialize;
 use shared::ipc::Config;
 use std::path::Path;
 
@@ -49,7 +50,11 @@ impl SavedConn {
 pub(crate) struct Prefs {
     #[serde(default = "default_theme")]
     theme: String,
-    #[serde(default = "default_accent")]
+    /// Validated on the way in (from disk *and* from the frontend's
+    /// `save_prefs` IPC call, since both deserialize through this struct):
+    /// it is later interpolated into an SVG `innerHTML` template on the
+    /// frontend, so a malformed value must never reach the UI layer.
+    #[serde(default = "default_accent", deserialize_with = "deserialize_accent")]
     accent: String,
     #[serde(default)]
     connections: Vec<SavedConn>,
@@ -87,6 +92,25 @@ fn default_theme() -> String {
 
 fn default_accent() -> String {
     "#2B44FF".into()
+}
+
+/// Accepts only `#RRGGBB`; falls back to [`default_accent`] otherwise rather
+/// than erroring, so a corrupted/hand-edited prefs file doesn't block the GUI
+/// from starting.
+fn deserialize_accent<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Ok(if is_valid_hex_color(&s) {
+        s
+    } else {
+        default_accent()
+    })
+}
+
+fn is_valid_hex_color(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
 }
 
 pub(crate) fn save_config_to_dir(config_dir: &Path, config: &mut Config) -> Result<(), String> {
@@ -237,6 +261,34 @@ mod tests {
             ech_config: None,
             vpn_mtu: None,
         }
+    }
+
+    #[test]
+    fn prefs_accepts_valid_hex_accent() {
+        let prefs: Prefs = serde_json::from_str(r##"{"accent": "#AB12ef"}"##).unwrap();
+        assert_eq!(prefs.accent, "#AB12ef");
+    }
+
+    #[test]
+    fn prefs_falls_back_to_default_accent_for_invalid_values() {
+        for bad in [
+            "red",
+            "#12345",   // too short
+            "#1234567", // too long
+            "#GGGGGG",  // non-hex digits
+            "javascript:alert(1)",
+            "\"></style><script>alert(1)</script>",
+        ] {
+            let json = serde_json::json!({ "accent": bad }).to_string();
+            let prefs: Prefs = serde_json::from_str(&json).unwrap();
+            assert_eq!(prefs.accent, default_accent(), "input was: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn prefs_defaults_accent_when_absent() {
+        let prefs: Prefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.accent, default_accent());
     }
 
     #[test]

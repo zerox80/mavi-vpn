@@ -1,10 +1,21 @@
 use super::command_runner::{CommandRunner, SystemCommandRunner};
+use std::net::Ipv4Addr;
 
-pub(super) fn configure_dns(adapter_name: &str) {
-    configure_dns_with_runner(&SystemCommandRunner, adapter_name);
+/// Secondary adapter-level resolver, used only if both the NRPT policy and
+/// the primary (server-assigned) DNS are unreachable.
+const SECONDARY_FALLBACK_DNS: &str = "8.8.8.8";
+
+/// Sets the adapter's own DNS servers as a defense-in-depth fallback for the
+/// NRPT policy installed by `configure_vpn_dns_preference`. The primary entry
+/// must be the server-assigned resolver so the two layers agree: if NRPT ever
+/// fails to apply, queries still go to the VPN's real DNS instead of a
+/// different, possibly locally-censored or -monitored resolver.
+pub(super) fn configure_dns(adapter_name: &str, dns_v4: Ipv4Addr) {
+    configure_dns_with_runner(&SystemCommandRunner, adapter_name, dns_v4);
 }
 
-fn configure_dns_with_runner(runner: &dyn CommandRunner, adapter_name: &str) {
+fn configure_dns_with_runner(runner: &dyn CommandRunner, adapter_name: &str, dns_v4: Ipv4Addr) {
+    let primary = dns_v4.to_string();
     runner.run_cmd(
         "netsh",
         &[
@@ -14,7 +25,7 @@ fn configure_dns_with_runner(runner: &dyn CommandRunner, adapter_name: &str) {
             "dnsservers",
             adapter_name,
             "static",
-            "1.1.1.1",
+            &primary,
             "primary",
             "validate=no",
         ],
@@ -27,7 +38,7 @@ fn configure_dns_with_runner(runner: &dyn CommandRunner, adapter_name: &str) {
             "add",
             "dnsservers",
             adapter_name,
-            "8.8.8.8",
+            SECONDARY_FALLBACK_DNS,
             "index=2",
             "validate=no",
         ],
@@ -45,7 +56,7 @@ mod tests {
     fn dns_configuration_uses_expected_netsh_commands() {
         let runner = RecordingRunner::new(true);
 
-        configure_dns_with_runner(&runner, "MaviVPN");
+        configure_dns_with_runner(&runner, "MaviVPN", Ipv4Addr::new(10, 8, 0, 1));
 
         assert_eq!(
             runner.commands(),
@@ -59,7 +70,7 @@ mod tests {
                         "dnsservers",
                         "MaviVPN",
                         "static",
-                        "1.1.1.1",
+                        "10.8.0.1",
                         "primary",
                         "validate=no",
                     ]

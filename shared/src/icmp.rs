@@ -97,7 +97,12 @@ pub fn generate_packet_too_big(
                 64,                 // Hop Limit (equiv. of TTL)
             )
             .icmpv6(Icmpv6Type::PacketTooBig {
-                mtu: u32::from(mtu),
+                // RFC 8201: the IPv6 minimum path MTU is 1280; never advertise
+                // less, regardless of what the caller passed in. Mirrors the
+                // floor `mtu::effective_ptb_mtu` applies on the normal path,
+                // enforced here too since this function is a public part of
+                // `shared` and shouldn't rely solely on callers doing it.
+                mtu: u32::from(mtu.max(1280)),
             });
 
             let mut result = Vec::with_capacity(builder.size(payload_slice.len()));
@@ -310,5 +315,24 @@ mod tests {
     #[test]
     fn single_byte_returns_none() {
         assert!(generate_packet_too_big(&[0x45], 1280, None).is_none());
+    }
+
+    #[test]
+    fn ipv6_mtu_is_floored_at_1280_per_rfc_8201() {
+        let client = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let internet = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let packet = make_ipv6_packet(client, internet);
+
+        // A caller passing an out-of-range sub-1280 value must not produce a
+        // PTB that violates the IPv6 minimum path MTU.
+        let result = generate_packet_too_big(&packet, 500, None).unwrap();
+        let parsed = etherparse::SlicedPacket::from_ip(&result).unwrap();
+        match parsed.transport {
+            Some(etherparse::TransportSlice::Icmpv6(icmp)) => match icmp.icmp_type() {
+                etherparse::Icmpv6Type::PacketTooBig { mtu } => assert_eq!(mtu, 1280),
+                other => panic!("Expected PacketTooBig, got {other:?}"),
+            },
+            other => panic!("Expected ICMPv6 transport, got {other:?}"),
+        }
     }
 }

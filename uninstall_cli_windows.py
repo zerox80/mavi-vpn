@@ -52,11 +52,6 @@ def step(msg):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def run(cmd, check=False):
-    info(f"Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
-    return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True)
-
-
 def ask(question, default="y"):
     yn = "Y/n" if default == "y" else "y/N"
     answer = input(c("1;37", f"  ? {question} [{yn}]: ")).strip().lower()
@@ -99,10 +94,11 @@ function Test-MaviDnsPolicy {
     if ($comment -eq 'MaviVPN' -or $displayName -eq 'MaviVPN DNS Force') { return $true }
     $isRootPolicy = ($namespace -contains '.') -or $name -eq '.'
     if (-not $isRootPolicy) { return $false }
+    if ($servers.Count -eq 0) { return $false }
     foreach ($server in $servers) {
-        if ($maviDns -contains $server) { return $true }
+        if ($maviDns -notcontains $server) { return $false }
     }
-    return $false
+    return $true
 }
 function Test-MaviDnsPolicyRegistryEntry {
     param($Props)

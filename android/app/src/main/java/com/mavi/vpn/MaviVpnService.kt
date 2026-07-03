@@ -283,11 +283,24 @@ class MaviVpnService : VpnService() {
                                 val fd = localInterface.fd
                                 Log.d("MaviVPN", "Interface established. Starting Loop.")
                                 isConnected.value = true
+                                // Both callbacks re-check the registry instead of
+                                // closing over `handle` directly: the ticker thread
+                                // is interrupted with only a bounded join (see
+                                // stopKeycloakRefreshTicker) when the session ends,
+                                // so it can still be mid-network-call when
+                                // NativeLib.free(handle) runs on the worker thread.
+                                // Without this check a late callback would call
+                                // into an already-freed native handle.
                                 val refreshTicker = startKeycloakRefreshTicker(
                                     prefs = prefs,
                                     tokenManager = tokenManager,
                                     isSessionActive = { isRunning && handleRegistry.isCurrent(workerGeneration) },
-                                    onTokenRefreshed = { newToken -> NativeLib.updateToken(handle, newToken) },
+                                    onTokenRefreshed = { newToken ->
+                                        val currentHandle = handleRegistry.handleIfCurrent(workerGeneration)
+                                        if (currentHandle != 0L) {
+                                            NativeLib.updateToken(currentHandle, newToken)
+                                        }
+                                    },
                                     onSessionExpired = {
                                         isRunning = false
                                         isConnected.value = false
@@ -296,7 +309,10 @@ class MaviVpnService : VpnService() {
                                             "Mavi VPN",
                                             "Keycloak session expired. Please login again.",
                                         )
-                                        NativeLib.stop(handle)
+                                        val currentHandle = handleRegistry.handleIfCurrent(workerGeneration)
+                                        if (currentHandle != 0L) {
+                                            NativeLib.stop(currentHandle)
+                                        }
                                     },
                                 )
                                 try {
@@ -415,6 +431,18 @@ class MaviVpnService : VpnService() {
             }
         } catch (_: Exception) {
         }
+    }
+
+    /**
+     * Called by the system when the user revokes this VPN's permission from
+     * Settings. The default [VpnService] implementation just calls
+     * [stopSelf], which would skip our own teardown (native session handle,
+     * TUN fd, network callback, wake lock) entirely - so this must run the
+     * same path as a manual Stop.
+     */
+    override fun onRevoke() {
+        Log.i("MaviVPN", "VPN permission revoked by the system; tearing down session")
+        stopVpn()
     }
 
     override fun onDestroy() {

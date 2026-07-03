@@ -61,6 +61,14 @@ pub struct KeycloakValidator {
 
 const JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 
+/// Upper bound on how long a cache hit on `kid` is trusted without a refresh.
+/// Normally a matching `kid` means the cached key is still current, but if
+/// Keycloak ever reused a `kid` across a genuine rotation (a JWKS spec
+/// violation, but cheap to defend against), a kid-found cache hit would
+/// otherwise never expire. Forcing a periodic refresh bounds how long a
+/// stale key could stay trusted in that scenario.
+const JWKS_MAX_CACHE_AGE: Duration = Duration::from_secs(60 * 60);
+
 impl KeycloakValidator {
     pub fn new(
         url: String,
@@ -127,14 +135,18 @@ impl KeycloakValidator {
 
         // First attempt: look up kid in cached JWKS.
         // If not found, Keycloak may have rotated keys — refresh once and retry.
-        let kid_found = self
-            .jwks_cache
-            .read()
-            .await
-            .as_ref()
-            .is_some_and(|(j, _)| j.find(&kid).is_some());
+        let (kid_found, cache_age) = {
+            let cache = self.jwks_cache.read().await;
+            let kid_found = cache.as_ref().is_some_and(|(j, _)| j.find(&kid).is_some());
+            let cache_age = cache.as_ref().map(|(_, t)| t.elapsed());
+            (kid_found, cache_age)
+        };
+        // A kid-found cache hit is normally trusted without a refresh, but a
+        // cache older than JWKS_MAX_CACHE_AGE is refreshed anyway (see its
+        // doc comment) so a reused kid can't pin a stale key indefinitely.
+        let cache_is_stale = cache_age.is_none_or(|age| age >= JWKS_MAX_CACHE_AGE);
 
-        if !kid_found {
+        if !kid_found || cache_is_stale {
             let should_refresh = self
                 .jwks_cache
                 .read()
@@ -143,10 +155,17 @@ impl KeycloakValidator {
                 .is_none_or(|(_, t)| t.elapsed() >= JWKS_REFRESH_COOLDOWN);
 
             if should_refresh {
-                warn!(
-                    "Token kid '{}' not found in cached JWKS — refreshing keys from Keycloak",
-                    kid
-                );
+                if kid_found {
+                    info!(
+                        "Periodic JWKS refresh (cache age exceeded {:?})",
+                        JWKS_MAX_CACHE_AGE
+                    );
+                } else {
+                    warn!(
+                        "Token kid '{}' not found in cached JWKS — refreshing keys from Keycloak",
+                        kid
+                    );
+                }
                 match self.fetch_jwks_from_server().await {
                     Ok(fresh) => {
                         // Atomic update: JWKS and timestamp written together under a single lock.
@@ -154,7 +173,7 @@ impl KeycloakValidator {
                     }
                     Err(e) => warn!("JWKS refresh failed: {}. Proceeding with cached keys.", e),
                 }
-            } else {
+            } else if !kid_found {
                 warn!(
                     "Token kid '{}' not found but JWKS refresh is on cooldown. Rejecting token.",
                     kid

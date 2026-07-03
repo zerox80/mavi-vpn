@@ -246,7 +246,10 @@ def main():
     # Fedora/RHEL – RPM
     rpm = find_bundle("rpm/*.rpm")
     if rpm and shutil.which("rpm") and ask(f"Install via RPM ({rpm.name})?"):
-        sudo("rpm", "-i", "--force", str(rpm))
+        # --replacepkgs (not the broader --force) lets this reinstall over a
+        # previous install of the same package without also suppressing
+        # rpm's file-conflict check against *other*, unrelated packages.
+        sudo("rpm", "-i", "--replacepkgs", str(rpm))
         ok("Installed via rpm")
         patch_system_desktop_entry()
         refresh_desktop_integration()
@@ -292,7 +295,9 @@ def main():
     default_dest = "/usr/local/bin/mavi-vpn-gui"
     raw = input(c("1;37", f"  ? Install binary to [{default_dest}]: ")).strip()
     dest = Path(raw) if raw else Path(default_dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Via sudo, not a plain mkdir: dest may be a custom path under a
+    # root-owned directory the current user can't create on their own.
+    sudo("mkdir", "-p", str(dest.parent))
     sudo("install", "-m", "755", str(binary), str(dest))
     ok(f"Binary installed to {dest}")
     create_desktop_entry(str(dest))

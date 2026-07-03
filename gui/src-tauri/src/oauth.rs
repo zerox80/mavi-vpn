@@ -3,6 +3,7 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tracing::warn;
 
 /// Fixed callback port so the redirect URI is predictable and can be registered
 /// once in Keycloak: `http://127.0.0.1:18923/callback`
@@ -107,8 +108,16 @@ pub async fn start_oauth_flow(
         .context("Could not reach Keycloak token endpoint")?;
 
     if !res.status().is_success() {
+        let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Token exchange failed: {body}"));
+        // The raw response body is logged locally for debugging only; it must
+        // not be embedded in the error returned to the frontend, since a
+        // failed exchange's error body is upstream server text we don't
+        // control and shouldn't assume is safe to render as-is in the UI.
+        warn!(%status, %body, "Keycloak token exchange failed");
+        return Err(anyhow::anyhow!(
+            "Token exchange failed (HTTP {status}). Check the service log for details."
+        ));
     }
 
     let body = res

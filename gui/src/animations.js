@@ -6,7 +6,11 @@ export function startCoreAnimation() {
   if (!svg) return;
   const size = 280;
   const R = size / 2;
-  const accent = state.prefs.accent || '#2B44FF';
+  // Defense in depth: the Rust side already validates this before it's ever
+  // persisted, but this value is interpolated into an SVG innerHTML template
+  // below, so it's re-checked here too rather than trusting the source.
+  const rawAccent = state.prefs.accent || '#2B44FF';
+  const accent = /^#[0-9a-fA-F]{6}$/.test(rawAccent) ? rawAccent : '#2B44FF';
   const accentClean = accent.replace('#', '');
 
   const ns = 'http://www.w3.org/2000/svg';

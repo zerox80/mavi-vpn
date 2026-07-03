@@ -7,6 +7,30 @@ import { parseOptionalMtu } from './utils.js';
 let _applyHero = null;
 let _editingId = null;
 
+// Light format checks so a typo is caught immediately in the form instead of
+// surfacing later as an opaque connection failure. Not a security boundary -
+// the service validates these for real before using them.
+function isValidEndpoint(value) {
+  return /^.+:\d{1,5}$/.test(value);
+}
+
+function isValidCertPin(value) {
+  return value
+    .split(',')
+    .map((p) => p.trim())
+    .every((p) => /^[0-9a-fA-F]{64}$/.test(p));
+}
+
+function isValidKcUrl(value) {
+  if (!value) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export function wireModal({ applyHeroForSelection }) {
   _applyHero = applyHeroForSelection;
 
@@ -60,13 +84,26 @@ export async function saveModal() {
   const kc_auth = $('m_kc_auth').checked || null;
   if (!label) return showToast('Label is required.', 'error');
   if (!endpoint) return showToast('Endpoint is required.', 'error');
+  if (!isValidEndpoint(endpoint))
+    return showToast('Endpoint must look like host:port.', 'error');
   if (!kc_auth && !token)
     return showToast('Pre-shared key is required unless Keycloak is enabled.', 'error');
   if (!cert_pin) return showToast('Certificate PIN is required.', 'error');
+  if (!isValidCertPin(cert_pin)) {
+    return showToast(
+      'Certificate PIN must be 64 hex characters (comma-separated for dual-pin rotation).',
+      'error'
+    );
+  }
 
   const mtu = parseOptionalMtu($('m_vpn_mtu').value);
   if (!mtu.valid) {
     return showToast('VPN MTU must be between 1280 and 1360.', 'error');
+  }
+
+  const kc_url_input = kc_auth ? $('m_kc_url').value.trim() : '';
+  if (kc_auth && !isValidKcUrl(kc_url_input)) {
+    return showToast('Keycloak URL must be a valid http(s) URL.', 'error');
   }
 
   const conn = {

@@ -129,7 +129,11 @@ fn run_service(_arguments: Vec<OsString>) -> anyhow::Result<()> {
             &reharden_signal_handler,
         );
         if did_stop {
-            utils::run_network_repair_cleanup();
+            // The SCM expects control handlers to return promptly (it treats
+            // a slow handler as a hung service). run_network_repair_cleanup
+            // shells out to netsh/PowerShell and can briefly block, so run it
+            // off this thread instead of inline in the callback.
+            std::thread::spawn(utils::run_network_repair_cleanup);
         }
         result
     };

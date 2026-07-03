@@ -419,6 +419,50 @@ mod tests {
     }
 
     #[test]
+    fn config_wire_format_is_stable() {
+        // Captured once from `bincode::serde::encode_to_vec` for the exact
+        // `Config` built below. IPC bincode is positional, so a future field
+        // being added in the middle, removed, or reordered would silently
+        // shift every following field on the wire instead of erroring loudly
+        // — this fixture pins the layout so such a change fails this test
+        // (or, if intentional, forces a conscious update here) rather than
+        // only surfacing as a GUI/service version-skew bug in the field.
+        const FIXTURE_BYTES: &[u8] = &[
+            20, 118, 112, 110, 46, 101, 120, 97, 109, 112, 108, 101, 46, 99, 111, 109, 58, 52, 52,
+            51, 51, 6, 115, 101, 99, 114, 101, 116, 6, 112, 105, 110, 110, 101, 100, 1, 0, 1, 1, 1,
+            16, 104, 116, 116, 112, 115, 58, 47, 47, 97, 117, 116, 104, 46, 99, 111, 109, 1, 6,
+            109, 97, 115, 116, 101, 114, 1, 10, 118, 112, 110, 45, 99, 108, 105, 101, 110, 116, 1,
+            14, 114, 101, 102, 114, 101, 115, 104, 45, 115, 101, 99, 114, 101, 116, 0, 1, 251, 20,
+            5,
+        ];
+
+        let (decoded, consumed): (Config, usize) =
+            bincode::serde::decode_from_slice(FIXTURE_BYTES, bincode::config::standard())
+                .expect("Config wire format changed incompatibly - see comment above");
+        assert_eq!(consumed, FIXTURE_BYTES.len());
+
+        assert_eq!(decoded.endpoint, "vpn.example.com:4433");
+        assert_eq!(decoded.token, "secret");
+        assert_eq!(decoded.cert_pin, "pinned");
+        assert!(decoded.censorship_resistant);
+        assert!(!decoded.http3_framing);
+        assert_eq!(decoded.kc_auth, Some(true));
+        assert_eq!(decoded.kc_url.as_deref(), Some("https://auth.com"));
+        assert_eq!(decoded.kc_realm.as_deref(), Some("master"));
+        assert_eq!(decoded.kc_client_id.as_deref(), Some("vpn-client"));
+        assert_eq!(decoded.refresh_token.as_deref(), Some("refresh-secret"));
+        assert_eq!(decoded.ech_config, None);
+        assert_eq!(decoded.vpn_mtu, Some(1300));
+
+        // Also confirm the current encoder still produces exactly this
+        // fixture, so an accidental encoding-side change is caught too, not
+        // just a decode-side one.
+        let reencoded = bincode::serde::encode_to_vec(&decoded, bincode::config::standard())
+            .expect("re-encoding a just-decoded Config cannot fail");
+        assert_eq!(reencoded, FIXTURE_BYTES);
+    }
+
+    #[test]
     fn test_ipc_response_roundtrip() {
         let responses = vec![
             IpcResponse::Ok,

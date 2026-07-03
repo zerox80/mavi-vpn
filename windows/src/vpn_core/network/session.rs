@@ -43,6 +43,19 @@ pub struct AdapterNetworkConfig {
     pub dns_v6: Option<Ipv6Addr>,
 }
 
+/// Converts an IPv4 netmask to a CIDR prefix length. Falls back to the safe
+/// `/32` (host-only) prefix for a non-contiguous mask rather than guessing,
+/// mirroring `linux::network::routes::netmask_to_prefix`.
+fn netmask_to_prefix(netmask: Ipv4Addr) -> u8 {
+    let bits = u32::from_be_bytes(netmask.octets());
+    let ones = bits.count_ones() as u8;
+    if bits.leading_ones() + bits.trailing_zeros() == 32 {
+        ones
+    } else {
+        32
+    }
+}
+
 pub fn set_adapter_network_config(
     adapter: &Adapter,
     config: AdapterNetworkConfig,
@@ -59,7 +72,6 @@ pub fn set_adapter_network_config(
         gateway_v6,
         dns_v6,
     } = config;
-    let _ = netmask;
 
     let requested_adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let adapter_index = adapter.get_adapter_index()?;
@@ -78,7 +90,7 @@ pub fn set_adapter_network_config(
     }
 
     let address_started = Instant::now();
-    win32_add_ip(adapter_index, IpAddr::V4(ip), 24)?;
+    win32_add_ip(adapter_index, IpAddr::V4(ip), netmask_to_prefix(netmask))?;
 
     if let (Some(ipv6), Some(plen)) = (assigned_ipv6, netmask_v6) {
         win32_add_ip(adapter_index, IpAddr::V6(ipv6), plen)?;
@@ -97,7 +109,7 @@ pub fn set_adapter_network_config(
         );
     }
 
-    configure_dns(&adapter_name);
+    configure_dns(&adapter_name, dns);
 
     win32_set_mtu(adapter_index, u32::from(tun_mtu), AF_INET);
     win32_set_mtu(adapter_index, u32::from(tun_mtu), AF_INET6 as _);
@@ -257,6 +269,21 @@ mod tests {
     fn session_route_guard_none_host_route() {
         let guard = SessionRouteGuard::new(None);
         assert!(guard.host_route.is_none());
+    }
+
+    #[test]
+    fn netmask_to_prefix_accepts_contiguous_masks() {
+        assert_eq!(netmask_to_prefix(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        assert_eq!(netmask_to_prefix(Ipv4Addr::new(255, 0, 0, 0)), 8);
+        assert_eq!(netmask_to_prefix(Ipv4Addr::new(255, 255, 255, 0)), 24);
+        assert_eq!(netmask_to_prefix(Ipv4Addr::new(255, 255, 0, 0)), 16);
+        assert_eq!(netmask_to_prefix(Ipv4Addr::new(255, 255, 255, 255)), 32);
+    }
+
+    #[test]
+    fn netmask_to_prefix_rejects_non_contiguous_masks_with_safe_fallback() {
+        assert_eq!(netmask_to_prefix(Ipv4Addr::new(255, 0, 255, 0)), 32);
+        assert_eq!(netmask_to_prefix(Ipv4Addr::new(255, 255, 0, 255)), 32);
     }
 
     #[test]

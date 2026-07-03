@@ -166,7 +166,13 @@ pub(super) async fn handle_ipc_client(
     // Unix sockets have no meaningful remote address; log the peer's
     // credentials instead (pid/uid), which tokio exposes via SO_PEERCRED and
     // is strictly more useful for auditing than the old anonymous
-    // "127.0.0.1:PORT" line.
+    // "127.0.0.1:PORT" line. This is informational only, not an
+    // authorization check — peer_cred()'s uid is never compared against an
+    // allowlist. The actual access-control boundary is the constant-time
+    // bearer-token comparison below, backed by the socket's file permissions
+    // and group ownership (see bind_ipc_socket_at): any process able to read
+    // the token file (root, or a member of the socket's owning group) can
+    // drive this daemon regardless of its own uid.
     let peer_desc = socket
         .peer_cred()
         .map(|cred| format!("pid={:?} uid={}", cred.pid(), cred.uid()))

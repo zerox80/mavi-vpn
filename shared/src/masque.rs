@@ -59,7 +59,11 @@ pub const MAX_CAPSULE_BUF: usize = 64 * 1024;
 /// Writes a QUIC varint (RFC 9000 §16) to `buf`.
 ///
 /// # Panics
-/// Panics if `value >= 2^62`.
+/// Panics if `value >= 2^62`. Every call site in this crate passes a
+/// locally-known, compile-time-bounded value (a capsule type constant or a
+/// local buffer length) — never an attacker- or network-supplied value
+/// directly. Keep it that way: validate any externally-derived length
+/// before it reaches this function.
 #[allow(clippy::cast_possible_truncation)]
 pub fn write_varint(value: u64, buf: &mut Vec<u8>) {
     if value < (1 << 6) {
@@ -81,7 +85,8 @@ pub fn write_varint(value: u64, buf: &mut Vec<u8>) {
 /// Number of bytes `value` will occupy when encoded as a varint.
 ///
 /// # Panics
-/// Panics if `value >= 2^62`.
+/// Panics if `value >= 2^62`. See [`write_varint`]'s panics note — the same
+/// call-site invariant applies here.
 #[must_use]
 pub fn varint_len(value: u64) -> usize {
     if value < (1 << 6) {

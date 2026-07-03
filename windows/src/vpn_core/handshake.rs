@@ -1,12 +1,11 @@
 use anyhow::{Context, Result};
 use shared::{
-    compute_quic_mtu_config, endpoint_host_is_explicit_ipv6, looks_like_html_response,
+    compute_quic_mtu_config, control, endpoint_host_is_explicit_ipv6, looks_like_html_response,
     resolve_server_name, validate_control_message_mtu, ControlMessage,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 
 mod cert;
@@ -228,22 +227,12 @@ pub(super) async fn connect_and_handshake(
         // Perform application-level handshake
         let (mut send, mut recv) = connection.open_bi().await?;
         let auth_msg = ControlMessage::Auth { token };
-        let bytes = bincode::serde::encode_to_vec(&auth_msg, bincode::config::standard())?;
-        #[allow(clippy::cast_possible_truncation)]
-        send.write_u32_le(bytes.len() as u32).await?;
-        send.write_all(&bytes).await?;
+        control::write_control_frame(&mut send, &auth_msg).await?;
         let _ = send.finish(); // properly close the send side of the auth stream
 
-        let len = recv
-            .read_u32_le()
+        let buf = control::read_control_frame(&mut recv, control::MAX_CONTROL_FRAME_BYTES)
             .await
-            .context("Server closed raw auth response before sending length")?
-            as usize;
-        validate_raw_response_len(len)?;
-        let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf)
-            .await
-            .context("Server closed raw auth response before sending the full body")?;
+            .context("Failed to read raw auth response")?;
 
         // In censorship-resistant mode the server returns a fake nginx HTML
         // page on auth failure. Detect by content, not magic length.
@@ -254,8 +243,7 @@ pub(super) async fn connect_and_handshake(
             );
         }
 
-        let cfg: ControlMessage =
-            bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map(|(v, _)| v)?;
+        let cfg = control::decode_control_message(&buf)?;
         info!(
             "Received raw server config in {} ms",
             config_started.elapsed().as_millis()
@@ -288,11 +276,4 @@ fn wire_mtu_for_addr(config: shared::QuicMtuConfig, addr: &SocketAddr) -> u16 {
     } else {
         config.wire_mtu_ipv6
     }
-}
-
-fn validate_raw_response_len(len: usize) -> Result<()> {
-    if len > 65_536 {
-        anyhow::bail!("Server response too large: {len} bytes");
-    }
-    Ok(())
 }

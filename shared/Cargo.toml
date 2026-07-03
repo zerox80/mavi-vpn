@@ -39,15 +39,27 @@ rustls = { workspace = true, optional = true }
 tokio = { version = "1.0", default-features = false, features = ["io-util", "time", "net", "rt", "macros"], optional = true }
 url = { version = "2", optional = true }
 
+# Control-plane framing shared by the client cores (`control` module). Optional
+# so the backend — which keeps its own server-side framing — pulls in neither
+# bincode nor the async I/O helpers.
+bincode = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+
 [dev-dependencies]
 bincode = { workspace = true }
 proptest = { workspace = true }
 # Async runtime + test macro for the loopback callback-reader tests.
 # `test-util` enables paused-time tests of the per-connection read timeout.
 tokio = { workspace = true, features = ["test-util"] }
+# Lets the `control` module compile for `cargo test -p shared` without any
+# features enabled (it is gated on `any(feature = "control-client", test)`).
+thiserror = { workspace = true }
 
 [features]
 default = []
 # Pulls in the `kc_oauth` module and its HTTP/JSON/base64 dependencies.
 oauth-client = ["dep:serde_json", "dep:base64", "dep:reqwest", "dep:rustls", "dep:tokio", "dep:url"]
+# Pulls in the `control` module: length-prefixed ControlMessage framing and the
+# in-band reauth exchange used by the Linux/Windows/Android client cores.
+control-client = ["dep:tokio", "dep:bincode", "dep:thiserror"]
 

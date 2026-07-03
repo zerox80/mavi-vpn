@@ -2,6 +2,7 @@
 name = "mavi-vpn-gui"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Mavi VPN Desktop GUI"
 license = "MIT"
 repository = "https://github.com/zerox80/mavi-vpn"

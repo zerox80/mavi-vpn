@@ -161,17 +161,49 @@ pub struct Config {
     pub ech_key_path: std::path::PathBuf,
 }
 
+/// Where the effective `mtu` value came from, for the startup log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MtuSetting {
+    Flag,
+    Env,
+    Default,
+}
+
+impl MtuSetting {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Flag => "--mtu flag",
+            Self::Env => "VPN_MTU env / .env",
+            Self::Default => "default",
+        }
+    }
+
+    fn from_matches(matches: &clap::ArgMatches) -> Self {
+        match matches.value_source("mtu") {
+            Some(clap::parser::ValueSource::CommandLine) => Self::Flag,
+            Some(clap::parser::ValueSource::EnvVariable) => Self::Env,
+            _ => Self::Default,
+        }
+    }
+}
+
 /// Loads the server configuration from environment variables and CLI arguments.
 /// Also attempts to load a `.env` file from the current working directory.
-pub fn load() -> Config {
+/// Returns the config together with the provenance of the MTU value, so the
+/// startup log can say where the knob was turned (flag vs. env vs. default).
+pub fn load() -> (Config, MtuSetting) {
     // Load .env file if it exists
     dotenvy::dotenv().ok();
-    let config = Config::parse();
+    let matches = <Config as clap::CommandFactory>::command().get_matches();
+    let config = match <Config as clap::FromArgMatches>::from_arg_matches(&matches) {
+        Ok(config) => config,
+        Err(err) => err.exit(),
+    };
     if let Err(err) = config.validate() {
         eprintln!("{err}");
         std::process::exit(2);
     }
-    config
+    (config, MtuSetting::from_matches(&matches))
 }
 
 impl Config {
@@ -215,279 +247,4 @@ impl Config {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_config() {
-        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret123"]);
-        assert_eq!(config.mtu, 1280);
-        assert_eq!(config.network_cidr, "10.8.0.0/24");
-        assert_eq!(config.network_cidr_v6, "fd00::/64");
-        assert_eq!(config.dns, std::net::Ipv4Addr::new(1, 1, 1, 1));
-        assert_eq!(config.auth_token.as_deref(), Some("secret123"));
-        assert!(!config.censorship_resistant);
-        assert!(!config.mss_clamping);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_mtu_valid_range() {
-        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1360"]);
-        assert_eq!(config.mtu, 1360);
-
-        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1280"]);
-        assert_eq!(config.mtu, 1280);
-    }
-
-    #[test]
-    fn test_mtu_below_range_rejected() {
-        let result =
-            Config::try_parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1279"]);
-        assert!(result.is_err(), "MTU 1279 should be rejected");
-    }
-
-    #[test]
-    fn test_mtu_above_range_rejected() {
-        let result =
-            Config::try_parse_from(["mavi-vpn", "--auth-token", "secret123", "--mtu", "1361"]);
-        assert!(result.is_err(), "MTU 1361 should be rejected");
-    }
-
-    #[test]
-    fn test_custom_arguments() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "super_secret",
-            "--network-cidr",
-            "192.168.10.0/24",
-            "--dns",
-            "8.8.8.8",
-            "--censorship-resistant",
-            "--mss-clamping",
-        ]);
-        assert_eq!(config.auth_token.as_deref(), Some("super_secret"));
-        assert_eq!(config.network_cidr, "192.168.10.0/24");
-        assert_eq!(config.dns, std::net::Ipv4Addr::new(8, 8, 8, 8));
-        assert!(config.censorship_resistant);
-        assert!(config.mss_clamping);
-    }
-
-    #[test]
-    fn test_whitelist_domains() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "secret",
-            "--whitelist-domains",
-            "github.com,google.com",
-        ]);
-        assert_eq!(config.whitelist_domains, vec!["github.com", "google.com"]);
-    }
-
-    #[test]
-    fn test_keycloak_flags() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "secret",
-            "--keycloak-enabled",
-            "--keycloak-url",
-            "https://auth.example.com",
-            "--keycloak-realm",
-            "my-realm",
-            "--keycloak-client-id",
-            "my-client",
-        ]);
-        assert!(config.keycloak_enabled);
-        assert_eq!(
-            config.keycloak_url.as_deref(),
-            Some("https://auth.example.com")
-        );
-        assert_eq!(config.keycloak_realm, "my-realm");
-        assert_eq!(config.keycloak_client_id, "my-client");
-        assert!(config.keycloak_required_role.is_none());
-        assert!(config.keycloak_required_scope.is_none());
-    }
-
-    #[test]
-    fn test_keycloak_defaults() {
-        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret"]);
-        assert!(!config.keycloak_enabled);
-        assert!(config.keycloak_url.is_none());
-        assert_eq!(config.keycloak_realm, "mavi-vpn");
-        assert_eq!(config.keycloak_client_id, "mavi-client");
-        assert!(config.keycloak_required_role.is_none());
-        assert!(config.keycloak_required_scope.is_none());
-    }
-
-    #[test]
-    fn test_keycloak_does_not_require_static_token() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--keycloak-enabled",
-            "--keycloak-url",
-            "https://auth.example.com",
-        ]);
-        assert!(config.keycloak_enabled);
-        assert!(config.auth_token.is_none());
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_static_auth_requires_token() {
-        let config = Config::parse_from(["mavi-vpn"]);
-        assert!(!config.keycloak_enabled);
-        assert!(config.auth_token.is_none());
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_keycloak_policy_flags() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--keycloak-enabled",
-            "--keycloak-url",
-            "https://auth.example.com",
-            "--keycloak-required-role",
-            "vpn-user",
-            "--keycloak-required-scope",
-            "vpn:connect",
-        ]);
-
-        assert_eq!(config.keycloak_required_role.as_deref(), Some("vpn-user"));
-        assert_eq!(
-            config.keycloak_required_scope.as_deref(),
-            Some("vpn:connect")
-        );
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_keycloak_policy_requires_keycloak_auth() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "secret",
-            "--keycloak-required-role",
-            "vpn-user",
-        ]);
-
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_keycloak_requires_url() {
-        let config = Config::parse_from(["mavi-vpn", "--keycloak-enabled"]);
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_keycloak_rejects_plain_http_url() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--keycloak-enabled",
-            "--keycloak-url",
-            "http://auth.example.com",
-        ]);
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_keycloak_allows_localhost_http_url() {
-        for url in [
-            "http://localhost:8080",
-            "http://127.0.0.1:8080/path",
-            "http://[::1]:8080",
-        ] {
-            let config =
-                Config::parse_from(["mavi-vpn", "--keycloak-enabled", "--keycloak-url", url]);
-            assert!(config.validate().is_ok(), "expected {url} to be allowed");
-        }
-    }
-
-    #[test]
-    fn test_ipv6_network_flag() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "secret",
-            "--network-cidr-v6",
-            "fd12:3456::/64",
-        ]);
-        assert_eq!(config.network_cidr_v6, "fd12:3456::/64");
-    }
-
-    #[test]
-    fn test_ech_flags() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "secret",
-            "--ech-public-name",
-            "cover.example.com",
-        ]);
-        assert_eq!(config.ech_public_name, "cover.example.com");
-    }
-
-    #[test]
-    fn test_ech_defaults() {
-        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret"]);
-        assert_eq!(config.ech_public_name, "cloudflare-ech.com");
-    }
-
-    #[test]
-    fn test_dns_v6_flag() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "secret",
-            "--dns-v6",
-            "2001:4860:4860::8888",
-        ]);
-        assert_eq!(config.dns_v6, Some("2001:4860:4860::8888".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_dns_v6_default() {
-        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret"]);
-        assert!(config.dns_v6.is_none());
-    }
-
-    #[test]
-    fn test_bind_addr_default() {
-        let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret"]);
-        assert_eq!(
-            config.bind_addr,
-            "0.0.0.0:4433".parse::<std::net::SocketAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn test_bind_addr_custom() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "secret",
-            "--bind-addr",
-            "127.0.0.1:8443",
-        ]);
-        assert_eq!(
-            config.bind_addr,
-            "127.0.0.1:8443".parse::<std::net::SocketAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn test_tun_device_path() {
-        let config = Config::parse_from([
-            "mavi-vpn",
-            "--auth-token",
-            "secret",
-            "--tun-device-path",
-            "tun1",
-        ]);
-        assert_eq!(config.tun_device_path.as_deref(), Some("tun1"));
-    }
-}
+mod tests;

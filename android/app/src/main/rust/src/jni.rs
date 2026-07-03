@@ -41,7 +41,10 @@ fn clear_last_init_error() {
 }
 
 fn classify_init_error(message: &str) -> jlong {
+    // Matching is case-insensitive (unlike the desktop reconnect loops) since
+    // JNI error strings pass through several layers that may change casing.
     let msg = message.to_ascii_lowercase();
+    let contains_marker = |marker: &str| msg.contains(&marker.to_ascii_lowercase());
     if msg.contains("invalid certificate pin")
         || msg.contains("pin mismatch")
         || msg.contains("certificate pin mismatch")
@@ -49,7 +52,7 @@ fn classify_init_error(message: &str) -> jlong {
         return INIT_FATAL_CERT;
     }
     if msg.contains("server error: unauthorized")
-        || msg.contains("auth_failed")
+        || contains_marker(shared::session_errors::MARKER_AUTH_FAILED)
         || msg.contains("access denied")
         || msg.contains("invalid keycloak token")
         || msg.contains("invalid token")
@@ -58,8 +61,8 @@ fn classify_init_error(message: &str) -> jlong {
     }
     if msg.contains("endpoint host missing")
         || msg.contains("invalid address")
-        || msg.contains("mtu mismatch")
-        || msg.contains("unsupported vpn mtu")
+        || contains_marker(shared::session_errors::MARKER_MTU_MISMATCH)
+        || contains_marker(shared::session_errors::MARKER_UNSUPPORTED_MTU)
     {
         return INIT_FATAL_CONFIG;
     }

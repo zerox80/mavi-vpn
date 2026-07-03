@@ -7,16 +7,13 @@ use std::time::{Duration, Instant};
 pub(crate) const RECONNECT_INITIAL_SECS: u64 = 1;
 pub(crate) const RECONNECT_MAX_SECS: u64 = 30;
 
-/// Substrings that mark an error as a permanent failure: reconnecting cannot fix
-/// these (bad credentials, rejected handshake, or adapter/IP setup that will fail
-/// identically on retry), so the loop stops instead of backing off forever.
-const PERMANENT_FAILURE_MARKERS: &[&str] = &[
-    "AUTH_FAILED",
-    "Server rejected connection",
-    "MTU mismatch",
-    "was not applied to adapter",
-    "IPV6_SETUP_FAILED",
-];
+/// Marker substrings for Windows-specific permanent failures: adapter/IP setup
+/// that will fail identically on retry, so the loop stops instead of backing
+/// off forever. The cross-platform markers (auth, server rejection, MTU) live
+/// in [`shared::session_errors`] — previously this list duplicated them and
+/// had drifted (it was missing `unsupported VPN MTU`, so an out-of-range
+/// server MTU retried forever on Windows).
+const WINDOWS_PERMANENT_MARKERS: &[&str] = &["was not applied to adapter", "IPV6_SETUP_FAILED"];
 
 /// Sleeps up to `delay`, but returns as soon as `running` is cleared.
 ///
@@ -61,10 +58,10 @@ pub(crate) fn compute_reconnect_delay(
         },
         Err(e) => {
             let err_str = e.to_string();
-            if PERMANENT_FAILURE_MARKERS
-                .iter()
-                .any(|marker| err_str.contains(marker))
-            {
+            if shared::session_errors::is_permanent_session_error(
+                &err_str,
+                WINDOWS_PERMANENT_MARKERS,
+            ) {
                 ReconnectDecision::PermanentFailure { error: err_str }
             } else {
                 ReconnectDecision::Reconnect {
@@ -181,6 +178,20 @@ mod tests {
     #[test]
     fn permanent_mtu_mismatch_stops() {
         let err = anyhow::anyhow!("MTU mismatch");
+        assert!(matches!(
+            compute_reconnect_delay(Err(err), Duration::from_secs(5)),
+            ReconnectDecision::PermanentFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn permanent_unsupported_mtu_stops() {
+        // Regression: this marker was missing from the Windows list before the
+        // classifier moved to shared::session_errors, so an out-of-range
+        // server MTU retried forever instead of stopping.
+        let err = anyhow::anyhow!(
+            "Server pushed unsupported VPN MTU 9000. Supported range is 1280-1360."
+        );
         assert!(matches!(
             compute_reconnect_delay(Err(err), Duration::from_secs(5)),
             ReconnectDecision::PermanentFailure { .. }

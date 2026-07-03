@@ -130,7 +130,7 @@ mavi-vpn/
 │
 ├── quic-tester/        # DPI probe simulator — verifies censorship resistance
 ├── docs/               # INSTALLATION.md, NGINX_PROXY.md, whitepaper.tex
-├── Dockerfile          # Multi-stage build (rust:1.94 → debian:trixie-slim)
+├── Dockerfile          # Multi-stage build (rust:1.95 → debian:trixie-slim)
 └── .github/workflows/  # CI: build (Linux CLI, Android APK, Linux/Windows GUI), tests
 ```
 

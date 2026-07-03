@@ -9,6 +9,13 @@ members = [
     "gui/src-tauri",
 ]
 
+[workspace.package]
+# Minimum supported Rust version for the whole workspace. Bounded by the
+# locked dependency set (constant_time_eq 0.5 requires 1.95); bump it here
+# when a dependency raises the floor so older toolchains fail with a clear
+# "package requires rustc X" error instead of an opaque build failure.
+rust-version = "1.95"
+
 [workspace.lints.rust]
 unsafe_code = "warn"
 

@@ -15,6 +15,7 @@ pub mod ipc;
 pub mod kc_oauth;
 pub mod masque;
 pub mod mtu;
+pub mod session_errors;
 
 pub use endpoint::{
     endpoint_host, endpoint_host_is_explicit_ipv6, resolve_server_name, split_endpoint,
@@ -207,16 +208,16 @@ pub fn validate_keycloak_url(url: &str) -> Result<(), String> {
 /// on Windows and Android.
 #[must_use]
 pub fn looks_like_html_response(buf: &[u8]) -> bool {
-    let trimmed: Vec<u8> = buf
+    let start = buf
         .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .take(32)
-        .collect();
-    trimmed.starts_with(b"<!DOCTYPE")
-        || trimmed.starts_with(b"<!doctype")
-        || trimmed.starts_with(b"<html")
-        || trimmed.starts_with(b"<HTML")
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(buf.len());
+    let trimmed = &buf[start..];
+    [b"<!doctype".as_slice(), b"<html".as_slice()]
+        .iter()
+        .any(|prefix| {
+            trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
+        })
 }
 
 #[cfg(test)]

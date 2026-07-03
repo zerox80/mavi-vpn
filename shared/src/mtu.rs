@@ -50,10 +50,13 @@ pub fn compute_quic_mtu_config(vpn_mtu: Option<u16>) -> QuicMtuConfig {
 /// synthesized ICMP "Packet Too Big" cannot recover it because the dropped
 /// packet never reaches the path where PMTUD would help.
 ///
-/// The error message embeds the marker substrings `"unsupported VPN MTU"` /
-/// `"MTU mismatch"`, which every client's permanent-error classifier already
-/// recognises, so a misconfiguration stops the reconnect loop instead of
-/// retrying forever.
+/// The error message embeds the marker substrings
+/// [`crate::session_errors::MARKER_UNSUPPORTED_MTU`] /
+/// [`crate::session_errors::MARKER_MTU_MISMATCH`] (referenced as constants
+/// below so the coupling cannot drift), which every client's permanent-error
+/// classifier recognises via
+/// [`crate::session_errors::is_permanent_session_error`], so a
+/// misconfiguration stops the reconnect loop instead of retrying forever.
 ///
 /// # Errors
 /// Returns `Err` if `server_mtu` is out of the supported range or differs from
@@ -61,14 +64,16 @@ pub fn compute_quic_mtu_config(vpn_mtu: Option<u16>) -> QuicMtuConfig {
 pub fn check_server_mtu(server_mtu: u16, local_tun_mtu: u16) -> Result<(), String> {
     if !(MIN_TUN_MTU..=MAX_TUN_MTU).contains(&server_mtu) {
         return Err(format!(
-            "Server pushed unsupported VPN MTU {server_mtu}. Supported range is {MIN_TUN_MTU}-{MAX_TUN_MTU}."
+            "Server pushed {marker} {server_mtu}. Supported range is {MIN_TUN_MTU}-{MAX_TUN_MTU}.",
+            marker = crate::session_errors::MARKER_UNSUPPORTED_MTU,
         ));
     }
     if server_mtu != local_tun_mtu {
         return Err(format!(
-            "MTU mismatch: local/client VPN MTU is {local_tun_mtu}, but server pushed {server_mtu}. \
+            "{marker}: local/client VPN MTU is {local_tun_mtu}, but server pushed {server_mtu}. \
              Configure both sides to the same VPN_MTU (the client pins its transport budget before \
-             the handshake and cannot adopt a different value)."
+             the handshake and cannot adopt a different value).",
+            marker = crate::session_errors::MARKER_MTU_MISMATCH,
         ));
     }
     Ok(())

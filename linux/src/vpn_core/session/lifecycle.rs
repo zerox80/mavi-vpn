@@ -1,13 +1,17 @@
+/// Marker substrings for Linux-specific permanent setup failures: TUN device
+/// creation and `ip`-command failures will fail identically on retry, so the
+/// reconnect loop must stop instead of backing off forever. The cross-platform
+/// markers (auth, server rejection, MTU) live in [`shared::session_errors`].
+const LINUX_PERMANENT_MARKERS: &[&str] = &[
+    "Failed to open /dev/net/tun",
+    "Failed to create TUN device",
+    "Failed to install IPv6 split route",
+    "Failed to execute: ip ",
+    "ip failed:",
+];
+
 pub(super) fn is_permanent_setup_error(message: &str) -> bool {
-    message.contains("AUTH_FAILED")
-        || message.contains("Server rejected connection")
-        || message.contains("MTU mismatch")
-        || message.contains("unsupported VPN MTU")
-        || message.contains("Failed to open /dev/net/tun")
-        || message.contains("Failed to create TUN device")
-        || message.contains("Failed to install IPv6 split route")
-        || message.contains("Failed to execute: ip ")
-        || message.contains("ip failed:")
+    shared::session_errors::is_permanent_session_error(message, LINUX_PERMANENT_MARKERS)
 }
 
 pub(super) enum SessionEnd {

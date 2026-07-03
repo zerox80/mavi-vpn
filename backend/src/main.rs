@@ -101,16 +101,12 @@ async fn main() -> Result<()> {
     // Install the cryptographic provider (aws-lc-rs for better performance)
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let config = config::load();
+    let (config, mtu_setting) = config::load();
 
     let quic_payload_mtu = config.mtu + shared::QUIC_OVERHEAD_BYTES;
     let wire_overhead_ipv4 = 20u16 + 8; // IP + UDP
     let wire_overhead_ipv6 = 40u16 + 8;
-    let mtu_source = if std::env::var("VPN_MTU").is_ok() {
-        "VPN_MTU env / .env"
-    } else {
-        "default"
-    };
+    let mtu_source = mtu_setting.label();
 
     info!("Starting Mavi VPN Server...");
     info!("Network: {}", config.network_cidr);

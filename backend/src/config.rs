@@ -161,17 +161,49 @@ pub struct Config {
     pub ech_key_path: std::path::PathBuf,
 }
 
+/// Where the effective `mtu` value came from, for the startup log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MtuSetting {
+    Flag,
+    Env,
+    Default,
+}
+
+impl MtuSetting {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Flag => "--mtu flag",
+            Self::Env => "VPN_MTU env / .env",
+            Self::Default => "default",
+        }
+    }
+
+    fn from_matches(matches: &clap::ArgMatches) -> Self {
+        match matches.value_source("mtu") {
+            Some(clap::parser::ValueSource::CommandLine) => Self::Flag,
+            Some(clap::parser::ValueSource::EnvVariable) => Self::Env,
+            _ => Self::Default,
+        }
+    }
+}
+
 /// Loads the server configuration from environment variables and CLI arguments.
 /// Also attempts to load a `.env` file from the current working directory.
-pub fn load() -> Config {
+/// Returns the config together with the provenance of the MTU value, so the
+/// startup log can say where the knob was turned (flag vs. env vs. default).
+pub fn load() -> (Config, MtuSetting) {
     // Load .env file if it exists
     dotenvy::dotenv().ok();
-    let config = Config::parse();
+    let matches = <Config as clap::CommandFactory>::command().get_matches();
+    let config = match <Config as clap::FromArgMatches>::from_arg_matches(&matches) {
+        Ok(config) => config,
+        Err(err) => err.exit(),
+    };
     if let Err(err) = config.validate() {
         eprintln!("{err}");
         std::process::exit(2);
     }
-    config
+    (config, MtuSetting::from_matches(&matches))
 }
 
 impl Config {
@@ -229,6 +261,31 @@ mod tests {
         assert!(!config.censorship_resistant);
         assert!(!config.mss_clamping);
         assert!(config.validate().is_ok());
+    }
+
+    fn mtu_setting_for(args: &[&str]) -> MtuSetting {
+        let matches = <Config as clap::CommandFactory>::command().get_matches_from(args);
+        MtuSetting::from_matches(&matches)
+    }
+
+    #[test]
+    fn test_mtu_setting_provenance() {
+        assert_eq!(
+            mtu_setting_for(&["mavi-vpn", "--auth-token", "secret"]),
+            MtuSetting::Default
+        );
+        assert_eq!(
+            mtu_setting_for(&["mavi-vpn", "--auth-token", "secret", "--mtu", "1280"]),
+            MtuSetting::Flag,
+            "an explicit --mtu must report as flag-set even at the default value"
+        );
+    }
+
+    #[test]
+    fn test_mtu_setting_labels() {
+        assert_eq!(MtuSetting::Flag.label(), "--mtu flag");
+        assert_eq!(MtuSetting::Env.label(), "VPN_MTU env / .env");
+        assert_eq!(MtuSetting::Default.label(), "default");
     }
 
     #[test]

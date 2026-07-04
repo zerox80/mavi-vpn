@@ -14,6 +14,28 @@ pub trait JwksFetcher: Send + Sync + std::fmt::Debug {
     fn fetch_jwks<'a>(&'a self, url: &'a str) -> JwksFetchFuture<'a>;
 }
 
+/// A real-world JWKS response (even with several keys retained across a
+/// rotation) is a few KB. This bounds it well above that while still refusing
+/// to buffer an unbounded body from a compromised/MITMed Keycloak instance.
+const MAX_JWKS_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// Reads `resp`'s body up to `max_bytes`, one chunk at a time, instead of
+/// buffering an unbounded response into memory.
+async fn read_capped_jwks_body(mut resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .context("failed reading JWKS response body")?
+    {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            anyhow::bail!("JWKS response exceeded {max_bytes}-byte limit");
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 #[derive(Debug)]
 struct DefaultJwksFetcher;
 
@@ -30,7 +52,8 @@ impl JwksFetcher for DefaultJwksFetcher {
                 .send()
                 .await
                 .context("Failed to fetch JWKS")?;
-            let jwks: JwkSet = res.json().await.context("Failed to parse JWKS JSON")?;
+            let body = read_capped_jwks_body(res, MAX_JWKS_RESPONSE_BYTES).await?;
+            let jwks: JwkSet = serde_json::from_slice(&body).context("Failed to parse JWKS JSON")?;
             Ok(jwks)
         })
     }

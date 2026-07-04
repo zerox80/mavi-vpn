@@ -316,13 +316,18 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_getLastInitError<'l
 ) -> jni::sys::jstring {
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let env = guard.borrow_env_mut();
-    let message = last_init_error()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    env.new_string(message)
-        .unwrap_or_else(|_| env.new_string("").unwrap())
-        .into_raw()
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let message = last_init_error()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        env.new_string(message)
+            .unwrap_or_else(|_| env.new_string("").unwrap())
+            .into_raw()
+    }));
+
+    result.unwrap_or_else(|_| env.new_string("").unwrap().into_raw())
 }
 
 #[allow(improper_ctypes_definitions)]

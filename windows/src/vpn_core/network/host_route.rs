@@ -4,17 +4,23 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 pub(super) fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
-    add_host_route_exception_fixed_with_runner(&SystemCommandRunner, endpoint, true)
-}
-
-fn add_host_route_exception_fixed_with_runner(
-    runner: &dyn CommandRunner,
-    endpoint: &str,
-    persist: bool,
-) -> Option<String> {
     let (host, _) = split_endpoint(endpoint);
     let host_ip = host.parse::<IpAddr>().ok()?;
+    add_host_route_exception_for_ip_with_runner(&SystemCommandRunner, host_ip, true)
+}
 
+/// Same as [`add_host_route_exception_fixed`], but for an already-resolved IP
+/// (a split-tunnel whitelist domain) rather than the VPN endpoint's own
+/// `host:port` string.
+pub(super) fn add_host_route_exception_for_ip(ip: IpAddr) -> Option<String> {
+    add_host_route_exception_for_ip_with_runner(&SystemCommandRunner, ip, true)
+}
+
+fn add_host_route_exception_for_ip_with_runner(
+    runner: &dyn CommandRunner,
+    host_ip: IpAddr,
+    persist: bool,
+) -> Option<String> {
     let (prefix, default_prefix) = match host_ip {
         IpAddr::V4(_) => (format!("{host_ip}/32"), "0.0.0.0/0"),
         IpAddr::V6(_) => (format!("{host_ip}/128"), "::/0"),
@@ -55,19 +61,37 @@ fn host_route_path() -> PathBuf {
     base.join("mavi-vpn").join("last_host_route.txt")
 }
 
+/// Appends `prefix` to the crash-recovery file so a route survives a service
+/// crash (which skips `SessionRouteGuard`'s `Drop`) even when the session
+/// installed several exceptions (the endpoint plus each whitelist domain).
 fn persist_host_route(prefix: &str) {
+    use std::io::Write;
+
     let path = host_route_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, prefix);
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{prefix}");
 }
 
-pub(super) fn load_persisted_host_route() -> Option<String> {
+pub(super) fn load_persisted_host_routes() -> Vec<String> {
     std::fs::read_to_string(host_route_path())
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .map(|contents| {
+            contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(super) fn clear_persisted_host_route() {
@@ -85,7 +109,11 @@ mod tests {
     fn host_route_exception_builds_ipv4_power_shell_plan() {
         let runner = RecordingRunner::new(true);
 
-        let prefix = add_host_route_exception_fixed_with_runner(&runner, "203.0.113.10:443", false);
+        let prefix = add_host_route_exception_for_ip_with_runner(
+            &runner,
+            "203.0.113.10".parse().unwrap(),
+            false,
+        );
 
         assert_eq!(prefix.as_deref(), Some("203.0.113.10/32"));
         let commands = runner.commands();
@@ -103,8 +131,11 @@ mod tests {
     fn host_route_exception_builds_ipv6_power_shell_plan() {
         let runner = RecordingRunner::new(true);
 
-        let prefix =
-            add_host_route_exception_fixed_with_runner(&runner, "[2001:db8::10]:443", false);
+        let prefix = add_host_route_exception_for_ip_with_runner(
+            &runner,
+            "2001:db8::10".parse().unwrap(),
+            false,
+        );
 
         assert_eq!(prefix.as_deref(), Some("2001:db8::10/128"));
         let commands = runner.commands();
@@ -119,7 +150,11 @@ mod tests {
     fn host_route_exception_returns_none_when_runner_fails() {
         let runner = RecordingRunner::new(false);
 
-        let prefix = add_host_route_exception_fixed_with_runner(&runner, "203.0.113.10:443", false);
+        let prefix = add_host_route_exception_for_ip_with_runner(
+            &runner,
+            "203.0.113.10".parse().unwrap(),
+            false,
+        );
 
         assert!(prefix.is_none());
     }

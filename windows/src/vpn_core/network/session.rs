@@ -4,9 +4,10 @@ use super::adapter::{
 };
 use super::cleanup::cleanup_routes;
 use super::dns::configure_dns;
-use super::host_route::add_host_route_exception_fixed;
+use super::host_route::{add_host_route_exception_fixed, add_host_route_exception_for_ip};
 use super::ip::{wait_for_ipv4_address, win32_add_ip};
 use super::route::{apply_ipv6_prefix_policy, ipv6_network_prefix, win32_add_route};
+use super::whitelist::resolve_whitelist_ips;
 use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
@@ -15,18 +16,18 @@ use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use wintun::Adapter;
 
 pub struct SessionRouteGuard {
-    host_route: Option<String>,
+    host_routes: Vec<String>,
 }
 
 impl SessionRouteGuard {
-    pub const fn new(host_route: Option<String>) -> Self {
-        Self { host_route }
+    pub const fn new(host_routes: Vec<String>) -> Self {
+        Self { host_routes }
     }
 }
 
 impl Drop for SessionRouteGuard {
     fn drop(&mut self) {
-        cleanup_routes(self.host_route.as_deref());
+        cleanup_routes(&self.host_routes);
     }
 }
 
@@ -60,7 +61,8 @@ pub fn set_adapter_network_config(
     adapter: &Adapter,
     config: AdapterNetworkConfig,
     endpoint: &str,
-) -> Result<Option<String>> {
+    whitelist_domains: &[String],
+) -> Result<Vec<String>> {
     let AdapterNetworkConfig {
         ip,
         netmask,
@@ -72,6 +74,11 @@ pub fn set_adapter_network_config(
         gateway_v6,
         dns_v6,
     } = config;
+
+    // Resolve split-tunnel whitelist domains before this adapter's DNS server
+    // or the split default routes are installed below, so this still queries
+    // the physical (pre-VPN) resolver.
+    let whitelist_ips = resolve_whitelist_ips(whitelist_domains, assigned_ipv6.is_some());
 
     let requested_adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let adapter_index = adapter.get_adapter_index()?;
@@ -118,6 +125,12 @@ pub fn set_adapter_network_config(
     let endpoint_route = add_host_route_exception_fixed(endpoint).ok_or_else(|| {
         anyhow::anyhow!("Failed to install host route exception for VPN endpoint")
     })?;
+    let mut host_routes = vec![endpoint_route];
+    for ip in whitelist_ips {
+        if let Some(prefix) = add_host_route_exception_for_ip(ip) {
+            host_routes.push(prefix);
+        }
+    }
 
     let route_result = (|| -> Result<()> {
         install_ipv4_split_routes(adapter_index, gateway)?;
@@ -129,7 +142,7 @@ pub fn set_adapter_network_config(
         Ok(())
     })();
     if let Err(err) = route_result {
-        cleanup_routes(Some(&endpoint_route));
+        cleanup_routes(&host_routes);
         return Err(err);
     }
 
@@ -141,10 +154,10 @@ pub fn set_adapter_network_config(
     configure_vpn_dns_preference(&adapter_name, adapter_index, dns, dns_v6);
 
     info!(
-        "Network config complete: endpoint_exception={}",
-        endpoint_route
+        "Network config complete: host route exceptions={}",
+        host_routes.len()
     );
-    Ok(Some(endpoint_route))
+    Ok(host_routes)
 }
 
 fn install_ipv4_split_routes(adapter_index: u32, gateway: Ipv4Addr) -> Result<()> {
@@ -260,15 +273,24 @@ mod tests {
     }
 
     #[test]
-    fn session_route_guard_stores_host_route() {
-        let guard = SessionRouteGuard::new(Some("10.0.0.0/32".to_string()));
-        assert_eq!(guard.host_route.as_deref(), Some("10.0.0.0/32"));
+    fn session_route_guard_stores_host_routes() {
+        let guard = SessionRouteGuard::new(vec!["10.0.0.0/32".to_string()]);
+        assert_eq!(guard.host_routes, vec!["10.0.0.0/32".to_string()]);
     }
 
     #[test]
-    fn session_route_guard_none_host_route() {
-        let guard = SessionRouteGuard::new(None);
-        assert!(guard.host_route.is_none());
+    fn session_route_guard_stores_multiple_host_routes() {
+        let guard = SessionRouteGuard::new(vec![
+            "10.0.0.0/32".to_string(),
+            "203.0.113.10/32".to_string(),
+        ]);
+        assert_eq!(guard.host_routes.len(), 2);
+    }
+
+    #[test]
+    fn session_route_guard_empty_host_routes() {
+        let guard = SessionRouteGuard::new(Vec::new());
+        assert!(guard.host_routes.is_empty());
     }
 
     #[test]

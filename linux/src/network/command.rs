@@ -33,3 +33,25 @@ pub(super) fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
     let mut runner = ProductionCommandRunner;
     runner.run(cmd, args)
 }
+
+/// Records invocations instead of running them, shared by `routes` and
+/// `whitelist`'s tests so each doesn't need its own copy.
+#[cfg(test)]
+pub(super) mod test_support {
+    use super::{CommandRunner, Result};
+
+    #[derive(Default)]
+    pub(crate) struct RecordingRunner {
+        pub(crate) calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&mut self, cmd: &str, args: &[&str]) -> Result<()> {
+            self.calls.push((
+                cmd.to_string(),
+                args.iter().map(|a| (*a).to_string()).collect(),
+            ));
+            Ok(())
+        }
+    }
+}

@@ -109,7 +109,9 @@ pub async fn start_oauth_flow(
 
     if !res.status().is_success() {
         let status = res.status();
-        let body = res.text().await.unwrap_or_default();
+        let body = shared::kc_oauth::read_capped_text(res, shared::kc_oauth::MAX_TOKEN_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
         // The raw response body is logged locally for debugging only; it must
         // not be embedded in the error returned to the frontend, since a
         // failed exchange's error body is upstream server text we don't
@@ -120,9 +122,9 @@ pub async fn start_oauth_flow(
         ));
     }
 
-    let body = res
-        .text()
+    let body = shared::kc_oauth::read_capped_text(res, shared::kc_oauth::MAX_TOKEN_RESPONSE_BYTES)
         .await
+        .map_err(|e| anyhow::anyhow!(e))
         .context("Failed to read Keycloak token response")?;
     shared::kc_oauth::parse_token_response(&body, None)
         .ok_or_else(|| anyhow::anyhow!("Token response missing access_token"))

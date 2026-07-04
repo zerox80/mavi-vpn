@@ -396,4 +396,45 @@ fn test_validate_claims() {
     ));
 }
 
+/// Spawns a one-shot HTTP server on loopback that replies with `body` and
+/// returns its address, driving a real `reqwest::Response` through
+/// `read_capped_jwks_body`.
+async fn serve_once(body: String) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    });
+    addr
+}
+
+#[tokio::test]
+async fn read_capped_jwks_body_accepts_body_within_limit() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let addr = serve_once("{\"keys\":[]}".to_string()).await;
+    let resp = reqwest::get(format!("http://{addr}/")).await.unwrap();
+
+    let body = read_capped_jwks_body(resp, 1024).await.unwrap();
+    assert_eq!(body, b"{\"keys\":[]}");
+}
+
+#[tokio::test]
+async fn read_capped_jwks_body_rejects_oversized_response() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let addr = serve_once("x".repeat(64)).await;
+    let resp = reqwest::get(format!("http://{addr}/")).await.unwrap();
+
+    let err = read_capped_jwks_body(resp, 10).await.unwrap_err();
+    assert!(err.to_string().contains("exceeded"));
+}
+
 mod claim_policy_tests;

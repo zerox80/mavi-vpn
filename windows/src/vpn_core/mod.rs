@@ -68,6 +68,7 @@ struct ServerNetworkAssignment {
     netmask_v6: Option<u8>,
     gateway_v6: Option<std::net::Ipv6Addr>,
     dns_v6: Option<std::net::Ipv6Addr>,
+    whitelist_domains: Vec<String>,
 }
 
 impl ServerNetworkAssignment {
@@ -83,7 +84,7 @@ impl ServerNetworkAssignment {
                 netmask_v6,
                 gateway_v6,
                 dns_server_v6,
-                ..
+                whitelist_domains,
             } => Ok(Self {
                 assigned_ip,
                 netmask,
@@ -94,6 +95,7 @@ impl ServerNetworkAssignment {
                 netmask_v6,
                 gateway_v6,
                 dns_v6: dns_server_v6,
+                whitelist_domains: whitelist_domains.unwrap_or_default(),
             }),
             ControlMessage::Error { message } => {
                 Err(anyhow::anyhow!("Server rejected connection: {message}"))
@@ -156,7 +158,7 @@ pub async fn run_vpn(
     while runtime.is_running() {
         // Always clear stale routes before a new session so a previous
         // (possibly crashed) session does not leave orphaned routing entries.
-        cleanup_routes(None);
+        cleanup_routes(&[]);
         runtime.set_connected(false);
 
         let outcome = run_session(&config, &cert_pin_hashes, &adapter, &runtime).await;
@@ -192,7 +194,7 @@ pub async fn run_vpn(
 
     // 4. Cleanup - routes first, then DNS/NRPT
     runtime.set_connected(false);
-    cleanup_routes(None);
+    cleanup_routes(&[]);
     remove_nrpt_dns_rule();
     runtime.clear_assigned_ip();
     info!("VPN Service Stopped.");
@@ -296,6 +298,7 @@ async fn run_session(
         adapter,
         assignment.adapter_config(),
         &endpoint_ip_str,
+        &assignment.whitelist_domains,
     )?);
     info!(
         "Windows adapter/network config completed in {} ms",

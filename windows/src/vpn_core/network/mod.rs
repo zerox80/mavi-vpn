@@ -9,6 +9,7 @@ mod dns;
 mod host_route;
 mod session;
 mod socket;
+mod whitelist;
 
 pub use self::adapter::remove_nrpt_dns_rule;
 pub use self::cleanup::{cleanup_routes, cleanup_stale_network_state};

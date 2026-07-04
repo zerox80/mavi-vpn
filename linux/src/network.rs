@@ -11,6 +11,7 @@ use tracing::{info, warn};
 mod command;
 mod dns;
 mod routes;
+mod whitelist;
 
 use command::{run_cmd, CommandRunner};
 
@@ -25,6 +26,10 @@ pub struct NetworkConfig {
     pub has_ipv6: bool,
     pub gateway_v6: Option<Ipv6Addr>,
     pub used_resolvconf: bool,
+    /// Split-tunnel whitelist domain IPs excepted from the tunnel via a host
+    /// route, resolved once at connect time. Removed symmetrically in
+    /// `cleanup()`.
+    pub whitelist_ips: Vec<IpAddr>,
 }
 
 impl NetworkConfig {
@@ -42,10 +47,16 @@ impl NetworkConfig {
         netmask_v6: Option<u8>,
         gateway_v6: Option<Ipv6Addr>,
         dns_v6: Option<Ipv6Addr>,
+        whitelist_domains: &[String],
     ) -> Result<Self> {
         let prefix_len = routes::netmask_to_prefix(netmask);
 
         let has_ipv6 = assigned_ipv6.is_some();
+
+        // Resolve split-tunnel whitelist domains before DNS is redirected to
+        // the tunnel below, so this still queries the physical (pre-VPN)
+        // resolver.
+        let whitelist_ips = whitelist::resolve_whitelist_ips(whitelist_domains, has_ipv6);
 
         // 5. Detect the physical gateway and device (before we add VPN routes)
         let (physical_gateway, physical_device) = routes::detect_physical_gateway();
@@ -72,6 +83,16 @@ impl NetworkConfig {
             physical_device_v6.as_deref(),
         )?;
 
+        // 7. Except each resolved whitelist domain IP from the tunnel too.
+        whitelist::add_whitelist_route_exceptions(
+            &mut runner,
+            &whitelist_ips,
+            physical_gateway.as_deref(),
+            physical_device.as_deref(),
+            physical_gateway_v6.as_deref(),
+            physical_device_v6.as_deref(),
+        );
+
         // 9. DNS configuration
         let (dns_backup, used_resolvconf) = dns::configure_dns(tun_name, dns, dns_v6)?;
 
@@ -90,6 +111,7 @@ impl NetworkConfig {
             has_ipv6,
             gateway_v6,
             used_resolvconf,
+            whitelist_ips,
         })
     }
 
@@ -116,6 +138,9 @@ impl NetworkConfig {
             }
             Err(_) => {}
         }
+
+        // Remove each whitelist domain's route exception, symmetric with apply().
+        whitelist::remove_whitelist_route_exceptions(&self.whitelist_ips);
 
         // Restore DNS
         dns::restore_dns(&self.dns_backup, self.used_resolvconf);
@@ -224,28 +249,14 @@ fn add_endpoint_route_exception<R: CommandRunner>(
     physical_device_v6: Option<&str>,
 ) {
     match routes::parse_endpoint_ip(endpoint_ip) {
-        Ok(IpAddr::V4(v4)) => {
-            if let (Some(gw), Some(dev)) = (physical_gateway, physical_device) {
-                let route = format!("{v4}/32");
-                let _ = runner.run("ip", &["route", "add", &route, "via", gw, "dev", dev]);
-            } else {
-                warn!(
-                    "No physical IPv4 gateway detected; skipping host route exception for {}",
-                    v4
-                );
-            }
-        }
-        Ok(IpAddr::V6(v6)) => {
-            if let (Some(gw), Some(dev)) = (physical_gateway_v6, physical_device_v6) {
-                let route = format!("{v6}/128");
-                let _ = runner.run("ip", &["-6", "route", "add", &route, "via", gw, "dev", dev]);
-            } else {
-                warn!(
-                    "No physical IPv6 gateway detected; skipping host route exception for {}",
-                    v6
-                );
-            }
-        }
+        Ok(ip) => routes::add_host_route_exception(
+            runner,
+            ip,
+            physical_gateway,
+            physical_device,
+            physical_gateway_v6,
+            physical_device_v6,
+        ),
         Err(e) => {
             warn!(
                 "Could not parse endpoint IP {:?}: {}; skipping host route exception",

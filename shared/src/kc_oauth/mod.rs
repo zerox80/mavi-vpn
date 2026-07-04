@@ -56,6 +56,35 @@ fn json_i64(value: &serde_json::Value) -> Option<i64> {
         .or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
 }
 
+/// Maximum size accepted for a Keycloak token-endpoint response body. Real
+/// responses (access + refresh + optional id token, all JWTs) are a few KB;
+/// this only guards against a compromised/MITMed Keycloak instance streaming
+/// an unbounded body into memory. Every platform's token exchange/refresh
+/// reads its response through [`read_capped_text`] rather than
+/// `Response::text()`/`::json()` directly.
+pub const MAX_TOKEN_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// Reads `resp`'s body up to `max_bytes`, one chunk at a time, instead of
+/// buffering an unbounded response into memory.
+///
+/// # Errors
+/// Returns `Err` if a read fails, the body is not valid UTF-8, or its total
+/// size exceeds `max_bytes`.
+pub async fn read_capped_text(mut resp: reqwest::Response, max_bytes: usize) -> Result<String, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("failed reading response body: {e}"))?
+    {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("response body exceeded {max_bytes}-byte limit"));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).map_err(|_| "response body was not valid UTF-8".to_string())
+}
+
 /// Parses a Keycloak token endpoint JSON body into [`OAuthTokens`].
 ///
 /// When the response omits a `refresh_token` (Keycloak does this on some
@@ -173,7 +202,9 @@ pub async fn refresh_access_token(
     match client.post(&token_endpoint).form(&params).send().await {
         Ok(resp) => {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_capped_text(resp, MAX_TOKEN_RESPONSE_BYTES)
+                .await
+                .unwrap_or_default();
             if status.is_success() {
                 parse_token_response(&body, Some(refresh_token)).map_or_else(
                     || {
@@ -208,6 +239,45 @@ pub(crate) fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    /// Spawns a one-shot HTTP server on loopback that replies with `body` and
+    /// returns its address, mirroring the real Keycloak token endpoint shape
+    /// closely enough to drive a real `reqwest::Response` through
+    /// `read_capped_text`.
+    async fn serve_once(body: &'static str) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn read_capped_text_accepts_body_within_limit() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let addr = serve_once("hello").await;
+        let resp = reqwest::get(format!("http://{addr}/")).await.unwrap();
+
+        assert_eq!(read_capped_text(resp, 1024).await.unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn read_capped_text_rejects_oversized_body() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let addr = serve_once("this body is over the limit").await;
+        let resp = reqwest::get(format!("http://{addr}/")).await.unwrap();
+
+        assert!(read_capped_text(resp, 10).await.is_err());
+    }
 
     /// Builds an unsigned JWT (`header.payload.`) whose payload carries `exp`.
     fn jwt_with_exp(exp: i64) -> String {

@@ -1,3 +1,4 @@
+use super::command::CommandRunner;
 use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::Command;
@@ -62,6 +63,44 @@ pub(super) fn parse_endpoint_ip(s: &str) -> Result<IpAddr> {
     cleaned
         .parse::<IpAddr>()
         .with_context(|| format!("not a valid IP address: {:?}", s))
+}
+
+/// Adds a host route (`/32` for IPv4, `/128` for IPv6) for `ip` via the
+/// physical (non-VPN) gateway/device, so traffic to it bypasses the tunnel.
+/// Shared by the VPN endpoint's own route exception (preventing a routing
+/// loop) and each resolved split-tunnel whitelist domain IP.
+pub(super) fn add_host_route_exception<R: CommandRunner>(
+    runner: &mut R,
+    ip: IpAddr,
+    physical_gateway: Option<&str>,
+    physical_device: Option<&str>,
+    physical_gateway_v6: Option<&str>,
+    physical_device_v6: Option<&str>,
+) {
+    match ip {
+        IpAddr::V4(v4) => {
+            if let (Some(gw), Some(dev)) = (physical_gateway, physical_device) {
+                let route = format!("{v4}/32");
+                let _ = runner.run("ip", &["route", "add", &route, "via", gw, "dev", dev]);
+            } else {
+                warn!(
+                    "No physical IPv4 gateway detected; skipping host route exception for {}",
+                    v4
+                );
+            }
+        }
+        IpAddr::V6(v6) => {
+            if let (Some(gw), Some(dev)) = (physical_gateway_v6, physical_device_v6) {
+                let route = format!("{v6}/128");
+                let _ = runner.run("ip", &["-6", "route", "add", &route, "via", gw, "dev", dev]);
+            } else {
+                warn!(
+                    "No physical IPv6 gateway detected; skipping host route exception for {}",
+                    v6
+                );
+            }
+        }
+    }
 }
 
 pub(super) fn netmask_to_prefix(netmask: Ipv4Addr) -> u8 {

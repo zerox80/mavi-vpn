@@ -1,5 +1,5 @@
 use super::adapter::{cleanup_mavi_adapter_dns_state, remove_nrpt_dns_rule};
-use super::host_route::{clear_persisted_host_route, load_persisted_host_route};
+use super::host_route::{clear_persisted_host_route, load_persisted_host_routes};
 use super::ip::win32_cleanup_all_ips_on_interface;
 use super::route::{
     cleanup_ipv6_prefix_policy, win32_cleanup_all_routes_on_interface, win32_delete_route,
@@ -9,7 +9,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 use tracing::{debug, info};
 
-pub fn cleanup_routes(host_route: Option<&str>) {
+pub fn cleanup_routes(host_routes: &[String]) {
     info!("Cleaning up MaviVPN routes...");
     cleanup_ipv6_prefix_policy();
 
@@ -37,12 +37,9 @@ pub fn cleanup_routes(host_route: Option<&str>) {
         }
     });
 
-    let mut host_prefixes = Vec::new();
-    if let Some(prefix) = host_route {
-        host_prefixes.push(prefix.to_string());
-    }
-    if let Some(prefix) = load_persisted_host_route() {
-        if !host_prefixes.iter().any(|item| item == &prefix) {
+    let mut host_prefixes: Vec<String> = host_routes.to_vec();
+    for prefix in load_persisted_host_routes() {
+        if !host_prefixes.contains(&prefix) {
             host_prefixes.push(prefix);
         }
     }
@@ -68,6 +65,6 @@ pub fn cleanup_routes(host_route: Option<&str>) {
 }
 
 pub fn cleanup_stale_network_state() {
-    cleanup_routes(None);
+    cleanup_routes(&[]);
     remove_nrpt_dns_rule();
 }

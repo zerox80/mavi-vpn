@@ -1,7 +1,7 @@
 use super::cert_pin;
 use anyhow::{Context, Result};
 use bytes::Buf;
-use shared::{icmp, ipc::Config, masque, ControlMessage};
+use shared::{icmp, ipc::Config, masque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -18,9 +18,11 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 15;
 const TUN_DEVICE_NAME: &str = "mavi0";
 
 mod lifecycle;
+mod network_assignment;
 mod reauth;
 
 use self::lifecycle::{is_permanent_setup_error, SessionEnd};
+use self::network_assignment::{ServerNetworkAssignment, SessionSetupError};
 
 /// Sleeps up to `delay`, but returns as soon as `running` is cleared.
 ///
@@ -177,39 +179,31 @@ async fn run_session(
     };
 
     // 2. Extract Network Configuration
-    let (assigned_ip, netmask, gateway, dns, mtu, assigned_ipv6, netmask_v6, gateway_v6, dns_v6) =
-        match server_config {
-            ControlMessage::Config {
-                assigned_ip,
-                netmask,
-                gateway,
-                dns_server,
-                mtu,
-                assigned_ipv6,
-                netmask_v6,
-                gateway_v6,
-                dns_server_v6,
-                ..
-            } => (
-                assigned_ip,
-                netmask,
-                gateway,
-                dns_server,
-                mtu,
-                assigned_ipv6,
-                netmask_v6,
-                gateway_v6,
-                dns_server_v6,
-            ),
-            ControlMessage::Error { message } => {
-                let msg = format!("Server rejected connection: {}", message);
-                if let Ok(mut last) = last_error_state.lock() {
-                    *last = Some(msg.clone());
-                }
-                return Err(anyhow::anyhow!(msg));
+    let assignment = match ServerNetworkAssignment::from_control(server_config) {
+        Ok(assignment) => assignment,
+        Err(SessionSetupError::Rejected(message)) => {
+            let msg = format!("Server rejected connection: {}", message);
+            if let Ok(mut last) = last_error_state.lock() {
+                *last = Some(msg.clone());
             }
-            _ => return Err(anyhow::anyhow!("Unexpected server response")),
-        };
+            return Err(anyhow::anyhow!(msg));
+        }
+        Err(SessionSetupError::UnexpectedResponse) => {
+            return Err(anyhow::anyhow!("Unexpected server response"));
+        }
+    };
+    let ServerNetworkAssignment {
+        assigned_ip,
+        netmask,
+        gateway,
+        dns,
+        mtu,
+        assigned_ipv6,
+        netmask_v6,
+        gateway_v6,
+        dns_v6,
+        whitelist_domains,
+    } = assignment;
 
     // 3. Create TUN device
     let tun = TunDevice::create(TUN_DEVICE_NAME)?;
@@ -237,6 +231,7 @@ async fn run_session(
         netmask_v6,
         gateway_v6,
         dns_v6,
+        &whitelist_domains,
     )?;
 
     // 5. Start async TUN I/O

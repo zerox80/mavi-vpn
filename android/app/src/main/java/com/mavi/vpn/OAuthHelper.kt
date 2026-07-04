@@ -46,6 +46,12 @@ object OAuthHelper {
     @Volatile
     private var oauthState: String? = null
 
+    // Real token responses (access + refresh + optional id token, all JWTs) are a
+    // few KB; this only guards against a compromised/MITMed Keycloak instance
+    // streaming an unbounded body into memory. peekBody truncates rather than
+    // reading past the cap, so an oversized body just fails JSON parsing below.
+    private const val MAX_TOKEN_RESPONSE_BYTES = 256L * 1024
+
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient
             .Builder()
@@ -347,7 +353,14 @@ object OAuthHelper {
                 codeVerifier = null
             }
 
-            if (expectedState == null || returnedState != expectedState) {
+            val stateMatches =
+                expectedState != null &&
+                    returnedState != null &&
+                    MessageDigest.isEqual(
+                        returnedState.toByteArray(Charsets.UTF_8),
+                        expectedState.toByteArray(Charsets.UTF_8),
+                    )
+            if (!stateMatches) {
                 Log.e("OAuthHelper", "OAuth state mismatch; possible CSRF. Aborting token exchange.")
                 return@withContext null
             }
@@ -382,7 +395,7 @@ object OAuthHelper {
 
             try {
                 httpClient.newCall(request).execute().use { response ->
-                    val body = response.body.string()
+                    val body = response.peekBody(MAX_TOKEN_RESPONSE_BYTES).string()
                     if (response.isSuccessful) {
                         val tokens = parseTokenResponse(body)
                         if (tokens == null) {
@@ -431,7 +444,7 @@ object OAuthHelper {
 
             try {
                 httpClient.newCall(request).execute().use { response ->
-                    val body = response.body.string()
+                    val body = response.peekBody(MAX_TOKEN_RESPONSE_BYTES).string()
                     if (response.isSuccessful) {
                         val tokens = parseTokenResponse(body, fallbackRefreshToken = refreshToken)
                         if (tokens == null) {

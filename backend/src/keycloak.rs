@@ -53,7 +53,8 @@ impl JwksFetcher for DefaultJwksFetcher {
                 .await
                 .context("Failed to fetch JWKS")?;
             let body = read_capped_jwks_body(res, MAX_JWKS_RESPONSE_BYTES).await?;
-            let jwks: JwkSet = serde_json::from_slice(&body).context("Failed to parse JWKS JSON")?;
+            let jwks: JwkSet =
+                serde_json::from_slice(&body).context("Failed to parse JWKS JSON")?;
             Ok(jwks)
         })
     }

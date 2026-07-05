@@ -400,9 +400,7 @@ fn test_validate_claims() {
 /// returns its address, driving a real `reqwest::Response` through
 /// `read_capped_jwks_body`.
 async fn serve_once(body: String) -> std::net::SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;

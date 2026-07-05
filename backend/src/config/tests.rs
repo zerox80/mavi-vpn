@@ -183,6 +183,46 @@ fn test_keycloak_policy_requires_keycloak_auth() {
 }
 
 #[test]
+fn test_empty_role_and_scope_treated_as_unset() {
+    // docker-compose passes unset variables through as empty strings
+    // (`${VAR:-}`); normalize() must not trip the keycloak-policy check.
+    let mut config = Config::parse_from([
+        "mavi-vpn",
+        "--auth-token",
+        "secret",
+        "--keycloak-required-role",
+        "",
+        "--keycloak-required-scope",
+        "",
+    ]);
+    config.normalize();
+    assert!(config.keycloak_required_role.is_none());
+    assert!(config.keycloak_required_scope.is_none());
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_normalize_keeps_real_role_and_scope() {
+    let mut config = Config::parse_from([
+        "mavi-vpn",
+        "--keycloak-enabled",
+        "--keycloak-url",
+        "https://auth.example.com",
+        "--keycloak-required-role",
+        "vpn-user",
+        "--keycloak-required-scope",
+        "vpn:connect",
+    ]);
+    config.normalize();
+    assert_eq!(config.keycloak_required_role.as_deref(), Some("vpn-user"));
+    assert_eq!(
+        config.keycloak_required_scope.as_deref(),
+        Some("vpn:connect")
+    );
+    assert!(config.validate().is_ok());
+}
+
+#[test]
 fn test_keycloak_requires_url() {
     let config = Config::parse_from(["mavi-vpn", "--keycloak-enabled"]);
     assert!(config.validate().is_err());

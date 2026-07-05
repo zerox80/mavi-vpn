@@ -195,10 +195,11 @@ pub fn load() -> (Config, MtuSetting) {
     // Load .env file if it exists
     dotenvy::dotenv().ok();
     let matches = <Config as clap::CommandFactory>::command().get_matches();
-    let config = match <Config as clap::FromArgMatches>::from_arg_matches(&matches) {
+    let mut config = match <Config as clap::FromArgMatches>::from_arg_matches(&matches) {
         Ok(config) => config,
         Err(err) => err.exit(),
     };
+    config.normalize();
     if let Err(err) = config.validate() {
         eprintln!("{err}");
         std::process::exit(2);
@@ -207,6 +208,20 @@ pub fn load() -> (Config, MtuSetting) {
 }
 
 impl Config {
+    /// Docker Compose forwards unset optional variables as empty strings
+    /// (`${VAR:-}`), which clap surfaces as `Some("")`. Treat empty
+    /// role/scope requirements as absent, like `auth_token`/`keycloak_url`.
+    fn normalize(&mut self) {
+        for field in [
+            &mut self.keycloak_required_role,
+            &mut self.keycloak_required_scope,
+        ] {
+            if field.as_deref().is_some_and(str::is_empty) {
+                *field = None;
+            }
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !self.keycloak_enabled && self.auth_token.as_deref().is_none_or(str::is_empty) {
             return Err(

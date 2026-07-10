@@ -11,6 +11,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  node-supply-chain:
+    name: Node dependency audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Audit dependencies
+        run: npm audit --audit-level=moderate
+
   rust-supply-chain:
     name: Rust dependency audit
     runs-on: ubuntu-latest

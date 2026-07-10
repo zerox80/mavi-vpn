@@ -400,11 +400,25 @@ fn test_validate_claims() {
 /// returns its address, driving a real `reqwest::Response` through
 /// `read_capped_jwks_body`.
 async fn serve_once(body: String) -> std::net::SocketAddr {
+    const MAX_TEST_REQUEST_BYTES: usize = 64 * 1024;
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 1024];
+        while request.len() < MAX_TEST_REQUEST_BYTES {
+            let read = socket.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),

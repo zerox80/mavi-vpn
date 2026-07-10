@@ -70,7 +70,10 @@ pub const MAX_TOKEN_RESPONSE_BYTES: usize = 256 * 1024;
 /// # Errors
 /// Returns `Err` if a read fails, the body is not valid UTF-8, or its total
 /// size exceeds `max_bytes`.
-pub async fn read_capped_text(mut resp: reqwest::Response, max_bytes: usize) -> Result<String, String> {
+pub async fn read_capped_text(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String, String> {
     let mut buf: Vec<u8> = Vec::new();
     while let Some(chunk) = resp
         .chunk()
@@ -239,7 +242,7 @@ pub(crate) fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     /// Spawns a one-shot HTTP server on loopback that replies with `body` and
@@ -251,6 +254,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::with_capacity(1024);
+            let mut chunk = [0u8; 1024];
+            while request.len() < MAX_CALLBACK_REQUEST_BYTES {
+                let read = socket.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if http_request_head_complete(&request) {
+                    break;
+                }
+            }
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),

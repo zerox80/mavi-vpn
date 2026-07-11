@@ -347,38 +347,44 @@ async fn run_session(
                         pool.extend_from_slice(&scratch[..n]);
                         pool.split().freeze()
                     };
-                    if let Err(e) = conn_sender.send_packet(payload).await {
-                        if let Some(quic) = conn_sender.quic() {
-                            let version = scratch[0] >> 4;
-                            let source_ip = if version == 4 {
-                                Some(std::net::IpAddr::V4(gateway))
-                            } else if version == 6 {
-                                gateway_v6_for_ptb.map(std::net::IpAddr::V6)
-                            } else {
-                                None
-                            };
-                            let h3_prefix = if is_h3_framing {
-                                masque::DATAGRAM_PREFIX.len()
-                            } else {
-                                0
-                            };
-                            let reported_mtu = shared::effective_ptb_mtu(
-                                tun_mtu_for_ptb,
-                                quic.max_datagram_size(),
-                                h3_prefix,
-                                version == 6,
-                            );
-                            if let Some(icmp_packet) = icmp::generate_packet_too_big(
-                                &scratch[..n],
-                                reported_mtu,
-                                source_ip,
-                            ) {
-                                let _ = tun_reader.write(&icmp_packet).await;
+                    match conn_sender.send_packet(payload).await {
+                        Ok(()) => {}
+                        Err(super::handshake::SendPacketError::TooLarge) => {
+                            if let Some(quic) = conn_sender.quic() {
+                                let version = scratch[0] >> 4;
+                                let source_ip = if version == 4 {
+                                    Some(std::net::IpAddr::V4(gateway))
+                                } else if version == 6 {
+                                    gateway_v6_for_ptb.map(std::net::IpAddr::V6)
+                                } else {
+                                    None
+                                };
+                                let h3_prefix = if is_h3_framing {
+                                    masque::DATAGRAM_PREFIX.len()
+                                } else {
+                                    0
+                                };
+                                let reported_mtu = shared::effective_ptb_mtu(
+                                    tun_mtu_for_ptb,
+                                    quic.max_datagram_size(),
+                                    h3_prefix,
+                                    version == 6,
+                                );
+                                if let Some(icmp_packet) = icmp::generate_packet_too_big(
+                                    &scratch[..n],
+                                    reported_mtu,
+                                    source_ip,
+                                ) {
+                                    let _ = tun_reader.write(&icmp_packet).await;
+                                }
                             }
+                            warn!("QUIC datagram too large; sent ICMP Packet Too Big");
                         }
-                        warn!("Transport send error: {}", e);
-                        alive_tun.store(false, Ordering::SeqCst);
-                        break;
+                        Err(e) => {
+                            warn!("Transport send error: {}", e);
+                            alive_tun.store(false, Ordering::SeqCst);
+                            break;
+                        }
                     }
                 }
                 Ok(_) => {} // zero-length read, continue

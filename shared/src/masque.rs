@@ -42,7 +42,8 @@ pub const CAPSULE_MAVI_REAUTH_RESULT: u64 = 0x4D58;
 /// For stream ID 0 the Quarter Stream ID is 0, and for uncompressed IP
 /// payloads the Context ID is 0 – both encode to a single `0x00` byte,
 /// giving a 2-byte prefix. We hard-code this for the hot path; the
-/// `unwrap_datagram` helper still accepts any varint-encoded values.
+/// `unwrap_datagram` accepts non-canonical encodings of those zero values,
+/// but rejects packets for any other request stream or context.
 ///
 /// This hard-coding relies on the invariant that Mavi sends exactly one
 /// extended CONNECT request per H3 connection and that it lands on the
@@ -373,18 +374,19 @@ pub fn wrap_datagram(ip_packet: &[u8]) -> Vec<u8> {
 }
 
 /// Extracts the IP packet out of a connect-ip datagram frame. Returns `None`
-/// if the prefix is truncated.
+/// if the prefix is truncated or identifies another request stream or context.
 #[must_use]
 pub fn unwrap_datagram(datagram: &[u8]) -> Option<&[u8]> {
     // Fast path: both varints encode as a single 0x00 byte.
     if datagram.len() >= 2 && datagram[0] == 0x00 && datagram[1] == 0x00 {
         return Some(&datagram[2..]);
     }
-    // General path: handles any varint-encoded Quarter Stream ID / Context ID.
-    let (_qsid, n1) = read_varint(datagram)?;
+    // General path: accepts non-canonical encodings for Mavi's single stream
+    // and context, but never maps another CONNECT request into this tunnel.
+    let (qsid, n1) = read_varint(datagram)?;
     let rest = &datagram[n1..];
-    let (_ctx, n2) = read_varint(rest)?;
-    Some(&datagram[n1 + n2..])
+    let (context_id, n2) = read_varint(rest)?;
+    (qsid == 0 && context_id == 0).then_some(&datagram[n1 + n2..])
 }
 
 #[cfg(test)]

@@ -384,6 +384,13 @@ async fn connect_and_handshake_h3(
     if resp.status() != http::StatusCode::OK {
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
     }
+    if resp
+        .headers()
+        .get("capsule-protocol")
+        .is_none_or(|value| value != "?1")
+    {
+        anyhow::bail!("AUTH_FAILED: Server did not enable the capsule protocol");
+    }
     if is_camouflage_h3_response(resp.headers()) {
         anyhow::bail!("AUTH_FAILED: Server returned camouflage HTML instead of MAVI_CONFIG");
     }

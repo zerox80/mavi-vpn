@@ -21,6 +21,24 @@ pub(super) enum TunnelConnection {
     Http2(Http2Session),
 }
 
+/// A packet-plane send failure, preserving the recoverable QUIC MTU signal.
+#[derive(Debug)]
+pub(super) enum SendPacketError {
+    TooLarge,
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for SendPacketError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge => formatter.write_str("QUIC datagram exceeds the peer's maximum size"),
+            Self::Other(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for SendPacketError {}
+
 impl TunnelConnection {
     pub(super) fn remote_address(&self) -> std::net::SocketAddr {
         match self {
@@ -29,12 +47,22 @@ impl TunnelConnection {
         }
     }
 
-    pub(super) async fn send_packet(&self, packet: bytes::Bytes) -> Result<()> {
+    pub(super) async fn send_packet(
+        &self,
+        packet: bytes::Bytes,
+    ) -> std::result::Result<(), SendPacketError> {
         match self {
-            Self::Quic(connection) => connection
-                .send_datagram(packet)
-                .map_err(|error| anyhow::anyhow!("QUIC datagram send failed: {error}")),
-            Self::Http2(session) => session.send_packet(packet).await,
+            Self::Quic(connection) => match connection.send_datagram(packet) {
+                Ok(()) => Ok(()),
+                Err(quinn::SendDatagramError::TooLarge) => Err(SendPacketError::TooLarge),
+                Err(error) => Err(SendPacketError::Other(anyhow::anyhow!(
+                    "QUIC datagram send failed: {error}"
+                ))),
+            },
+            Self::Http2(session) => session
+                .send_packet(packet)
+                .await
+                .map_err(SendPacketError::Other),
         }
     }
 

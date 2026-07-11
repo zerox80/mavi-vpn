@@ -114,6 +114,12 @@ fn unwrap_datagram_rejects_truncation() {
 }
 
 #[test]
+fn unwrap_datagram_rejects_unknown_stream_or_context() {
+    assert!(unwrap_datagram(&[0x01, 0x00, 0x45]).is_none());
+    assert!(unwrap_datagram(&[0x00, 0x01, 0x45]).is_none());
+}
+
+#[test]
 fn varint_encode_1_byte_boundary() {
     let mut buf = Vec::new();
     write_varint(0, &mut buf);

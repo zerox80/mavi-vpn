@@ -23,12 +23,26 @@ enum NonConnectIpResponse {
     NotFound,
 }
 
+const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/*/*/";
+const CAPSULE_PROTOCOL: &str = "?1";
+
 fn non_connect_ip_response(censorship_resistant: bool) -> NonConnectIpResponse {
     if censorship_resistant {
         NonConnectIpResponse::CamouflageOk
     } else {
         NonConnectIpResponse::NotFound
     }
+}
+
+fn is_connect_ip_request<B>(request: &http::Request<B>) -> bool {
+    request.method() == http::Method::CONNECT
+        && request.uri().path() == CONNECT_IP_PATH
+        && request.extensions().get::<h3::ext::Protocol>().copied()
+            == Some(h3::ext::Protocol::CONNECT_IP)
+        && request
+            .headers()
+            .get("capsule-protocol")
+            .is_some_and(|value| value == CAPSULE_PROTOCOL)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -153,8 +167,7 @@ pub async fn handle_h3_connection(
         .await
         .map_err(|_| anyhow::anyhow!("H3 resolve timeout from {remote_addr}"))?
         .map_err(|e| anyhow::anyhow!("H3 resolve error: {e}"))?;
-    let connect_ip_requested =
-        req.extensions().get::<h3::ext::Protocol>().copied() == Some(h3::ext::Protocol::CONNECT_IP);
+    let connect_ip_requested = is_connect_ip_request(&req);
     info!(
         "H3 Request: {} {} (connect-ip={})",
         req.method(),
@@ -242,6 +255,8 @@ pub async fn handle_h3_connection(
 
     let response = Response::builder()
         .status(http::StatusCode::OK)
+        .header("capsule-protocol", CAPSULE_PROTOCOL)
+        .header("cache-control", "no-store")
         .body(())
         .map_err(|e| anyhow::anyhow!("Response build error: {e}"))?;
     req_stream
@@ -315,6 +330,58 @@ mod tests {
             non_connect_ip_response(false),
             NonConnectIpResponse::NotFound
         );
+    }
+
+    fn connect_ip_request() -> http::Request<()> {
+        let mut request = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri(CONNECT_IP_PATH)
+            .header("capsule-protocol", CAPSULE_PROTOCOL)
+            .body(())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(h3::ext::Protocol::CONNECT_IP);
+        request
+    }
+
+    #[test]
+    fn connect_ip_request_requires_method_path_protocol_and_capsule_header() {
+        let request = connect_ip_request();
+        assert!(is_connect_ip_request(&request));
+
+        let wrong_method = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(CONNECT_IP_PATH)
+            .header("capsule-protocol", CAPSULE_PROTOCOL)
+            .body(())
+            .unwrap();
+        assert!(!is_connect_ip_request(&wrong_method));
+
+        let wrong_path = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("/.well-known/masque/ip/192.0.2.1/6/")
+            .header("capsule-protocol", CAPSULE_PROTOCOL)
+            .extension(h3::ext::Protocol::CONNECT_IP)
+            .body(())
+            .unwrap();
+        assert!(!is_connect_ip_request(&wrong_path));
+
+        let missing_protocol = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri(CONNECT_IP_PATH)
+            .header("capsule-protocol", CAPSULE_PROTOCOL)
+            .body(())
+            .unwrap();
+        assert!(!is_connect_ip_request(&missing_protocol));
+
+        let missing_capsule_protocol = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri(CONNECT_IP_PATH)
+            .extension(h3::ext::Protocol::CONNECT_IP)
+            .body(())
+            .unwrap();
+        assert!(!is_connect_ip_request(&missing_capsule_protocol));
     }
 
     #[test]

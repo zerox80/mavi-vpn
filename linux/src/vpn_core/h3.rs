@@ -75,6 +75,13 @@ pub(super) async fn connect_and_handshake_h3(
     if resp.status() != http::StatusCode::OK {
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
     }
+    if resp
+        .headers()
+        .get("capsule-protocol")
+        .is_none_or(|value| value != "?1")
+    {
+        anyhow::bail!("AUTH_FAILED: Server did not enable the capsule protocol");
+    }
 
     // Accumulate capsules until we see MAVI_CONFIG. Every wait on `recv_data`
     // is bounded by the remaining handshake budget so a silent or slow-drip

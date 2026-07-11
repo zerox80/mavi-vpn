@@ -80,6 +80,13 @@ pub(super) async fn connect_and_handshake_h3(
     if resp.status() != http::StatusCode::OK {
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
     }
+    if resp
+        .headers()
+        .get("capsule-protocol")
+        .is_none_or(|value| value != "?1")
+    {
+        anyhow::bail!("AUTH_FAILED: Server did not enable the capsule protocol");
+    }
 
     // Read capsules until we find MAVI_CONFIG. We collect into a rolling buffer
     // because capsule boundaries do not align with QUIC chunk boundaries.

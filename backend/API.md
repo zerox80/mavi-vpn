@@ -2,11 +2,11 @@
 
 This document describes the public backend protocol exposed by the Mavi VPN
 server. The backend is not a classical REST API. It exposes a VPN control plane
-and an IP data plane over QUIC, with two supported client-facing protocol
-profiles:
+and an IP data plane with three supported client-facing protocol profiles:
 
 1. **Raw Mavi QUIC protocol** using ALPN `mavivpn`
 2. **HTTP/3 CONNECT-IP / MASQUE protocol** using ALPN `h3`
+3. **HTTP/2 CONNECT-IP protocol** using ALPN `h2` over TLS/TCP
 
 The word "API" in this document therefore means the network contract between a
 client and the backend: transport parameters, authentication, control messages,
@@ -15,15 +15,16 @@ configuration values the server exposes to clients during connection setup.
 
 The protocol is intentionally small. Authentication happens once at connection
 startup, configuration is delivered once after successful authentication, and
-all tunneled traffic then moves through QUIC datagrams. No JSON REST endpoint is
-required for ordinary VPN operation.
+raw and HTTP/3 tunneled traffic then moves through QUIC datagrams. HTTP/2 mode
+carries CONNECT-IP datagram capsules inside HTTP/2 DATA frames over TLS/TCP. No
+JSON REST endpoint is required for ordinary VPN operation.
 
 Source overview:
 
 - `backend/src/main.rs` starts the QUIC server, loads configuration, prepares
   certificates, initializes Keycloak authentication, creates the TUN interface,
   and accepts incoming QUIC connections.
-- `backend/src/config.rs` defines CLI flags, environment variables, defaults,
+- `backend/src/config/mod.rs` defines CLI flags, environment variables, defaults,
   and validation rules for server configuration.
 - `backend/src/server/quic.rs` configures TLS 1.3, QUIC transport settings,
   ALPN, datagrams, congestion control, keepalive, buffers, and the fixed QUIC
@@ -33,6 +34,10 @@ Source overview:
   and starts the tunnel loop.
 - `backend/src/handlers/h3.rs` handles HTTP/3 extended CONNECT-IP requests,
   bearer-token authentication, MASQUE capsules, and camouflage responses.
+- `backend/src/server/http2.rs` accepts the optional TLS/TCP HTTP/2 listener,
+  validates Extended CONNECT-IP requests, and starts HTTP/2 tunnel sessions.
+- `backend/src/handlers/tunnel/http2.rs` carries CONNECT-IP capsules over the
+  upgraded HTTP/2 stream, including datagrams and reauthentication.
 - `backend/src/handlers/auth.rs` validates either a static token or a Keycloak
   JWT and leases an IPv4/IPv6 address pair.
 - `backend/src/handlers/tunnel.rs` moves IP packets between QUIC datagrams and
@@ -42,7 +47,7 @@ Source overview:
 - `backend/src/routing.rs` routes packets read from TUN to registered clients
   by destination address and prefixes server-to-client packets with the
   CONNECT-IP datagram prefix internally.
-- `backend/src/state.rs` manages IPv4 and IPv6 address pools and active peer
+- `backend/src/state/mod.rs` manages IPv4 and IPv6 address pools and active peer
   registries.
 - `backend/src/keycloak.rs` implements Keycloak JWKS loading, JWT validation,
   key refresh, issuer checks, `azp` checks, optional role checks, and optional
@@ -50,8 +55,8 @@ Source overview:
 - `shared/src/lib.rs` defines bincode-serialized control messages and shared
   MTU constants.
 - `shared/src/masque.rs` defines QUIC varint helpers, Capsule Protocol framing,
-  CONNECT-IP address and route capsules, the vendor-specific Mavi capsule, and
-  HTTP/3 datagram wrapping/unwrapping.
+  CONNECT-IP address and route capsules, the vendor-specific Mavi capsules, and
+  HTTP/3/HTTP/2 datagram wrapping and unwrapping.
 
 ---
 
@@ -64,13 +69,16 @@ the client needs in order to configure its virtual network interface. In raw
 mode this setup phase is a single bincode control exchange on a client-opened
 bidirectional QUIC stream. In HTTP/3 mode this setup phase is an extended
 CONNECT-IP request followed by a capsule stream containing both standard
-CONNECT-IP information and a Mavi-specific configuration capsule.
+CONNECT-IP information and a Mavi-specific configuration capsule. HTTP/2 uses
+the same capsule types after an RFC 8441 Extended CONNECT upgrade, but carries
+them in HTTP/2 DATA frames.
 
-The forwarding phase uses QUIC datagrams. A datagram carries exactly one inner
-IP packet, either directly in raw mode or wrapped in the HTTP/3 CONNECT-IP
-datagram framing in `h3` mode. The server does not expose per-packet REST-like
-operations, resource URLs, or persistent JSON sessions. The QUIC connection is
-the session.
+The forwarding phase uses QUIC datagrams in raw and HTTP/3 modes. A datagram
+carries exactly one inner IP packet, either directly in raw mode or wrapped in
+HTTP/3 CONNECT-IP datagram framing in `h3` mode. HTTP/2 mode carries the same
+CONNECT-IP payload in a `CAPSULE_DATAGRAM` capsule over the upgraded HTTP/2
+stream. The server does not expose per-packet REST-like operations, resource
+URLs, or persistent JSON sessions; the transport connection is the session.
 
 The server assigns one IPv4 address and one IPv6 address to every authenticated
 connection. Whether IPv6 configuration is sent to the client depends on whether
@@ -79,10 +87,12 @@ released when the connection handler exits. The backend keeps active peer
 registries keyed by virtual destination address, so packets read from the TUN
 interface can be routed to the correct QUIC connection.
 
-Client implementations should treat the protocol as connection-oriented even
-though the data plane uses unreliable datagrams. A client should authenticate,
-apply the received configuration, send and receive datagrams while the QUIC
-connection is alive, and discard the assigned addresses after disconnect.
+Client implementations should treat the protocol as connection-oriented. QUIC
+clients must account for unreliable datagrams; HTTP/2 clients receive reliable,
+ordered TCP delivery but still carry IP packets in datagram capsules. A client
+should authenticate, apply the received configuration, exchange packets while
+the transport connection is alive, and discard the assigned addresses after
+disconnect.
 
 ---
 
@@ -113,6 +123,15 @@ Client IP traffic is sent after authentication using QUIC datagrams. Because
 MTU discovery is disabled, the server pins the QUIC transport MTU to a value
 derived from `VPN_MTU`. Operators should choose an inner tunnel MTU that fits
 their expected outer network path.
+
+### Optional HTTP/2 endpoint
+
+When `VPN_HTTP2_BIND_ADDR` is set, the backend also listens on that TCP address
+for HTTP/2 CONNECT-IP sessions. The listener is disabled by default and may use
+the same numeric port as `VPN_BIND_ADDR` because one endpoint is UDP and the
+other is TCP. It uses the configured certificate and advertises only ALPN `h2`.
+HTTP/2 mode does not use QUIC, ECH, QUIC connection migration, or the
+censorship-resistant fake nginx responses.
 
 On Linux, the server also attempts to relax kernel-level path MTU discovery
 behavior for IPv4 and IPv6 UDP sockets. Those socket options are best-effort:
@@ -672,6 +691,78 @@ not indicate VPN authentication success.
 
 ---
 
+## 5A. HTTP/2 CONNECT-IP / Capsules
+
+### When HTTP/2 mode is used
+
+HTTP/2 mode is enabled by setting `VPN_HTTP2_BIND_ADDR` on the server and
+`http2_framing: true` in the client configuration. It is a separate TLS/TCP
+listener, disabled by default. The UDP QUIC listener may use the same numeric
+port. Client transport normalization makes HTTP/2 mutually exclusive with
+censorship-resistant mode, HTTP/3 framing, and ECH.
+
+HTTP/2 is a reliable, ordered fallback transport. It is not a QUIC transport and
+does not provide QUIC datagrams, QUIC connection migration, ECH, or the fake
+nginx probe response used by the QUIC censorship-resistant mode.
+
+### HTTP/2 request contract
+
+The listener negotiates ALPN `h2` and accepts only HTTP/2. A tunnel request must
+meet all of these conditions:
+
+```http
+CONNECT /.well-known/masque/ip/*/*/ HTTP/2
+:protocol: connect-ip
+capsule-protocol: ?1
+Authorization: Bearer <token>
+```
+
+The path, method, `connect-ip` Extended CONNECT protocol, and capsule protocol
+marker are all checked. The bearer prefix must be exactly `Bearer ` with a
+trailing space. A successful request returns:
+
+```http
+:status: 200
+capsule-protocol: ?1
+cache-control: no-store
+```
+
+The server then sends `ADDRESS_ASSIGN`, `ROUTE_ADVERTISEMENT`, and `MAVI_CONFIG`
+capsules. The capsule type and payload definitions are the same as in the
+HTTP/3 section above; `MAVI_CONFIG` contains the bincode
+`ControlMessage::Config` payload.
+
+### HTTP/2 data plane
+
+After the response, both directions carry capsules in HTTP/2 DATA frames. A
+`CAPSULE_DATAGRAM` capsule contains a CONNECT-IP datagram payload: a context ID
+followed by one IPv4 or IPv6 packet. Mavi currently uses context ID `0`. Unlike
+HTTP/3, there is no QUIC Quarter Stream ID prefix. The server validates that
+client packets use the assigned source address and fit the configured inner
+tunnel MTU; invalid packets are dropped and oversized packets may generate
+Packet Too Big feedback.
+
+The Mavi-specific reauthentication capsules are:
+
+| Capsule | Type | Purpose |
+|---|---:|---|
+| `MAVI_REAUTH` | `0x4D57` | Carries a refreshed bearer token |
+| `MAVI_REAUTH_RESULT` | `0x4D58` | Reports whether reauthentication was accepted |
+
+Reauthentication refreshes the authenticated session without reconnecting. A
+session still closes when its authentication deadline expires without a
+successful refresh.
+
+### HTTP/2 errors and probe behavior
+
+For HTTP/2 requests that fail authentication, the server returns `401
+Unauthorized`. Invalid CONNECT-IP requests return `400 Bad Request`; other
+requests return `404 Not Found`. The HTTP/2 listener does not return the fake
+nginx HTML response, even when the QUIC listener has censorship-resistant mode
+enabled.
+
+---
+
 ## 6. HTTP/3 datagram format
 
 CONNECT-IP datagrams are framed as:
@@ -1130,6 +1221,7 @@ may change without a protocol version change.
 | CLI flag | Environment variable | Default | Description |
 |---|---|---|---|
 | `--bind-addr` | `VPN_BIND_ADDR` | `0.0.0.0:4433` | UDP address for QUIC server |
+| `--http2-bind-addr` | `VPN_HTTP2_BIND_ADDR` | unset | Optional TCP address for HTTP/2 CONNECT-IP |
 | `--auth-token` | `VPN_AUTH_TOKEN` | required unless Keycloak is enabled | Static authentication token |
 | `--network-cidr` | `VPN_NETWORK` | `10.8.0.0/24` | IPv4 VPN address pool |
 | `--network-cidr-v6` | `VPN_NETWORK_V6` | `fd00::/64` | IPv6 VPN address pool |
@@ -1212,6 +1304,23 @@ A compatible HTTP/3 CONNECT-IP client must:
 13. Strip CONNECT-IP datagram prefixes from incoming datagrams before writing
     packets to TUN.
 14. Close and clean up local network state when the QUIC connection ends.
+
+### HTTP/2 CONNECT-IP client checklist
+
+A compatible HTTP/2 CONNECT-IP client must:
+
+1. Connect to the configured TCP endpoint using TLS with certificate pinning.
+2. Negotiate ALPN `h2`.
+3. Send an HTTP/2 Extended CONNECT request to
+   `/.well-known/masque/ip/*/*/` with protocol `connect-ip`.
+4. Include `capsule-protocol: ?1` and `Authorization: Bearer <token>`.
+5. Require a `200` response before configuring the local TUN interface.
+6. Parse `ADDRESS_ASSIGN`, `ROUTE_ADVERTISEMENT`, and `MAVI_CONFIG` capsules.
+7. Send and receive one IP packet per `CAPSULE_DATAGRAM` capsule using context
+   ID `0`; do not add the HTTP/3 Quarter Stream ID prefix.
+8. Process `MAVI_REAUTH_RESULT` and close when the authenticated session ends.
+9. Close and clean up local network state when the HTTP/2 stream or TCP
+   connection ends.
 
 ### Cross-mode client requirements
 

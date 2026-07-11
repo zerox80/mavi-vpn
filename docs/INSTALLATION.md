@@ -11,7 +11,8 @@ The backend is fully dockerized for Linux servers.
 ### Prerequisites
 * **Docker** and **Docker Compose** installed.
 * Ports open in your firewall:
-  * `10433/UDP` (For the VPN tunnel)
+  * `10443/UDP` (For the QUIC VPN tunnel; use the value from `VPN_PORT`)
+  * `TCP` port from `VPN_HTTP2_BIND_ADDR` when HTTP/2 mode is enabled
   * `80/TCP` & `443/TCP` (If using standalone Traefik)
 
 ### Step 1: Prepare the Configuration
@@ -27,7 +28,16 @@ Depending on your needs, configure the `.env` file exactly as follows:
 
 **1. Basic Settings (Required for all modes)**
 * `VPN_AUTH_TOKEN`: A secure, long password. Required unless `VPN_KEYCLOAK_ENABLED=true`; the server refuses empty or example/default values in static-token mode.
-* `VPN_PORT`: e.g. `10433`.
+* `VPN_PORT`: e.g. `10443`.
+
+**Optional HTTP/2 CONNECT-IP transport:**
+```dotenv
+VPN_HTTP2_BIND_ADDR=0.0.0.0:10443
+```
+This enables a separate TLS/TCP listener using ALPN `h2`. It may use the same
+numeric port as the UDP QUIC listener. Select **HTTP/2 framing** in the client
+and point the client at the TCP endpoint. HTTP/2 mode is mutually exclusive
+with censorship-resistant mode, HTTP/3 framing, and ECH.
 
 **2. Enterprise Mode (Keycloak + Traefik)**
 If you want the web-based Admin UI and user management, you **must** configure these variables to avoid startup errors:
@@ -55,7 +65,9 @@ Use this if you already run Nginx/Apache on Port 443.
 * Check out [`docs/NGINX_PROXY.md`](NGINX_PROXY.md) for the exact Nginx `location /` configuration to proxy traffic to port 11443.
 
 **4. Performance Tuning (Critical for High-Speed)**
-* `VPN_MTU=1280`: **(Default)** This sets the TUN adapter payload size. Do not change this unless you know what you're doing. 1280 ensures the final QUIC packets (including headers) stay within 1360-1400 bytes, which is compatible with most mobile and residential networks.
+* `VPN_MTU=1280`: **(Default)** This sets the TUN adapter payload size. The
+  allowed range is `1280..=1360`; for QUIC transports the outer payload MTU is
+  derived as `VPN_MTU + 80`. HTTP/2 uses TLS/TCP and has no QUIC payload MTU.
 * **Socket Buffers**: The system now automatically requests **4MB** of OS-level UDP buffer space on both the server and client to prevent packet loss during high-speed bursts (GSO).
 
 ### Step 3: Start the Server
@@ -100,7 +112,7 @@ The Keycloak container ships with a **pre-configured realm import** (`backend/ke
 > **Existing deployments:** If you already created the `mavi-vpn` realm manually, the import will be skipped and your existing configuration is left untouched. To pick up the tuned token lifespans from the import, either apply them manually in the Keycloak admin console (Realm Settings → Tokens) or re-import with `--override` after backing up your users.
 
 ### Step 5: Retrieve the Certificate PIN
-For the VPN client to connect securely via QUIC without MITM attacks, you need the server's unique Certificate PIN:
+For the VPN client to connect securely via QUIC or HTTP/2 without MITM attacks, you need the server's unique Certificate PIN:
 ```bash
 cat data/cert_pin.txt
 ```

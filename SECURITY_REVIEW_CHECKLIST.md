@@ -14,7 +14,7 @@ blocked checks in the review notes.
 
 ## 2. Architecture And Trust Boundaries
 
-- [ ] Map server trust boundaries: QUIC listener, raw bincode control stream, HTTP/3 MASQUE `connect-ip`, TUN device, iptables/ip6tables.
+- [ ] Map server trust boundaries: QUIC listener, optional HTTP/2 TLS/TCP listener, raw bincode control stream, HTTP/3/HTTP/2 MASQUE `connect-ip`, TUN device, iptables/ip6tables.
 - [ ] Map client trust boundaries: GUI/CLI process, privileged Windows service or Linux daemon, local IPC token, TUN/WinTUN, DNS/routing state.
 - [ ] Map Android trust boundaries: exported Activity, OAuth deep link, VpnService, JNI handles, native Rust session.
 - [ ] Map Tauri trust boundaries: webview, exposed `#[tauri::command]` handlers, capabilities, shell permissions, config storage.
@@ -33,7 +33,7 @@ blocked checks in the review notes.
 - [ ] Verify `Start`, `Stop`, and `RepairNetwork` cannot be invoked without the local IPC token.
 - [ ] Treat membership in `mavivpn` or read access to the Windows IPC token as privilege to control VPN routing.
 
-## 4. Server Auth, JWT, QUIC, MASQUE
+## 4. Server Auth, JWT, QUIC, HTTP/2, MASQUE
 
 - [ ] Static token mode: verify empty `VPN_AUTH_TOKEN` refuses startup or rejects auth.
 - [ ] Keycloak mode: verify missing URL or JWKS fetch failure aborts startup and does not fall back to static token.
@@ -42,6 +42,9 @@ blocked checks in the review notes.
 - [ ] JWT: test unknown `kid`, JWKS refresh cooldown, JWKS outage, and rotation behavior.
 - [ ] QUIC raw mode: verify auth frame length limit and handshake timeout.
 - [ ] HTTP/3/MASQUE: verify only authenticated `connect-ip` sessions get tunnel config capsules.
+- [ ] HTTP/2: verify TLS ALPN is `h2`, the exact Extended CONNECT method/path/protocol/capsule headers are required, and malformed requests cannot reach the tunnel handler.
+- [ ] HTTP/2: verify authentication, session expiry, reauthentication capsules, and `CAPSULE_DATAGRAM` parsing have bounded buffers and correct error responses.
+- [ ] HTTP/2: verify the optional TCP listener is disabled by default and is not confused with the HTTP reverse proxy/Traefik web listener.
 - [ ] Datagrams: verify client-to-server packets are dropped unless source IP matches the assigned IPv4/IPv6 lease.
 - [ ] Verify connection limits and queue bounds under unauthenticated connection churn.
 
@@ -102,8 +105,8 @@ Run from the repository root unless noted.
 ```powershell
 git status --short --branch
 git diff --stat
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features
+cargo test-core-workspace
+cargo clippy --workspace --exclude windows-vpn --all-targets -- -D warnings
 rg -n 'unsafe\s*\{|unsafe fn|extern "|no_mangle|Box::from_raw|from_raw_fd|Command::new|subprocess\.run' -S -g "!target/**" -g "!gui/node_modules/**"
 rg -n "(?i)(password|secret|token|private.?key|client_secret|refresh_token|access_token|BEGIN .*PRIVATE KEY|change_me)" -S -g "!target/**" -g "!gui/node_modules/**" -g "!android/app/build/**"
 gh workflow list --repo zerox80/mavi-vpn

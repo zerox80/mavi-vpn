@@ -1,6 +1,6 @@
 # Mavi VPN – Windows
 
-VPN-Client für Windows mit QUIC-Transport und WinTUN. Verfügbar als CLI und grafische Oberfläche (GUI via Tauri). Der Hintergrund-Service übernimmt die eigentliche Tunnelarbeit; CLI und GUI kommunizieren mit ihm über lokales IPC.
+VPN-Client für Windows mit QUIC- oder HTTP/2-CONNECT-IP-Transport und WinTUN. Verfügbar als CLI und grafische Oberfläche (GUI via Tauri). Der Hintergrund-Service übernimmt die eigentliche Tunnelarbeit; CLI und GUI kommunizieren mit ihm über lokales IPC.
 
 ---
 
@@ -156,7 +156,8 @@ Die GUI verbindet sich automatisch mit dem laufenden Service.
    - Server Endpoint eintragen
    - Pre-shared Key eintragen oder Keycloak aktivieren
    - Certificate PIN eingeben
-   - optional ECH, CR/H3 und VPN MTU setzen
+   - optional ECH, CR/H3, HTTP/2 CONNECT-IP und VPN MTU setzen
+   - HTTP/2 ist mit CR, HTTP/3 framing und ECH nicht kombinierbar
    - Verbindung speichern
 4. **Verbinden** - gespeicherte Verbindung auswaehlen und `CONNECT` klicken
 5. **System Tray** - Die GUI minimiert in den System Tray; Rechtsklick fuer Connect/Disconnect/Quit
@@ -191,6 +192,10 @@ Die CLI speichert `config.json` unter `%APPDATA%\MaviVPN`. Die GUI speichert die
   "token": "dein-auth-token",
   "cert_pin": "a1b2c3d4e5f6...",
   "censorship_resistant": false,
+  "http3_framing": false,
+  "http2_framing": false,
+  "ech_config": null,
+  "vpn_mtu": 1280,
   "kc_auth": false
 }
 ```
@@ -258,12 +263,13 @@ Logs weitergegeben werden, trotzdem vorher kurz nach Secrets suchen.
 
 | Feature | Details |
 |---------|---------|
-| Transport | QUIC über UDP, BBR Congestion Control |
+| Transport | QUIC über UDP oder HTTP/2 CONNECT-IP über TLS/TCP |
 | TUN-Treiber | WinTUN (eingebettet, kein extra Download) |
 | Dual-Stack | IPv4 + IPv6 vollständig unterstützt |
-| MTU | 1280 Tun / 1360 QUIC Payload / ~1400 Wire |
+| MTU | TUN `1280..=1360`; QUIC-Payload = TUN + 80; HTTP/2 ohne QUIC-MTU |
 | Certificate Pinning | SHA-256 Fingerabdruck, verhindert MitM |
 | Censorship Resistance | H3 ALPN (sieht aus wie HTTP/3) |
+| HTTP/2 CONNECT-IP | TLS/TCP mit ALPN `h2` und RFC-9297-Capsules; zuverlässig/geordnet |
 | DNS Leak Prevention | NRPT-Regeln + SMHNR deaktiviert |
 | Auto-Reconnect | Exponential Backoff (1s → 30s) |
 | Keycloak SSO | OAuth2 PKCE, öffnet Browser automatisch |

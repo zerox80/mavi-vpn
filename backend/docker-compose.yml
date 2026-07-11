@@ -25,7 +25,7 @@ services:
       VPN_AUTH_TOKEN: ${VPN_AUTH_TOKEN:-}
       VPN_BIND_ADDR: ${VPN_BIND_ADDR:-0.0.0.0:${VPN_PORT:-10443}}
       # Optional TCP listener; set e.g. 0.0.0.0:10443 (same number as UDP is valid).
-      VPN_HTTP2_BIND_ADDR:
+      VPN_HTTP2_BIND_ADDR: ${VPN_HTTP2_BIND_ADDR:-}
       VPN_NETWORK: ${VPN_NETWORK:-10.8.0.0/24}
       VPN_NETWORK_V6: ${VPN_NETWORK_V6:-fd00::/64}
       VPN_DISABLE_IPV6: ${VPN_DISABLE_IPV6:-false}

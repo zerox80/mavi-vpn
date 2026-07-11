@@ -37,6 +37,12 @@ cargo test -p shared
 cargo test -p mavi-vpn
 ```
 
+For the portable core workspace, the preferred alias is:
+
+```bash
+cargo test-core-workspace
+```
+
 For the Linux client:
 
 ```bash
@@ -77,11 +83,14 @@ Before opening a PR, run the tests that match the area you changed.
 
 ```bash
 cargo fmt
-cargo test -p shared
-cargo test -p mavi-vpn
+cargo test-core-workspace
+cargo clippy --workspace --exclude windows-vpn --all-targets -- -D warnings
 ```
 
-Run more tests if you touched other crates.
+Run `cargo test -p linux-vpn` on Linux, `cargo test -p windows-vpn` on Windows,
+and the Android or GUI test commands when those areas are changed. If you touch
+the HTTP/2 transport, include the backend HTTP/2 tests and the platform client
+tests available on your host.
 
 ## Code style
 

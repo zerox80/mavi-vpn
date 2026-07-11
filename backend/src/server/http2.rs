@@ -36,6 +36,8 @@ use crate::state::AppState;
 const CONNECT_IP_PROTOCOL: &str = "connect-ip";
 const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/*/*/";
 const MAX_CONNECTIONS: usize = 1_000;
+const MAX_PENDING_HANDSHAKES: usize = 100;
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 type ResponseBody = BoxBody<Bytes, Infallible>;
 
 /// A bound HTTP/2 CONNECT-IP listener.
@@ -89,6 +91,7 @@ impl Http2Listener {
         let local_addr = self.local_addr()?;
         info!(%local_addr, "HTTP/2 CONNECT-IP listener ready on TCP");
         let connection_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let handshake_limit = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
 
         loop {
             let (tcp_stream, peer_addr) = self
@@ -96,10 +99,11 @@ impl Http2Listener {
                 .accept()
                 .await
                 .context("HTTP/2 TCP accept failed")?;
-            let Ok(permit) = connection_limit.clone().try_acquire_owned() else {
-                warn!(%peer_addr, "HTTP/2 connection limit reached; dropping TCP connection");
+            let Ok(handshake_permit) = handshake_limit.clone().try_acquire_owned() else {
+                warn!(%peer_addr, "HTTP/2 TLS handshake limit reached; dropping TCP connection");
                 continue;
             };
+            let connection_limit = connection_limit.clone();
             let tls_acceptor = self.tls_acceptor.clone();
             let state = self.state.clone();
             let config = self.config.clone();
@@ -108,11 +112,24 @@ impl Http2Listener {
             let ipv6_enabled = self.ipv6_enabled;
 
             tokio::spawn(async move {
-                let _permit = permit;
+                let _handshake_permit = handshake_permit;
+                let tls_stream =
+                    match accept_tls(&tls_acceptor, tcp_stream, TLS_HANDSHAKE_TIMEOUT).await {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            debug!(%peer_addr, %error, "HTTP/2 TLS handshake failed");
+                            return;
+                        }
+                    };
+                drop(_handshake_permit);
+
+                let Ok(_connection_permit) = connection_limit.try_acquire_owned() else {
+                    warn!(%peer_addr, "HTTP/2 connection limit reached; dropping TLS connection");
+                    return;
+                };
                 if let Err(error) = serve_connection(
-                    tcp_stream,
+                    tls_stream,
                     peer_addr,
-                    tls_acceptor,
                     state,
                     config,
                     tx_tun,
@@ -126,6 +143,17 @@ impl Http2Listener {
             });
         }
     }
+}
+
+async fn accept_tls(
+    tls_acceptor: &TlsAcceptor,
+    tcp_stream: TcpStream,
+    timeout: Duration,
+) -> Result<tokio_rustls::server::TlsStream<TcpStream>> {
+    tokio::time::timeout(timeout, tls_acceptor.accept(tcp_stream))
+        .await
+        .map_err(|_| anyhow::anyhow!("HTTP/2 TLS handshake timed out"))?
+        .context("HTTP/2 TLS handshake failed")
 }
 
 fn build_tls_config(
@@ -144,19 +172,14 @@ fn build_tls_config(
 
 #[allow(clippy::too_many_arguments)]
 async fn serve_connection(
-    tcp_stream: TcpStream,
+    tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
     peer_addr: SocketAddr,
-    tls_acceptor: TlsAcceptor,
     state: Arc<AppState>,
     config: Config,
     tx_tun: mpsc::Sender<Bytes>,
     keycloak: Option<Arc<KeycloakValidator>>,
     ipv6_enabled: bool,
 ) -> Result<()> {
-    let tls_stream = tls_acceptor
-        .accept(tcp_stream)
-        .await
-        .context("HTTP/2 TLS handshake failed")?;
     if tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
         anyhow::bail!("client did not negotiate ALPN h2");
     }

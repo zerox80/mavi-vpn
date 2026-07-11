@@ -56,6 +56,24 @@ fn generate_test_certs() -> (
     (certs, key, trusted_cert)
 }
 
+#[tokio::test]
+async fn tls_handshake_times_out_without_a_client_hello() {
+    let (certs, key, _) = generate_test_certs();
+    let tls_acceptor = TlsAcceptor::from(Arc::new(build_tls_config(certs, key).unwrap()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+
+    let error = accept_tls(&tls_acceptor, server, Duration::from_millis(50))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("timed out"));
+    drop(client);
+}
+
 fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr) -> Bytes {
     let mut packet = vec![0_u8; 20];
     packet[0] = 0x45;

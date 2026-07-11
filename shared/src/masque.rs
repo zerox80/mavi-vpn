@@ -22,9 +22,19 @@ pub const CAPSULE_ADDRESS_ASSIGN: u64 = 0x01;
 pub const CAPSULE_ADDRESS_REQUEST: u64 = 0x02;
 /// RFC 9484 – `ROUTE_ADVERTISEMENT` (IP ranges the tunnel can reach).
 pub const CAPSULE_ROUTE_ADVERTISEMENT: u64 = 0x03;
+/// RFC 9297 -- reliable HTTP Datagram carried on a Capsule Protocol data stream.
+///
+/// On HTTP/2 over TCP this is how CONNECT-IP conveys an IP packet. The payload
+/// is the normal CONNECT-IP HTTP Datagram payload: Context ID 0 followed by the
+/// complete IP packet (RFC 9484 section 6).
+pub const CAPSULE_DATAGRAM: u64 = 0x00;
 /// Vendor-specific capsule carrying `ControlMessage::Config` (bincode).
 /// Value "MV" (0x4D56). Unknown capsule types MUST be ignored per RFC 9297.
 pub const CAPSULE_MAVI_CONFIG: u64 = 0x4D56;
+/// Vendor-specific capsule carrying `ControlMessage::Reauth` (bincode).
+pub const CAPSULE_MAVI_REAUTH: u64 = 0x4D57;
+/// Vendor-specific capsule carrying `ControlMessage::ReauthResult` (bincode).
+pub const CAPSULE_MAVI_REAUTH_RESULT: u64 = 0x4D58;
 
 /// HTTP/3 datagram framing for connect-ip on the first request stream:
 /// `[Quarter Stream ID (varint)] [Context ID (varint)] [IP Packet]`.
@@ -32,7 +42,8 @@ pub const CAPSULE_MAVI_CONFIG: u64 = 0x4D56;
 /// For stream ID 0 the Quarter Stream ID is 0, and for uncompressed IP
 /// payloads the Context ID is 0 – both encode to a single `0x00` byte,
 /// giving a 2-byte prefix. We hard-code this for the hot path; the
-/// `unwrap_datagram` helper still accepts any varint-encoded values.
+/// `unwrap_datagram` accepts non-canonical encodings of those zero values,
+/// but rejects packets for any other request stream or context.
 ///
 /// This hard-coding relies on the invariant that Mavi sends exactly one
 /// extended CONNECT request per H3 connection and that it lands on the
@@ -151,6 +162,35 @@ pub fn read_capsule(buf: &[u8]) -> Option<(u64, &[u8], usize)> {
         return None;
     }
     Some((capsule_type, &buf[start..end], end))
+}
+
+/// Encodes one reliable HTTP Datagram capsule for a CONNECT-IP packet.
+///
+/// The Context ID is zero because Mavi creates no additional IP contexts.
+#[must_use]
+pub fn encode_connect_ip_datagram_capsule(ip_packet: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(ip_packet.len() + 1);
+    write_varint(0, &mut payload);
+    payload.extend_from_slice(ip_packet);
+
+    let mut capsule = Vec::with_capacity(payload.len() + 2);
+    encode_capsule(CAPSULE_DATAGRAM, &payload, &mut capsule);
+    capsule
+}
+
+/// Decodes a CONNECT-IP HTTP Datagram payload from a DATAGRAM capsule.
+///
+/// Returns `None` for malformed payloads, an empty IP packet, or an unknown
+/// context ID. RFC 9484 reserves Context ID zero for complete IP packets;
+/// Mavi does not negotiate any additional contexts.
+#[must_use]
+pub fn decode_connect_ip_datagram_payload(payload: &[u8]) -> Option<&[u8]> {
+    let (context_id, context_len) = read_varint(payload)?;
+    if context_id != 0 {
+        return None;
+    }
+    let packet = &payload[context_len..];
+    (!packet.is_empty()).then_some(packet)
 }
 
 // --------------------------------------------------------------------------
@@ -334,18 +374,19 @@ pub fn wrap_datagram(ip_packet: &[u8]) -> Vec<u8> {
 }
 
 /// Extracts the IP packet out of a connect-ip datagram frame. Returns `None`
-/// if the prefix is truncated.
+/// if the prefix is truncated or identifies another request stream or context.
 #[must_use]
 pub fn unwrap_datagram(datagram: &[u8]) -> Option<&[u8]> {
     // Fast path: both varints encode as a single 0x00 byte.
     if datagram.len() >= 2 && datagram[0] == 0x00 && datagram[1] == 0x00 {
         return Some(&datagram[2..]);
     }
-    // General path: handles any varint-encoded Quarter Stream ID / Context ID.
-    let (_qsid, n1) = read_varint(datagram)?;
+    // General path: accepts non-canonical encodings for Mavi's single stream
+    // and context, but never maps another CONNECT request into this tunnel.
+    let (qsid, n1) = read_varint(datagram)?;
     let rest = &datagram[n1..];
-    let (_ctx, n2) = read_varint(rest)?;
-    Some(&datagram[n1 + n2..])
+    let (context_id, n2) = read_varint(rest)?;
+    (qsid == 0 && context_id == 0).then_some(&datagram[n1 + n2..])
 }
 
 #[cfg(test)]

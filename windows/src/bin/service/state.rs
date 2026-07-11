@@ -254,6 +254,7 @@ mod tests {
             cert_pin: "abcd".to_string(),
             censorship_resistant: false,
             http3_framing: false,
+            http2_framing: false,
             kc_auth: None,
             kc_url: None,
             kc_realm: None,

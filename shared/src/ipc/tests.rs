@@ -15,6 +15,7 @@ fn test_effective_http3_framing() {
         refresh_token: None,
         ech_config: None,
         vpn_mtu: None,
+        http2_framing: false,
     };
 
     // case: http3_framing=false, censorship_resistant=false => effective framing is false
@@ -49,6 +50,7 @@ fn test_normalize_transport() {
         refresh_token: None,
         ech_config: None,
         vpn_mtu: None,
+        http2_framing: false,
     };
 
     // normalize_transport() returns true only when it actually changes http3_framing
@@ -68,6 +70,29 @@ fn test_normalize_transport() {
 }
 
 #[test]
+fn http2_transport_is_mutually_exclusive_with_http3_and_cr() {
+    let mut config = Config {
+        endpoint: "test".to_string(),
+        token: "test".to_string(),
+        cert_pin: "test".to_string(),
+        censorship_resistant: true,
+        http3_framing: true,
+        kc_auth: None,
+        kc_url: None,
+        kc_realm: None,
+        kc_client_id: None,
+        refresh_token: None,
+        ech_config: None,
+        vpn_mtu: None,
+        http2_framing: true,
+    };
+    assert!(config.normalize_transport());
+    assert!(config.uses_http2());
+    assert!(!config.effective_http3_framing());
+    assert!(!config.censorship_resistant && !config.http3_framing);
+}
+
+#[test]
 fn test_ipc_request_roundtrip() {
     let configs = vec![
         IpcRequest::Start(Config {
@@ -83,6 +108,7 @@ fn test_ipc_request_roundtrip() {
             refresh_token: Some("refresh-secret".to_string()),
             ech_config: None,
             vpn_mtu: Some(1300),
+            http2_framing: false,
         }),
         IpcRequest::Start(Config {
             endpoint: "vpn.example.com:4433".to_string(),
@@ -97,6 +123,7 @@ fn test_ipc_request_roundtrip() {
             refresh_token: None,
             ech_config: Some("ech-config".to_string()),
             vpn_mtu: None,
+            http2_framing: false,
         }),
         IpcRequest::Stop,
         IpcRequest::Status,
@@ -118,6 +145,7 @@ fn test_ipc_request_roundtrip() {
                 refresh_token: Some("refresh-secret".to_string()),
                 ech_config: None,
                 vpn_mtu: Some(1300),
+                http2_framing: false,
             },
             keycloak: KeycloakRuntimeAuth {
                 connection_id: "conn-1".to_string(),
@@ -172,13 +200,15 @@ fn config_wire_format_is_stable() {
     assert_eq!(decoded.refresh_token.as_deref(), Some("refresh-secret"));
     assert_eq!(decoded.ech_config, None);
     assert_eq!(decoded.vpn_mtu, Some(1300));
+    assert!(!decoded.http2_framing);
 
     // Also confirm the current encoder still produces exactly this
     // fixture, so an accidental encoding-side change is caught too, not
     // just a decode-side one.
     let reencoded = bincode::serde::encode_to_vec(&decoded, bincode::config::standard())
         .expect("re-encoding a just-decoded Config cannot fail");
-    assert_eq!(reencoded, FIXTURE_BYTES);
+    assert_eq!(&reencoded[..FIXTURE_BYTES.len()], FIXTURE_BYTES);
+    assert_eq!(reencoded.last(), Some(&0));
 }
 
 #[test]

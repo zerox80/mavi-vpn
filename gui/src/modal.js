@@ -60,6 +60,7 @@ export function openModal(id) {
   $('m_ech_config').value = existing?.ech_config ?? '';
   $('m_cr_mode').checked = !!existing?.censorship_resistant;
   $('m_h3_framing').checked = !!existing?.http3_framing;
+  $('m_h2_framing').checked = !!existing?.http2_framing;
   $('m_kc_auth').checked = !!existing?.kc_auth;
   $('m_kc_url').value = existing?.kc_url ?? '';
   $('m_kc_realm').value = existing?.kc_realm ?? '';
@@ -106,6 +107,7 @@ export async function saveModal() {
     return showToast('Keycloak URL must be a valid http(s) URL.', 'error');
   }
 
+  const http2_framing = $('m_h2_framing').checked;
   const conn = {
     id: _editingId || generateConnectionId(),
     label,
@@ -113,8 +115,9 @@ export async function saveModal() {
     token: kc_auth ? null : token,
     cert_pin,
     ech_config: $('m_ech_config').value.trim() || null,
-    censorship_resistant: $('m_cr_mode').checked,
-    http3_framing: $('m_h3_framing').checked,
+    censorship_resistant: http2_framing ? false : $('m_cr_mode').checked,
+    http3_framing: http2_framing ? false : $('m_h3_framing').checked,
+    http2_framing,
     kc_auth,
     kc_url: kc_auth ? $('m_kc_url').value.trim() || null : null,
     kc_realm: kc_auth ? $('m_kc_realm').value.trim() || null : null,

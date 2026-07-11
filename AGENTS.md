@@ -2,8 +2,9 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
-Mavi VPN is a Rust Cargo workspace that tunnels all traffic over QUIC (via forked `quinn`/`h3`),
-disguised as HTTP/3 for censorship resistance. It targets a Linux server plus Windows, Linux, and
+Mavi VPN is a Rust Cargo workspace that tunnels traffic over QUIC (via forked `quinn`/`h3`) by
+default, with an optional HTTP/2 CONNECT-IP fallback over TLS/TCP. QUIC can be disguised as HTTP/3
+for censorship resistance. It targets a Linux server plus Windows, Linux, and
 Android clients, with an optional cross-platform Tauri GUI. `README.md` and `CODEWIKI.md` cover
 features and deep internals; this file covers the things that bite you when building and editing.
 
@@ -75,20 +76,22 @@ Everything client/server agree on lives here, so changes ripple across all crate
 `ControlMessage` in `shared/src/lib.rs`, the control-plane handshake exchanged over a **QUIC
 bidirectional stream** (length-prefixed `u32` + bincode):
 
-1. Client opens a bidi stream and sends `Auth { token }` (static token, or a Keycloak JWT).
+1. In raw QUIC mode, the client opens a bidi stream and sends `Auth { token }` (static token, or a Keycloak JWT).
 2. Server replies `Config { assigned_ip, gateway, dns, mtu, optional IPv6… }` or `Error { message }`.
-3. The stream closes; **all subsequent packet data flows as QUIC datagrams**, not streams.
-4. Mid-session, a client may open a fresh bidi stream and send `Reauth { token }` (silently refreshed
-   Keycloak token) to extend the session deadline without tearing down the tunnel; server answers
-   `ReauthResult { accepted }`.
+3. The stream closes; in raw QUIC and HTTP/3 mode, subsequent packet data flows as QUIC datagrams,
+   not streams. HTTP/2 mode maps setup and packet data to bounded MASQUE capsules instead.
+4. Mid-session, a raw QUIC/HTTP/3 client may open a fresh bidi stream and send `Reauth { token }`,
+   while an HTTP/2 client sends the equivalent reauthentication capsule. Both extend the session
+   deadline without tearing down the tunnel and receive an acceptance result.
 
 When adding a `ControlMessage` variant, **append it** — variant order is the bincode wire format, so
 reordering breaks compatibility with older peers.
 
-`shared/` also owns `masque.rs` (MASQUE connect-ip capsule framing for HTTP/3 mode), `icmp.rs`
+`shared/` also owns `masque.rs` (MASQUE connect-ip capsule framing for HTTP/3 and HTTP/2 modes), `icmp.rs`
 (Packet-Too-Big generation), `ipc.rs` (GUI↔service IPC protocol), and the MTU logic below.
 
 ### MTU coupling (a frequent source of bugs)
+HTTP/2 mode uses TCP/TLS and has no QUIC payload MTU; the derived payload rule below applies only to QUIC modes.
 The operator turns exactly one knob: the inner **TUN MTU** (`VPN_MTU`, allowed range **1280–1360**,
 default 1280). The outer **QUIC payload MTU is always derived** as `tun_mtu + QUIC_OVERHEAD_BYTES`
 (+80) — never set independently. Server and client must agree on `tun_mtu` or the larger side emits
@@ -96,7 +99,7 @@ packets the smaller side rejects. See `resolve_tun_mtu*` and the `mtu` module in
 
 ### Per-platform clients share a shape
 Each client crate (`linux/`, `windows/`, `android/.../rust/`) has its own `vpn_core` that drives the
-QUIC tunnel (ECH GREASE, optional MASQUE framing, certificate pinning, connection-migration handling
+selected tunnel transport (ECH GREASE, optional MASQUE framing, certificate pinning, connection-migration handling
 on network change) plus platform-specific TUN + routing + DNS:
 - `linux/` raw TUN via ioctl (`tun.rs`), routes/DNS in `network.rs`, and a `daemon.rs` IPC server.
 - `windows/` WinTUN + a Windows Service (`bin/service.rs`) with NRPT DNS, plus PKCE OAuth (`oauth.rs`).
@@ -106,7 +109,7 @@ The GUI and CLI talk to the privileged background service over **OS-native local
 on Linux, Windows Named Pipe on Windows) — the GUI never touches the TUN directly.
 
 ### Server (`backend/`)
-`main.rs` accept loop → per-connection handler in `handlers/`; `state.rs` holds the v4+v6 IP pool and
+`main.rs` accept loop → per-connection handler in `handlers/`; `state/mod.rs` holds the v4+v6 IP pool and
 a `DashMap` peer table; `routing.rs` runs the TUN reader/writer tasks. TLS cert + SHA-256 pin in
 `cert.rs`, ECH keypair in `ech.rs`, Keycloak JWKS validation in `keycloak.rs`. Runs as a hardened,
 non-privileged Docker container (`backend/docker-compose.yml`, `entrypoint.sh` does iptables NAT and
@@ -114,8 +117,10 @@ IPv6 forwarding) — it **cannot** set host sysctls, so IPv6 forwarding must be 
 
 ### Censorship-resistance modes (escalating)
 Standard raw QUIC → CR mode (ALPN `h3` + fake nginx H3 page for unauthorized probes) → full MASQUE
-connect-ip capsule framing. ECH (SNI spoofing via HPKE GREASE) layers on top. `quic-tester/` acts as
-a DPI probe to verify the server looks like a plain web server.
+connect-ip capsule framing. HTTP/2 CONNECT-IP is a separate TLS/TCP fallback and is mutually
+exclusive with CR, HTTP/3 framing, and ECH. ECH (SNI spoofing via HPKE GREASE) layers on top of
+the QUIC/HTTP/3 paths. `quic-tester/` acts as a DPI probe to verify the server looks like a plain
+web server.
 
 ## Forked dependencies — do not bump casually
 `Cargo.toml` `[patch.crates-io]` pins `quinn`/`quinn-proto`/`quinn-udp` and `h3`/`h3-quinn`/

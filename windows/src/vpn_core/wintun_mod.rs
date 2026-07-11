@@ -151,7 +151,12 @@ pub fn get_or_create_adapter(wintun: &wintun::Wintun) -> Result<Arc<Adapter>> {
 /// Checks if the `WinTUN` ring buffer is full.
 #[allow(clippy::cast_possible_wrap)]
 pub fn is_wintun_ring_full(err: &wintun::Error) -> bool {
-    matches!(err, wintun::Error::Io(io_err) if io_err.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW as i32))
+    matches!(
+        err,
+        wintun::Error::Io(io_err)
+            if io_err.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW as i32)
+    )
 }
 
 #[cfg(test)]

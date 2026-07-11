@@ -56,6 +56,10 @@ class PrefsManager(
         get() = prefs.getBoolean("saved_http3_framing", false)
         set(value) = prefs.edit().putBoolean("saved_http3_framing", value).apply()
 
+    var savedHttp2Framing: Boolean
+        get() = prefs.getBoolean("saved_http2_framing", false)
+        set(value) = prefs.edit().putBoolean("saved_http2_framing", value).apply()
+
     var savedEchConfig: String
         get() = prefs.getString("saved_ech_config", "") ?: ""
         set(value) = prefs.edit().putString("saved_ech_config", value).apply()

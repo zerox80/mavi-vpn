@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::handshake::TunnelConnection;
 use super::wintun_mod::is_wintun_ring_full;
 
 /// Session-static inputs needed to synthesize ICMP "Packet Too Big" replies.
@@ -28,7 +29,7 @@ pub(super) struct PtbContext {
 /// host lowers its path MTU.
 pub(super) fn pump_tun_to_quic(
     session: &Arc<wintun::Session>,
-    connection: &quinn::Connection,
+    connection: &TunnelConnection,
     running: &AtomicBool,
     alive: &AtomicBool,
     ptb: &PtbContext,
@@ -46,13 +47,21 @@ pub(super) fn pump_tun_to_quic(
                 }
                 pool.extend_from_slice(packet_bytes);
                 let payload = pool.split().freeze();
-                match connection.send_datagram(payload) {
-                    Ok(()) => {}
-                    Err(quinn::SendDatagramError::TooLarge) => {
-                        send_ptb_reply(session, connection, packet.bytes(), ptb);
+                match connection {
+                    TunnelConnection::Quic(connection) => match connection.send_datagram(payload) {
+                        Ok(()) => {}
+                        Err(quinn::SendDatagramError::TooLarge) => {
+                            send_ptb_reply(session, connection, packet.bytes(), ptb);
+                        }
+                        Err(quinn::SendDatagramError::ConnectionLost(_)) => break,
+                        Err(_) => {}
+                    },
+                    TunnelConnection::Http2(connection) => {
+                        if connection.send_packet_blocking(payload).is_err() {
+                            alive.store(false, Ordering::SeqCst);
+                            break;
+                        }
                     }
-                    Err(quinn::SendDatagramError::ConnectionLost(_)) => break,
-                    Err(_) => {}
                 }
             }
             Ok(None) => {
@@ -120,7 +129,7 @@ fn send_ptb_reply(
 /// backpressures by retaining the datagram and yielding before retrying.
 pub(super) async fn pump_quic_to_tun(
     session: &Arc<wintun::Session>,
-    connection: &quinn::Connection,
+    connection: &TunnelConnection,
     running: &AtomicBool,
     alive: &AtomicBool,
     is_h3_framing: bool,
@@ -131,7 +140,7 @@ pub(super) async fn pump_quic_to_tun(
         let data = match pending_datagram.take() {
             Some(data) => data,
             None => {
-                let Ok(mut data) = connection.read_datagram().await else {
+                let Ok(mut data) = connection.recv_packet().await else {
                     alive.store(false, Ordering::SeqCst);
                     break;
                 };

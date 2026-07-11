@@ -1,4 +1,4 @@
-name: File Length Check
+name: Source Style Checks
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   file-length:
-    name: Check files under 500 lines
+    name: Check source file size and line width
     runs-on: ubuntu-latest
 
     steps:
@@ -44,5 +44,42 @@ jobs:
 
           if [ "$FOUND_TOO_LONG" -eq 1 ]; then
             echo "Please split the above files into smaller modules."
+            exit 1
+          fi
+      - name: Check Rust and Kotlin code lines are at most 120 characters
+        shell: bash
+        run: |
+          MAX_COLUMNS=120
+          FOUND_TOO_WIDE=0
+
+          while IFS= read -r file; do
+            while IFS= read -r line; do
+              line_number=${line%%:*}
+              line_length=${line#*:}
+              if [ "$line_length" -gt "$MAX_COLUMNS" ]; then
+                echo "Error: $file:$line_number has $line_length characters (max $MAX_COLUMNS allowed)"
+                FOUND_TOO_WIDE=1
+              fi
+            # Long string literals are exempt: URLs, certificates, embedded HTML,
+            # and PowerShell commands cannot always be usefully wrapped.
+            done < <(awk -v max="$MAX_COLUMNS" '
+              in_string {
+                if ($0 ~ /"[[:space:]]*$/) in_string = 0
+                next
+              }
+              /"[^"]*\\[[:space:]]*$/ {
+                in_string = 1
+                next
+              }
+              length($0) > max && $0 !~ /"/ { print NR ":" length($0) }
+            ' "$file")
+          done < <(find . -type f \( -name "*.rs" -o -name "*.kt" \) \
+              -not -path "*/target/*" \
+              -not -path "*/node_modules/*" \
+              -not -path "*/android/app/build/*" \
+              -not -path "*/.git/*")
+
+          if [ "$FOUND_TOO_WIDE" -eq 1 ]; then
+            echo "Please wrap Rust and Kotlin code lines to 120 characters or fewer."
             exit 1
           fi

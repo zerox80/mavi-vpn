@@ -234,7 +234,11 @@ async fn run_session(
     adapter: &Arc<Adapter>,
     runtime: &VpnRuntimeState,
 ) -> Result<SessionEnd> {
-    let socket = create_udp_socket()?;
+    let socket = if config.uses_http2() {
+        None
+    } else {
+        Some(create_udp_socket()?)
+    };
 
     // 1. QUIC Handshake & Auth
     let ech_bytes = config
@@ -259,6 +263,7 @@ async fn run_session(
             cert_pin: cert_pin_hashes.to_vec(),
             censorship_resistant: config.censorship_resistant,
             http3_framing: config.effective_http3_framing(),
+            http2_framing: config.uses_http2(),
             ech_config_list: ech_bytes,
             vpn_mtu: config.vpn_mtu,
         }),
@@ -345,33 +350,37 @@ async fn run_session(
     let connection = Arc::new(connection);
 
     // Task: MTU Monitor
-    let conn_monitor = connection.clone();
-    let alive_monitor = session_alive.clone();
-    let running_monitor = runtime.running().clone();
-    tokio::spawn(async move {
-        let mut last_mtu = 0;
-        loop {
-            if !running_monitor.load(Ordering::Relaxed) || !alive_monitor.load(Ordering::Relaxed) {
-                break;
-            }
-            let current_mtu = conn_monitor.max_datagram_size().unwrap_or(0);
-            if current_mtu != last_mtu {
-                if last_mtu != 0 {
-                    info!(
-                        "[MTU] QUIC Path MTU changed: {} -> {} bytes",
-                        last_mtu, current_mtu
-                    );
+    if let Some(quic) = connection.quic().cloned() {
+        let alive_monitor = session_alive.clone();
+        let running_monitor = runtime.running().clone();
+        tokio::spawn(async move {
+            let mut last_mtu = 0;
+            loop {
+                if !running_monitor.load(Ordering::Relaxed)
+                    || !alive_monitor.load(Ordering::Relaxed)
+                {
+                    break;
                 }
-                last_mtu = current_mtu;
+                let current_mtu = quic.max_datagram_size().unwrap_or(0);
+                if current_mtu != last_mtu {
+                    if last_mtu != 0 {
+                        info!(
+                            "[MTU] QUIC Path MTU changed: {} -> {} bytes",
+                            last_mtu, current_mtu
+                        );
+                    }
+                    last_mtu = current_mtu;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    });
+        });
+    }
 
     // Task: in-band Keycloak token reauth. A service-side refresh task or IPC
     // client pushes a fresh access token into current_token; present it to the
-    // server over a fresh bidi stream so the live tunnel survives the original
-    // token's expiry instead of being force-closed and reconnected.
+    // server over the transport's in-band control path so the live tunnel
+    // survives the original token's expiry instead of being force-closed and
+    // reconnected.
     let reauth_task = reauth::spawn_reauth_task(
         connection.clone(),
         session_alive.clone(),
@@ -419,9 +428,12 @@ async fn run_session(
     // silent reconnects: a server-initiated close carries its reason string
     // (e.g. "session token expired"), a QUIC idle timeout shows as `TimedOut`.
     if runtime.is_running() {
-        match connection.close_reason() {
+        match connection.quic().and_then(quinn::Connection::close_reason) {
             Some(reason) => warn!("VPN session ended - QUIC close reason: {reason}"),
-            None => warn!("VPN session ended without an explicit QUIC close reason"),
+            None if connection.quic().is_some() => {
+                warn!("VPN session ended without an explicit QUIC close reason")
+            }
+            None => warn!("VPN session ended - HTTP/2 CONNECT-IP stream closed"),
         }
     }
 

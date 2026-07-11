@@ -1,6 +1,6 @@
 # Mavi VPN – Linux
 
-High-performance VPN client for Linux using QUIC transport. Supports dual-stack (IPv4/IPv6), certificate pinning, censorship resistance, Keycloak SSO, and both CLI and GUI operation.
+High-performance VPN client for Linux using QUIC or HTTP/2 CONNECT-IP transport. Supports dual-stack (IPv4/IPv6), certificate pinning, censorship resistance, Keycloak SSO, and both CLI and GUI operation.
 
 ---
 
@@ -207,6 +207,10 @@ Berechtigungen werden automatisch auf `600` gesetzt (nur Eigentümer kann lesen)
   "token": "dein-auth-token",
   "cert_pin": "a1b2c3d4e5f6...",
   "censorship_resistant": false,
+  "http3_framing": false,
+  "http2_framing": false,
+  "ech_config": null,
+  "vpn_mtu": 1280,
   "kc_auth": false,
   "kc_url": null,
   "kc_realm": null,
@@ -242,11 +246,12 @@ Auf **Wayland/Fedora** wird `xdg-open` direkt aufgerufen – funktioniert mit GN
 
 | Feature | Details |
 |---------|---------|
-| Transport | QUIC über UDP, BBR Congestion Control |
+| Transport | QUIC über UDP oder HTTP/2 CONNECT-IP über TLS/TCP |
 | Dual-Stack | IPv4 + IPv6 vollständig unterstützt |
-| MTU | 1280 Tun / 1360 QUIC Payload / ~1400 Wire |
+| MTU | TUN `1280..=1360`; QUIC-Payload = TUN + 80; HTTP/2 ohne QUIC-MTU |
 | Certificate Pinning | SHA-256 Fingerabdruck, verhindert MitM |
 | Censorship Resistance | H3 ALPN (sieht aus wie HTTP/3) |
+| HTTP/2 CONNECT-IP | TLS/TCP mit ALPN `h2` und RFC-9297-Capsules; zuverlässig/geordnet |
 | DNS Leak Prevention | systemd-resolved oder /etc/resolv.conf |
 | Routing | Split-Routes (0/1 + 128/1), kein Default-Route-Überschreiben |
 | Auto-Reconnect | Exponential Backoff (1s → 30s) |

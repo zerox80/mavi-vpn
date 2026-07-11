@@ -139,6 +139,10 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
             "  HTTP/3 Framing: {}",
             if saved.http3_framing { "Yes" } else { "No" }
         );
+        println!(
+            "  HTTP/2 CONNECT-IP: {}",
+            if saved.http2_framing { "Yes" } else { "No" }
+        );
         if let Some(mtu) = saved.vpn_mtu {
             println!("  VPN MTU: {}", mtu);
         }
@@ -260,19 +264,28 @@ async fn prompt_new_config() -> Result<Config> {
     stdout.flush()?;
     let cert_pin = read_line()?;
 
-    print!("Censorship resistant mode? [y/N]: ");
+    print!("Use HTTP/2 CONNECT-IP over TCP (beta)? [y/N]: ");
     stdout.flush()?;
-    let cr_input = read_line()?.to_lowercase();
-    let censorship_resistant = cr_input == "y" || cr_input == "yes";
-
-    let http3_framing = if censorship_resistant {
-        println!("HTTP/3 Framing is required for CR mode and was enabled automatically.");
-        true
+    let http2_input = read_line()?.to_lowercase();
+    let http2_framing = http2_input == "y" || http2_input == "yes";
+    let (censorship_resistant, http3_framing) = if http2_framing {
+        println!("HTTP/2 uses reliable TCP capsules; HTTP/3 framing and CR mode are disabled.");
+        (false, false)
     } else {
-        print!("HTTP/3 Framing (RFC 9297)? [y/N]: ");
+        print!("Censorship resistant mode? [y/N]: ");
         stdout.flush()?;
-        let h3_input = read_line()?.to_lowercase();
-        h3_input == "y" || h3_input == "yes"
+        let cr_input = read_line()?.to_lowercase();
+        let censorship_resistant = cr_input == "y" || cr_input == "yes";
+        let http3_framing = if censorship_resistant {
+            println!("HTTP/3 Framing is required for CR mode and was enabled automatically.");
+            true
+        } else {
+            print!("HTTP/3 Framing (CONNECT-IP/H3)? [y/N]: ");
+            stdout.flush()?;
+            let h3_input = read_line()?.to_lowercase();
+            h3_input == "y" || h3_input == "yes"
+        };
+        (censorship_resistant, http3_framing)
     };
 
     // Optional hex-encoded ECHConfigList. Prefer $VPN_ECH_CONFIG, fall back to
@@ -325,6 +338,7 @@ async fn prompt_new_config() -> Result<Config> {
         refresh_token,
         ech_config,
         vpn_mtu,
+        http2_framing,
     })
 }
 
@@ -377,6 +391,7 @@ mod tests {
             refresh_token: Some("refresh-token".to_string()),
             ech_config: None,
             vpn_mtu: None,
+            http2_framing: false,
         }
     }
 }

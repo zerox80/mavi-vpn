@@ -1,4 +1,5 @@
 use super::cert_pin::PinnedServerVerifier;
+use super::h2::Http2Session;
 use super::h3::H3SessionGuard;
 use anyhow::{Context, Result};
 use shared::{
@@ -7,11 +8,94 @@ use shared::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 const KEEPALIVE_SECS: u64 = 10;
 const IDLE_TIMEOUT_SECS: u64 = 60;
 const ADDRESS_CONNECT_TIMEOUT_SECS: u64 = 5;
+
+/// The packet plane selected for a session.
+#[derive(Clone)]
+pub(super) enum TunnelConnection {
+    Quic(quinn::Connection),
+    Http2(Http2Session),
+}
+
+/// A packet-plane send failure, preserving the recoverable QUIC MTU signal.
+#[derive(Debug)]
+pub(super) enum SendPacketError {
+    TooLarge,
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for SendPacketError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge => formatter.write_str("QUIC datagram exceeds the peer's maximum size"),
+            Self::Other(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for SendPacketError {}
+
+impl TunnelConnection {
+    pub(super) fn remote_address(&self) -> std::net::SocketAddr {
+        match self {
+            Self::Quic(connection) => connection.remote_address(),
+            Self::Http2(session) => session.remote_addr(),
+        }
+    }
+
+    pub(super) async fn send_packet(
+        &self,
+        packet: bytes::Bytes,
+    ) -> std::result::Result<(), SendPacketError> {
+        match self {
+            Self::Quic(connection) => match connection.send_datagram(packet) {
+                Ok(()) => Ok(()),
+                Err(quinn::SendDatagramError::TooLarge) => Err(SendPacketError::TooLarge),
+                Err(error) => Err(SendPacketError::Other(anyhow::anyhow!(
+                    "QUIC datagram send failed: {error}"
+                ))),
+            },
+            Self::Http2(session) => session
+                .send_packet(packet)
+                .await
+                .map_err(SendPacketError::Other),
+        }
+    }
+
+    pub(super) async fn recv_packet(&self) -> Result<bytes::Bytes> {
+        match self {
+            Self::Quic(connection) => connection
+                .read_datagram()
+                .await
+                .map_err(|error| anyhow::anyhow!("QUIC datagram receive failed: {error}")),
+            Self::Http2(session) => session.recv_packet().await,
+        }
+    }
+
+    pub(super) fn quic(&self) -> Option<&quinn::Connection> {
+        match self {
+            Self::Quic(connection) => Some(connection),
+            Self::Http2(_) => None,
+        }
+    }
+
+    pub(super) async fn reauthenticate(&self, token: &str) -> Result<bool> {
+        match self {
+            Self::Quic(connection) => tokio::time::timeout(Duration::from_secs(10), async {
+                let (mut send, mut recv) = connection.open_bi().await?;
+                let accepted = control::reauth_over_stream(&mut send, &mut recv, token).await?;
+                Ok::<bool, anyhow::Error>(accepted)
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Reauth timed out"))?,
+            Self::Http2(session) => session.reauthenticate(token).await,
+        }
+    }
+}
 
 /// QUIC connection setup with custom certificate pinning.
 #[allow(clippy::too_many_arguments)]
@@ -22,9 +106,26 @@ pub(super) async fn connect_and_handshake(
     cert_pin: Vec<Vec<u8>>,
     censorship_resistant: bool,
     http3_framing: bool,
+    http2_framing: bool,
     ech_config_list: Option<Vec<u8>>,
     vpn_mtu: Option<u16>,
-) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
+) -> Result<(TunnelConnection, ControlMessage, Option<H3SessionGuard>)> {
+    if http2_framing {
+        if censorship_resistant || http3_framing {
+            anyhow::bail!(
+                "HTTP/2 transport cannot be combined with HTTP/3 censorship-resistant framing"
+            );
+        }
+        if ech_config_list.is_some() {
+            warn!("Ignoring ECH configuration because HTTP/2 transport is selected");
+        }
+        let (session, config) =
+            super::h2::connect_and_handshake_h2(&endpoint_str, token, cert_pin).await?;
+        let mtu_cfg = compute_quic_mtu_config(vpn_mtu);
+        validate_control_message_mtu(&config, mtu_cfg.local_tun_mtu)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        return Ok((TunnelConnection::Http2(session), config, None));
+    }
     let effective_http3_framing = http3_framing || censorship_resistant;
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
 
@@ -190,7 +291,7 @@ pub(super) async fn connect_and_handshake(
 
     validate_control_message_mtu(&config, mtu_cfg.local_tun_mtu).map_err(|e| anyhow::anyhow!(e))?;
 
-    Ok((connection, config, h3_guard))
+    Ok((TunnelConnection::Quic(connection), config, h3_guard))
 }
 
 #[cfg(test)]

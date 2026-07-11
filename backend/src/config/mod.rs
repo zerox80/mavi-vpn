@@ -30,6 +30,14 @@ pub struct Config {
     #[arg(long, env = "VPN_BIND_ADDR", default_value = "0.0.0.0:4433")]
     pub bind_addr: SocketAddr,
 
+    /// Optional TCP address for the experimental HTTP/2 CONNECT-IP listener.
+    ///
+    /// This uses TLS ALPN `h2` and RFC 8441 Extended CONNECT. It is disabled
+    /// by default and can use the same port number as `bind_addr`, because
+    /// QUIC listens on UDP while HTTP/2 listens on TCP.
+    #[arg(long, env = "VPN_HTTP2_BIND_ADDR")]
+    pub http2_bind_addr: Option<SocketAddr>,
+
     /// Pre-shared authentication token. Required unless Keycloak authentication
     /// is enabled. Clients must provide this exact string during the handshake
     /// to gain access. Use a long, random string for security.

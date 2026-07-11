@@ -211,7 +211,12 @@ fun HomeView(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Settings, contentDescription = null, tint = T.ink, modifier = Modifier.size(26.dp))
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = null,
+                        tint = T.ink,
+                        modifier = Modifier.size(26.dp),
+                    )
                     Spacer(modifier = Modifier.width(14.dp))
                     Column {
                         Text("ADVANCED", fontFamily = MaterialTheme.typography.labelSmall.fontFamily, fontSize = 9.sp, letterSpacing = 1.5.sp, color = T.mute)

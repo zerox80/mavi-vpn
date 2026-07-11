@@ -1,27 +1,27 @@
 # Mavi VPN: The Ultimate Technical Encyclopedia (CodeWiki)
 
 ## 🌐 1. Project Overview & Vision
-Mavi VPN establishes secure, private network connections between devices and a server. The solution aims to overcome network instability and censorship by tunneling network traffic over the **QUIC protocol**. Its components include a high-performance Rust-based server, client applications for Android and Windows, and shared communication logic, primarily implemented in **Rust** and **Kotlin**.
+Mavi VPN establishes secure, private network connections between devices and a server. The solution supports a QUIC data plane for low-latency operation and an optional HTTP/2 CONNECT-IP data plane over TLS/TCP for networks where TCP is more usable. Its components include a high-performance Rust-based server, client applications for Android, Windows, and Linux, and shared communication logic, primarily implemented in **Rust** and **Kotlin**.
 
-The communication layer leverages the QUIC protocol for secure, low-latency data transfer. This utilizes the `quinn` library, which manages network endpoints, connections, and data streams. It forms the foundation for reliable packet tunneling, even on unstable networks. For more details, refer to **Core QUIC Protocol Integration**.
+The QUIC communication layer uses the `quinn` library for encrypted UDP transport, streams, and datagrams. The HTTP/2 path uses TLS/TCP, RFC 8441 Extended CONNECT, and RFC 9297 capsules. Both paths share authentication, address assignment, packet validation, and TUN routing.
 
 ---
 
 ## 🏗 2. Mavi VPN Architecture
-Mavi VPN is a high-performance, censorship-resistant VPN solution engineered for unreliable network conditions, particularly prevalent in mobile environments. Its architecture comprises a Rust-based server, client applications for Android and Windows, and shared libraries that facilitate communication. The system is designed around the **QUIC protocol**, which provides secure, low-latency, and multiplexed connections over UDP, offering advantages over traditional TCP-based VPNs, especially on unstable networks.
+Mavi VPN is a high-performance, censorship-resistant VPN solution engineered for unreliable network conditions, particularly prevalent in mobile environments. Its architecture comprises a Rust-based server, clients for Android, Windows, and Linux, and shared libraries that facilitate communication. The transport is selectable: raw QUIC or HTTP/3/MASQUE over UDP, or HTTP/2 CONNECT-IP capsules over TLS/TCP.
 
-The core communication mechanism leverages Rust for its performance and memory safety. The QUIC protocol, implemented via the `quinn` library, forms the secure and efficient transport layer. This deep integration allows for robust handling of data streams and datagrams, crucial for efficient packet tunneling. For more details on this, refer to **Core QUIC Protocol Integration**.
+The core communication mechanism leverages Rust for performance and memory safety. QUIC provides unreliable datagrams and connection migration; HTTP/2 provides reliable, ordered capsule delivery. The client transport selector keeps HTTP/2 mutually exclusive with censorship-resistant mode, HTTP/3 framing, and ECH.
 
 ### 🔹 2.1 Cross-Platform Client Architecture
 The client applications are designed for cross-platform compatibility while accounting for platform-specific requirements. 
-- **The Android client**, built with **Kotlin** and **Jetpack Compose**, orchestrates the VPN lifecycle and user interface. It integrates with a native Rust library via **JNI (Java Native Interface)** for the core VPN logic, including QUIC tunneling and TUN device management. 
+- **The Android client**, built with **Kotlin** and **Jetpack Compose**, orchestrates the VPN lifecycle and user interface. It integrates with a native Rust library via **JNI (Java Native Interface)** for QUIC or HTTP/2 tunneling and TUN device management.
 - **The Windows client**, written in **Rust**, utilizes the **WinTUN** adapter for network interface management. 
 This shared Rust core minimizes code duplication and ensures consistent VPN functionality across platforms. For further information on client architectures, see **Cross-Platform Client Architecture**.
 
 ---
 
 ## 🛡 3. Censorship Resistance Mechanisms
-A central design principle of Mavi VPN is censorship resistance. This is achieved through various techniques, including **Layer 7 obfuscation**, which disguises VPN traffic as standard **HTTP/3** traffic using **ALPN (Application-Layer Protocol Negotiation)**. 
+A central design principle of Mavi VPN is censorship resistance. The QUIC censorship-resistant mode disguises VPN traffic as standard **HTTP/3** traffic using **ALPN (Application-Layer Protocol Negotiation)**. HTTP/2 CONNECT-IP is a separate TCP fallback, not an HTTP/3 camouflage mode.
 
 ### 🎭 3.1 Layer 7 Obfuscation & ALPN
 A core strategy for censorship resistance involves Layer 7 obfuscation, primarily through the use of HTTP/3 Application-Layer Protocol Negotiation (ALPN). When the censorship-resistant mode is enabled, the client's QUIC connection is configured to advertise only the **"h3" ALPN**. This makes the VPN traffic appear as standard HTTP/3 web traffic, a widely used protocol that is less likely to be blocked indiscriminately. This ALPN configuration is evident in the client's connection handshake within `android/app/src/main/rust/src/lib.rs` and is determined by the `censorship_resistant` flag set in the client's settings.
@@ -38,12 +38,12 @@ This prevent attackers from issuing fake certificates to intercept or impersonat
 ---
 
 ## 🏎 4. MTU and Network Performance Optimizations
-A key strategy involves MTU (Maximum Transmission Unit) management, where the system employs an **internal MTU of 1280 bytes** (Tun) and a **QUIC MTU of 1360 bytes** (resulting in ~1400 bytes on the wire).
+A key strategy involves MTU (Maximum Transmission Unit) management. The operator chooses the inner TUN MTU in the range **1280..=1360**; for QUIC transports the outer payload MTU is derived as `VPN_MTU + 80`. HTTP/2 uses TLS/TCP and therefore has no QUIC payload MTU.
 
 ### 📐 4.1 The 1280/1360 Pinning Strategy
-This specific configuration aims to minimize packet fragmentation, which can degrade performance and reliability over diverse network paths. 
-- **Inner TUN MTU**: 1280 (The IPv6 minimum required by all networks).
-- **QUIC Payload MTU**: 1360 (Selected to fit comfortably within 1460-MTU networks like Vodafone without fragmentation).
+This configurable range aims to minimize packet fragmentation, which can degrade performance and reliability over diverse network paths.
+- **Inner TUN MTU**: `1280..=1360` (1280 is the IPv6 minimum).
+- **QUIC Payload MTU**: `VPN_MTU + 80` (1360 when `VPN_MTU=1280`).
 By pinning these values, Mavi VPN avoids the "Black Hole" problem of Path MTU Discovery (PMTUD) where ICMP messages are blocked by ISPs.
 
 ### 🏎 4.2 Congestion Control: BBR
@@ -58,7 +58,7 @@ Path MTU Discovery (PMTUD) is crucial for dynamically determining the largest MT
 ---
 
 ## 🖥 5. VPN Server Implementation
-The server-side components of Mavi VPN facilitate secure and efficient communication by establishing and managing VPN tunnels. Written in **Rust**, the server handles client connections via QUIC, authenticates users, allocates IP addresses, and routes network traffic. 
+The server-side components of Mavi VPN facilitate secure and efficient communication by establishing and managing VPN tunnels. Written in **Rust**, the server handles raw QUIC, HTTP/3, and optional HTTP/2 connections, authenticates users, allocates IP addresses, and routes network traffic.
 
 ### 🐳 5.1 Dockerized Deployment
 The server's lifecycle begins with building and containerization. A multi-stage `Dockerfile` (`backend/Dockerfile`) compiles the Rust application into an optimized binary and packages it with necessary runtime dependencies like `iptables` and `iproute2`. This ensures portability and simplifies deployment.
@@ -71,16 +71,16 @@ The `entrypoint.sh` script (`backend/entrypoint.sh`) dynamically configures the 
 - **IPv6 Forwarding**: Configures `ip6tables` for full IPv6 NAT support.
 
 ### 🔐 5.3 Core Server Logic & Connection Handling (`main.rs`)
-The core server logic manages client connections and data flow. It loads server configurations (bind address, auth token) and initializes an **`AppState`** (`backend/src/state.rs`) to manage IP address pools.
+The core server logic manages client connections and data flow. It loads server configurations (bind addresses, auth token) and initializes an **`AppState`** (`backend/src/state/mod.rs`) to manage IP address pools.
 - **Endpoints**: A `quinn::Endpoint` is configured with performance tunings, including `max_idle_timeout` and `BbrConfig`.
-- **Packet Routing**: Dedicated asynchronous tasks read packets from the TUN device and forward them to clients via QUIC datagrams, and vice-versa.
+- **Packet Routing**: Dedicated asynchronous tasks read packets from the TUN device and forward them through QUIC datagrams or HTTP/2 `CAPSULE_DATAGRAM` capsules, and vice-versa.
 - **Censorship Resistance**: Implements the "Fake Nginx" response logic if authentication fails.
 
 ### 👤 5.4 Client Authentication & IP Management
 Assignments of virtual IPs is handled by the **`IpGuard`** mechanism.
 - **Authentication**: This branch supports both **Token-Based Auth** and **Keycloak OIDC**.
 - **IpGuard**: Ensures that assigned IPv4 and IPv6 addresses are automatically released back to the pool when a client disconnects. This RAII pattern prevents IP leaks.
-- **IP Pools**: Managed in `backend/src/state.rs` using `free_ips` and `free_ips_v6` vectors for O(1) complexity.
+- **IP Pools**: Managed in `backend/src/state/mod.rs` using `free_ips` and `free_ips_v6` vectors for O(1) complexity.
 
 ---
 
@@ -90,7 +90,7 @@ Assignments of virtual IPs is handled by the **`IpGuard`** mechanism.
 This branch integrates enterprise-grade identity management via **Keycloak**.
 - **OIDC Flow**: The server acts as a Resource Server. It fetches public certificates from Keycloak's **JWKS endpoint** on startup (fail-closed — the backend refuses to start if JWKS cannot be loaded, no static-token fallback when `VPN_KEYCLOAK_ENABLED=true`).
 - **JWT Validation**: Every client connection is verified against the Keycloak realm. The server uses the `jsonwebtoken` crate (with `aws_lc_rs`) to verify the signature, issuer, and `exp`/`nbf` (30 s leeway). The `azp` (Authorized Party) claim is compared against the configured client ID in **constant time**; built-in audience validation is disabled because Keycloak access tokens default to `aud: account`.
-- **In-band Reauth**: A live tunnel is **not** torn down when the original access token expires. Clients silently refresh the token (via `grant_type=refresh_token`) and present the fresh JWT to the server over a **new bidirectional QUIC stream** (`ControlMessage::Reauth`). The server re-validates it against JWKS, binds it to the original `sub`, and pushes the new `exp` out — the session deadline is re-armed in place, no reconnect.
+- **In-band Reauth**: A live tunnel is **not** torn down when the original access token expires. QUIC clients present the fresh JWT over a new bidirectional QUIC stream (`ControlMessage::Reauth`); HTTP/2 clients use the `MAVI_REAUTH` capsule. The server re-validates it against JWKS, binds it to the original `sub`, and re-arms the session deadline in place.
 - **Token Refresh Lifecycle**: Clients refresh **300 s before `exp`** (`REFRESH_SKEW_SECS`) and check every 30 s (`REFRESH_TICK`). Outcomes are classified as `Success`, `NetworkError` (5xx/transport — keep tunnel, retry), or `NeedsLogin` (4xx — refresh token dead, terminal stop + browser re-login). Refresh tokens are stored only in the OS keyring, never in config files or over IPC.
 - **Server Force-Close**: If no successful reauth lands before `exp + 30 s` (`SESSION_EXPIRY_LEEWAY`), the server closes the QUIC connection with reason `b"session token expired"` so revoked/expired credentials cannot keep a session alive.
 - **Auto-Imported Realm**: The Keycloak container mounts `backend/keycloak/mavi-vpn-realm.json` and starts with `--import-realm`, so on first start (empty DB) the `mavi-vpn` realm is created automatically with the `mavi-client` public PKCE client, the `vpn-user` realm role, and token lifespans tuned for the VPN refresh cycle (10 min access token / 1 h SSO idle / 24 h SSO max). Operators only need to create users in the Keycloak admin console; the realm and client setup is automated. The import is idempotent — restarts skip it once the realm exists.

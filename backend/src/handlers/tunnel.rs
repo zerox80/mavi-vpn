@@ -10,6 +10,9 @@ use tracing::info;
 
 use shared::{icmp, masque};
 
+mod http2;
+pub use http2::run_http2_tunnel;
+
 #[derive(Default)]
 struct TunnelStats {
     server_to_client_bytes: AtomicU64,

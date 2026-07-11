@@ -8,9 +8,25 @@ fn test_default_config() {
     assert_eq!(config.network_cidr_v6, "fd00::/64");
     assert_eq!(config.dns, std::net::Ipv4Addr::new(1, 1, 1, 1));
     assert_eq!(config.auth_token.as_deref(), Some("secret123"));
+    assert_eq!(config.http2_bind_addr, None);
     assert!(!config.censorship_resistant);
     assert!(!config.mss_clamping);
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_http2_bind_addr_custom() {
+    let config = Config::parse_from([
+        "mavi-vpn",
+        "--auth-token",
+        "secret123",
+        "--http2-bind-addr",
+        "127.0.0.1:8443",
+    ]);
+    assert_eq!(
+        config.http2_bind_addr,
+        Some("127.0.0.1:8443".parse().unwrap())
+    );
 }
 
 fn mtu_setting_for(args: &[&str]) -> MtuSetting {

@@ -22,7 +22,7 @@
 \maketitle
 
 \begin{abstract}
-This whitepaper provides an exhaustive technical analysis of Mavi VPN, a next-generation, high-performance, censorship-resistant Virtual Private Network architecture built entirely in Rust. It details the utilization of the IETF QUIC protocol for zero-head-of-line-blocking transport, the implementation of Encrypted Client Hello (ECH) and MASQUE (RFC 9484) to defeat Deep Packet Inspection (DPI) systems, and the novel "Pinned MTU" strategy. By leveraging highly optimized asynchronous I/O frameworks, dual-stack routing dynamics, and rigorous cryptographic enforcement, Mavi VPN ensures continuous, robust connectivity across the most restrictive and constrained network environments.
+This whitepaper provides an exhaustive technical analysis of Mavi VPN, a high-performance, censorship-resistant Virtual Private Network architecture built primarily in Rust. It covers the IETF QUIC transport, the optional HTTP/2 CONNECT-IP transport over TLS/TCP, Encrypted Client Hello (ECH), MASQUE (RFC 9484), and the configurable MTU strategy. By leveraging asynchronous I/O, dual-stack routing, and certificate pinning, Mavi VPN provides multiple transport choices for constrained network environments.
 \end{abstract}
 
 \tableofcontents
@@ -32,7 +32,7 @@ This whitepaper provides an exhaustive technical analysis of Mavi VPN, a next-ge
 
 Historically, Virtual Private Networks (VPNs) such as OpenVPN, WireGuard, and IPsec were engineered with the primary assumption of operating within open, neutral networks. Their wire formats are highly recognizable; WireGuard, for example, maintains a static 148-byte handshake initiation structure that state-sponsored firewalls flag and drop instantly. 
 
-Mavi VPN discards these legacy assumptions. It operates on the principle that \textit{all} traffic is subject to hostile interception, active probing, and Deep Packet Inspection (DPI). To combat this, Mavi VPN's data and control planes are designed to be statistically and behaviorally indistinguishable from standard HTTP/3 web traffic. 
+Mavi VPN discards these legacy assumptions. It operates on the principle that \textit{all} traffic is subject to hostile interception, active probing, and Deep Packet Inspection (DPI). Its QUIC censorship-resistant mode uses HTTP/3 framing and probe camouflage; its separate HTTP/2 mode provides a reliable TLS/TCP CONNECT-IP fallback without claiming to be ordinary browser traffic.
 
 \subsection{Key Design Goals}
 \begin{itemize}
@@ -60,8 +60,8 @@ The architecture separates unprivileged UI tasks from highly privileged network 
 |   Route & DNS Policy Management   |                             |
 +-----------------------------------+                             | (JNI)
                  |                                                |
-                 +----------  QUIC Datagram Tunnel  --------------+
-                 (TLS 1.3 / ChaCha20 / MASQUE Connect-IP Capsules)
+                 +----- QUIC Datagram or HTTP/2 Capsule Tunnel -----+
+                 (TLS / MASQUE Connect-IP Capsules)
                                                    |
                                        +-----------------------+
                                        |      VPN Server       |
@@ -72,7 +72,7 @@ The architecture separates unprivileged UI tasks from highly privileged network 
 \end{verbatim}
 
 \subsection{The Backend (Server-Side)}
-The Linux-based backend is a horizontally scalable routing hub. It is responsible for terminatingQUIC connections, verifying identity tokens or OpenID Connect (OIDC) JWTs, allocating private Dual-Stack IP addresses, and routing packets between the inner virtual network and the internet via Network Address Translation (NAT). 
+The Linux-based backend is a horizontally scalable routing hub. It is responsible for terminating QUIC and optional HTTP/2 connections, verifying identity tokens or OpenID Connect (OIDC) JWTs, allocating private Dual-Stack IP addresses, and routing packets between the inner virtual network and the internet via Network Address Translation (NAT).
 
 To maximize throughput, the server relies on \textbf{mimalloc} as the global memory allocator. Since a VPN server handles millions of tiny `bytes::BytesMut` allocations per second per client, standard malloc implementations often suffer from extreme heap fragmentation and thread-contention. \texttt{mimalloc} guarantees constant-time allocation even under heavily multiplexed asynchronous workloads.
 
@@ -88,13 +88,22 @@ Mavi VPN provides native drivers rather than relying on generic user-space wrapp
 
 Operating a Layer 3 VPN over TCP leads to catastrophic "TCP Meltdown" when packets are lost. Operating over raw UDP leaves the implementation solely responsible for congestion control and encryption. 
 
-Mavi VPN leverages \textbf{QUIC}. We use the \texttt{quinn} Rust crate (implementation of IETF QUIC) to provide the best of both worlds: independent, unreliable datagrams encapsulated in a state-of-the-art encrypted, congestion-controlled wrapper.
+Mavi VPN leverages \textbf{QUIC} by default. We use the \texttt{quinn} Rust crate (implementation of IETF QUIC) to provide independent, unreliable datagrams in an encrypted, congestion-controlled wrapper. An optional HTTP/2 CONNECT-IP mode uses TLS/TCP and RFC 8441 Extended CONNECT with RFC 9297 capsules; its capsule delivery is reliable and ordered.
 
 \subsection{Datagrams vs. Streams}
 \begin{itemize}
     \item \textbf{The Data Plane (Datagrams)}: Encapsulated IP packets (IPv4/IPv6) are transmitted using QUIC Datagrams (RFC 9221). Because datagrams are unordered and unreliable, the loss of one packet does not delay subsequent packets, completely solving the HoL blocking problem while allowing the inner OS TCP stack to handle retransmissions correctly.
     \item \textbf{The Control Plane (Streams)}: Configuration, Handshake (Auth messages), and telemetry are sent over QUIC Streams. This guarantees that initial network assignments (Gateway IPs, Routes, MTU) are delivered with cryptographic certainty before the client configures its virtual interface.
 \end{itemize}
+
+\subsection{HTTP/2 CONNECT-IP Fallback}
+When \texttt{VPN\_HTTP2\_BIND\_ADDR} is configured, the backend exposes a separate
+TLS/TCP listener that negotiates ALPN \texttt{h2}. Clients send an Extended CONNECT
+request to \texttt{/.well-known/masque/ip/*/*/} with protocol \texttt{connect-ip}
+and \texttt{capsule-protocol: ?1}. Address, route, configuration, reauthentication,
+and IP packet data are exchanged as CONNECT-IP capsules inside HTTP/2 DATA frames.
+HTTP/2 mode is mutually exclusive with QUIC HTTP/3 framing, censorship-resistant
+mode, and ECH.
 
 \subsection{Congestion Control: BBR (Bottleneck Bandwidth and RTT)}
 Traditional CUBIC congestion algorithms interpret packet loss as network congestion and instantly halve transmission velocity. On erratic mobile or international links, this leads to chronic under-utilization. Mavi VPN explicitly initializes the QUIC transport configuration to utilize Google's \textbf{BBR} congestion control. BBR continually models the actual bandwidth pipe and baseline RTT, ensuring high-speed throughput even over wireless topologies exhibiting 5\%-10\% innate packet loss.
@@ -164,26 +173,28 @@ QUIC traditionally attempts to increase probe sizes to discover the maximum avai
 If 1500-byte encapsulated packets are transmitted, upstream routers must fragment them. Due to security heuristics, most ISPs aggressively drop fragmented UDP traffic, triggering silent protocol collapse. 
 
 \subsection{Dual-Boundary Pinned Limitation}
-Mavi VPN abolishes PMTUD variance in favor of strict "Pinned Mode".
+Mavi VPN bounds PMTUD variance with an operator-selected inner MTU in the
+range 1280--1360. For QUIC transports the outer payload MTU is derived as
+\texttt{VPN\_MTU + 80}; HTTP/2/TCP has no QUIC payload MTU.
 
-\textbf{1. The Outer Wire Tunnel: Pinned at 1360 Bytes}\\
+\textbf{1. The Outer QUIC Payload: Derived from the Inner MTU}\\
 We actively disable PMTUD within the Quinn stack:
 \begin{lstlisting}[language=Rust]
 transport_config.mtu_discovery_config(None); 
-transport_config.initial_mtu(1360); 
-transport_config.min_mtu(1360);
+transport_config.initial_mtu(vpn_mtu + 80);
+transport_config.min_mtu(vpn_mtu + 80);
 \end{lstlisting}
-At 1360 bytes, the packets are substantially smaller than even the most severely constrained PPPoE gateways (1460 bytes). Because the packet never challenges the infrastructure's MTU ceiling, fragmentation is structurally impossible.
+With the default \texttt{VPN\_MTU=1280}, the QUIC payload limit is 1360 bytes. The derived value keeps the encrypted UDP packet below common 1460-byte paths.
 
-\textbf{2. The Inner Payload Tunnel: Pinned at 1280 Bytes}\\
-1280 Bytes is the absolute minimum MTU acceptable for an IPv6-compliant network stack. By configuring the local virtual TUN adapter to 1280 MTU, the Windows/Linux/Android kernel will \textit{never} schedule an IP packet larger than 1280 bytes into the VPN driver.
+\textbf{2. The Inner Payload Tunnel: Configurable at 1280--1360 Bytes}\\
+1280 Bytes is the absolute minimum MTU acceptable for an IPv6-compliant network stack. By configuring the local virtual TUN adapter within the supported range, the Windows/Linux/Android kernel will not schedule an IP packet larger than the selected value into the VPN driver.
 
 \textbf{3. The Protocol Mathematics}
 \begin{itemize}
-    \item Allowed Transmission Array: 1360 Bytes.
+    \item Default QUIC Payload: $1280 + 80 = 1360$ Bytes.
     \item Transport Overhead: $\sim$80 Bytes (40B for IPv6 + 8B for UDP + 32B for QUIC Headers/TLS Auth Tag).
-    \item Available Payload: $1360 - 80 = 1280$ Bytes.
-    \item Max Inner Packet: 1280 Bytes.
+    \item Available Payload: $\texttt{VPN\_MTU}$ Bytes.
+    \item Max Inner Packet: the selected TUN MTU.
 \end{itemize}
 The payload perfectly occupies the safe transport array, ensuring zero-fragmentation tunneling on a global scale.
 
@@ -208,6 +219,6 @@ The network natively supports \textbf{Dual-Stack} deployments, assigning a dedic
 
 \section{Conclusion}
 
-The Mavi VPN architecture represents a decisive paradigm shift in secure network tunneling. By transitioning away from easily identified raw network protocols and encapsulating traffic securely within authentic HTTP/3 streams, it nullifies modern Deep Packet Inspection perimeters. Through meticulous memory handling, cryptographic enforcement (ECH, Certificate Pinning), and statistically impervious MTU pinning, Mavi VPN delivers robust, high-performance edge routing designed explicitly to withstand the aggressive censorship behaviors of the contemporary internet landscape.
+The Mavi VPN architecture combines raw QUIC, HTTP/3/MASQUE camouflage, and an optional HTTP/2 CONNECT-IP fallback. Through careful packet validation, certificate pinning, authentication, and transport-specific MTU handling, Mavi VPN delivers high-performance edge routing while making the deployment trade-offs explicit: QUIC provides unreliable datagrams and roaming, while HTTP/2 provides reliable ordered capsules over TLS/TCP.
 
 \end{document}

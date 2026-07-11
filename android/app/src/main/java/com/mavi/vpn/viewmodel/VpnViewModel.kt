@@ -52,6 +52,7 @@ class VpnViewModel(
     var splitPackages = MutableStateFlow(prefs.savedSplitPackages)
     var censorshipResistant = MutableStateFlow(prefs.savedCensorshipResistant)
     var http3Framing = MutableStateFlow(prefs.savedHttp3Framing)
+    var http2Framing = MutableStateFlow(prefs.savedHttp2Framing)
     var vpnMtu = MutableStateFlow(prefs.savedVpnMtu)
 
     private val _errorMessage = MutableStateFlow("")
@@ -138,18 +139,24 @@ class VpnViewModel(
         packages: String,
         crMode: Boolean,
         h3Mode: Boolean,
+        h2Mode: Boolean,
         vpnMtuValue: Int,
     ) {
+        val normalizedH2 = h2Mode
+        val normalizedCr = crMode && !normalizedH2
+        val normalizedH3 = (h3Mode || normalizedCr) && !normalizedH2
         splitMode.value = mode
         splitPackages.value = packages
-        censorshipResistant.value = crMode
-        http3Framing.value = h3Mode
+        censorshipResistant.value = normalizedCr
+        http3Framing.value = normalizedH3
+        http2Framing.value = normalizedH2
         vpnMtu.value = vpnMtuValue
-        
+
         prefs.savedSplitMode = mode
         prefs.savedSplitPackages = packages
-        prefs.savedCensorshipResistant = crMode
-        prefs.savedHttp3Framing = h3Mode
+        prefs.savedCensorshipResistant = normalizedCr
+        prefs.savedHttp3Framing = normalizedH3
+        prefs.savedHttp2Framing = normalizedH2
         prefs.savedVpnMtu = vpnMtuValue
     }
 }

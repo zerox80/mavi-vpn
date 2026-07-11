@@ -22,6 +22,7 @@ mod utils;
 use crate::handlers::connection::handle_connection;
 use crate::network::tun::create_tun_device;
 use crate::routing::{spawn_tun_reader, spawn_tun_writer};
+use crate::server::http2::bind_http2_listener;
 use crate::server::quic::create_quic_endpoint;
 use crate::state::AppState;
 use crate::utils::cleanup_legacy_rules;
@@ -187,11 +188,39 @@ async fn main() -> Result<()> {
     spawn_tun_reader(tun_reader, state.clone());
     spawn_tun_writer(tun_writer, rx_tun);
 
+    // HTTP/2 needs the same authenticated routing state and TUN sender as
+    // QUIC, so bind it once those dependencies have been initialized.
+    let http2_listener = if let Some(bind_addr) = config.http2_bind_addr {
+        Some(
+            bind_http2_listener(
+                bind_addr,
+                certs.clone(),
+                key.clone_key(),
+                state.clone(),
+                config.clone(),
+                tx_tun.clone(),
+                keycloak.clone(),
+                ipv6_enabled,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     // Cleanup legacy firewall rules (if any)
     cleanup_legacy_rules();
 
     // Create the QUIC endpoint
     let endpoint = create_quic_endpoint(&config, certs, key)?;
+
+    if let Some(http2_listener) = http2_listener {
+        tokio::spawn(async move {
+            if let Err(error) = http2_listener.run().await {
+                warn!(%error, "HTTP/2 listener stopped");
+            }
+        });
+    }
 
     info!("Server Ready. Waiting for connections...");
 

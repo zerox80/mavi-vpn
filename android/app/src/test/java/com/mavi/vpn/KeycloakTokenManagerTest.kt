@@ -281,7 +281,10 @@ class KeycloakTokenManagerTest {
         return "$header.$payload.signature"
     }
 
-    private fun encode(json: String): String = Base64.getUrlEncoder().withoutPadding().encodeToString(json.toByteArray(Charsets.UTF_8))
+    private fun encode(json: String): String =
+        Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString(json.toByteArray(Charsets.UTF_8))
 
     private fun nowSeconds(): Long = System.currentTimeMillis() / 1000L
 }

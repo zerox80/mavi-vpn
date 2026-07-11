@@ -42,6 +42,8 @@ function setupVpnDom() {
     <div id="net-endpoint"></div>
     <div id="net-ip"></div>
     <div id="net-service"></div>
+    <div id="net-protocol"></div>
+    <div id="net-transport"></div>
     <div id="toast"></div>
   `;
 }

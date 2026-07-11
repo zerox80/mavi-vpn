@@ -140,7 +140,11 @@ class MaviVpnService : VpnService() {
 
                     while (isCurrentSessionActive()) {
                         if (prefs.savedUseKeycloak) {
-                            when (val tokenResult = runBlocking { tokenManager.getUsableAccessToken(skewSeconds = 300) }) {
+                            when (
+                                val tokenResult = runBlocking {
+                                    tokenManager.getUsableAccessToken(skewSeconds = 300)
+                                }
+                            ) {
                                 is TokenAcquireResult.Usable -> {
                                     currentToken = tokenResult.accessToken
                                     if (tokenResult.refreshed) {
@@ -179,6 +183,7 @@ class MaviVpnService : VpnService() {
                                 certPin,
                                 crMode,
                                 prefs.savedHttp3Framing,
+                                prefs.savedHttp2Framing,
                                 prefs.savedEchConfig,
                                 prefs.savedVpnMtu,
                             )

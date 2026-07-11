@@ -2,11 +2,10 @@
 //!
 //! The GUI silently refreshes the access token and pushes it (via `UpdateToken`)
 //! into the session's `current_token` cell. This task presents the fresh token to
-//! the server over a *fresh* bidirectional QUIC stream so the live tunnel survives
-//! the original token's expiry instead of being force-closed and reconnected.
+//! the server over the active transport's in-band control path so the live tunnel
+//! survives the original token's expiry instead of being force-closed and reconnected.
 
-use anyhow::Result;
-use shared::control;
+use super::super::handshake::TunnelConnection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -22,7 +21,7 @@ const REAUTH_POLL_SECS: u64 = 15;
 /// (global) or `session_alive` is cleared. Returns the join handle so the caller
 /// can abort it during teardown.
 pub(super) fn spawn_reauth_task(
-    connection: Arc<quinn::Connection>,
+    connection: Arc<TunnelConnection>,
     session_alive: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     token_cell: Arc<StdMutex<String>>,
@@ -39,7 +38,7 @@ pub(super) fn spawn_reauth_task(
             if current.is_empty() || current == last_token {
                 continue;
             }
-            match send_reauth(&connection, &current).await {
+            match connection.reauthenticate(&current).await {
                 Ok(true) => {
                     info!("In-band token reauth accepted; live session extended");
                     last_token = current;
@@ -49,19 +48,4 @@ pub(super) fn spawn_reauth_task(
             }
         }
     })
-}
-
-/// Presents a refreshed access token to the server over a fresh bidirectional
-/// QUIC stream so the *live* session's deadline is extended in place (no
-/// reconnect). Returns whether the server accepted it. Bounded by a timeout so a
-/// stalled stream cannot wedge the reauth task. Framing and the exchange itself
-/// live in [`shared::control`], shared with the Windows and Android cores.
-async fn send_reauth(connection: &quinn::Connection, token: &str) -> Result<bool> {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let (mut send, mut recv) = connection.open_bi().await?;
-        let accepted = control::reauth_over_stream(&mut send, &mut recv, token).await?;
-        Ok::<bool, anyhow::Error>(accepted)
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("Reauth timed out"))?
 }

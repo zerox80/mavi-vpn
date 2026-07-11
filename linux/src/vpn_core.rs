@@ -3,6 +3,7 @@
 //! Implements the core VPN logic for Linux.
 
 mod cert_pin;
+mod h2;
 mod h3;
 mod handshake;
 mod kc_refresh;

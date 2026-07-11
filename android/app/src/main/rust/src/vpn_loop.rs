@@ -1,8 +1,16 @@
+#[cfg(not(target_os = "android"))]
 use jni::sys::jint;
+#[cfg(not(target_os = "android"))]
 use log::error;
+#[cfg(not(target_os = "android"))]
 use shared::ControlMessage;
+#[cfg(not(target_os = "android"))]
 use std::sync::atomic::AtomicBool;
+#[cfg(not(target_os = "android"))]
 use std::sync::Arc;
+
+#[cfg(not(target_os = "android"))]
+use crate::connection::TunnelConnection;
 
 #[cfg(target_os = "android")]
 mod android;
@@ -24,7 +32,7 @@ pub type RawFd = std::os::raw::c_int;
 
 #[cfg(not(target_os = "android"))]
 pub async fn run_vpn_loop(
-    _connection: quinn::Connection,
+    _connection: TunnelConnection,
     _fd: jint,
     _stop_flag: Arc<AtomicBool>,
     _config: ControlMessage,

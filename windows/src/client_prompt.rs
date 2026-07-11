@@ -128,18 +128,25 @@ async fn prompt_new_config() -> Result<Config> {
     print!("Certificate PIN (SHA256 hex): ");
     stdout.flush()?;
     let cert_pin = read_line()?;
-    print!("Censorship Resistant Mode? [y/N]: ");
+    print!("Use HTTP/2 CONNECT-IP over TCP (beta)? [y/N]: ");
     stdout.flush()?;
-    let cr_input = read_line()?.to_lowercase();
-    let censorship_resistant = is_affirmative(&cr_input);
-    let http3_framing = if censorship_resistant {
-        println!("HTTP/3 Datagram Framing is automatically enabled in CR Mode.");
-        true
+    let http2_framing = is_affirmative(&read_line()?.to_lowercase());
+    let (censorship_resistant, http3_framing) = if http2_framing {
+        println!("HTTP/2 is reliable TCP transport; CR and HTTP/3 framing are disabled.");
+        (false, false)
     } else {
-        print!("HTTP/3 Datagram Framing? (Only useful in CR Mode) [y/N]: ");
+        print!("Censorship Resistant Mode? [y/N]: ");
         stdout.flush()?;
-        let h3_input = read_line()?.to_lowercase();
-        is_affirmative(&h3_input)
+        let censorship_resistant = is_affirmative(&read_line()?.to_lowercase());
+        let http3_framing = if censorship_resistant {
+            println!("HTTP/3 Datagram Framing is automatically enabled in CR Mode.");
+            true
+        } else {
+            print!("HTTP/3 Datagram Framing? (Only useful in CR Mode) [y/N]: ");
+            stdout.flush()?;
+            is_affirmative(&read_line()?.to_lowercase())
+        };
+        (censorship_resistant, http3_framing)
     };
     let ech_config = match std::env::var("VPN_ECH_CONFIG") {
         Ok(s) if !s.is_empty() => Some(s),
@@ -179,6 +186,7 @@ async fn prompt_new_config() -> Result<Config> {
         cert_pin,
         censorship_resistant,
         http3_framing,
+        http2_framing,
         kc_auth,
         kc_url: saved_kc_url,
         kc_realm: saved_kc_realm,

@@ -17,7 +17,7 @@ use crate::handlers::h3::handle_h3_connection;
 use crate::handlers::tunnel::run_tunnel;
 use crate::handlers::utils::{emulate_http3, negotiated_alpn, negotiated_sni, IpGuard};
 
-mod reauth;
+pub(super) mod reauth;
 use reauth::reauth_listener;
 
 enum InitialStreams {
@@ -40,7 +40,7 @@ const RAW_AUTH_MAX_BYTES: usize = 16_384;
 /// connection-slot exhaustion. Bounding the pre-auth phase releases stalled slots.
 pub(crate) const PREAUTH_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub(super) fn validate_raw_auth_len(len: usize) -> Result<()> {
+pub(crate) fn validate_raw_auth_len(len: usize) -> Result<()> {
     if len > RAW_AUTH_MAX_BYTES {
         anyhow::bail!("Auth message too big");
     }

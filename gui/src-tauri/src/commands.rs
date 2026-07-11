@@ -41,7 +41,9 @@ pub(crate) async fn vpn_connect(
     config.normalize_transport();
     let endpoint = config.endpoint.clone();
     let keycloak_enabled = kc_session.is_some();
-    let transport = if config.effective_http3_framing() {
+    let transport = if config.uses_http2() {
+        "http2"
+    } else if config.effective_http3_framing() {
         "http3"
     } else {
         "raw"

@@ -21,15 +21,21 @@
 ---
 > ⚠️ Mavi VPN is early beta software and has not been independently audited. Do not rely on it for high-risk security use cases yet.
 
-Mavi VPN tunnels all network traffic over **QUIC** via the [`quinn`](https://github.com/zerox80/quinn) fork and the [`h3`](https://github.com/zerox80/h3) fork, both tracked on `main`, to deliver secure, reliable, low-latency connectivity — even on unstable mobile networks. It supports **Windows**, **Linux**, and **Android** with native clients and an optional cross-platform **Tauri GUI**.
+Mavi VPN tunnels all network traffic over **QUIC** by default, with an optional
+**HTTP/2 CONNECT-IP** transport over TLS/TCP. The QUIC path uses the
+[`quinn`](https://github.com/zerox80/quinn) and [`h3`](https://github.com/zerox80/h3)
+forks, both tracked on `main`, to deliver secure, low-latency connectivity even
+on unstable mobile networks. It supports **Windows**, **Linux**, and **Android**
+with native clients and an optional cross-platform **Tauri GUI**.
 
 ## Key Features
 
 | Category | Feature | Details |
 |---|---|---|
-| **Censorship Resistance** | Layer 7 Obfuscation | VPN traffic masquerades as **HTTP/3** via ALPN `h3` |
+| **Censorship Resistance** | Layer 7 Obfuscation | VPN traffic can masquerade as **HTTP/3** via ALPN `h3` |
 | | Probe Resistance | Unauthorized connections receive a fake **nginx** welcome page (H3 200 OK) |
 | | MASQUE / RFC 9484 | Optional `connect-ip` capsule framing for DPI-proof wire format |
+| | HTTP/2 CONNECT-IP | Optional TLS/TCP transport using Extended CONNECT and RFC 9297 capsules |
 | | Encrypted Client Hello | **ECH GREASE** + SNI spoofing via X25519/HPKE (RFC 9180) |
 | | Certificate Pinning | SHA-256 cert fingerprint verification on all clients |
 | **Performance** | Zero-Copy Path | `bytes`/`BytesMut` across the entire packet pipeline |
@@ -38,7 +44,7 @@ Mavi VPN tunnels all network traffic over **QUIC** via the [`quinn`](https://git
 | | 4 MB UDP Buffers | Auto-tuned OS-level socket buffers for burst resilience |
 | | mimalloc | High-performance memory allocator on the server |
 | **Mobile-First** | Seamless Roaming | QUIC connection migration — no handshake restart on IP change |
-| | MTU Pinning (1280/1360) | Avoids PMTUD black holes; ICMP PTB signal generation (RFC 4443) |
+| | MTU Coupling (1280..1360) | QUIC payload is derived as TUN MTU + 80; ICMP PTB generation (RFC 4443) |
 | | Split Tunneling | Per-app VPN bypass on Android |
 | **Auth** | Static Token | Simple pre-shared key authentication |
 | | Keycloak OIDC | Enterprise SSO with JWT validation, PKCE, and JWKS rotation |
@@ -58,8 +64,8 @@ graph TD
         SVC <-->|"Packet I/O"| TUN_C
     end
 
-    subgraph "Transport — UDP/QUIC"
-        QUIC["QUIC Datagrams\n(or MASQUE connect-ip capsules)"]
+    subgraph "Transport — QUIC or TLS/TCP"
+        QUIC["QUIC datagrams / HTTP/3 MASQUE\nor HTTP/2 CONNECT-IP capsules"]
     end
 
     subgraph "Server — Linux Docker Container"
@@ -72,8 +78,8 @@ graph TD
         HUB <-->|"Packet I/O"| TUN_S
     end
 
-    SVC <-->|"QUIC payload ≤1360 bytes"| QUIC
-    QUIC <-->|"QUIC payload ≤1360 bytes"| HUB
+    SVC <-->|"VPN packets"| QUIC
+    QUIC <-->|"VPN packets"| HUB
 ```
 
 ## Project Structure
@@ -83,15 +89,15 @@ mavi-vpn/
 ├── backend/            # Linux VPN server (Rust) — QUIC endpoint, IP pool, routing, Keycloak
 │   ├── src/
 │   │   ├── main.rs           # Entry point, connection accept loop
-│   │   ├── config.rs         # CLI/env config (clap)
-│   │   ├── state.rs          # AppState: IP pool (v4+v6), peer DashMap
+│   │   ├── config/            # CLI/env config (clap)
+│   │   ├── state/             # AppState: IP pool (v4+v6), peer DashMap
 │   │   ├── routing.rs        # TUN reader/writer tasks with local peer cache
 │   │   ├── cert.rs           # TLS cert generation & SHA-256 PIN export
 │   │   ├── ech.rs            # ECH key generation & ECHConfigList persistence
 │   │   ├── keycloak.rs       # OIDC JWT validator with JWKS refresh
-│   │   ├── handlers/         # Per-connection QUIC session handler
+│   │   ├── handlers/         # Per-connection QUIC/HTTP2 session handlers
 │   │   ├── network/          # TUN device creation, h3-quinn adapter
-│   │   └── server/           # QUIC endpoint builder (BBR, timeouts, buffers)
+│   │   └── server/           # QUIC and HTTP/2 listeners
 │   ├── docker-compose.yml    # Full stack: VPN + optional Traefik + Keycloak
 │   ├── entrypoint.sh         # iptables NAT, IPv6 forwarding, MSS clamping
 │   └── .env.example          # All configuration variables documented
@@ -100,13 +106,13 @@ mavi-vpn/
 │   └── src/
 │       ├── main.rs           # CLI client (start/stop/status)
 │       ├── bin/service.rs    # Windows Service (WinTUN, routing, NRPT DNS)
-│       ├── vpn_core.rs       # QUIC tunnel logic, ECH, MASQUE framing
+│       ├── vpn_core.rs       # QUIC/HTTP2 tunnel logic, ECH, MASQUE framing
 │       └── oauth.rs          # PKCE OAuth2 flow for Keycloak
 │
 ├── linux/              # Linux client (Rust) — TUN via /dev/net/tun, systemd
 │   └── src/
 │       ├── main.rs           # CLI + daemon mode + IPC client
-│       ├── vpn_core.rs       # QUIC tunnel logic with network change detection
+│       ├── vpn_core.rs       # QUIC/HTTP2 tunnel logic with network change detection
 │       ├── daemon/           # Unix socket IPC server for GUI/CLI integration
 │       ├── network.rs        # Route setup, DNS config, cleanup
 │       └── tun.rs            # Raw TUN device via ioctl
@@ -114,7 +120,7 @@ mavi-vpn/
 ├── android/            # Android app (Kotlin + Rust JNI)
 │   └── app/src/main/
 │       ├── kotlin/           # Jetpack Compose UI, VpnService, NetworkCallback
-│       └── rust/src/lib.rs   # JNI core: QUIC, cert pinning, connection migration
+│       └── rust/src/lib.rs   # JNI core: QUIC/HTTP2, cert pinning, migration
 │
 ├── gui/                # Cross-platform Tauri v2 GUI (HTML/CSS/JS + Rust)
 │   ├── src/                  # Frontend (vanilla HTML/CSS/JS)
@@ -125,7 +131,7 @@ mavi-vpn/
 │       ├── lib.rs            # ControlMessage protocol (Auth → Config → Datagrams)
 │       ├── icmp.rs           # ICMP "Packet Too Big" generation (RFC 792/4443)
 │       ├── ipc.rs            # IPC protocol (SecureIpcRequest, Config, Response)
-│       ├── masque.rs         # MASQUE connect-ip: capsules, varints, datagram framing
+│       ├── masque.rs         # CONNECT-IP capsules, varints, datagram framing
 │       └── hex.rs            # Hex encode/decode utilities
 │
 ├── quic-tester/        # DPI probe simulator — verifies censorship resistance
@@ -141,7 +147,7 @@ mavi-vpn/
 ```bash
 cd backend
 cp .env.example .env
-nano .env                    # Set VPN_AUTH_TOKEN, VPN_PORT, etc.
+nano .env                    # Set VPN_AUTH_TOKEN and optionally VPN_PORT
 docker compose up -d --build
 ```
 
@@ -157,7 +163,9 @@ Retrieve the certificate PIN for clients:
 cat data/cert_pin.txt
 ```
 
-> **Port:** The server listens on UDP (default `10443`). Ensure your firewall allows this.
+> **Ports:** The Compose default is UDP `10443` for QUIC. If HTTP/2 is enabled,
+> also allow the TCP port configured by `VPN_HTTP2_BIND_ADDR` (it may use the
+> same numeric port as the QUIC listener).
 
 ### Windows Client
 
@@ -215,23 +223,28 @@ npm run tauri -- build     # Production (generates MSI/DEB/RPM)
 
 ## Censorship Resistance Modes
 
-Mavi VPN offers three escalating levels of traffic obfuscation:
+Mavi VPN offers several mutually exclusive transport modes:
 
 | Level | Mode | Wire Format | Activate |
 |---|---|---|---|
 | **0** | Standard | Raw QUIC datagrams | Default |
 | **1** | CR Mode | QUIC + ALPN `h3` + probe resistance | `censorship_resistant: true` |
-| **2** | HTTP/3 Framing | Full MASQUE connect-ip (RFC 9484) capsules | `http3_framing: true` |
+| **2A** | HTTP/3 Framing | MASQUE connect-ip (RFC 9484) over QUIC | `http3_framing: true` |
+| **2B** | HTTP/2 CONNECT-IP | TLS/TCP + ALPN `h2` + RFC 8441 Extended CONNECT + RFC 9297 capsules | `http2_framing: true` |
 | **+** | ECH | SNI spoofing + HPKE GREASE (RFC 9180) | Provide `ech_config` hex |
 
-When CR Mode is enabled, the server responds to unauthorized connections with a fabricated HTTP/3 nginx welcome page. This makes the server indistinguishable from a regular web server to active probes and DPI systems.
+HTTP/2 mode requires `VPN_HTTP2_BIND_ADDR=0.0.0.0:10443` (or another TCP port) on the server and the **HTTP/2 CONNECT-IP** option on the client. It is mutually exclusive with CR mode, HTTP/3 framing, and ECH. The server and clients exchange real HTTP/2 frames and CONNECT-IP capsules. Unlike the QUIC data plane, HTTP/2 capsules are reliable and ordered because they run over TLS/TCP; traffic volume and timing can still differ from ordinary browsing.
 
-**ECH** is supported on clients via `EchMode::Grease` — the real SNI is hidden behind a cover domain (e.g. `cloudflare-ech.com`). The server generates and persists the ECH keypair in `data/ech_config_hex.txt`.
+When CR Mode is enabled, the server responds to unauthorized connections with a fabricated HTTP/3 nginx welcome page, improving resistance to simple active probes.
+
+**ECH** is supported on QUIC clients via `EchMode::Grease` — the real SNI is hidden behind a cover domain (e.g. `cloudflare-ech.com`). The server persists the binary ECH config/key files and writes the administrator-facing hex config to `data/ech_config_hex.txt`. HTTP/2 mode does not use ECH.
 
 ## Authentication
 
 ### Static Token
-Set `VPN_AUTH_TOKEN` on the server. Clients send this token during the QUIC handshake.
+Set `VPN_AUTH_TOKEN` on the server. Raw QUIC clients send it in the bincode
+control handshake; HTTP/3 and HTTP/2 clients send it as `Authorization: Bearer
+<token>` during CONNECT-IP setup.
 
 ### Keycloak OIDC (Enterprise)
 Full enterprise SSO with Keycloak:
@@ -259,7 +272,7 @@ Full enterprise SSO with Keycloak:
 | Setting | Value | Why |
 |---|---|---|
 | Inner TUN MTU | **1280** | IPv6 minimum — universally supported, avoids fragmentation |
-| QUIC Payload | **1360** | Fits within 1460-MTU networks (e.g. Vodafone) without fragmentation |
+| QUIC Payload | **TUN MTU + 80** | Derived from the selected inner MTU; default is 1360 |
 | Congestion Control | **BBR** | Bandwidth-based, not loss-based — optimal for mobile/high-latency |
 | UDP Socket Buffers | **4 MB** | Prevents kernel drops during GSO bursts |
 | Allocator | **system default** | Avoids an unused native allocator dependency in test and build paths |
@@ -272,17 +285,25 @@ All server settings can be configured via environment variables or CLI flags:
 | Variable | Default | Description |
 |---|---|---|
 | `VPN_BIND_ADDR` | `0.0.0.0:4433` | QUIC listen address |
+| `VPN_HTTP2_BIND_ADDR` | *(disabled)* | Optional TLS/TCP listener for HTTP/2 CONNECT-IP; may use the same numeric port as QUIC |
 | `VPN_AUTH_TOKEN` | *(required)* | Pre-shared authentication token |
 | `VPN_NETWORK` | `10.8.0.0/24` | IPv4 client subnet (supports /8 to /30) |
 | `VPN_NETWORK_V6` | `fd00::/64` | IPv6 client subnet (ULA) |
 | `VPN_DISABLE_IPV6` | `false` | Skip all IPv6 setup and run IPv4-only |
 | `VPN_IPV6_WAIT` | `30` | Seconds to wait for the WAN's global IPv6 to appear before continuing |
 | `VPN_DNS` | `1.1.1.1` | DNS server pushed to clients |
+| `VPN_DNS_V6` | *(automatic)* | IPv6 DNS server pushed when IPv6 is active |
 | `VPN_MTU` | `1280` | TUN interface MTU |
 | `VPN_CENSORSHIP_RESISTANT` | `false` | Enable Layer 7 obfuscation |
-| `VPN_MSS_CLAMPING` | `false` | TCP MSS rewriting via iptables mangle (MSS derived from `VPN_MTU`) |
+| `VPN_MSS_CLAMPING` | `false` (`true` in the Docker Compose example) | TCP MSS rewriting via iptables mangle (MSS derived from `VPN_MTU`) |
 | `VPN_ALLOW_CLIENT_TO_CLIENT` | `false` | Allow VPN clients to reach each other (blocked by default) |
+| `VPN_TUN_DEVICE` | *(automatic)* | Optional server TUN device name/path |
+| `VPN_WHITELIST_DOMAINS` | *(empty)* | Comma-separated client-side split-tunnel domain allow-list |
+| `VPN_CERT` | `data/cert.pem` | TLS certificate path |
+| `VPN_KEY` | `data/key.pem` | TLS private key path |
 | `VPN_ECH_PUBLIC_NAME` | `cloudflare-ech.com` | ECH cover SNI domain |
+| `VPN_ECH_CONFIG` | `data/ech_config.bin` | Persisted ECHConfigList path |
+| `VPN_ECH_KEY` | `data/ech_key.bin` | Persisted ECH private key path |
 | `VPN_KEYCLOAK_ENABLED` | `false` | Enable Keycloak JWT auth |
 | `VPN_KEYCLOAK_URL` | — | Keycloak server URL (must be `https://`; plain HTTP only for localhost) |
 | `VPN_KEYCLOAK_REALM` | `mavi-vpn` | Keycloak realm name |

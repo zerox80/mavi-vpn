@@ -6,14 +6,17 @@
 use android_logger::Config;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jint, jlong};
-use jni::{AttachGuard, Env, EnvUnowned, JValue};
+use jni::{AttachGuard, Env, EnvUnowned};
 use log::{error, info};
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, Once, OnceLock};
 
-use crate::connection::connect_and_handshake;
+use crate::connection::{connect_and_handshake, connect_and_handshake_http2};
 use crate::session::VpnSession;
 use crate::vpn_loop::run_vpn_loop;
+
+mod socket;
+use socket::{create_udp_socket, protect_socket};
 
 const INIT_RETRYABLE_FAILURE: jlong = 0;
 const INIT_FATAL_AUTH: jlong = -1;
@@ -94,6 +97,7 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
     cert_pin: JString<'local>,
     censorship_resistant: jni::sys::jboolean,
     http3_framing: jni::sys::jboolean,
+    http2_framing: jni::sys::jboolean,
     ech_config: JString<'local>,
     vpn_mtu: jint,
 ) -> jlong {
@@ -101,202 +105,134 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
     let env = guard.borrow_env_mut();
     clear_last_init_error();
 
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            static LOGGER_INIT: Once = Once::new();
-            LOGGER_INIT.call_once(|| {
-                android_logger::init_once(
-                    Config::default()
-                        .with_tag("MaviVPN")
-                        .with_max_level(log::LevelFilter::Info),
-                );
-                let _ = rustls::crypto::ring::default_provider().install_default();
-            });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        static LOGGER_INIT: Once = Once::new();
+        LOGGER_INIT.call_once(|| {
+            android_logger::init_once(
+                Config::default()
+                    .with_tag("MaviVPN")
+                    .with_max_level(log::LevelFilter::Info),
+            );
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
 
-            info!("JNI init called. CR Mode: {censorship_resistant}");
+        info!("JNI init called. CR Mode: {censorship_resistant}");
 
-            let get_string = |env: &mut Env, jstr: &JString| -> Option<String> {
-                #[allow(deprecated)]
-                match env.get_string(jstr) {
-                    Ok(s) => Some(s.into()),
-                    Err(e) => {
-                        error!("Failed to get string from JNI: {e}");
-                        None
-                    }
+        let get_string = |env: &mut Env, jstr: &JString| -> Option<String> {
+            #[allow(deprecated)]
+            match env.get_string(jstr) {
+                Ok(s) => Some(s.into()),
+                Err(e) => {
+                    error!("Failed to get string from JNI: {e}");
+                    None
                 }
-            };
-
-            let Some(token) = get_string(env, &token) else {
-                set_last_init_error("Failed to read VPN token from JNI");
-                return INIT_FATAL_CONFIG;
-            };
-            let Some(endpoint) = get_string(env, &endpoint) else {
-                set_last_init_error("Failed to read VPN endpoint from JNI");
-                return INIT_FATAL_CONFIG;
-            };
-            let Some(cert_pin_str) = get_string(env, &cert_pin) else {
-                set_last_init_error("Failed to read certificate pin from JNI");
-                return INIT_FATAL_CONFIG;
-            };
-
-            // Optional: hex-encoded ECHConfigList. Empty string → no ECH override.
-            let ech_config_hex: Option<String> =
-                get_string(env, &ech_config).filter(|s| !s.is_empty());
-
-            if cert_pin_str.is_empty() {
-                let message = "Certificate PIN is empty. Connection aborted.";
-                error!("{message}");
-                set_last_init_error(message);
-                return INIT_FATAL_CERT;
             }
+        };
 
-            // Validate the MTU before allocating any sockets or the runtime so an
-            // out-of-range value fails fast instead of after expensive setup.
-            let vpn_mtu_opt = match validated_vpn_mtu(vpn_mtu) {
-                Ok(vpn_mtu) => vpn_mtu,
+        let Some(token) = get_string(env, &token) else {
+            set_last_init_error("Failed to read VPN token from JNI");
+            return INIT_FATAL_CONFIG;
+        };
+        let Some(endpoint) = get_string(env, &endpoint) else {
+            set_last_init_error("Failed to read VPN endpoint from JNI");
+            return INIT_FATAL_CONFIG;
+        };
+        let Some(cert_pin_str) = get_string(env, &cert_pin) else {
+            set_last_init_error("Failed to read certificate pin from JNI");
+            return INIT_FATAL_CONFIG;
+        };
+
+        // Optional: hex-encoded ECHConfigList. Empty string → no ECH override.
+        let ech_config_hex: Option<String> = get_string(env, &ech_config).filter(|s| !s.is_empty());
+
+        if cert_pin_str.is_empty() {
+            let message = "Certificate PIN is empty. Connection aborted.";
+            error!("{message}");
+            set_last_init_error(message);
+            return INIT_FATAL_CERT;
+        }
+
+        // Validate the MTU before allocating any sockets or the runtime so an
+        // out-of-range value fails fast instead of after expensive setup.
+        let vpn_mtu_opt = match validated_vpn_mtu(vpn_mtu) {
+            Ok(vpn_mtu) => vpn_mtu,
+            Err(message) => {
+                error!("{message}");
+                set_last_init_error(&message);
+                return INIT_FATAL_CONFIG;
+            }
+        };
+
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let message = format!("Failed to create runtime: {e}");
+                error!("{message}");
+                set_last_init_error(&message);
+                return INIT_RETRYABLE_FAILURE;
+            }
+        };
+
+        let effective_http3_framing =
+            crate::connection::effective_http3_framing(censorship_resistant, http3_framing);
+
+        // Keep a copy of the access token to seed the session's reauth cell;
+        // the handshake call below consumes `token`.
+        let session_token = token.clone();
+        let result = if http2_framing {
+            rt.block_on(connect_and_handshake_http2(
+                token,
+                endpoint,
+                cert_pin_str,
+                vpn_mtu_opt,
+                |tcp| protect_socket(env, &service, tcp),
+            ))
+            .map(|(connection, config)| (connection, config, None))
+        } else {
+            let socket = match create_udp_socket(env, &service) {
+                Ok(socket) => socket,
                 Err(message) => {
                     error!("{message}");
-                    set_last_init_error(&message);
-                    return INIT_FATAL_CONFIG;
-                }
-            };
-
-            let socket2_sock = match socket2::Socket::new(
-                socket2::Domain::IPV6,
-                socket2::Type::DGRAM,
-                Some(socket2::Protocol::UDP),
-            ) {
-                Ok(sock) => sock,
-                Err(e) => {
-                    let message = format!("Failed to create UDP socket: {e}");
-                    error!("{message}");
-                    set_last_init_error(&message);
+                    set_last_init_error(&message.to_string());
                     return INIT_RETRYABLE_FAILURE;
                 }
             };
+            rt.block_on(connect_and_handshake(
+                socket,
+                token,
+                endpoint,
+                cert_pin_str,
+                censorship_resistant,
+                effective_http3_framing,
+                ech_config_hex,
+                vpn_mtu_opt,
+            ))
+        };
 
-            if let Err(e) = socket2_sock.set_only_v6(false) {
-                let message = format!("Failed to enable dual-stack UDP socket: {e}");
-                error!("{message}");
-                set_last_init_error(&message);
-                return INIT_RETRYABLE_FAILURE;
-            }
-            if let Err(e) = socket2_sock.bind(&socket2::SockAddr::from(
-                std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0),
-            )) {
-                let message = format!("Failed to bind UDP socket: {e}");
-                error!("{message}");
-                set_last_init_error(&message);
-                return INIT_RETRYABLE_FAILURE;
-            }
-            let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
-            let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
-
-            #[cfg(target_os = "android")]
-            unsafe {
-                use std::os::unix::io::AsRawFd;
-                let fd = socket2_sock.as_raw_fd();
-                let val: libc::c_int = 0;
-
-                let _ = libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_IP,
-                    libc::IP_MTU_DISCOVER,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&val) as libc::socklen_t,
+        match result {
+            Ok((connection, config, h3_guard)) => {
+                clear_last_init_error();
+                let session = VpnSession::new(
+                    rt,
+                    connection,
+                    config,
+                    effective_http3_framing && !http2_framing,
+                    session_token,
+                    h3_guard,
                 );
-                let _ = libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_IPV6,
-                    libc::IPV6_MTU_DISCOVER,
-                    &val as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&val) as libc::socklen_t,
-                );
+                Box::into_raw(Box::new(session)) as jlong
             }
-
-            let socket = std::net::UdpSocket::from(socket2_sock);
-
-            #[cfg(target_os = "android")]
-            let sock_fd = {
-                use std::os::unix::io::AsRawFd;
-                socket.as_raw_fd()
-            };
-            #[cfg(not(target_os = "android"))]
-            let sock_fd = 0;
-
-            let protected = env
-                .call_method(
-                    &service,
-                    jni::jni_str!("protect"),
-                    jni::jni_sig!("(I)Z"),
-                    &[JValue::Int(sock_fd as jint)],
-                )
-                .and_then(jni::JValueOwned::z)
-                .unwrap_or(false);
-
-            if !protected {
-                let message = "Failed to protect VPN socket!";
-                error!("{message}");
-                set_last_init_error(message);
-                return INIT_RETRYABLE_FAILURE;
+            Err(e) => {
+                let message = e.to_string();
+                error!("Handshake failed: {message}");
+                set_last_init_error(&message);
+                classify_init_error(&message)
             }
-
-            let _ = socket.set_nonblocking(true);
-
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let message = format!("Failed to create runtime: {e}");
-                    error!("{message}");
-                    set_last_init_error(&message);
-                    return INIT_RETRYABLE_FAILURE;
-                }
-            };
-
-            let effective_http3_framing =
-                crate::connection::effective_http3_framing(censorship_resistant, http3_framing);
-
-            // Keep a copy of the access token to seed the session's reauth cell;
-            // the handshake call below consumes `token`.
-            let session_token = token.clone();
-            let result = rt.block_on(async {
-                connect_and_handshake(
-                    socket,
-                    token,
-                    endpoint,
-                    cert_pin_str,
-                    censorship_resistant,
-                    effective_http3_framing,
-                    ech_config_hex,
-                    vpn_mtu_opt,
-                )
-                .await
-            });
-
-            match result {
-                Ok((connection, config, h3_guard)) => {
-                    clear_last_init_error();
-                    let session = VpnSession::new(
-                        rt,
-                        connection,
-                        config,
-                        effective_http3_framing,
-                        session_token,
-                        h3_guard,
-                    );
-                    Box::into_raw(Box::new(session)) as jlong
-                }
-                Err(e) => {
-                    let message = e.to_string();
-                    error!("Handshake failed: {message}");
-                    set_last_init_error(&message);
-                    classify_init_error(&message)
-                }
-            }
-        }));
+        }
+    }));
 
     result.unwrap_or_else(|_| {
         set_last_init_error("Unexpected panic in native init");
@@ -380,9 +316,9 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_startLoop<'local>(
 
         // In-band Keycloak reauth: present GUI-refreshed tokens over the live
         // connection so the tunnel survives the original token's expiry.
-        let reauth_conn = session.connection.clone();
         let reauth_token = session.current_token.clone();
         let reauth_stop = session.stop_flag.clone();
+        let reauth_conn = session.connection.clone();
 
         session.runtime.block_on(async move {
             let reauth_handle = tokio::spawn(crate::connection::run_reauth_task(
@@ -440,7 +376,9 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_stop<'local>(
         let session = unsafe { &*(handle as *const VpnSession) };
         session.stop_flag.store(true, Ordering::SeqCst);
         let _ = session.shutdown_tx.send(());
-        session.connection.close(0u32.into(), b"user_disconnect");
+        if let Some(connection) = session.connection.quic() {
+            connection.close(0u32.into(), b"user_disconnect");
+        }
     }));
 }
 
@@ -471,9 +409,9 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_networkChanged<'loc
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = unsafe { &*(handle as *const VpnSession) };
-        let _ = session
-            .connection
-            .send_datagram(bytes::Bytes::from_static(&[0]));
+        if let Some(connection) = session.connection.quic() {
+            let _ = connection.send_datagram(bytes::Bytes::from_static(&[0]));
+        }
     }));
 }
 

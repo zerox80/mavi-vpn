@@ -23,6 +23,8 @@ struct SavedConn {
     #[serde(default)]
     http3_framing: bool,
     #[serde(default)]
+    http2_framing: bool,
+    #[serde(default)]
     censorship_resistant: bool,
     #[serde(default)]
     kc_auth: Option<bool>,
@@ -37,12 +39,23 @@ struct SavedConn {
 }
 
 impl SavedConn {
-    const fn normalize_transport(&mut self) -> bool {
-        let old_http3_framing = self.http3_framing;
-        if self.censorship_resistant {
+    fn normalize_transport(&mut self) -> bool {
+        let old = (
+            self.http2_framing,
+            self.http3_framing,
+            self.censorship_resistant,
+        );
+        if self.http2_framing {
+            self.http3_framing = false;
+            self.censorship_resistant = false;
+        } else if self.censorship_resistant {
             self.http3_framing = true;
         }
-        self.http3_framing != old_http3_framing
+        old != (
+            self.http2_framing,
+            self.http3_framing,
+            self.censorship_resistant,
+        )
     }
 }
 
@@ -253,6 +266,7 @@ mod tests {
             cert_pin: "pin".to_string(),
             censorship_resistant: false,
             http3_framing: false,
+            http2_framing: false,
             kc_auth: None,
             kc_url: None,
             kc_realm: None,

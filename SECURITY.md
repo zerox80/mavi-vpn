@@ -41,6 +41,8 @@ Reports around these areas are especially welcome:
 * Windows routing and DNS rules
 * Linux route cleanup
 * QUIC transport edge cases
+* HTTP/2 CONNECT-IP parsing, capsule handling, TLS/TCP listener exposure, or
+  reauthentication behavior
 * anything that could leak traffic outside the tunnel
 
 ## Operational trust boundaries

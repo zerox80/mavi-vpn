@@ -2,6 +2,12 @@
 
 This guide explains how to deploy the Mavi VPN backend (Keycloak + Traefik) behind an existing Nginx server on a Linux host that already manages a wildcard Let's Encrypt certificate.
 
+This configuration proxies the **Keycloak/Traefik web services**. It does not
+proxy the optional Mavi VPN HTTP/2 CONNECT-IP listener. HTTP/2 VPN clients need
+end-to-end ALPN `h2` and capsule support; expose `VPN_HTTP2_BIND_ADDR` directly
+or use a TCP passthrough proxy. Do not point the `location /` block below at
+the VPN listener.
+
 ## 🔗 Architecture Overview
 ```mermaid
 graph LR
@@ -60,10 +66,12 @@ server {
 ## 🚀 3. Deployment
 
 ### 🔄 Step 0: Syncing the Branch
-Since the `beta-keycloak` branch was rebased and force-pushed, a standard `git pull` will fail. Run this on your server:
+Check out the branch or tag you intend to deploy and update it normally. Avoid
+resetting a production checkout until local configuration and data have been
+backed up:
 ```bash
-git fetch origin beta-keycloak
-git reset --hard origin/beta-keycloak
+git fetch origin
+git pull --ff-only
 ```
 
 ### ⚙️ Step 1: Update Configuration

@@ -1,27 +1,26 @@
 use anyhow::Result;
 use bytes::Bytes;
 use http::Response;
-use std::net::IpAddr;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use shared::masque::{
-    self, AssignedAddress, IpAddressRange, CAPSULE_ADDRESS_ASSIGN, CAPSULE_MAVI_CONFIG,
-    CAPSULE_ROUTE_ADVERTISEMENT,
-};
-
 use crate::config::Config;
 use crate::handlers::auth::{as_token_validator, authenticate_client};
-use crate::handlers::connection::{build_config_message, run_authenticated_tunnel};
-use crate::handlers::utils::{prefix_len_from_mask, IpGuard};
+use crate::handlers::connection::run_authenticated_tunnel;
+use crate::handlers::utils::IpGuard;
 use crate::keycloak::KeycloakValidator;
 use crate::state::AppState;
+
+pub(crate) use crate::handlers::h3_capsules::build_connect_ip_capsules;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NonConnectIpResponse {
     CamouflageOk,
     NotFound,
 }
+
+const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/*/*/";
+const CAPSULE_PROTOCOL: &str = "?1";
 
 fn non_connect_ip_response(censorship_resistant: bool) -> NonConnectIpResponse {
     if censorship_resistant {
@@ -31,59 +30,15 @@ fn non_connect_ip_response(censorship_resistant: bool) -> NonConnectIpResponse {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_connect_ip_capsules(
-    state: &AppState,
-    config: &Config,
-    assigned_ip: std::net::Ipv4Addr,
-    assigned_ip6: std::net::Ipv6Addr,
-    ipv6_enabled: bool,
-) -> Result<Vec<u8>> {
-    let success_msg = build_config_message(state, config, assigned_ip, assigned_ip6, ipv6_enabled);
-
-    let mut capsule_stream: Vec<u8> = Vec::with_capacity(256);
-
-    let mut address_assigns = vec![AssignedAddress {
-        request_id: 0,
-        ip: IpAddr::V4(assigned_ip),
-        prefix_len: prefix_len_from_mask(state.network.mask()),
-    }];
-    if ipv6_enabled {
-        address_assigns.push(AssignedAddress {
-            request_id: 0,
-            ip: IpAddr::V6(assigned_ip6),
-            prefix_len: state.network_v6.prefix(),
-        });
-    }
-    masque::encode_capsule(
-        CAPSULE_ADDRESS_ASSIGN,
-        &masque::encode_address_assign(&address_assigns),
-        &mut capsule_stream,
-    );
-
-    let mut routes = vec![IpAddressRange {
-        start: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        end: IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
-        ip_protocol: 0,
-    }];
-    if ipv6_enabled {
-        routes.push(IpAddressRange {
-            start: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-            end: IpAddr::V6(std::net::Ipv6Addr::from([0xff; 16])),
-            ip_protocol: 0,
-        });
-    }
-    masque::encode_capsule(
-        CAPSULE_ROUTE_ADVERTISEMENT,
-        &masque::encode_route_advertisement(&routes),
-        &mut capsule_stream,
-    );
-
-    let mavi_config_bytes =
-        bincode::serde::encode_to_vec(&success_msg, bincode::config::standard())?;
-    masque::encode_capsule(CAPSULE_MAVI_CONFIG, &mavi_config_bytes, &mut capsule_stream);
-
-    Ok(capsule_stream)
+fn is_connect_ip_request<B>(request: &http::Request<B>) -> bool {
+    request.method() == http::Method::CONNECT
+        && request.uri().path() == CONNECT_IP_PATH
+        && request.extensions().get::<h3::ext::Protocol>().copied()
+            == Some(h3::ext::Protocol::CONNECT_IP)
+        && request
+            .headers()
+            .get("capsule-protocol")
+            .is_some_and(|value| value == CAPSULE_PROTOCOL)
 }
 
 async fn send_h3_camouflage_response<S>(
@@ -153,8 +108,7 @@ pub async fn handle_h3_connection(
         .await
         .map_err(|_| anyhow::anyhow!("H3 resolve timeout from {remote_addr}"))?
         .map_err(|e| anyhow::anyhow!("H3 resolve error: {e}"))?;
-    let connect_ip_requested =
-        req.extensions().get::<h3::ext::Protocol>().copied() == Some(h3::ext::Protocol::CONNECT_IP);
+    let connect_ip_requested = is_connect_ip_request(&req);
     info!(
         "H3 Request: {} {} (connect-ip={})",
         req.method(),
@@ -242,6 +196,8 @@ pub async fn handle_h3_connection(
 
     let response = Response::builder()
         .status(http::StatusCode::OK)
+        .header("capsule-protocol", CAPSULE_PROTOCOL)
+        .header("cache-control", "no-store")
         .body(())
         .map_err(|e| anyhow::anyhow!("Response build error: {e}"))?;
     req_stream
@@ -315,6 +271,58 @@ mod tests {
             non_connect_ip_response(false),
             NonConnectIpResponse::NotFound
         );
+    }
+
+    fn connect_ip_request() -> http::Request<()> {
+        let mut request = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri(CONNECT_IP_PATH)
+            .header("capsule-protocol", CAPSULE_PROTOCOL)
+            .body(())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(h3::ext::Protocol::CONNECT_IP);
+        request
+    }
+
+    #[test]
+    fn connect_ip_request_requires_method_path_protocol_and_capsule_header() {
+        let request = connect_ip_request();
+        assert!(is_connect_ip_request(&request));
+
+        let wrong_method = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(CONNECT_IP_PATH)
+            .header("capsule-protocol", CAPSULE_PROTOCOL)
+            .body(())
+            .unwrap();
+        assert!(!is_connect_ip_request(&wrong_method));
+
+        let wrong_path = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("/.well-known/masque/ip/192.0.2.1/6/")
+            .header("capsule-protocol", CAPSULE_PROTOCOL)
+            .extension(h3::ext::Protocol::CONNECT_IP)
+            .body(())
+            .unwrap();
+        assert!(!is_connect_ip_request(&wrong_path));
+
+        let missing_protocol = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri(CONNECT_IP_PATH)
+            .header("capsule-protocol", CAPSULE_PROTOCOL)
+            .body(())
+            .unwrap();
+        assert!(!is_connect_ip_request(&missing_protocol));
+
+        let missing_capsule_protocol = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri(CONNECT_IP_PATH)
+            .extension(h3::ext::Protocol::CONNECT_IP)
+            .body(())
+            .unwrap();
+        assert!(!is_connect_ip_request(&missing_capsule_protocol));
     }
 
     #[test]

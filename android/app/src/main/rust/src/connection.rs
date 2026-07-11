@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod h2;
 mod validation;
 
 /// How often the in-band reauth task checks whether `updateToken` has pushed a
@@ -17,11 +18,11 @@ mod validation;
 const REAUTH_POLL_SECS: u64 = 15;
 
 /// Background task: while the session is alive, present a GUI-refreshed access
-/// token to the server over a fresh bidirectional stream so the live tunnel
-/// survives the original token's expiry without a reconnect. The token cell is
+/// token to the server over the active transport's in-band control path so the
+/// live tunnel survives the original token's expiry without a reconnect. The token cell is
 /// seeded with the handshake token and updated via `NativeLib.updateToken`.
 pub async fn run_reauth_task(
-    connection: quinn::Connection,
+    connection: TunnelConnection,
     token_cell: Arc<Mutex<String>>,
     stop_flag: Arc<AtomicBool>,
 ) {
@@ -35,7 +36,7 @@ pub async fn run_reauth_task(
         if current.is_empty() || current == last_token {
             continue;
         }
-        match send_reauth(&connection, &current).await {
+        match connection.reauthenticate(&current).await {
             Ok(true) => {
                 info!("In-band token reauth accepted; live session extended");
                 last_token = current;
@@ -46,22 +47,72 @@ pub async fn run_reauth_task(
     }
 }
 
-/// Presents `token` to the server over a fresh bidirectional QUIC stream and
-/// returns whether it was accepted. Bounded by a timeout so a stalled stream
-/// cannot wedge the task. Framing and the exchange itself live in
-/// [`shared::control`], shared with the Linux and Windows cores.
-async fn send_reauth(connection: &quinn::Connection, token: &str) -> anyhow::Result<bool> {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let (mut send, mut recv) = connection.open_bi().await?;
-        let accepted = control::reauth_over_stream(&mut send, &mut recv, token).await?;
-        Ok::<bool, anyhow::Error>(accepted)
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("Reauth timed out"))?
-}
-
 use crate::crypto::{decode_hex_pins, PinnedServerVerifier};
 use validation::validate_server_mtu;
+
+#[derive(Clone)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub enum TunnelConnection {
+    Quic(quinn::Connection),
+    Http2(h2::Http2Session),
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+impl TunnelConnection {
+    pub async fn send_packet(&self, packet: Bytes) -> anyhow::Result<()> {
+        match self {
+            Self::Quic(connection) => connection
+                .send_datagram(packet)
+                .map_err(anyhow::Error::from),
+            Self::Http2(connection) => connection.send_packet(packet).await,
+        }
+    }
+
+    pub async fn recv_packet(&self) -> anyhow::Result<Bytes> {
+        match self {
+            Self::Quic(connection) => Ok(connection.read_datagram().await?),
+            Self::Http2(connection) => connection.recv_packet().await,
+        }
+    }
+
+    pub const fn quic(&self) -> Option<&quinn::Connection> {
+        match self {
+            Self::Quic(connection) => Some(connection),
+            Self::Http2(_) => None,
+        }
+    }
+
+    pub async fn reauthenticate(&self, token: &str) -> anyhow::Result<bool> {
+        match self {
+            Self::Quic(connection) => tokio::time::timeout(Duration::from_secs(10), async {
+                let (mut send, mut recv) = connection.open_bi().await?;
+                let accepted = control::reauth_over_stream(&mut send, &mut recv, token).await?;
+                Ok::<bool, anyhow::Error>(accepted)
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Reauth timed out"))?,
+            Self::Http2(session) => session.reauthenticate(token).await,
+        }
+    }
+}
+
+pub async fn connect_and_handshake_http2<F>(
+    token: String,
+    endpoint: String,
+    cert_pin: String,
+    vpn_mtu: Option<u16>,
+    protect_socket: F,
+) -> anyhow::Result<(TunnelConnection, ControlMessage)>
+where
+    F: FnMut(&tokio::net::TcpSocket) -> anyhow::Result<()>,
+{
+    let hashes = decode_hex_pins(&cert_pin)
+        .ok_or_else(|| anyhow::anyhow!("Invalid Certificate PIN hex string"))?;
+    let (connection, config) =
+        h2::connect_and_handshake(&endpoint, token, hashes, protect_socket).await?;
+    validate_server_mtu(&config, compute_quic_mtu_config(vpn_mtu).local_tun_mtu)?;
+    Ok((TunnelConnection::Http2(connection), config))
+}
 
 /// Holds the h3 CONNECT-IP request state for the lifetime of the VPN session.
 ///
@@ -110,7 +161,7 @@ pub async fn connect_and_handshake(
     http3_framing: bool,
     ech_config_hex: Option<String>,
     vpn_mtu: Option<u16>,
-) -> anyhow::Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
+) -> anyhow::Result<(TunnelConnection, ControlMessage, Option<H3SessionGuard>)> {
     info!("Connect and Handshake started. Pin: {cert_pin}");
     let effective_http3_framing = effective_http3_framing(censorship_resistant, http3_framing);
 
@@ -275,7 +326,7 @@ pub async fn connect_and_handshake(
 
     validate_server_mtu(&config, mtu_cfg.local_tun_mtu)?;
 
-    Ok((connection, config, h3_guard))
+    Ok((TunnelConnection::Quic(connection), config, h3_guard))
 }
 
 fn decode_raw_server_config(buf: &[u8]) -> anyhow::Result<ControlMessage> {
@@ -332,6 +383,13 @@ async fn connect_and_handshake_h3(
 
     if resp.status() != http::StatusCode::OK {
         anyhow::bail!("AUTH_FAILED: Server returned HTTP {}", resp.status());
+    }
+    if resp
+        .headers()
+        .get("capsule-protocol")
+        .is_none_or(|value| value != "?1")
+    {
+        anyhow::bail!("AUTH_FAILED: Server did not enable the capsule protocol");
     }
     if is_camouflage_h3_response(resp.headers()) {
         anyhow::bail!("AUTH_FAILED: Server returned camouflage HTML instead of MAVI_CONFIG");

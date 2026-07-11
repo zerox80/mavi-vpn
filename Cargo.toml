@@ -47,6 +47,10 @@ tempfile = "3"
 proptest = "1"
 dotenvy = "0.15"
 http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio-rustls = "0.26"
 async-trait = "0.1"
 
 [patch.crates-io]

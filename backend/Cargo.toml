@@ -24,7 +24,11 @@ rcgen = { workspace = true }
 tun = { version = "0.8", features = ["async"] }
 anyhow = { workspace = true }
 dotenvy = { workspace = true }
-http = "1"
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+tokio-rustls = { workspace = true }
 h3 = { workspace = true }
 h3-quinn = { workspace = true }
 bytes = { workspace = true }

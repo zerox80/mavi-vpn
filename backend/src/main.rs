@@ -22,6 +22,7 @@ mod utils;
 use crate::handlers::connection::handle_connection;
 use crate::network::tun::create_tun_device;
 use crate::routing::{spawn_tun_reader, spawn_tun_writer};
+use crate::server::http2::bind_http2_listener;
 use crate::server::quic::create_quic_endpoint;
 use crate::state::AppState;
 use crate::utils::cleanup_legacy_rules;
@@ -143,6 +144,22 @@ async fn main() -> Result<()> {
     }
     let (certs, key) = cert::load_or_generate_certs(&cert_path, &key_path)?;
 
+    // HTTP/2 is an opt-in beta transport. Bind it before doing privileged
+    // network setup so a configured TCP port conflict fails fast.
+    let http2_listener = if let Some(bind_addr) = config.http2_bind_addr {
+        Some(
+            bind_http2_listener(
+                bind_addr,
+                certs.clone(),
+                key.clone_key(),
+                config.censorship_resistant,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     // ECH (Encrypted Client Hello) setup — generates and persists an HPKE key
     // pair + ECHConfigList when censorship-resistant mode is enabled. The
     // ECHConfigList is distributed to clients out-of-band (alongside the cert
@@ -192,6 +209,14 @@ async fn main() -> Result<()> {
 
     // Create the QUIC endpoint
     let endpoint = create_quic_endpoint(&config, certs, key)?;
+
+    if let Some(http2_listener) = http2_listener {
+        tokio::spawn(async move {
+            if let Err(error) = http2_listener.run().await {
+                warn!(%error, "HTTP/2 listener stopped");
+            }
+        });
+    }
 
     info!("Server Ready. Waiting for connections...");
 

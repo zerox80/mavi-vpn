@@ -120,11 +120,10 @@ pub async fn start_oauth_flow(
         .await
         .context("Failed to connect to Keycloak")?;
     if !res.status().is_success() {
-        let error_text =
-            shared::kc_oauth::read_capped_text(res, shared::kc_oauth::MAX_TOKEN_RESPONSE_BYTES)
-                .await
-                .unwrap_or_default();
-        return Err(anyhow::anyhow!("Token exchange failed: {}", error_text));
+        return Err(anyhow::anyhow!(
+            "Token exchange failed (HTTP {})",
+            res.status()
+        ));
     }
 
     let body = shared::kc_oauth::read_capped_text(res, shared::kc_oauth::MAX_TOKEN_RESPONSE_BYTES)

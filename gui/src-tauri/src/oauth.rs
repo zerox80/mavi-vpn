@@ -109,18 +109,10 @@ pub async fn start_oauth_flow(
 
     if !res.status().is_success() {
         let status = res.status();
-        let body =
-            shared::kc_oauth::read_capped_text(res, shared::kc_oauth::MAX_TOKEN_RESPONSE_BYTES)
-                .await
-                .unwrap_or_default();
-        // The raw response body is logged locally for debugging only; it must
-        // not be embedded in the error returned to the frontend, since a
-        // failed exchange's error body is upstream server text we don't
-        // control and shouldn't assume is safe to render as-is in the UI.
-        warn!(%status, %body, "Keycloak token exchange failed");
-        return Err(anyhow::anyhow!(
-            "Token exchange failed (HTTP {status}). Check the service log for details."
-        ));
+        // Keycloak response bodies can include user-controlled or deployment-
+        // specific data. Keep them out of local logs as well as UI errors.
+        warn!(%status, "Keycloak token exchange failed");
+        return Err(anyhow::anyhow!("Token exchange failed (HTTP {status})."));
     }
 
     let body = shared::kc_oauth::read_capped_text(res, shared::kc_oauth::MAX_TOKEN_RESPONSE_BYTES)

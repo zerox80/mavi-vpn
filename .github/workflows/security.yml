@@ -18,9 +18,9 @@ jobs:
       run:
         working-directory: gui
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 20
           cache: npm
@@ -34,13 +34,13 @@ jobs:
     name: Rust dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           submodules: recursive
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index/
@@ -53,12 +53,14 @@ jobs:
             ${{ runner.os }}-cargo-
       - name: Generate lockfile for audit tools
         run: cargo generate-lockfile
+      - name: Validate RustSec exception expirations
+        run: python3 scripts/check_security_exceptions.py
       - name: Install cargo-deny
-        uses: taiki-e/install-action@cargo-deny
+        uses: taiki-e/install-action@1bc50175d5a5b2af5d7bc40ba011f153ec39715a # cargo-deny
       - name: Run cargo-deny
         run: cargo deny check
       - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
+        uses: taiki-e/install-action@17dfa9a7aa66ae804b5cbd9f505a33815221f967 # cargo-audit
       - name: Run cargo-audit
         # Keep these in sync with deny.toml until tauri/plist can consume quick-xml >= 0.41.
         run: cargo audit --deny warnings --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195

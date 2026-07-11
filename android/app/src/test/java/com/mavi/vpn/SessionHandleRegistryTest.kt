@@ -87,4 +87,20 @@ class SessionHandleRegistryTest {
         registry.invalidate()
         assertFalse(registry.isCurrent(generation))
     }
+
+    @Test
+    fun withHandleIfCurrentRunsOnlyForTheAdoptedCurrentSession() {
+        val registry = SessionHandleRegistry()
+        val generation = registry.currentGeneration
+        registry.tryAdopt(0xCAFE, generation)
+        var observedHandle = 0L
+
+        assertTrue(registry.withHandleIfCurrent(generation) { observedHandle = it })
+        assertEquals(0xCAFEL, observedHandle)
+
+        val nextGeneration = registry.invalidate().generation
+        assertFalse(registry.withHandleIfCurrent(generation) { observedHandle = it })
+        assertFalse(registry.withHandleIfCurrent(nextGeneration) { observedHandle = it })
+        assertEquals(0xCAFEL, observedHandle)
+    }
 }

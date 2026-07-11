@@ -99,10 +99,7 @@ class MaviVpnService : VpnService() {
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     Log.d("MaviVPN", "Network available: $network")
-                    val handle = handleRegistry.handleIfCurrent(sessionGeneration)
-                    if (handle != 0L) {
-                        NativeLib.networkChanged(handle)
-                    }
+                    handleRegistry.withHandleIfCurrent(sessionGeneration, NativeLib::networkChanged)
                 }
 
                 override fun onLost(network: Network) {
@@ -252,9 +249,7 @@ class MaviVpnService : VpnService() {
                         // Superseded after a successful adopt but before the loop
                         // started: free our own handle so it does not leak.
                         if (acquiredHandle != 0L) {
-                            handleRegistry.clearIfMatches(acquiredHandle)
-                            NativeLib.stop(acquiredHandle)
-                            NativeLib.free(acquiredHandle)
+                            releaseNativeHandle(acquiredHandle, stopFirst = true)
                         }
                         continue
                     }
@@ -288,22 +283,17 @@ class MaviVpnService : VpnService() {
                                 val fd = localInterface.fd
                                 Log.d("MaviVPN", "Interface established. Starting Loop.")
                                 isConnected.value = true
-                                // Both callbacks re-check the registry instead of
-                                // closing over `handle` directly: the ticker thread
-                                // is interrupted with only a bounded join (see
-                                // stopKeycloakRefreshTicker) when the session ends,
-                                // so it can still be mid-network-call when
-                                // NativeLib.free(handle) runs on the worker thread.
-                                // Without this check a late callback would call
-                                // into an already-freed native handle.
+                                // The callbacks run their native operation while
+                                // holding vpnLock. Handle removal and free use the
+                                // same monitor, so a late ticker callback cannot
+                                // cross the native handle's lifetime boundary.
                                 val refreshTicker = startKeycloakRefreshTicker(
                                     prefs = prefs,
                                     tokenManager = tokenManager,
                                     isSessionActive = { isRunning && handleRegistry.isCurrent(workerGeneration) },
                                     onTokenRefreshed = { newToken ->
-                                        val currentHandle = handleRegistry.handleIfCurrent(workerGeneration)
-                                        if (currentHandle != 0L) {
-                                            NativeLib.updateToken(currentHandle, newToken)
+                                        handleRegistry.withHandleIfCurrent(workerGeneration) {
+                                            NativeLib.updateToken(it, newToken)
                                         }
                                     },
                                     onSessionExpired = {
@@ -314,10 +304,7 @@ class MaviVpnService : VpnService() {
                                             "Mavi VPN",
                                             "Keycloak session expired. Please login again.",
                                         )
-                                        val currentHandle = handleRegistry.handleIfCurrent(workerGeneration)
-                                        if (currentHandle != 0L) {
-                                            NativeLib.stop(currentHandle)
-                                        }
+                                        handleRegistry.withHandleIfCurrent(workerGeneration, NativeLib::stop)
                                     },
                                 )
                                 try {
@@ -349,8 +336,7 @@ class MaviVpnService : VpnService() {
                         // Free our own handle exactly once and detach it from the
                         // registry if it is still the current one.
                         if (handle != 0L) {
-                            handleRegistry.clearIfMatches(handle)
-                            NativeLib.free(handle)
+                            releaseNativeHandle(handle)
                         }
                     }
                 } catch (e: Exception) {
@@ -395,6 +381,12 @@ class MaviVpnService : VpnService() {
     private fun invalidateCurrentSession(): SessionCleanup {
         synchronized(vpnLock) {
             val invalidation = handleRegistry.invalidate()
+            if (invalidation.previousHandle != 0L) {
+                // The worker frees this handle after its native loop exits. Do
+                // the stop while retaining the same monitor used by callbacks
+                // and free, so this pointer cannot be freed concurrently.
+                NativeLib.stop(invalidation.previousHandle)
+            }
             isRunning = false
             isConnected.value = false
             val cleanup = SessionCleanup(
@@ -412,10 +404,6 @@ class MaviVpnService : VpnService() {
     }
 
     private fun stopCurrentSession(cleanup: SessionCleanup) {
-        if (cleanup.handle != 0L) {
-            NativeLib.stop(cleanup.handle)
-        }
-
         try {
             if (connectivityManager != null && cleanup.callback != null) {
                 connectivityManager?.unregisterNetworkCallback(cleanup.callback)
@@ -435,6 +423,21 @@ class MaviVpnService : VpnService() {
                 cleanup.workerThread.join(3000)
             }
         } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Detaches and frees a worker-owned handle while holding the shared native
+     * handle monitor. Native callbacks use the same monitor through
+     * [SessionHandleRegistry.withHandleIfCurrent].
+     */
+    private fun releaseNativeHandle(handle: Long, stopFirst: Boolean = false) {
+        synchronized(vpnLock) {
+            handleRegistry.clearIfMatches(handle)
+            if (stopFirst) {
+                NativeLib.stop(handle)
+            }
+            NativeLib.free(handle)
         }
     }
 

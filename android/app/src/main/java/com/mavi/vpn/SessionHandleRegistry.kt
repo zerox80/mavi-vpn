@@ -77,6 +77,29 @@ internal class SessionHandleRegistry(
         synchronized(lock) { if (generation == workerGeneration) handle else 0L }
 
     /**
+     * Runs [action] for the current handle while holding the shared session
+     * monitor. This makes the native operation atomic with handle removal and
+     * freeing: a callback cannot obtain a pointer that another thread frees
+     * immediately afterwards.
+     *
+     * Returns false when [workerGeneration] is no longer current or no handle
+     * has been adopted yet.
+     */
+    fun withHandleIfCurrent(
+        workerGeneration: Long,
+        action: (Long) -> Unit,
+    ): Boolean =
+        synchronized(lock) {
+            val currentHandle = if (generation == workerGeneration) handle else 0L
+            if (currentHandle == 0L) {
+                false
+            } else {
+                action(currentHandle)
+                true
+            }
+        }
+
+    /**
      * Clears the stored handle if it still equals [targetHandle]. Returns true
      * if it was cleared (the registry still pointed at this handle).
      */

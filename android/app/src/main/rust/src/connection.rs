@@ -18,11 +18,11 @@ mod validation;
 const REAUTH_POLL_SECS: u64 = 15;
 
 /// Background task: while the session is alive, present a GUI-refreshed access
-/// token to the server over a fresh bidirectional stream so the live tunnel
-/// survives the original token's expiry without a reconnect. The token cell is
+/// token to the server over the active transport's in-band control path so the
+/// live tunnel survives the original token's expiry without a reconnect. The token cell is
 /// seeded with the handshake token and updated via `NativeLib.updateToken`.
 pub async fn run_reauth_task(
-    connection: quinn::Connection,
+    connection: TunnelConnection,
     token_cell: Arc<Mutex<String>>,
     stop_flag: Arc<AtomicBool>,
 ) {
@@ -36,7 +36,7 @@ pub async fn run_reauth_task(
         if current.is_empty() || current == last_token {
             continue;
         }
-        match send_reauth(&connection, &current).await {
+        match connection.reauthenticate(&current).await {
             Ok(true) => {
                 info!("In-band token reauth accepted; live session extended");
                 last_token = current;
@@ -45,20 +45,6 @@ pub async fn run_reauth_task(
             Err(e) => log::warn!("In-band token reauth attempt failed: {e}"),
         }
     }
-}
-
-/// Presents `token` to the server over a fresh bidirectional QUIC stream and
-/// returns whether it was accepted. Bounded by a timeout so a stalled stream
-/// cannot wedge the task. Framing and the exchange itself live in
-/// [`shared::control`], shared with the Linux and Windows cores.
-async fn send_reauth(connection: &quinn::Connection, token: &str) -> anyhow::Result<bool> {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let (mut send, mut recv) = connection.open_bi().await?;
-        let accepted = control::reauth_over_stream(&mut send, &mut recv, token).await?;
-        Ok::<bool, anyhow::Error>(accepted)
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("Reauth timed out"))?
 }
 
 use crate::crypto::{decode_hex_pins, PinnedServerVerifier};
@@ -93,6 +79,19 @@ impl TunnelConnection {
         match self {
             Self::Quic(connection) => Some(connection),
             Self::Http2(_) => None,
+        }
+    }
+
+    pub async fn reauthenticate(&self, token: &str) -> anyhow::Result<bool> {
+        match self {
+            Self::Quic(connection) => tokio::time::timeout(Duration::from_secs(10), async {
+                let (mut send, mut recv) = connection.open_bi().await?;
+                let accepted = control::reauth_over_stream(&mut send, &mut recv, token).await?;
+                Ok::<bool, anyhow::Error>(accepted)
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Reauth timed out"))?,
+            Self::Http2(session) => session.reauthenticate(token).await,
         }
     }
 }

@@ -243,7 +243,7 @@ async fn handle_request(
         };
 
     let session_expiry = session_auth.as_ref().map(|auth| auth.exp);
-    let _session_subject = session_auth.map(|auth| auth.sub);
+    let session_subject = session_auth.map(|auth| auth.sub);
     let on_upgrade = hyper::upgrade::on(&mut request);
     let tunnel_state = state.clone();
     let tunnel_config = config.clone();
@@ -262,6 +262,9 @@ async fn handle_request(
             assigned_ip6,
             tunnel_config.mtu,
             session_expiry,
+            session_subject,
+            keycloak,
+            remote_addr,
         )
         .await
         {

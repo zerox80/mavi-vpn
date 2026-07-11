@@ -318,20 +318,16 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_startLoop<'local>(
         // connection so the tunnel survives the original token's expiry.
         let reauth_token = session.current_token.clone();
         let reauth_stop = session.stop_flag.clone();
-        let reauth_conn = session.connection.quic().cloned();
+        let reauth_conn = session.connection.clone();
 
         session.runtime.block_on(async move {
-            let reauth_handle = reauth_conn.map(|connection| {
-                tokio::spawn(crate::connection::run_reauth_task(
-                    connection,
-                    reauth_token,
-                    reauth_stop,
-                ))
-            });
+            let reauth_handle = tokio::spawn(crate::connection::run_reauth_task(
+                reauth_conn,
+                reauth_token,
+                reauth_stop,
+            ));
             run_vpn_loop(conn, tun_fd, stop_flag, config, shutdown_rx, http3_framing).await;
-            if let Some(handle) = reauth_handle {
-                handle.abort();
-            }
+            reauth_handle.abort();
         });
     }));
 }

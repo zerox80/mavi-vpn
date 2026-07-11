@@ -1,17 +1,17 @@
 use anyhow::Result;
 use bytes::Bytes;
 use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
-use hyper::upgrade::OnUpgrade;
-use hyper_util::rt::TokioIo;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::info;
 
 use shared::{icmp, masque};
+
+mod http2;
+pub use http2::run_http2_tunnel;
 
 #[derive(Default)]
 struct TunnelStats {
@@ -244,99 +244,6 @@ pub async fn run_tunnel(
     tun_to_quic.abort();
     stats_task.abort();
     res
-}
-
-/// Runs a CONNECT-IP tunnel transported by HTTP/2 DATA frames.
-///
-/// RFC 9297 maps HTTP Datagrams to reliable `DATAGRAM` capsules when the
-/// underlying HTTP version cannot carry QUIC datagrams.  The global routing
-/// table stays deliberately transport-agnostic: it emits the existing H3
-/// context-zero prefix, which is removed here before being put into a capsule.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_http2_tunnel(
-    on_upgrade: OnUpgrade,
-    initial_capsules: Vec<u8>,
-    state: Arc<crate::state::AppState>,
-    tx_tun: mpsc::Sender<Bytes>,
-    assigned_ip: Ipv4Addr,
-    assigned_ip6: Ipv6Addr,
-    tunnel_mtu: u16,
-    session_expiry: Option<i64>,
-) -> Result<()> {
-    const CLIENT_CHANNEL_CAPACITY: usize = 4096;
-    let upgraded = on_upgrade
-        .await
-        .map_err(|error| anyhow::anyhow!("HTTP/2 CONNECT upgrade failed: {error}"))?;
-    let (mut request_stream, mut response_stream) = tokio::io::split(TokioIo::new(upgraded));
-    response_stream.write_all(&initial_capsules).await?;
-    let (tx_client, mut rx_client) = mpsc::channel::<Bytes>(CLIENT_CHANNEL_CAPACITY);
-    state.register_client(assigned_ip, assigned_ip6, tx_client);
-
-    let server_to_client = async move {
-        while let Some(framed) = rx_client.recv().await {
-            let Some((_frame, packet)) = server_to_client_datagram(framed, false) else {
-                continue;
-            };
-            let capsule = masque::encode_connect_ip_datagram_capsule(&packet);
-            response_stream.write_all(&capsule).await?;
-        }
-        Ok(())
-    };
-
-    let client_to_server = async move {
-        let mut capsule_buf = Vec::new();
-        let mut read_buf = [0_u8; 16 * 1024];
-        loop {
-            let read = request_stream.read(&mut read_buf).await?;
-            if read == 0 {
-                break;
-            }
-            capsule_buf.extend_from_slice(&read_buf[..read]);
-            if capsule_buf.len() > masque::MAX_CAPSULE_BUF {
-                anyhow::bail!("HTTP/2 capsule buffer exceeds limit");
-            }
-
-            while let Some((capsule_type, payload, consumed)) = masque::read_capsule(&capsule_buf) {
-                if capsule_type == masque::CAPSULE_DATAGRAM {
-                    let Some(packet) = masque::decode_connect_ip_datagram_payload(payload) else {
-                        anyhow::bail!("malformed HTTP/2 CONNECT-IP DATAGRAM capsule");
-                    };
-                    // The negotiated TUN MTU is a hard per-packet ceiling;
-                    // enforce it before the packet reaches the shared TUN.
-                    if packet.len() <= usize::from(tunnel_mtu)
-                        && packet_source_is_assigned(packet, assigned_ip, assigned_ip6)
-                    {
-                        match tx_tun.try_send(Bytes::copy_from_slice(packet)) {
-                            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
-                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                anyhow::bail!("TUN closed");
-                            }
-                        }
-                    }
-                }
-                capsule_buf.drain(..consumed);
-            }
-        }
-        if !capsule_buf.is_empty() {
-            anyhow::bail!("truncated HTTP/2 capsule at end of request body");
-        }
-        Ok(())
-    };
-
-    let tunnel = async {
-        tokio::select! {
-            result = server_to_client => result,
-            result = client_to_server => result,
-        }
-    };
-    if let Some(deadline) = crate::handlers::connection::session_deadline(session_expiry) {
-        tokio::select! {
-            result = tunnel => result,
-            () = tokio::time::sleep_until(deadline) => Ok(()),
-        }
-    } else {
-        tunnel.await
-    }
 }
 
 #[cfg(test)]

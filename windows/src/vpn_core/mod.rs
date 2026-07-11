@@ -378,18 +378,17 @@ async fn run_session(
 
     // Task: in-band Keycloak token reauth. A service-side refresh task or IPC
     // client pushes a fresh access token into current_token; present it to the
-    // server over a fresh bidi stream so the live tunnel survives the original
-    // token's expiry instead of being force-closed and reconnected.
-    let reauth_task = connection.quic().cloned().map(|quic| {
-        reauth::spawn_reauth_task(
-            Arc::new(quic),
-            session_alive.clone(),
-            runtime.running().clone(),
-            runtime.current_token(),
-            runtime.token_updated(),
-            token,
-        )
-    });
+    // server over the transport's in-band control path so the live tunnel
+    // survives the original token's expiry instead of being force-closed and
+    // reconnected.
+    let reauth_task = reauth::spawn_reauth_task(
+        connection.clone(),
+        session_alive.clone(),
+        runtime.running().clone(),
+        runtime.current_token(),
+        runtime.token_updated(),
+        token,
+    );
 
     // Thread: TUN -> QUIC (Read from WinTUN, Send via QUIC)
     let ptb_ctx = PtbContext {
@@ -422,9 +421,7 @@ async fn run_session(
     }
 
     quic_to_tun.abort();
-    if let Some(task) = reauth_task {
-        task.abort();
-    }
+    reauth_task.abort();
     let _ = tun_to_quic.join();
 
     // Surface WHY the tunnel dropped so disconnects are diagnosable instead of

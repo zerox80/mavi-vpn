@@ -54,6 +54,19 @@ impl TunnelConnection {
             Self::Http2(_) => None,
         }
     }
+
+    pub(super) async fn reauthenticate(&self, token: &str) -> Result<bool> {
+        match self {
+            Self::Quic(connection) => tokio::time::timeout(Duration::from_secs(10), async {
+                let (mut send, mut recv) = connection.open_bi().await?;
+                let accepted = control::reauth_over_stream(&mut send, &mut recv, token).await?;
+                Ok::<bool, anyhow::Error>(accepted)
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Reauth timed out"))?,
+            Self::Http2(session) => session.reauthenticate(token).await,
+        }
+    }
 }
 
 /// QUIC connection setup with custom certificate pinning.

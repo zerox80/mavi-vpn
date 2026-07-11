@@ -161,7 +161,7 @@ async fn send_reauth_result(mut send: quinn::SendStream, accepted: bool) -> Resu
 /// (`Some`) *and* carry the same subject the session was opened with. Returns the
 /// new expiry to extend to, or `None` to reject (invalid token or subject
 /// mismatch). Pure and side-effect free so the policy is unit-testable.
-pub(super) fn reauth_decision(
+pub(crate) fn reauth_decision(
     validated: Option<ValidatedToken>,
     expected_sub: &str,
 ) -> Option<i64> {
@@ -169,11 +169,11 @@ pub(super) fn reauth_decision(
     (token.sub == expected_sub).then_some(token.exp)
 }
 
-pub(super) fn reauth_rate_limited(state: &AppState, remote_ip: IpAddr) -> bool {
+pub(crate) fn reauth_rate_limited(state: &AppState, remote_ip: IpAddr) -> bool {
     state.auth_rate_limiter.is_blocked(remote_ip)
 }
 
-pub(super) fn record_reauth_result(state: &AppState, remote_ip: IpAddr, accepted: bool) {
+pub(crate) fn record_reauth_result(state: &AppState, remote_ip: IpAddr, accepted: bool) {
     if accepted {
         state.auth_rate_limiter.record_success(remote_ip);
     } else {
@@ -183,7 +183,7 @@ pub(super) fn record_reauth_result(state: &AppState, remote_ip: IpAddr, accepted
 
 /// Decodes a length-checked reauth payload into the carried token, rejecting any
 /// other control message.
-pub(super) fn decode_reauth_payload(buf: &[u8]) -> Result<String> {
+pub(crate) fn decode_reauth_payload(buf: &[u8]) -> Result<String> {
     let msg: ControlMessage = bincode::serde::decode_from_slice(buf, bincode::config::standard())
         .map(|(v, _)| v)
         .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;

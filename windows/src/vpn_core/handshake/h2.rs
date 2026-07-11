@@ -16,6 +16,7 @@ const CHANNEL_CAPACITY: usize = 4096;
 pub(in crate::vpn_core) struct Http2Session {
     outbound: mpsc::Sender<Bytes>,
     inbound: Arc<Mutex<mpsc::Receiver<Bytes>>>,
+    reauth_results: Arc<Mutex<mpsc::Receiver<bool>>>,
     remote_addr: std::net::SocketAddr,
 }
 
@@ -25,8 +26,9 @@ impl Http2Session {
     }
 
     pub(in crate::vpn_core) fn send_packet_blocking(&self, packet: Bytes) -> Result<()> {
+        let capsule = Bytes::from(masque::encode_connect_ip_datagram_capsule(&packet));
         self.outbound
-            .blocking_send(packet)
+            .blocking_send(capsule)
             .map_err(|_| anyhow::anyhow!("HTTP/2 CONNECT-IP send task stopped"))
     }
 
@@ -36,6 +38,25 @@ impl Http2Session {
             .await
             .recv()
             .await
+            .ok_or_else(|| anyhow::anyhow!("HTTP/2 CONNECT-IP receive task stopped"))
+    }
+
+    pub(in crate::vpn_core) async fn reauthenticate(&self, token: &str) -> Result<bool> {
+        let mut results = self.reauth_results.lock().await;
+        while results.try_recv().is_ok() {}
+        let message = ControlMessage::Reauth {
+            token: token.to_owned(),
+        };
+        let payload = bincode::serde::encode_to_vec(&message, bincode::config::standard())?;
+        let mut capsule = Vec::new();
+        masque::encode_capsule(masque::CAPSULE_MAVI_REAUTH, &payload, &mut capsule);
+        self.outbound
+            .send(Bytes::from(capsule))
+            .await
+            .map_err(|_| anyhow::anyhow!("HTTP/2 CONNECT-IP send task stopped"))?;
+        tokio::time::timeout(Duration::from_secs(10), results.recv())
+            .await
+            .map_err(|_| anyhow::anyhow!("HTTP/2 reauth timed out"))?
             .ok_or_else(|| anyhow::anyhow!("HTTP/2 CONNECT-IP receive task stopped"))
     }
 }
@@ -144,12 +165,14 @@ async fn establish_h2(
     let (config, buffer) = read_config(&mut recv_stream).await?;
     let (outbound, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (inbound_tx, inbound) = mpsc::channel(CHANNEL_CAPACITY);
+    let (reauth_tx, reauth_results) = mpsc::channel(CHANNEL_CAPACITY);
     tokio::spawn(send_capsules(send_stream, outbound_rx));
-    tokio::spawn(receive_capsules(recv_stream, buffer, inbound_tx));
+    tokio::spawn(receive_capsules(recv_stream, buffer, inbound_tx, reauth_tx));
     Ok((
         Http2Session {
             outbound,
             inbound: Arc::new(Mutex::new(inbound)),
+            reauth_results: Arc::new(Mutex::new(reauth_results)),
             remote_addr,
         },
         config,
@@ -178,15 +201,17 @@ async fn read_config(recv: &mut RecvStream) -> Result<(ControlMessage, Vec<u8>)>
             .ok_or_else(|| anyhow::anyhow!("server closed CONNECT-IP stream before MAVI_CONFIG"))?
             .context("HTTP/2 response body failed")?;
         buffer.extend_from_slice(&data);
+        recv.flow_control()
+            .release_capacity(data.len())
+            .context("failed to release HTTP/2 receive capacity")?;
         if looks_like_html_response(&buffer) {
             anyhow::bail!("AUTH_FAILED: server returned HTML instead of CONNECT-IP capsules");
         }
     }
 }
 
-async fn send_capsules(mut stream: SendStream<Bytes>, mut packets: mpsc::Receiver<Bytes>) {
-    while let Some(packet) = packets.recv().await {
-        let capsule = Bytes::from(masque::encode_connect_ip_datagram_capsule(&packet));
+async fn send_capsules(mut stream: SendStream<Bytes>, mut capsules: mpsc::Receiver<Bytes>) {
+    while let Some(capsule) = capsules.recv().await {
         stream.reserve_capacity(capsule.len());
         while stream.capacity() < capsule.len() {
             let Some(result) = std::future::poll_fn(|cx| stream.poll_capacity(cx)).await else {
@@ -207,6 +232,7 @@ async fn receive_capsules(
     mut stream: RecvStream,
     mut buffer: Vec<u8>,
     packets: mpsc::Sender<Bytes>,
+    reauth_results: mpsc::Sender<bool>,
 ) {
     loop {
         while let Some((kind, payload, consumed)) = masque::read_capsule(&buffer) {
@@ -216,6 +242,15 @@ async fn receive_capsules(
                         return;
                     }
                 }
+            } else if kind == masque::CAPSULE_MAVI_REAUTH_RESULT {
+                let Ok((ControlMessage::ReauthResult { accepted }, _)) =
+                    bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                else {
+                    return;
+                };
+                if reauth_results.send(accepted).await.is_err() {
+                    return;
+                }
             }
             buffer.drain(..consumed);
         }
@@ -223,7 +258,12 @@ async fn receive_capsules(
             return;
         }
         match stream.data().await {
-            Some(Ok(data)) => buffer.extend_from_slice(&data),
+            Some(Ok(data)) => {
+                buffer.extend_from_slice(&data);
+                if stream.flow_control().release_capacity(data.len()).is_err() {
+                    return;
+                }
+            }
             None | Some(Err(_)) => return,
         }
     }

@@ -258,16 +258,15 @@ async fn run_session(
 
     // Task: in-band Keycloak token reauth. The background refresh task pushes
     // fresh access tokens into current_token; present them to the server over a
-    // fresh bidi stream so the live tunnel survives the original token's expiry.
-    let reauth_task = connection.quic().map(|quic| {
-        reauth::spawn_reauth_task(
-            Arc::new(quic.clone()),
-            session_alive.clone(),
-            global_running.clone(),
-            current_token.clone(),
-            token,
-        )
-    });
+    // transport's in-band control path so the live tunnel survives the original
+    // token's expiry.
+    let reauth_task = reauth::spawn_reauth_task(
+        connection.clone(),
+        session_alive.clone(),
+        global_running.clone(),
+        current_token.clone(),
+        token,
+    );
 
     // Task: background Keycloak access-token refresh. Renews the short-lived
     // access token using the long-lived refresh token and writes it into
@@ -470,9 +469,7 @@ async fn run_session(
     if let Some(task) = mtu_monitor {
         task.abort();
     }
-    if let Some(task) = reauth_task {
-        task.abort();
-    }
+    reauth_task.abort();
     if let Some(task) = kc_refresh_task {
         task.abort();
     }

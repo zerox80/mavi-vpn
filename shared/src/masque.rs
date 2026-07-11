@@ -31,6 +31,10 @@ pub const CAPSULE_DATAGRAM: u64 = 0x00;
 /// Vendor-specific capsule carrying `ControlMessage::Config` (bincode).
 /// Value "MV" (0x4D56). Unknown capsule types MUST be ignored per RFC 9297.
 pub const CAPSULE_MAVI_CONFIG: u64 = 0x4D56;
+/// Vendor-specific capsule carrying `ControlMessage::Reauth` (bincode).
+pub const CAPSULE_MAVI_REAUTH: u64 = 0x4D57;
+/// Vendor-specific capsule carrying `ControlMessage::ReauthResult` (bincode).
+pub const CAPSULE_MAVI_REAUTH_RESULT: u64 = 0x4D58;
 
 /// HTTP/3 datagram framing for connect-ip on the first request stream:
 /// `[Quarter Stream ID (varint)] [Context ID (varint)] [IP Packet]`.

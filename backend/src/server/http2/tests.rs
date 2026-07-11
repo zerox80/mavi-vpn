@@ -5,7 +5,7 @@ use http::Version;
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::ServerName;
-use shared::masque::{self, CAPSULE_DATAGRAM, CAPSULE_MAVI_CONFIG};
+use shared::masque::{self, CAPSULE_DATAGRAM, CAPSULE_MAVI_CONFIG, CAPSULE_MAVI_REAUTH_RESULT};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio_rustls::TlsConnector;
 
@@ -128,7 +128,9 @@ async fn read_capsule(stream: &mut RecvStream, buffer: &mut Vec<u8>, wanted: u64
                     return payload;
                 }
             }
-            buffer.extend_from_slice(&stream.data().await.unwrap().unwrap());
+            let data = stream.data().await.unwrap().unwrap();
+            buffer.extend_from_slice(&data);
+            stream.flow_control().release_capacity(data.len()).unwrap();
         }
     })
     .await
@@ -223,6 +225,47 @@ async fn tls_h2_connect_ip_moves_packets_in_both_directions() {
         masque::decode_connect_ip_datagram_payload(&datagram_payload),
         Some(server_packet.as_ref())
     );
+
+    // Exceed h2's initial 65,535-byte receive window. This catches clients or
+    // test peers that consume DATA frames without releasing flow-control
+    // capacity: the loop would time out once the initial window is exhausted.
+    for _ in 0..3_000 {
+        peer.send(Bytes::from(masque::wrap_datagram(&server_packet)))
+            .await
+            .unwrap();
+        let payload =
+            read_capsule(&mut response_body, &mut response_buffer, CAPSULE_DATAGRAM).await;
+        assert_eq!(
+            masque::decode_connect_ip_datagram_payload(&payload),
+            Some(server_packet.as_ref())
+        );
+    }
+
+    // Static-token sessions cannot be extended, but must still return a
+    // well-formed result instead of silently swallowing the control capsule.
+    let reauth = shared::ControlMessage::Reauth {
+        token: "replacement-token".to_string(),
+    };
+    let reauth_payload =
+        bincode::serde::encode_to_vec(&reauth, bincode::config::standard()).unwrap();
+    let mut capsule = Vec::new();
+    masque::encode_capsule(masque::CAPSULE_MAVI_REAUTH, &reauth_payload, &mut capsule);
+    send_capsule(&mut request_body, Bytes::from(capsule)).await;
+    let result_payload = read_capsule(
+        &mut response_body,
+        &mut response_buffer,
+        CAPSULE_MAVI_REAUTH_RESULT,
+    )
+    .await;
+    let (result, _) = bincode::serde::decode_from_slice::<shared::ControlMessage, _>(
+        &result_payload,
+        bincode::config::standard(),
+    )
+    .unwrap();
+    assert!(matches!(
+        result,
+        shared::ControlMessage::ReauthResult { accepted: false }
+    ));
 
     drop(request_body);
     drop(sender);

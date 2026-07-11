@@ -27,6 +27,8 @@ shared = { workspace = true, features = ["control-client"] }
 http = "1"
 h3 = { workspace = true }
 h3-quinn = { workspace = true }
+h2 = { workspace = true }
+tokio-rustls = { workspace = true }
 android_logger = "0.15"
 log = "0.4"
 anyhow = { workspace = true }

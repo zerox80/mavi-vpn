@@ -163,6 +163,7 @@ async fn run_session(
             cert_pin_hashes.to_vec(),
             config.censorship_resistant,
             config.effective_http3_framing(),
+            config.uses_http2(),
             ech_bytes,
             config.vpn_mtu,
         ),
@@ -258,13 +259,15 @@ async fn run_session(
     // Task: in-band Keycloak token reauth. The background refresh task pushes
     // fresh access tokens into current_token; present them to the server over a
     // fresh bidi stream so the live tunnel survives the original token's expiry.
-    let reauth_task = reauth::spawn_reauth_task(
-        connection.clone(),
-        session_alive.clone(),
-        global_running.clone(),
-        current_token.clone(),
-        token,
-    );
+    let reauth_task = connection.quic().map(|quic| {
+        reauth::spawn_reauth_task(
+            Arc::new(quic.clone()),
+            session_alive.clone(),
+            global_running.clone(),
+            current_token.clone(),
+            token,
+        )
+    });
 
     // Task: background Keycloak access-token refresh. Renews the short-lived
     // access token using the long-lived refresh token and writes it into
@@ -290,25 +293,29 @@ async fn run_session(
     };
 
     // Task: MTU Monitor
-    let conn_monitor = connection.clone();
+    let conn_monitor = connection.quic().cloned();
     let alive_monitor = session_alive.clone();
     let running_monitor = global_running.clone();
-    let mtu_monitor = tokio::spawn(async move {
-        let mut last_mtu = 0;
-        loop {
-            if !running_monitor.load(Ordering::Relaxed) || !alive_monitor.load(Ordering::Relaxed) {
-                break;
+    let mtu_monitor = conn_monitor.map(|conn_monitor| {
+        tokio::spawn(async move {
+            let mut last_mtu = 0;
+            loop {
+                if !running_monitor.load(Ordering::Relaxed)
+                    || !alive_monitor.load(Ordering::Relaxed)
+                {
+                    break;
+                }
+                let current_mtu = conn_monitor.max_datagram_size().unwrap_or(0);
+                if current_mtu != last_mtu && last_mtu != 0 {
+                    info!(
+                        "[MTU] QUIC Path MTU changed: {} -> {} bytes",
+                        last_mtu, current_mtu
+                    );
+                }
+                last_mtu = current_mtu;
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
-            let current_mtu = conn_monitor.max_datagram_size().unwrap_or(0);
-            if current_mtu != last_mtu && last_mtu != 0 {
-                info!(
-                    "[MTU] QUIC Path MTU changed: {} -> {} bytes",
-                    last_mtu, current_mtu
-                );
-            }
-            last_mtu = current_mtu;
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
+        })
     });
 
     // Task: TUN -> QUIC (Read from TUN, send via QUIC)
@@ -341,8 +348,8 @@ async fn run_session(
                         pool.extend_from_slice(&scratch[..n]);
                         pool.split().freeze()
                     };
-                    if let Err(e) = conn_sender.send_datagram(payload) {
-                        if matches!(e, quinn::SendDatagramError::TooLarge) {
+                    if let Err(e) = conn_sender.send_packet(payload).await {
+                        if let Some(quic) = conn_sender.quic() {
                             let version = scratch[0] >> 4;
                             let source_ip = if version == 4 {
                                 Some(std::net::IpAddr::V4(gateway))
@@ -358,7 +365,7 @@ async fn run_session(
                             };
                             let reported_mtu = shared::effective_ptb_mtu(
                                 tun_mtu_for_ptb,
-                                conn_sender.max_datagram_size(),
+                                quic.max_datagram_size(),
                                 h3_prefix,
                                 version == 6,
                             );
@@ -369,11 +376,10 @@ async fn run_session(
                             ) {
                                 let _ = tun_reader.write(&icmp_packet).await;
                             }
-                        } else {
-                            warn!("Datagram send error: {}", e);
-                            alive_tun.store(false, Ordering::SeqCst);
-                            break;
                         }
+                        warn!("Transport send error: {}", e);
+                        alive_tun.store(false, Ordering::SeqCst);
+                        break;
                     }
                 }
                 Ok(_) => {} // zero-length read, continue
@@ -404,7 +410,7 @@ async fn run_session(
             let datagram = tokio::select! {
                 biased;
                 _ = shutdown_rx.changed() => { break; }
-                result = conn_clone.read_datagram() => { result }
+                result = conn_clone.recv_packet() => { result }
             };
             match datagram {
                 Ok(mut data) => {
@@ -446,21 +452,27 @@ async fn run_session(
     // server-initiated close (e.g. "session token expired") or a QUIC idle
     // timeout is visible in the log instead of a silent reconnect.
     if global_running.load(Ordering::Relaxed) {
-        match connection.close_reason() {
+        match connection.quic().and_then(quinn::Connection::close_reason) {
             Some(reason) => warn!("VPN session ended - QUIC close reason: {reason}"),
-            None => warn!("VPN session ended without an explicit QUIC close reason"),
+            None => warn!("VPN session ended without an explicit transport close reason"),
         }
     }
 
     // Signal shutdown to the QUIC->TUN task (unblocks read_datagram)
     drop(shutdown_tx);
     // Close the QUIC connection to unblock any remaining awaits
-    connection.close(0u32.into(), b"session ending");
+    if let Some(quic) = connection.quic() {
+        quic.close(0u32.into(), b"session ending");
+    }
 
     tun_to_quic.abort();
     quic_to_tun.abort();
-    mtu_monitor.abort();
-    reauth_task.abort();
+    if let Some(task) = mtu_monitor {
+        task.abort();
+    }
+    if let Some(task) = reauth_task {
+        task.abort();
+    }
     if let Some(task) = kc_refresh_task {
         task.abort();
     }

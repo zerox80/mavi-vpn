@@ -100,6 +100,7 @@ export function connectionFromLegacyConfig(config, existing = null) {
     ech_config: config.ech_config || null,
     censorship_resistant: !!config.censorship_resistant,
     http3_framing: !!config.http3_framing,
+    http2_framing: !!config.http2_framing,
     kc_auth: kcAuth || null,
     kc_url: kcAuth ? config.kc_url || null : null,
     kc_realm: kcAuth ? config.kc_realm || null : null,

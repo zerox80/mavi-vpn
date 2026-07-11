@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod h2;
 mod validation;
 
 /// How often the in-band reauth task checks whether `updateToken` has pushed a
@@ -63,6 +64,57 @@ async fn send_reauth(connection: &quinn::Connection, token: &str) -> anyhow::Res
 use crate::crypto::{decode_hex_pins, PinnedServerVerifier};
 use validation::validate_server_mtu;
 
+#[derive(Clone)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub enum TunnelConnection {
+    Quic(quinn::Connection),
+    Http2(h2::Http2Session),
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+impl TunnelConnection {
+    pub async fn send_packet(&self, packet: Bytes) -> anyhow::Result<()> {
+        match self {
+            Self::Quic(connection) => connection
+                .send_datagram(packet)
+                .map_err(anyhow::Error::from),
+            Self::Http2(connection) => connection.send_packet(packet).await,
+        }
+    }
+
+    pub async fn recv_packet(&self) -> anyhow::Result<Bytes> {
+        match self {
+            Self::Quic(connection) => Ok(connection.read_datagram().await?),
+            Self::Http2(connection) => connection.recv_packet().await,
+        }
+    }
+
+    pub const fn quic(&self) -> Option<&quinn::Connection> {
+        match self {
+            Self::Quic(connection) => Some(connection),
+            Self::Http2(_) => None,
+        }
+    }
+}
+
+pub async fn connect_and_handshake_http2<F>(
+    token: String,
+    endpoint: String,
+    cert_pin: String,
+    vpn_mtu: Option<u16>,
+    protect_socket: F,
+) -> anyhow::Result<(TunnelConnection, ControlMessage)>
+where
+    F: FnMut(&tokio::net::TcpStream) -> anyhow::Result<()>,
+{
+    let hashes = decode_hex_pins(&cert_pin)
+        .ok_or_else(|| anyhow::anyhow!("Invalid Certificate PIN hex string"))?;
+    let (connection, config) =
+        h2::connect_and_handshake(&endpoint, token, hashes, protect_socket).await?;
+    validate_server_mtu(&config, compute_quic_mtu_config(vpn_mtu).local_tun_mtu)?;
+    Ok((TunnelConnection::Http2(connection), config))
+}
+
 /// Holds the h3 CONNECT-IP request state for the lifetime of the VPN session.
 ///
 /// `h3::client::SendRequest::drop` decrements an internal sender count; when the last
@@ -110,7 +162,7 @@ pub async fn connect_and_handshake(
     http3_framing: bool,
     ech_config_hex: Option<String>,
     vpn_mtu: Option<u16>,
-) -> anyhow::Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
+) -> anyhow::Result<(TunnelConnection, ControlMessage, Option<H3SessionGuard>)> {
     info!("Connect and Handshake started. Pin: {cert_pin}");
     let effective_http3_framing = effective_http3_framing(censorship_resistant, http3_framing);
 
@@ -275,7 +327,7 @@ pub async fn connect_and_handshake(
 
     validate_server_mtu(&config, mtu_cfg.local_tun_mtu)?;
 
-    Ok((connection, config, h3_guard))
+    Ok((TunnelConnection::Quic(connection), config, h3_guard))
 }
 
 fn decode_raw_server_config(buf: &[u8]) -> anyhow::Result<ControlMessage> {

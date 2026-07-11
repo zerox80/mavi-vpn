@@ -14,6 +14,7 @@ object NativeLib {
         certPin: String,
         censorshipResistant: Boolean,
         http3Framing: Boolean,
+        http2Framing: Boolean,
         echConfig: String,
         vpnMtu: Int,
     ): Long

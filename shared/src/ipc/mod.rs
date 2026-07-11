@@ -69,6 +69,12 @@ pub struct Config {
     /// Keep this serialized even when absent; see `refresh_token`.
     #[serde(default)]
     pub vpn_mtu: Option<u16>,
+    /// Use TLS over TCP with HTTP/2 CONNECT-IP capsules (RFC 9297 / RFC 9484)
+    /// instead of QUIC. This is reliable and ordered by design.
+    ///
+    /// Appended to preserve the positional order of the established IPC fields.
+    #[serde(default)]
+    pub http2_framing: bool,
 }
 
 impl fmt::Debug for Config {
@@ -85,6 +91,7 @@ impl fmt::Debug for Config {
             .field("kc_client_id", &self.kc_client_id)
             .field("ech_config", &self.ech_config)
             .field("vpn_mtu", &self.vpn_mtu)
+            .field("http2_framing", &self.http2_framing)
             .finish()
     }
 }
@@ -94,10 +101,22 @@ impl Config {
     /// CONNECT-IP/H3 framing internally as well.
     #[must_use]
     pub const fn effective_http3_framing(&self) -> bool {
-        self.http3_framing || self.censorship_resistant
+        !self.http2_framing && (self.http3_framing || self.censorship_resistant)
+    }
+
+    /// Whether this session uses reliable CONNECT-IP over HTTP/2/TCP.
+    #[must_use]
+    pub const fn uses_http2(&self) -> bool {
+        self.http2_framing
     }
 
     pub const fn normalize_transport(&mut self) -> bool {
+        if self.http2_framing {
+            let changed = self.censorship_resistant || self.http3_framing;
+            self.censorship_resistant = false;
+            self.http3_framing = false;
+            return changed;
+        }
         let old_http3_framing = self.http3_framing;
         self.http3_framing = self.effective_http3_framing();
         self.http3_framing != old_http3_framing

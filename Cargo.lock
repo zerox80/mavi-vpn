@@ -2342,6 +2342,7 @@ dependencies = [
  "bytes",
  "constant_time_eq",
  "etherparse",
+ "h2",
  "h3",
  "h3-quinn",
  "http",
@@ -2358,6 +2359,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -2424,6 +2426,7 @@ dependencies = [
  "dotenvy",
  "etherparse",
  "futures-util",
+ "h2",
  "h3",
  "h3-quinn",
  "hex",
@@ -2448,6 +2451,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
@@ -2492,6 +2496,7 @@ dependencies = [
  "bytes",
  "etherparse",
  "futures-util",
+ "h2",
  "h3",
  "h3-quinn",
  "http",
@@ -2505,6 +2510,7 @@ dependencies = [
  "shared",
  "socket2",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
 ]
 
@@ -4695,6 +4701,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-stream"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32da49809aab5c3bc678af03902d4ccddea2a87d028d86392a4b1560c6906c70"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5717,6 +5734,7 @@ dependencies = [
  "constant_time_eq",
  "ctrlc",
  "etherparse",
+ "h2",
  "h3",
  "h3-quinn",
  "http",
@@ -5733,6 +5751,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
  "url",

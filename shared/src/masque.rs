@@ -22,6 +22,12 @@ pub const CAPSULE_ADDRESS_ASSIGN: u64 = 0x01;
 pub const CAPSULE_ADDRESS_REQUEST: u64 = 0x02;
 /// RFC 9484 – `ROUTE_ADVERTISEMENT` (IP ranges the tunnel can reach).
 pub const CAPSULE_ROUTE_ADVERTISEMENT: u64 = 0x03;
+/// RFC 9297 -- reliable HTTP Datagram carried on a Capsule Protocol data stream.
+///
+/// On HTTP/2 over TCP this is how CONNECT-IP conveys an IP packet. The payload
+/// is the normal CONNECT-IP HTTP Datagram payload: Context ID 0 followed by the
+/// complete IP packet (RFC 9484 section 6).
+pub const CAPSULE_DATAGRAM: u64 = 0x00;
 /// Vendor-specific capsule carrying `ControlMessage::Config` (bincode).
 /// Value "MV" (0x4D56). Unknown capsule types MUST be ignored per RFC 9297.
 pub const CAPSULE_MAVI_CONFIG: u64 = 0x4D56;
@@ -151,6 +157,35 @@ pub fn read_capsule(buf: &[u8]) -> Option<(u64, &[u8], usize)> {
         return None;
     }
     Some((capsule_type, &buf[start..end], end))
+}
+
+/// Encodes one reliable HTTP Datagram capsule for a CONNECT-IP packet.
+///
+/// The Context ID is zero because Mavi creates no additional IP contexts.
+#[must_use]
+pub fn encode_connect_ip_datagram_capsule(ip_packet: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(ip_packet.len() + 1);
+    write_varint(0, &mut payload);
+    payload.extend_from_slice(ip_packet);
+
+    let mut capsule = Vec::with_capacity(payload.len() + 2);
+    encode_capsule(CAPSULE_DATAGRAM, &payload, &mut capsule);
+    capsule
+}
+
+/// Decodes a CONNECT-IP HTTP Datagram payload from a DATAGRAM capsule.
+///
+/// Returns `None` for malformed payloads, an empty IP packet, or an unknown
+/// context ID. RFC 9484 reserves Context ID zero for complete IP packets;
+/// Mavi does not negotiate any additional contexts.
+#[must_use]
+pub fn decode_connect_ip_datagram_payload(payload: &[u8]) -> Option<&[u8]> {
+    let (context_id, context_len) = read_varint(payload)?;
+    if context_id != 0 {
+        return None;
+    }
+    let packet = &payload[context_len..];
+    (!packet.is_empty()).then_some(packet)
 }
 
 // --------------------------------------------------------------------------

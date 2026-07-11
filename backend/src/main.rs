@@ -144,22 +144,6 @@ async fn main() -> Result<()> {
     }
     let (certs, key) = cert::load_or_generate_certs(&cert_path, &key_path)?;
 
-    // HTTP/2 is an opt-in beta transport. Bind it before doing privileged
-    // network setup so a configured TCP port conflict fails fast.
-    let http2_listener = if let Some(bind_addr) = config.http2_bind_addr {
-        Some(
-            bind_http2_listener(
-                bind_addr,
-                certs.clone(),
-                key.clone_key(),
-                config.censorship_resistant,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-
     // ECH (Encrypted Client Hello) setup — generates and persists an HPKE key
     // pair + ECHConfigList when censorship-resistant mode is enabled. The
     // ECHConfigList is distributed to clients out-of-band (alongside the cert
@@ -203,6 +187,26 @@ async fn main() -> Result<()> {
     // Start background routing tasks
     spawn_tun_reader(tun_reader, state.clone());
     spawn_tun_writer(tun_writer, rx_tun);
+
+    // HTTP/2 needs the same authenticated routing state and TUN sender as
+    // QUIC, so bind it once those dependencies have been initialized.
+    let http2_listener = if let Some(bind_addr) = config.http2_bind_addr {
+        Some(
+            bind_http2_listener(
+                bind_addr,
+                certs.clone(),
+                key.clone_key(),
+                state.clone(),
+                config.clone(),
+                tx_tun.clone(),
+                keycloak.clone(),
+                ipv6_enabled,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     // Cleanup legacy firewall rules (if any)
     cleanup_legacy_rules();

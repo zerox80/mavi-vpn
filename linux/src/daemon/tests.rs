@@ -30,6 +30,7 @@ fn test_config() -> Config {
         refresh_token: None,
         ech_config: None,
         vpn_mtu: Some(1280),
+        http2_framing: false,
     }
 }
 

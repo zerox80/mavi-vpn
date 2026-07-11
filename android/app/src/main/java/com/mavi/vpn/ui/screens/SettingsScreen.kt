@@ -64,7 +64,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun SettingsScreen(
     viewModel: VpnViewModel,
-    onBack: (String, String, Boolean, Boolean, Int) -> Unit,
+    onBack: (String, String, Boolean, Boolean, Boolean, Int) -> Unit,
 ) {
     val context = LocalContext.current
     
@@ -72,11 +72,13 @@ fun SettingsScreen(
     val initialSelection by viewModel.splitPackages.collectAsState()
     val initialCensorshipResistant by viewModel.censorshipResistant.collectAsState()
     val initialHttp3Framing by viewModel.http3Framing.collectAsState()
+    val initialHttp2Framing by viewModel.http2Framing.collectAsState()
     val initialVpnMtu by viewModel.vpnMtu.collectAsState()
     
     var mode by remember { mutableStateOf(initialMode) }
     var censorshipResistant by remember { mutableStateOf(initialCensorshipResistant) }
     var http3Framing by remember { mutableStateOf(initialHttp3Framing) }
+    var http2Framing by remember { mutableStateOf(initialHttp2Framing) }
     var vpnMtuText by remember { mutableStateOf(if (initialVpnMtu > 0) initialVpnMtu.toString() else "") }
 
     fun parseValidatedMtu(): Int? {
@@ -105,7 +107,14 @@ fun SettingsScreen(
         }
 
         val mtu = parseValidatedMtu() ?: return
-        onBack(mode, selectedPackages.joinToString(","), censorshipResistant, http3Framing, mtu)
+        onBack(
+            mode,
+            selectedPackages.joinToString(","),
+            censorshipResistant,
+            http3Framing,
+            http2Framing,
+            mtu,
+        )
     }
 
     LaunchedEffect(Unit) {
@@ -179,7 +188,13 @@ fun SettingsScreen(
             }
             Switch(
                 checked = censorshipResistant,
-                onCheckedChange = { censorshipResistant = it },
+                onCheckedChange = {
+                    censorshipResistant = it
+                    if (it) {
+                        http3Framing = true
+                        http2Framing = false
+                    }
+                },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
                     checkedTrackColor = Color(0xFF007AFF),
@@ -205,7 +220,11 @@ fun SettingsScreen(
             }
             Switch(
                 checked = http3Framing,
-                onCheckedChange = { http3Framing = it },
+                onCheckedChange = {
+                    http3Framing = it
+                    if (it) http2Framing = false
+                    if (!it) censorshipResistant = false
+                },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
                     checkedTrackColor = Color(0xFF007AFF),
@@ -215,6 +234,38 @@ fun SettingsScreen(
             )
         }
         
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = "HTTP/2 CONNECT-IP", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(text = "Tunnel over TLS/TCP using HTTP/2 and RFC 9297 capsules.", color = Color.Gray, fontSize = 12.sp)
+            }
+            Switch(
+                checked = http2Framing,
+                onCheckedChange = {
+                    http2Framing = it
+                    if (it) {
+                        censorshipResistant = false
+                        http3Framing = false
+                    }
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Color(0xFF007AFF),
+                    uncheckedThumbColor = Color.Gray,
+                    uncheckedTrackColor = Color.DarkGray,
+                ),
+            )
+        }
+
         Spacer(modifier = Modifier.height(16.dp))
 
         Column(

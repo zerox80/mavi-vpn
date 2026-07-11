@@ -33,6 +33,7 @@ function setupModalDom() {
     <input id="m_ech_config" />
     <input id="m_cr_mode" type="checkbox" />
     <input id="m_h3_framing" type="checkbox" />
+    <input id="m_h2_framing" type="checkbox" />
     <input id="m_kc_auth" type="checkbox" />
     <input id="m_kc_url" />
     <input id="m_kc_realm" />
@@ -181,6 +182,7 @@ describe('modal workflows', () => {
         ech_config: 'ech',
         censorship_resistant: true,
         http3_framing: true,
+        http2_framing: false,
         kc_auth: true,
         kc_url: 'https://auth.example.com',
         kc_realm: 'realm',

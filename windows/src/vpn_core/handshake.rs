@@ -9,12 +9,14 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 mod cert;
+mod h2;
 mod h3;
 #[cfg(test)]
 mod tests;
 
 pub use self::cert::decode_hex_pins;
 use self::cert::PinnedServerVerifier;
+pub(super) use self::h2::Http2Session;
 pub use self::h3::H3SessionGuard;
 
 // --- Default timing parameters ---
@@ -22,21 +24,50 @@ const KEEPALIVE_SECS: u64 = 10;
 const IDLE_TIMEOUT_SECS: u64 = 60;
 
 pub(super) struct HandshakeRequest {
-    pub(super) socket: std::net::UdpSocket,
+    pub(super) socket: Option<std::net::UdpSocket>,
     pub(super) token: String,
     pub(super) endpoint_str: String,
     pub(super) cert_pin: Vec<Vec<u8>>,
     pub(super) censorship_resistant: bool,
     pub(super) http3_framing: bool,
+    pub(super) http2_framing: bool,
     pub(super) ech_config_list: Option<Vec<u8>>,
     pub(super) vpn_mtu: Option<u16>,
+}
+
+pub(super) enum TunnelConnection {
+    Quic(quinn::Connection),
+    Http2(Http2Session),
+}
+
+impl TunnelConnection {
+    pub(super) fn remote_address(&self) -> SocketAddr {
+        match self {
+            Self::Quic(connection) => connection.remote_address(),
+            Self::Http2(connection) => connection.remote_addr(),
+        }
+    }
+
+    pub(super) fn quic(&self) -> Option<&quinn::Connection> {
+        match self {
+            Self::Quic(connection) => Some(connection),
+            Self::Http2(_) => None,
+        }
+    }
+
+    pub(super) async fn recv_packet(&self) -> Result<bytes::Bytes> {
+        match self {
+            Self::Quic(connection) => Ok(connection.read_datagram().await?),
+            Self::Http2(connection) => connection.recv_packet().await,
+        }
+    }
 }
 
 /// QUIC connection setup with custom certificate pinning.
 #[allow(clippy::too_many_lines)]
 pub(super) async fn connect_and_handshake(
     request: HandshakeRequest,
-) -> Result<(quinn::Connection, ControlMessage, Option<H3SessionGuard>)> {
+) -> Result<(TunnelConnection, ControlMessage, Option<H3SessionGuard>)> {
     let HandshakeRequest {
         socket,
         token,
@@ -44,9 +75,24 @@ pub(super) async fn connect_and_handshake(
         cert_pin,
         censorship_resistant,
         http3_framing,
+        http2_framing,
         ech_config_list,
         vpn_mtu,
     } = request;
+
+    if http2_framing {
+        if censorship_resistant || http3_framing {
+            anyhow::bail!("HTTP/2 CONNECT-IP cannot be combined with CR or HTTP/3");
+        }
+        if ech_config_list.is_some() {
+            warn!("Ignoring ECH configuration because HTTP/2 transport is selected");
+        }
+        let (connection, config) =
+            h2::connect_and_handshake_h2(&endpoint_str, token, cert_pin).await?;
+        let mtu = compute_quic_mtu_config(vpn_mtu).local_tun_mtu;
+        validate_control_message_mtu(&config, mtu).map_err(|e| anyhow::anyhow!(e))?;
+        return Ok((TunnelConnection::Http2(connection), config, None));
+    }
 
     let effective_http3_framing = http3_framing || censorship_resistant;
     let verifier = Arc::new(PinnedServerVerifier::new(cert_pin));
@@ -166,7 +212,7 @@ pub(super) async fn connect_and_handshake(
     let endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),
         None,
-        socket,
+        socket.context("missing UDP socket for QUIC transport")?,
         Arc::new(quinn::TokioRuntime),
     )?;
     endpoint.set_default_client_config(client_config);
@@ -253,7 +299,7 @@ pub(super) async fn connect_and_handshake(
 
     validate_control_message_mtu(&config, mtu_cfg.local_tun_mtu).map_err(|e| anyhow::anyhow!(e))?;
 
-    Ok((connection, config, h3_guard))
+    Ok((TunnelConnection::Quic(connection), config, h3_guard))
 }
 
 pub fn order_resolved_addrs(addrs: &mut [SocketAddr], endpoint: &str) {

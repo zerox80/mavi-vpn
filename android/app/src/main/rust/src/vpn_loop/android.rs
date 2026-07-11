@@ -1,3 +1,7 @@
+// Android TUN I/O requires raw file-descriptor syscalls. All descriptors are
+// owned or duplicated in this module and checked after every syscall.
+#![allow(unsafe_code)]
+
 use super::stats::AndroidTunnelStats;
 use super::{packet_too_big_feedback, quic_datagram_to_tun_packet, tun_payload_for_quic};
 use bytes::BufMut;
@@ -10,8 +14,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 
+use crate::connection::TunnelConnection;
+
 pub async fn run_vpn_loop(
-    connection: quinn::Connection,
+    connection: TunnelConnection,
     fd: jint,
     stop_flag: Arc<AtomicBool>,
     config: ControlMessage,
@@ -142,44 +148,50 @@ pub async fn run_vpn_loop(
 
             let payload = tun_payload_for_quic(framed, http3_framing);
 
-            if let Err(e) = conn_upload.send_datagram(payload) {
-                match e {
-                    quinn::SendDatagramError::ConnectionLost(_) => {
-                        error!("QUIC Connection lost during send");
-                        stop_upload.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                    quinn::SendDatagramError::TooLarge => {
-                        stats_upload.quic_too_large.fetch_add(1, Ordering::Relaxed);
-                        let current_limit = conn_upload.max_datagram_size().unwrap_or(1200);
-                        warn!(
-                            "MTU Limit hit! Packet: {} bytes, Limit: {} bytes",
-                            packet_len, current_limit
-                        );
+            if let TunnelConnection::Quic(quic) = conn_upload.as_ref() {
+                if let Err(e) = quic.send_datagram(payload) {
+                    match e {
+                        quinn::SendDatagramError::ConnectionLost(_) => {
+                            error!("QUIC Connection lost during send");
+                            stop_upload.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        quinn::SendDatagramError::TooLarge => {
+                            stats_upload.quic_too_large.fetch_add(1, Ordering::Relaxed);
+                            let current_limit = quic.max_datagram_size().unwrap_or(1200);
+                            warn!(
+                                "MTU Limit hit! Packet: {} bytes, Limit: {} bytes",
+                                packet_len, current_limit
+                            );
 
-                        let h3_prefix = if http3_framing {
-                            masque::DATAGRAM_PREFIX.len()
-                        } else {
-                            0
-                        };
-                        if let Some(icmp_packet) = packet_too_big_feedback(
-                            &packet,
-                            tunnel_mtu,
-                            conn_upload.max_datagram_size(),
-                            h3_prefix,
-                            gateway_v4,
-                            gateway_v6_opt,
-                        ) {
-                            let _ = tx_feedback.try_send(icmp_packet);
+                            let h3_prefix = if http3_framing {
+                                masque::DATAGRAM_PREFIX.len()
+                            } else {
+                                0
+                            };
+                            if let Some(icmp_packet) = packet_too_big_feedback(
+                                &packet,
+                                tunnel_mtu,
+                                quic.max_datagram_size(),
+                                h3_prefix,
+                                gateway_v4,
+                                gateway_v6_opt,
+                            ) {
+                                let _ = tx_feedback.try_send(icmp_packet);
+                            }
+                        }
+                        _ => {
+                            stats_upload
+                                .quic_send_errors
+                                .fetch_add(1, Ordering::Relaxed);
+                            error!("Unexpected SendDatagramError: {:?}", e);
                         }
                     }
-                    _ => {
-                        stats_upload
-                            .quic_send_errors
-                            .fetch_add(1, Ordering::Relaxed);
-                        error!("Unexpected SendDatagramError: {:?}", e);
-                    }
                 }
+            } else if let Err(e) = conn_upload.send_packet(payload).await {
+                error!("HTTP/2 CONNECT-IP send failed: {e}");
+                stop_upload.store(true, Ordering::SeqCst);
+                break;
             }
         }
         info!("Upload task exited.");
@@ -196,7 +208,7 @@ pub async fn run_vpn_loop(
                 break;
             }
 
-            match conn_download.read_datagram().await {
+            match conn_download.recv_packet().await {
                 Ok(first_packet) => {
                     let mut batch = Vec::with_capacity(64);
                     if let Some(packet) = quic_datagram_to_tun_packet(first_packet, http3_framing) {
@@ -204,7 +216,7 @@ pub async fn run_vpn_loop(
                     }
 
                     for _ in 0..63 {
-                        if let Some(Ok(pkt)) = conn_download.read_datagram().now_or_never() {
+                        if let Some(Ok(pkt)) = conn_download.recv_packet().now_or_never() {
                             if let Some(packet) = quic_datagram_to_tun_packet(pkt, http3_framing) {
                                 batch.push(packet);
                             }
@@ -345,23 +357,38 @@ pub async fn run_vpn_loop(
             if stop_stats.load(Ordering::Relaxed) {
                 break;
             }
-            let stats = conn_stats.stats();
             let tun_to_quic_bytes = stats_log.tun_to_quic_bytes.load(Ordering::Relaxed);
             let quic_to_tun_bytes = stats_log.quic_to_tun_bytes.load(Ordering::Relaxed);
             let tun_write_bytes = stats_log.tun_write_bytes.load(Ordering::Relaxed);
-            let udp_tx_bytes = stats.udp_tx.bytes;
-            let udp_rx_bytes = stats.udp_rx.bytes;
             let tun_to_quic_mbit =
                 (tun_to_quic_bytes - last_tun_to_quic_bytes) as f64 * 8.0 / 5_000_000.0;
             let quic_to_tun_mbit =
                 (quic_to_tun_bytes - last_quic_to_tun_bytes) as f64 * 8.0 / 5_000_000.0;
             let tun_write_mbit =
                 (tun_write_bytes - last_tun_write_bytes) as f64 * 8.0 / 5_000_000.0;
-            let udp_tx_mbit = (udp_tx_bytes - last_udp_tx_bytes) as f64 * 8.0 / 5_000_000.0;
-            let udp_rx_mbit = (udp_rx_bytes - last_udp_rx_bytes) as f64 * 8.0 / 5_000_000.0;
             last_tun_to_quic_bytes = tun_to_quic_bytes;
             last_quic_to_tun_bytes = quic_to_tun_bytes;
             last_tun_write_bytes = tun_write_bytes;
+
+            let Some(quic) = conn_stats.quic() else {
+                info!(
+                    "[ANDROID H2 TUNNEL STATS] tun2h2={:.1}mbit h2tun={:.1}mbit tun_write={:.1}mbit tun2h2_pkts={} h2tun_pkts={} tun_write_pkts={} tun_write_drops={} tun_write_err={}",
+                    tun_to_quic_mbit,
+                    quic_to_tun_mbit,
+                    tun_write_mbit,
+                    stats_log.tun_to_quic_packets.load(Ordering::Relaxed),
+                    stats_log.quic_to_tun_packets.load(Ordering::Relaxed),
+                    stats_log.tun_write_packets.load(Ordering::Relaxed),
+                    stats_log.tun_write_drops.load(Ordering::Relaxed),
+                    stats_log.tun_write_errors.load(Ordering::Relaxed),
+                );
+                continue;
+            };
+            let stats = quic.stats();
+            let udp_tx_bytes = stats.udp_tx.bytes;
+            let udp_rx_bytes = stats.udp_rx.bytes;
+            let udp_tx_mbit = (udp_tx_bytes - last_udp_tx_bytes) as f64 * 8.0 / 5_000_000.0;
+            let udp_rx_mbit = (udp_rx_bytes - last_udp_rx_bytes) as f64 * 8.0 / 5_000_000.0;
             last_udp_tx_bytes = udp_tx_bytes;
             last_udp_rx_bytes = udp_rx_bytes;
             info!(
@@ -375,8 +402,8 @@ pub async fn run_vpn_loop(
                 stats.path.cwnd,
                 stats.path.lost_packets,
                 stats.path.lost_bytes,
-                conn_stats.max_datagram_size().unwrap_or(0),
-                conn_stats.datagram_send_buffer_space(),
+                quic.max_datagram_size().unwrap_or(0),
+                quic.datagram_send_buffer_space(),
                 stats_log.tun_to_quic_packets.load(Ordering::Relaxed),
                 stats_log.quic_send_errors.load(Ordering::Relaxed),
                 stats_log.quic_too_large.load(Ordering::Relaxed),
@@ -398,7 +425,9 @@ pub async fn run_vpn_loop(
 
     warn!("VPN Loop Hub shutting down. Trigger: {} task exit", res);
     stop_flag.store(true, Ordering::SeqCst);
-    let _ = connection_arc.close(0u32.into(), b"loop_exit");
+    if let Some(connection) = connection_arc.quic() {
+        connection.close(0u32.into(), b"loop_exit");
+    }
 
     info!("VPN Loop tasks terminated.");
 }

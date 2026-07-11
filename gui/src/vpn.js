@@ -258,4 +258,13 @@ export function updateNetworkPanel() {
   $('net-endpoint').textContent = state.activeEndpoint || conn?.endpoint || '—';
   $('net-ip').textContent = $('ip-readout').textContent;
   $('net-service').textContent = state.serviceAvailable ? 'ONLINE' : 'OFFLINE';
+  const protocol = $('net-protocol');
+  const transport = $('net-transport');
+  if (conn?.http2_framing) {
+    if (protocol) protocol.textContent = 'TCP - TLS 1.3';
+    if (transport) transport.textContent = 'HTTP/2 CONNECT-IP';
+  } else {
+    if (protocol) protocol.textContent = 'QUIC - TLS 1.3';
+    if (transport) transport.textContent = conn?.http3_framing || conn?.censorship_resistant ? 'HTTP/3' : 'RAW QUIC';
+  }
 }

@@ -88,6 +88,26 @@ fn datagram_wrap_roundtrip() {
 }
 
 #[test]
+fn http2_datagram_capsule_roundtrip() {
+    let packet = b"an IP packet";
+    let capsule = encode_connect_ip_datagram_capsule(packet);
+    let (kind, payload, consumed) = read_capsule(&capsule).unwrap();
+    assert_eq!(kind, CAPSULE_DATAGRAM);
+    assert_eq!(consumed, capsule.len());
+    assert_eq!(
+        decode_connect_ip_datagram_payload(payload),
+        Some(packet.as_slice())
+    );
+}
+
+#[test]
+fn http2_datagram_capsule_rejects_missing_context_or_packet() {
+    assert!(decode_connect_ip_datagram_payload(&[]).is_none());
+    assert!(decode_connect_ip_datagram_payload(&[0]).is_none());
+    assert!(decode_connect_ip_datagram_payload(&[1, 0x45]).is_none());
+}
+
+#[test]
 fn unwrap_datagram_rejects_truncation() {
     assert!(unwrap_datagram(&[]).is_none());
     assert!(unwrap_datagram(&[0x00]).is_none());

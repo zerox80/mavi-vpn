@@ -179,6 +179,7 @@ class MaviVpnService : VpnService() {
                                 certPin,
                                 crMode,
                                 prefs.savedHttp3Framing,
+                                prefs.savedHttp2Framing,
                                 prefs.savedEchConfig,
                                 prefs.savedVpnMtu,
                             )

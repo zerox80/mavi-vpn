@@ -67,6 +67,7 @@ export function toConfig(conn) {
     cert_pin: conn.cert_pin,
     censorship_resistant: !!conn.censorship_resistant,
     http3_framing: !!conn.http3_framing,
+    http2_framing: !!conn.http2_framing,
     kc_auth: kcAuth || null,
     kc_url: kcAuth ? conn.kc_url ?? null : null,
     kc_realm: kcAuth ? conn.kc_realm ?? null : null,

@@ -215,16 +215,19 @@ npm run tauri -- build     # Production (generates MSI/DEB/RPM)
 
 ## Censorship Resistance Modes
 
-Mavi VPN offers three escalating levels of traffic obfuscation:
+Mavi VPN offers several mutually exclusive transport modes:
 
 | Level | Mode | Wire Format | Activate |
 |---|---|---|---|
 | **0** | Standard | Raw QUIC datagrams | Default |
 | **1** | CR Mode | QUIC + ALPN `h3` + probe resistance | `censorship_resistant: true` |
-| **2** | HTTP/3 Framing | Full MASQUE connect-ip (RFC 9484) capsules | `http3_framing: true` |
+| **2A** | HTTP/3 Framing | MASQUE connect-ip (RFC 9484) over QUIC | `http3_framing: true` |
+| **2B** | HTTP/2 CONNECT-IP | TLS/TCP + ALPN `h2` + RFC 8441 Extended CONNECT + RFC 9297 capsules | `http2_framing: true` |
 | **+** | ECH | SNI spoofing + HPKE GREASE (RFC 9180) | Provide `ech_config` hex |
 
-When CR Mode is enabled, the server responds to unauthorized connections with a fabricated HTTP/3 nginx welcome page. This makes the server indistinguishable from a regular web server to active probes and DPI systems.
+HTTP/2 mode requires `VPN_HTTP2_BIND_ADDR=0.0.0.0:4433` (or another TCP port) on the server and the **HTTP/2 CONNECT-IP** option on the client. It is mutually exclusive with CR mode, HTTP/3 framing, and ECH. The server and clients exchange real HTTP/2 frames and CONNECT-IP capsules; as with any long-lived tunnel, traffic volume and timing can still differ from ordinary browsing.
+
+When CR Mode is enabled, the server responds to unauthorized connections with a fabricated HTTP/3 nginx welcome page, improving resistance to simple active probes.
 
 **ECH** is supported on clients via `EchMode::Grease` — the real SNI is hidden behind a cover domain (e.g. `cloudflare-ech.com`). The server generates and persists the ECH keypair in `data/ech_config_hex.txt`.
 
@@ -272,6 +275,7 @@ All server settings can be configured via environment variables or CLI flags:
 | Variable | Default | Description |
 |---|---|---|
 | `VPN_BIND_ADDR` | `0.0.0.0:4433` | QUIC listen address |
+| `VPN_HTTP2_BIND_ADDR` | *(disabled)* | Optional TLS/TCP listener for HTTP/2 CONNECT-IP; may use the same numeric port as QUIC |
 | `VPN_AUTH_TOKEN` | *(required)* | Pre-shared authentication token |
 | `VPN_NETWORK` | `10.8.0.0/24` | IPv4 client subnet (supports /8 to /30) |
 | `VPN_NETWORK_V6` | `fd00::/64` | IPv6 client subnet (ULA) |

@@ -3,11 +3,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-use crate::connection::H3SessionGuard;
+use crate::connection::{H3SessionGuard, TunnelConnection};
 
 pub struct VpnSession {
     pub runtime: tokio::runtime::Runtime,
-    pub connection: quinn::Connection,
+    pub connection: TunnelConnection,
     pub config: ControlMessage,
     pub http3_framing: bool,
     pub stop_flag: Arc<AtomicBool>,
@@ -26,7 +26,7 @@ pub struct VpnSession {
 impl VpnSession {
     pub fn new(
         runtime: tokio::runtime::Runtime,
-        connection: quinn::Connection,
+        connection: TunnelConnection,
         config: ControlMessage,
         http3_framing: bool,
         token: String,

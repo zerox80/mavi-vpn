@@ -32,7 +32,7 @@ fn non_connect_ip_response(censorship_resistant: bool) -> NonConnectIpResponse {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_connect_ip_capsules(
+pub(crate) fn build_connect_ip_capsules(
     state: &AppState,
     config: &Config,
     assigned_ip: std::net::Ipv4Addr,

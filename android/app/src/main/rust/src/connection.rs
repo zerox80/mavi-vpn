@@ -104,7 +104,7 @@ pub async fn connect_and_handshake_http2<F>(
     protect_socket: F,
 ) -> anyhow::Result<(TunnelConnection, ControlMessage)>
 where
-    F: FnMut(&tokio::net::TcpStream) -> anyhow::Result<()>,
+    F: FnMut(&tokio::net::TcpSocket) -> anyhow::Result<()>,
 {
     let hashes = decode_hex_pins(&cert_pin)
         .ok_or_else(|| anyhow::anyhow!("Invalid Certificate PIN hex string"))?;

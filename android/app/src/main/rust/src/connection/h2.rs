@@ -12,6 +12,29 @@ use tokio_rustls::TlsConnector;
 
 const CHANNEL_CAPACITY: usize = 4096;
 
+async fn connect_protected<F>(
+    addr: std::net::SocketAddr,
+    protect_socket: &mut F,
+) -> Result<tokio::net::TcpStream>
+where
+    F: FnMut(&tokio::net::TcpSocket) -> Result<()>,
+{
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()
+    } else {
+        tokio::net::TcpSocket::new_v6()
+    }
+    .context("failed to create HTTP/2 TCP socket")?;
+
+    // VpnService.protect must run before connect: the TCP handshake itself must
+    // bypass the VPN TUN device or it can be routed back into this tunnel.
+    protect_socket(&socket).context("failed to protect HTTP/2 TCP socket")?;
+    tokio::time::timeout(Duration::from_secs(5), socket.connect(addr))
+        .await
+        .map_err(|_| anyhow::anyhow!("TCP connection to {addr} timed out"))?
+        .map_err(Into::into)
+}
+
 #[derive(Clone)]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) struct Http2Session {
@@ -66,7 +89,7 @@ pub(crate) async fn connect_and_handshake<F>(
     mut protect_socket: F,
 ) -> Result<(Http2Session, ControlMessage)>
 where
-    F: FnMut(&tokio::net::TcpStream) -> Result<()>,
+    F: FnMut(&tokio::net::TcpSocket) -> Result<()>,
 {
     let host = shared::endpoint_host(endpoint);
     let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
@@ -82,23 +105,13 @@ where
 
     let mut last_error = None;
     for addr in tokio::net::lookup_host(endpoint).await? {
-        let tcp = match tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::net::TcpStream::connect(addr),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(error)) => {
-                last_error = Some(error.into());
-                continue;
-            }
-            Err(_) => {
-                last_error = Some(anyhow::anyhow!("TCP connection to {addr} timed out"));
+        let tcp = match connect_protected(addr, &mut protect_socket).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                last_error = Some(error);
                 continue;
             }
         };
-        protect_socket(&tcp).context("failed to protect HTTP/2 TCP socket")?;
         let tls = match connector.connect(server_name.clone(), tcp).await {
             Ok(stream) => stream,
             Err(error) => {
@@ -268,5 +281,49 @@ async fn receive_capsules(
             }
             None | Some(Err(_)) => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connect_protected;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn connect_protected_invokes_protection_before_returning_stream() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let protected = Arc::new(AtomicBool::new(false));
+        let callback_flag = protected.clone();
+        let mut protect_socket = move |_: &tokio::net::TcpSocket| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+
+        let client = connect_protected(addr, &mut protect_socket).await.unwrap();
+
+        assert!(protected.load(Ordering::SeqCst));
+        let _server = listener.accept().await.unwrap();
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn failed_protection_prevents_tcp_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut reject_protection =
+            |_: &tokio::net::TcpSocket| Err(anyhow::anyhow!("VpnService.protect failed"));
+
+        assert!(connect_protected(addr, &mut reject_protection)
+            .await
+            .is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
     }
 }

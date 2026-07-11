@@ -6,7 +6,7 @@ use jni::{Env, JValue};
 pub(super) fn protect_socket(
     env: &mut Env<'_>,
     service: &JObject<'_>,
-    _socket: &tokio::net::TcpStream,
+    _socket: &tokio::net::TcpSocket,
 ) -> Result<()> {
     #[cfg(target_os = "android")]
     let socket_fd = {

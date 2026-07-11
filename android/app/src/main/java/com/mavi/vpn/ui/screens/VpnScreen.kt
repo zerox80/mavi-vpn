@@ -141,7 +141,9 @@ fun VpnScreen(
                     modifier = Modifier
                         .weight(1f)
                         .clickable(
-                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            interactionSource = remember {
+                                androidx.compose.foundation.interaction.MutableInteractionSource()
+                            },
                             indication = null
                         ) {
                             currentTab = id

@@ -354,13 +354,21 @@ fun SettingsScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
-                                if (isSelected) selectedPackages.remove(app.packageName) else selectedPackages.add(app.packageName)
+                                if (isSelected) {
+                                    selectedPackages.remove(app.packageName)
+                                } else {
+                                    selectedPackages.add(app.packageName)
+                                }
                             }
                             .padding(vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (app.icon != null) {
-                            androidx.compose.foundation.Image(bitmap = app.icon, contentDescription = null, modifier = Modifier.size(40.dp))
+                            androidx.compose.foundation.Image(
+                                bitmap = app.icon,
+                                contentDescription = null,
+                                modifier = Modifier.size(40.dp),
+                            )
                         } else {
                             Box(modifier = Modifier.size(40.dp).background(Color.DarkGray, RoundedCornerShape(20.dp)))
                         }
@@ -375,9 +383,17 @@ fun SettingsScreen(
                         Checkbox(
                             checked = isSelected,
                             onCheckedChange = { checked ->
-                                if (checked) selectedPackages.add(app.packageName) else selectedPackages.remove(app.packageName)
+                                if (checked) {
+                                    selectedPackages.add(app.packageName)
+                                } else {
+                                    selectedPackages.remove(app.packageName)
+                                }
                             },
-                            colors = CheckboxDefaults.colors(checkedColor = Color(0xFF007AFF), uncheckedColor = Color.Gray, checkmarkColor = Color.White)
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = Color(0xFF007AFF),
+                                uncheckedColor = Color.Gray,
+                                checkmarkColor = Color.White,
+                            )
                         )
                     }
                     HorizontalDivider(color = Color(0xFF2C2C2C))

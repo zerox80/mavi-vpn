@@ -140,7 +140,11 @@ class MaviVpnService : VpnService() {
 
                     while (isCurrentSessionActive()) {
                         if (prefs.savedUseKeycloak) {
-                            when (val tokenResult = runBlocking { tokenManager.getUsableAccessToken(skewSeconds = 300) }) {
+                            when (
+                                val tokenResult = runBlocking {
+                                    tokenManager.getUsableAccessToken(skewSeconds = 300)
+                                }
+                            ) {
                                 is TokenAcquireResult.Usable -> {
                                     currentToken = tokenResult.accessToken
                                     if (tokenResult.refreshed) {

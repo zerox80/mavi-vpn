@@ -62,7 +62,7 @@ pub(crate) async fn load_or_prompt_config() -> Result<Config> {
         } else {
             println!(
                 "  Token: {}...",
-                &saved.token.chars().take(8).collect::<String>()
+                saved.token.chars().take(8).collect::<String>()
             );
         }
         println!(

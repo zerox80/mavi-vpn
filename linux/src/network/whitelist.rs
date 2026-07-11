@@ -44,31 +44,37 @@ pub(super) fn add_whitelist_route_exceptions<R: CommandRunner>(
     physical_device_v6: Option<&str>,
 ) {
     for &ip in ips {
-        routes::add_host_route_exception(
+        if let Err(err) = routes::add_host_route_exception(
             runner,
             ip,
             physical_gateway,
             physical_device,
             physical_gateway_v6,
             physical_device_v6,
-        );
+        ) {
+            warn!("Could not install whitelist route exception for {ip}: {err}");
+        }
     }
 }
 
 /// Removes the host route exceptions installed by
 /// [`add_whitelist_route_exceptions`], mirroring the VPN endpoint's own route
 /// removal in [`super::NetworkConfig::cleanup`].
-pub(super) fn remove_whitelist_route_exceptions(ips: &[IpAddr]) {
-    for ip in ips {
-        match ip {
-            IpAddr::V4(v4) => {
-                let _ = super::command::run_cmd("ip", &["route", "del", &format!("{v4}/32")]);
-            }
-            IpAddr::V6(v6) => {
-                let _ =
-                    super::command::run_cmd("ip", &["-6", "route", "del", &format!("{v6}/128")]);
-            }
-        }
+pub(super) fn remove_whitelist_route_exceptions(
+    ips: &[IpAddr],
+    physical_gateway: Option<&str>,
+    physical_device: Option<&str>,
+    physical_gateway_v6: Option<&str>,
+    physical_device_v6: Option<&str>,
+) {
+    for &ip in ips {
+        routes::remove_host_route_exception(
+            ip,
+            physical_gateway,
+            physical_device,
+            physical_gateway_v6,
+            physical_device_v6,
+        );
     }
 }
 

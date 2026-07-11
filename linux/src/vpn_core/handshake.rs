@@ -11,6 +11,7 @@ use tracing::info;
 
 const KEEPALIVE_SECS: u64 = 10;
 const IDLE_TIMEOUT_SECS: u64 = 60;
+const ADDRESS_CONNECT_TIMEOUT_SECS: u64 = 5;
 
 /// QUIC connection setup with custom certificate pinning.
 #[allow(clippy::too_many_arguments)]
@@ -72,10 +73,8 @@ pub(super) async fn connect_and_handshake(
     };
 
     // Resolve endpoint and connect
-    let addr = tokio::net::lookup_host(&endpoint_str)
-        .await?
-        .next()
-        .context("Failed to resolve endpoint")?;
+    let addrs: Vec<_> = tokio::net::lookup_host(&endpoint_str).await?.collect();
+    let first_addr = *addrs.first().context("Failed to resolve endpoint")?;
 
     // Outer QUIC payload MTU is derived from the operator-configured inner TUN
     // MTU (`VPN_MTU`, default 1280). The 80-byte overhead reserves room for
@@ -83,14 +82,14 @@ pub(super) async fn connect_and_handshake(
     // client MUST be configured with the same `VPN_MTU`, otherwise the larger
     // side will send UDP payloads the smaller side considers out-of-spec.
     let mtu_cfg = compute_quic_mtu_config(vpn_mtu);
-    let wire_mtu = if addr.is_ipv4() {
+    let wire_mtu = if first_addr.is_ipv4() {
         mtu_cfg.wire_mtu_ipv4
     } else {
         mtu_cfg.wire_mtu_ipv6
     };
     info!(
         "Address family: {}. Setting QUIC MTU: {} (TUN MTU budget: {}, source: {:?}, Target Wire: {})",
-        if addr.is_ipv4() { "IPv4" } else { "IPv6" },
+        if first_addr.is_ipv4() { "IPv4" } else { "IPv6" },
         mtu_cfg.quic_mtu,
         mtu_cfg.transport_tun_mtu,
         mtu_cfg.mtu_source,
@@ -139,11 +138,40 @@ pub(super) async fn connect_and_handshake(
         ech_state.as_ref().map(|e| e.outer_sni.as_str()),
     )
     .map_err(|e| anyhow::anyhow!(e))?;
-    info!("Connecting to {} (SNI: {})", addr, server_name);
-    let connection = endpoint
-        .connect(addr, &server_name)?
+    let mut connection = None;
+    let mut last_error = None;
+    for addr in addrs {
+        info!("Connecting to {} (SNI: {})", addr, server_name);
+        let connecting = match endpoint.connect(addr, &server_name) {
+            Ok(connecting) => connecting,
+            Err(err) => {
+                last_error = Some(anyhow::Error::from(err));
+                continue;
+            }
+        };
+
+        match tokio::time::timeout(
+            Duration::from_secs(ADDRESS_CONNECT_TIMEOUT_SECS),
+            connecting,
+        )
         .await
-        .context("QUIC handshake failed")?;
+        {
+            Ok(Ok(connected)) => {
+                connection = Some(connected);
+                break;
+            }
+            Ok(Err(err)) => last_error = Some(anyhow::Error::from(err)),
+            Err(_) => {
+                last_error = Some(anyhow::anyhow!(
+                    "QUIC handshake to {addr} timed out after {ADDRESS_CONNECT_TIMEOUT_SECS}s"
+                ));
+            }
+        }
+    }
+    let connection = connection.ok_or_else(|| {
+        last_error
+            .unwrap_or_else(|| anyhow::anyhow!("QUIC handshake failed for every resolved address"))
+    })?;
 
     // Application-level handshake
     let (config, h3_guard) = if effective_http3_framing {

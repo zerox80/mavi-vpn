@@ -1,4 +1,4 @@
-use super::command::CommandRunner;
+use super::command::{run_cmd, CommandRunner};
 use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::Command;
@@ -76,28 +76,46 @@ pub(super) fn add_host_route_exception<R: CommandRunner>(
     physical_device: Option<&str>,
     physical_gateway_v6: Option<&str>,
     physical_device_v6: Option<&str>,
+) -> Result<()> {
+    match ip {
+        IpAddr::V4(v4) => {
+            let (gw, dev) = physical_gateway.zip(physical_device).ok_or_else(|| {
+                anyhow::anyhow!("No physical IPv4 gateway found for host route exception")
+            })?;
+            let route = format!("{v4}/32");
+            runner.run("ip", &["route", "add", &route, "via", gw, "dev", dev])?;
+        }
+        IpAddr::V6(v6) => {
+            let (gw, dev) = physical_gateway_v6.zip(physical_device_v6).ok_or_else(|| {
+                anyhow::anyhow!("No physical IPv6 gateway found for host route exception")
+            })?;
+            let route = format!("{v6}/128");
+            runner.run("ip", &["-6", "route", "add", &route, "via", gw, "dev", dev])?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes only a route matching the physical gateway/device used when the
+/// exception was added. This avoids deleting an unrelated host route.
+pub(super) fn remove_host_route_exception(
+    ip: IpAddr,
+    physical_gateway: Option<&str>,
+    physical_device: Option<&str>,
+    physical_gateway_v6: Option<&str>,
+    physical_device_v6: Option<&str>,
 ) {
     match ip {
         IpAddr::V4(v4) => {
             if let (Some(gw), Some(dev)) = (physical_gateway, physical_device) {
                 let route = format!("{v4}/32");
-                let _ = runner.run("ip", &["route", "add", &route, "via", gw, "dev", dev]);
-            } else {
-                warn!(
-                    "No physical IPv4 gateway detected; skipping host route exception for {}",
-                    v4
-                );
+                let _ = run_cmd("ip", &["route", "del", &route, "via", gw, "dev", dev]);
             }
         }
         IpAddr::V6(v6) => {
             if let (Some(gw), Some(dev)) = (physical_gateway_v6, physical_device_v6) {
                 let route = format!("{v6}/128");
-                let _ = runner.run("ip", &["-6", "route", "add", &route, "via", gw, "dev", dev]);
-            } else {
-                warn!(
-                    "No physical IPv6 gateway detected; skipping host route exception for {}",
-                    v6
-                );
+                let _ = run_cmd("ip", &["-6", "route", "del", &route, "via", gw, "dev", dev]);
             }
         }
     }

@@ -1,7 +1,6 @@
 use super::cert_pin;
 use anyhow::{Context, Result};
-use bytes::Buf;
-use shared::{icmp, ipc::Config, masque};
+use shared::ipc::Config;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -19,10 +18,12 @@ const TUN_DEVICE_NAME: &str = "mavi0";
 
 mod lifecycle;
 mod network_assignment;
+mod packet_pumps;
 mod reauth;
 
 use self::lifecycle::{is_permanent_setup_error, SessionEnd};
 use self::network_assignment::{ServerNetworkAssignment, SessionSetupError};
+use self::packet_pumps::{PacketPumpConfig, PacketPumpTasks};
 
 /// Sleeps up to `delay`, but returns as soon as `running` is cleared.
 ///
@@ -317,136 +318,18 @@ async fn run_session(
         })
     });
 
-    // Task: TUN -> QUIC (Read from TUN, send via QUIC)
-    let tun_reader = async_tun.clone();
-    let conn_sender = connection.clone();
-    let alive_tun = session_alive.clone();
-    let run_tun = global_running.clone();
-    let is_h3_framing = config.effective_http3_framing();
-    let tun_mtu_for_ptb = mtu;
-    let gateway_v6_for_ptb = gateway_v6;
-    let tun_to_quic = tokio::spawn(async move {
-        let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
-        let mut scratch = vec![0u8; 65536];
-        loop {
-            if !run_tun.load(Ordering::Relaxed) || !alive_tun.load(Ordering::Relaxed) {
-                break;
-            }
-            if pool.capacity() < 65536 + masque::DATAGRAM_PREFIX.len() {
-                pool.reserve(4 * 1024 * 1024);
-            }
-            match tun_reader.read(&mut scratch).await {
-                Ok(n) if n > 0 => {
-                    // In H3 mode, prepend [Quarter Stream ID] [Context ID]
-                    // (connect-ip datagram framing, RFC 9484 §5 — 2 bytes).
-                    let payload = if is_h3_framing {
-                        pool.extend_from_slice(&masque::DATAGRAM_PREFIX);
-                        pool.extend_from_slice(&scratch[..n]);
-                        pool.split().freeze()
-                    } else {
-                        pool.extend_from_slice(&scratch[..n]);
-                        pool.split().freeze()
-                    };
-                    match conn_sender.send_packet(payload).await {
-                        Ok(()) => {}
-                        Err(super::handshake::SendPacketError::TooLarge) => {
-                            if let Some(quic) = conn_sender.quic() {
-                                let version = scratch[0] >> 4;
-                                let source_ip = if version == 4 {
-                                    Some(std::net::IpAddr::V4(gateway))
-                                } else if version == 6 {
-                                    gateway_v6_for_ptb.map(std::net::IpAddr::V6)
-                                } else {
-                                    None
-                                };
-                                let h3_prefix = if is_h3_framing {
-                                    masque::DATAGRAM_PREFIX.len()
-                                } else {
-                                    0
-                                };
-                                let reported_mtu = shared::effective_ptb_mtu(
-                                    tun_mtu_for_ptb,
-                                    quic.max_datagram_size(),
-                                    h3_prefix,
-                                    version == 6,
-                                );
-                                if let Some(icmp_packet) = icmp::generate_packet_too_big(
-                                    &scratch[..n],
-                                    reported_mtu,
-                                    source_ip,
-                                ) {
-                                    let _ = tun_reader.write(&icmp_packet).await;
-                                }
-                            }
-                            warn!("QUIC datagram too large; sent ICMP Packet Too Big");
-                        }
-                        Err(e) => {
-                            warn!("Transport send error: {}", e);
-                            alive_tun.store(false, Ordering::SeqCst);
-                            break;
-                        }
-                    }
-                }
-                Ok(_) => {} // zero-length read, continue
-                Err(e) => {
-                    warn!("TUN read error: {}", e);
-                    alive_tun.store(false, Ordering::SeqCst);
-                    break;
-                }
-            }
-        }
-    });
-
-    // Task: QUIC -> TUN (Read from QUIC, write to TUN)
-    let tun_writer = async_tun.clone();
-    let alive_quic = session_alive.clone();
-    let run_quic = global_running.clone();
-    let is_h3_framing_dl = config.effective_http3_framing();
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
-    let conn_clone = connection.clone();
-    let quic_to_tun = tokio::spawn(async move {
-        loop {
-            if !run_quic.load(Ordering::Relaxed) || !alive_quic.load(Ordering::Relaxed) {
-                break;
-            }
-            // Use select! to race read_datagram against a shutdown signal.
-            // Without this, a Stop command blocks for up to 60s (QUIC idle
-            // timeout) because read_datagram holds the .await indefinitely.
-            let datagram = tokio::select! {
-                biased;
-                _ = shutdown_rx.changed() => { break; }
-                result = conn_clone.recv_packet() => { result }
-            };
-            match datagram {
-                Ok(mut data) => {
-                    // Strip [Quarter Stream ID] [Context ID] for connect-ip.
-                    if is_h3_framing_dl {
-                        let inner_len = match masque::unwrap_datagram(&data) {
-                            Some(slice) => slice.len(),
-                            None => continue,
-                        };
-                        if inner_len == 0 {
-                            continue;
-                        }
-                        let prefix = data.len() - inner_len;
-                        data.advance(prefix);
-                    }
-                    if data.is_empty() {
-                        continue;
-                    }
-                    if let Err(e) = tun_writer.write(&data).await {
-                        warn!("TUN write error: {}", e);
-                        alive_quic.store(false, Ordering::SeqCst);
-                        break;
-                    }
-                }
-                Err(_) => {
-                    alive_quic.store(false, Ordering::SeqCst);
-                    break;
-                }
-            }
-        }
-    });
+    let packet_pumps = PacketPumpTasks::spawn(
+        async_tun,
+        connection.clone(),
+        session_alive.clone(),
+        global_running.clone(),
+        PacketPumpConfig {
+            uses_h3_framing: config.effective_http3_framing(),
+            tun_mtu: mtu,
+            gateway,
+            gateway_v6,
+        },
+    );
 
     // Wait for termination
     while global_running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
@@ -463,15 +346,14 @@ async fn run_session(
         }
     }
 
-    // Signal shutdown to the QUIC->TUN task (unblocks read_datagram)
-    drop(shutdown_tx);
-    // Close the QUIC connection to unblock any remaining awaits
+    // Wake a blocked transport receive before closing the QUIC connection.
+    packet_pumps.stop();
+
+    // Close the QUIC connection to unblock any remaining awaits.
     if let Some(quic) = connection.quic() {
         quic.close(0u32.into(), b"session ending");
     }
 
-    tun_to_quic.abort();
-    quic_to_tun.abort();
     if let Some(task) = mtu_monitor {
         task.abort();
     }

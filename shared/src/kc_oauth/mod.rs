@@ -159,9 +159,9 @@ pub fn is_access_token_usable(jwt: &str, skew_secs: u64) -> bool {
 
 /// Exchanges a refresh token for a fresh access (and rotated refresh) token.
 ///
-/// Classifies failures the same way Android does:
-/// - 5xx / transport errors → [`RefreshOutcome::NetworkError`] (keep the session, retry later)
-/// - 4xx / unparsable success → [`RefreshOutcome::NeedsLogin`] (refresh token is dead)
+/// Only an OAuth `invalid_grant` response proves that the refresh token is
+/// dead. Transport errors, rate limits, malformed success responses and other
+/// ambiguous HTTP failures keep the session intact so the caller can retry.
 ///
 /// The Keycloak URL is re-validated so a misconfigured `http://` endpoint can
 /// never leak the long-lived refresh token to a MITM.
@@ -211,22 +211,35 @@ pub async fn refresh_access_token(
             if status.is_success() {
                 parse_token_response(&body, Some(refresh_token)).map_or_else(
                     || {
-                        RefreshOutcome::NeedsLogin(
+                        RefreshOutcome::NetworkError(
                             "Refresh response missing access token".to_string(),
                         )
                     },
                     RefreshOutcome::Success,
                 )
-            } else if status.as_u16() >= 500 {
-                // Server-side hiccup: do not invalidate the session.
-                RefreshOutcome::NetworkError(format!("Keycloak server error (HTTP {status})"))
+            } else if refresh_error_is_terminal(status, &body) {
+                RefreshOutcome::NeedsLogin(format!(
+                    "Refresh token rejected by Keycloak (HTTP {status}, invalid_grant)"
+                ))
             } else {
-                // 4xx: the refresh token is expired/revoked/invalid.
-                RefreshOutcome::NeedsLogin(format!("Refresh rejected by Keycloak (HTTP {status})"))
+                RefreshOutcome::NetworkError(format!(
+                    "Temporary or ambiguous Keycloak refresh failure (HTTP {status})"
+                ))
             }
         }
         Err(e) => RefreshOutcome::NetworkError(format!("Refresh request failed: {e}")),
     }
+}
+
+fn refresh_error_is_terminal(status: reqwest::StatusCode, body: &str) -> bool {
+    if !status.is_client_error() || matches!(status.as_u16(), 408 | 425 | 429) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .is_some_and(|json| {
+            json.get("error").and_then(serde_json::Value::as_str) == Some("invalid_grant")
+        })
 }
 
 /// Minimal HTML-escaping for text interpolated into a loopback callback response
@@ -339,6 +352,26 @@ mod tests {
         assert!(parse_token_response(r#"{"refresh_token":"ref"}"#, None).is_none());
         assert!(parse_token_response(r#"{"access_token":""}"#, None).is_none());
         assert!(parse_token_response("not json", None).is_none());
+    }
+
+    #[test]
+    fn only_invalid_grant_proves_refresh_token_is_dead() {
+        assert!(refresh_error_is_terminal(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid_grant","error_description":"expired"}"#
+        ));
+        assert!(!refresh_error_is_terminal(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"invalid_grant"}"#
+        ));
+        assert!(!refresh_error_is_terminal(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"temporarily_unavailable"}"#
+        ));
+        assert!(!refresh_error_is_terminal(
+            reqwest::StatusCode::BAD_REQUEST,
+            "not json"
+        ));
     }
 
     #[test]

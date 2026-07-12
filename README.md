@@ -297,7 +297,7 @@ All server settings can be configured via environment variables or CLI flags:
 | `VPN_CENSORSHIP_RESISTANT` | `false` | Enable Layer 7 obfuscation |
 | `VPN_MSS_CLAMPING` | `false` (`true` in the Docker Compose example) | TCP MSS rewriting via iptables mangle (MSS derived from `VPN_MTU`) |
 | `VPN_ALLOW_CLIENT_TO_CLIENT` | `false` | Allow VPN clients to reach each other (blocked by default) |
-| `VPN_TUN_DEVICE` | *(automatic)* | Optional server TUN device name/path |
+| `VPN_TUN_DEVICE` | *(automatic; `mavi0` in Docker)* | Optional server TUN device name |
 | `VPN_WHITELIST_DOMAINS` | *(empty)* | Comma-separated client-side split-tunnel domain allow-list |
 | `VPN_CERT` | `data/cert.pem` | TLS certificate path |
 | `VPN_KEY` | `data/key.pem` | TLS private key path |

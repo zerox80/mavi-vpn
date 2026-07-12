@@ -363,6 +363,11 @@ class MaviVpnService : VpnService() {
     }
 
     private fun stopVpn() {
+        tearDownVpnSession()
+        stopSelf()
+    }
+
+    private fun tearDownVpnSession() {
         val cleanup = invalidateCurrentSession()
         stopCurrentSession(cleanup)
 
@@ -374,8 +379,6 @@ class MaviVpnService : VpnService() {
         }
 
         releaseWakeLock()
-
-        stopSelf()
     }
 
     private fun invalidateCurrentSession(): SessionCleanup {
@@ -454,8 +457,8 @@ class MaviVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        tearDownVpnSession()
         super.onDestroy()
-        releaseWakeLock()
     }
 
     private fun acquireWakeLock() {

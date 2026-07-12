@@ -68,6 +68,17 @@ class KeycloakTokenManagerTest {
     }
 
     @Test
+    fun refreshFailureIsTerminalOnlyForInvalidGrant() {
+        val expired = OAuthHelper.classifyRefreshHttpFailure(400, """{"error":"invalid_grant"}""")
+        val rateLimited = OAuthHelper.classifyRefreshHttpFailure(429, """{"error":"invalid_grant"}""")
+        val ambiguous = OAuthHelper.classifyRefreshHttpFailure(400, "not json")
+
+        assertTrue(expired is RefreshResult.Error)
+        assertTrue(rateLimited is RefreshResult.NetworkError)
+        assertTrue(ambiguous is RefreshResult.NetworkError)
+    }
+
+    @Test
     fun keycloakBaseUrlIsTrimmedAndHasNoTrailingSlash() {
         assertEquals(
             "https://auth.example.com",

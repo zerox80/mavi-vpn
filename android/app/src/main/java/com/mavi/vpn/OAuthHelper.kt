@@ -449,15 +449,12 @@ object OAuthHelper {
                         val tokens = parseTokenResponse(body, fallbackRefreshToken = refreshToken)
                         if (tokens == null) {
                             Log.e("OAuthHelper", "Refresh response missing access token")
-                            return@withContext RefreshResult.Error("Invalid JSON from Keycloak")
+                            return@withContext RefreshResult.NetworkError("Invalid refresh response from Keycloak")
                         }
                         return@withContext RefreshResult.Success(tokens)
                     }
-                    if (response.code >= 500) {
-                        return@withContext RefreshResult.NetworkError("Server Error (HTTP ${response.code})")
-                    }
                     Log.e("OAuthHelper", "Refresh token request failed with HTTP ${response.code}; response body redacted")
-                    return@withContext RefreshResult.Error("Refresh rejected by server (HTTP ${response.code})")
+                    return@withContext classifyRefreshHttpFailure(response.code, body)
                 }
             } catch (e: java.io.IOException) {
                 Log.w("OAuthHelper", "Refresh token IO exception (Offline?): ${e.message}")
@@ -467,6 +464,22 @@ object OAuthHelper {
                 return@withContext RefreshResult.Error(e.message ?: "Unknown exception during refresh")
             }
         }
+
+    internal fun classifyRefreshHttpFailure(
+        statusCode: Int,
+        body: String,
+    ): RefreshResult {
+        val oauthError = runCatching { JSONObject(body).optString("error") }.getOrNull()
+        val terminal =
+            statusCode in 400..499 &&
+                statusCode !in setOf(408, 425, 429) &&
+                oauthError == "invalid_grant"
+        return if (terminal) {
+            RefreshResult.Error("Refresh token rejected by server (HTTP $statusCode, invalid_grant)")
+        } else {
+            RefreshResult.NetworkError("Temporary or ambiguous refresh failure (HTTP $statusCode)")
+        }
+    }
 
     private fun parseJwtPayload(token: String): JSONObject? {
         val parts = token.split(".")

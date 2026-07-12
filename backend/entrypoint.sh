@@ -43,6 +43,7 @@ echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "Info: Skipping ip_fo
 # Setup NAT (Masquerade)
 VPN_NETWORK=${VPN_NETWORK:-"10.8.0.0/24"}
 VPN_NETWORK_V6=${VPN_NETWORK_V6:-"fd00::/64"}
+VPN_TUN_DEVICE=${VPN_TUN_DEVICE:-"mavi0"}
 case "$VPN_NETWORK" in
     *[!0-9./]*|""|*/*/*)
         echo "Error: Refusing unsafe VPN_NETWORK value: $VPN_NETWORK" >&2
@@ -55,20 +56,56 @@ case "$VPN_NETWORK_V6" in
         exit 1
         ;;
 esac
-# Clear and set rules (DO NOT FLUSH ENTIRE NAT TABLE IN HOST MODE)
-# We only want to append our specific masquerade rule.
+case "$VPN_TUN_DEVICE" in
+    ""|*[!a-zA-Z0-9_.:-]*)
+        echo "Error: Refusing unsafe VPN_TUN_DEVICE value: $VPN_TUN_DEVICE" >&2
+        exit 1
+        ;;
+esac
+export VPN_TUN_DEVICE
+
+# All host-namespace firewall state is isolated in named chains. This lets us
+# replace stale rules on every start and remove exactly our own rules on exit.
+delete_managed_chain() {
+    binary=$1
+    table=$2
+    parent=$3
+    chain=$4
+    command -v "$binary" >/dev/null 2>&1 || return 0
+    while "$binary" -t "$table" -C "$parent" -j "$chain" 2>/dev/null; do
+        "$binary" -t "$table" -D "$parent" -j "$chain" 2>/dev/null || break
+    done
+    "$binary" -t "$table" -F "$chain" 2>/dev/null || true
+    "$binary" -t "$table" -X "$chain" 2>/dev/null || true
+}
+
+cleanup_firewall() {
+    delete_managed_chain iptables filter FORWARD MAVI_VPN_FORWARD
+    delete_managed_chain iptables nat POSTROUTING MAVI_VPN_NAT
+    delete_managed_chain iptables mangle FORWARD MAVI_VPN_MSS
+    delete_managed_chain ip6tables filter FORWARD MAVI_VPN6_FORWARD
+    delete_managed_chain ip6tables nat POSTROUTING MAVI_VPN6_NAT
+    delete_managed_chain ip6tables mangle FORWARD MAVI_VPN6_MSS
+}
+
+# Clean up leftovers from an ungraceful previous container termination. The
+# EXIT trap also covers setup failures after only some rules were installed.
+cleanup_firewall
+trap cleanup_firewall EXIT
 
 # IPv4 NAT
-# Use -I (Insert) to be at the top of the chain to avoid being blocked by trailing DROP rules.
-# Use tun+ wildcard to catch any TUN device name (tun0, tun1, etc.) assigned by the kernel.
-iptables -t nat -C POSTROUTING -s "$VPN_NETWORK" -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-    iptables -t nat -I POSTROUTING -s "$VPN_NETWORK" -o "$DEFAULT_IFACE" -j MASQUERADE
-iptables -C FORWARD -i tun+ -j ACCEPT 2>/dev/null || \
-    iptables -I FORWARD -i tun+ -j ACCEPT
-iptables -C FORWARD -o tun+ -j ACCEPT 2>/dev/null || \
-    iptables -I FORWARD -o tun+ -j ACCEPT
-iptables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-    iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -t nat -N MAVI_VPN_NAT
+iptables -t nat -A MAVI_VPN_NAT -s "$VPN_NETWORK" -o "$DEFAULT_IFACE" -j MASQUERADE
+iptables -t nat -I POSTROUTING 1 -j MAVI_VPN_NAT
+
+iptables -N MAVI_VPN_FORWARD
+if [ "${VPN_ALLOW_CLIENT_TO_CLIENT:-false}" != "true" ]; then
+    echo "Blocking client-to-client traffic (set VPN_ALLOW_CLIENT_TO_CLIENT=true to allow)..."
+    iptables -A MAVI_VPN_FORWARD -i "$VPN_TUN_DEVICE" -o "$VPN_TUN_DEVICE" -j DROP
+fi
+iptables -A MAVI_VPN_FORWARD -i "$VPN_TUN_DEVICE" -j ACCEPT
+iptables -A MAVI_VPN_FORWARD -o "$VPN_TUN_DEVICE" -j ACCEPT
+iptables -I FORWARD 1 -j MAVI_VPN_FORWARD
 
 if [ "${VPN_MSS_CLAMPING:-false}" = "true" ]; then
     # Derive the MSS from the tunnel MTU instead of hardcoding values for the
@@ -87,22 +124,14 @@ if [ "${VPN_MSS_CLAMPING:-false}" = "true" ]; then
     MSS_V4=$((VPN_MTU - 40))
     MSS_V6=$((VPN_MTU - 60))
     echo "Enabling TCP MSS clamping (MTU $VPN_MTU -> MSS $MSS_V4/$MSS_V6)..."
-    iptables -t mangle -C FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V4" 2>/dev/null || \
-        iptables -t mangle -I FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V4"
-    ip6tables -t mangle -C FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V6" 2>/dev/null || \
-        ip6tables -t mangle -I FORWARD -i tun+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V6" 2>/dev/null || true
-fi
-
-# Client isolation: by default, VPN clients must not be able to reach each
-# other. Client-to-client packets re-enter the kernel via the TUN device and
-# are routed back out of it, so a tun+ -> tun+ FORWARD drop blocks them.
-# Inserted last so it ends up at the top of the chain, ahead of the ACCEPTs.
-# (The IPv6 counterpart lives in the IPv6 section below, inserted after the
-# IPv6 ACCEPT rules so the DROP likewise ends up above them.)
-if [ "${VPN_ALLOW_CLIENT_TO_CLIENT:-false}" != "true" ]; then
-    echo "Blocking client-to-client traffic (set VPN_ALLOW_CLIENT_TO_CLIENT=true to allow)..."
-    iptables -C FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null || \
-        iptables -I FORWARD -i tun+ -o tun+ -j DROP
+    iptables -t mangle -N MAVI_VPN_MSS
+    iptables -t mangle -A MAVI_VPN_MSS -i "$VPN_TUN_DEVICE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V4"
+    iptables -t mangle -I FORWARD 1 -j MAVI_VPN_MSS
+    if [ -e /proc/sys/net/ipv6/conf/all/forwarding ] && [ "${VPN_DISABLE_IPV6:-false}" != "true" ]; then
+        ip6tables -t mangle -N MAVI_VPN6_MSS
+        ip6tables -t mangle -A MAVI_VPN6_MSS -i "$VPN_TUN_DEVICE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_V6"
+        ip6tables -t mangle -I FORWARD 1 -j MAVI_VPN6_MSS
+    fi
 fi
 
 echo "NAT configured: $VPN_NETWORK -> $DEFAULT_IFACE (IPv4)"
@@ -127,6 +156,14 @@ elif [ "${VPN_DISABLE_IPV6:-false}" = "true" ]; then
     echo "Info: VPN_DISABLE_IPV6=true; skipping IPv6 setup (IPv4-only)."
 else
     echo "Configuring IPv6 (WAN interface: $DEFAULT_IFACE)..."
+
+    ip6tables -N MAVI_VPN6_FORWARD
+    if [ "${VPN_ALLOW_CLIENT_TO_CLIENT:-false}" != "true" ]; then
+        ip6tables -A MAVI_VPN6_FORWARD -i "$VPN_TUN_DEVICE" -o "$VPN_TUN_DEVICE" -j DROP
+    fi
+    ip6tables -A MAVI_VPN6_FORWARD -i "$VPN_TUN_DEVICE" -j ACCEPT
+    ip6tables -A MAVI_VPN6_FORWARD -o "$VPN_TUN_DEVICE" -j ACCEPT
+    ip6tables -I FORWARD 1 -j MAVI_VPN6_FORWARD
 
     # Keep accepting Router Advertisements even once forwarding is enabled, so
     # the WAN keeps its RA-derived global address and default route. Each is
@@ -185,37 +222,11 @@ else
         fi
 
         # NAT66 for the VPN ULA prefix -> WAN. Fail loudly if it cannot be added.
-        if ! ip6tables -t nat -C POSTROUTING -s "$VPN_NETWORK_V6" -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null; then
-            if ! ip6tables -t nat -I POSTROUTING -s "$VPN_NETWORK_V6" -o "$DEFAULT_IFACE" -j MASQUERADE; then
-                echo "Error: failed to add IPv6 NAT66 rule ($VPN_NETWORK_V6 -> $DEFAULT_IFACE)." >&2
-                exit 1
-            fi
-        fi
-
-        # Allow forwarding to/from the tunnel. Fail loudly on failure.
-        ip6tables -C FORWARD -i tun+ -j ACCEPT 2>/dev/null || \
-            ip6tables -I FORWARD -i tun+ -j ACCEPT || \
-            { echo "Error: failed to add IPv6 FORWARD -i tun+ ACCEPT rule." >&2; exit 1; }
-        ip6tables -C FORWARD -o tun+ -j ACCEPT 2>/dev/null || \
-            ip6tables -I FORWARD -o tun+ -j ACCEPT || \
-            { echo "Error: failed to add IPv6 FORWARD -o tun+ ACCEPT rule." >&2; exit 1; }
-        ip6tables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-            ip6tables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT || \
-            { echo "Error: failed to add IPv6 FORWARD RELATED,ESTABLISHED ACCEPT rule." >&2; exit 1; }
+        ip6tables -t nat -N MAVI_VPN6_NAT
+        ip6tables -t nat -A MAVI_VPN6_NAT -s "$VPN_NETWORK_V6" -o "$DEFAULT_IFACE" -j MASQUERADE
+        ip6tables -t nat -I POSTROUTING 1 -j MAVI_VPN6_NAT
 
         echo "NAT66 configured: $VPN_NETWORK_V6 -> $DEFAULT_IFACE (IPv6)"
-    fi
-
-    # IPv6 client isolation: block client-to-client over the tunnel. Delete any
-    # stale copies first, then insert so the DROP sits ABOVE the tun+ ACCEPT
-    # rules (mirroring IPv4). Applied whenever IPv6 is enabled, since clients can
-    # reach each other over the ULA prefix even without global IPv6.
-    if [ "${VPN_ALLOW_CLIENT_TO_CLIENT:-false}" != "true" ]; then
-        while ip6tables -C FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null; do
-            ip6tables -D FORWARD -i tun+ -o tun+ -j DROP 2>/dev/null || break
-        done
-        ip6tables -I FORWARD -i tun+ -o tun+ -j DROP || \
-            echo "Warning: could not add IPv6 client-isolation DROP rule." >&2
     fi
 
     # Diagnostics (printed at startup to make IPv6 state obvious).
@@ -234,4 +245,23 @@ iptables -t nat -L -v -n
 ip6tables -t nat -L -v -n
 
 echo "Executing mavi-vpn binary..."
-exec /app/mavi-vpn
+SERVER_PID=""
+forward_signal() {
+    signal=$1
+    trap - TERM INT
+    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill -s "$signal" "$SERVER_PID"
+        wait "$SERVER_PID"
+    fi
+    exit 0
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+
+/app/mavi-vpn &
+SERVER_PID=$!
+set +e
+wait "$SERVER_PID"
+SERVER_STATUS=$?
+set -e
+exit "$SERVER_STATUS"

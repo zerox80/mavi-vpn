@@ -25,8 +25,11 @@ Mavi VPN tunnels all network traffic over **QUIC** by default, with an optional
 **HTTP/2 CONNECT-IP** transport over TLS/TCP. The QUIC path uses the
 [`quinn`](https://github.com/zerox80/quinn) and [`h3`](https://github.com/zerox80/h3)
 forks, both tracked on `main`, to deliver secure, low-latency connectivity even
-on unstable mobile networks. It supports **Windows**, **Linux**, and **Android**
-with native clients and an optional cross-platform **Tauri GUI**.
+on unstable mobile networks. The HTTP/2 path uses the branch-tracked
+[`h2`](https://github.com/zerox80/h2) fork on `master`. A scheduled CI workflow
+tests and advances `Cargo.lock` to the latest fork commits every day. It supports
+**Windows**, **Linux**, and **Android** with native clients and an optional
+cross-platform **Tauri GUI**.
 
 ## Key Features
 

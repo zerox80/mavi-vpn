@@ -29,10 +29,14 @@ where
     // VpnService.protect must run before connect: the TCP handshake itself must
     // bypass the VPN TUN device or it can be routed back into this tunnel.
     protect_socket(&socket).context("failed to protect HTTP/2 TCP socket")?;
-    tokio::time::timeout(Duration::from_secs(5), socket.connect(addr))
+    let stream = tokio::time::timeout(Duration::from_secs(5), socket.connect(addr))
         .await
         .map_err(|_| anyhow::anyhow!("TCP connection to {addr} timed out"))?
-        .map_err(Into::into)
+        .context("HTTP/2 TCP connection failed")?;
+    stream
+        .set_nodelay(true)
+        .context("failed to enable TCP_NODELAY for HTTP/2")?;
+    Ok(stream)
 }
 
 #[derive(Clone)]
@@ -133,7 +137,11 @@ async fn establish_h2(
     tls: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
     token: String,
 ) -> Result<(Http2Session, ControlMessage)> {
-    let (mut sender, connection) = h2::client::Builder::new()
+    let mut builder = h2::client::Builder::new();
+    builder
+        .initial_window_size(shared::http2::CLIENT_INITIAL_STREAM_WINDOW_SIZE)
+        .initial_connection_window_size(shared::http2::CLIENT_INITIAL_CONNECTION_WINDOW_SIZE);
+    let (mut sender, connection) = builder
         .handshake(tls)
         .await
         .context("HTTP/2 client handshake failed")?;
@@ -306,6 +314,7 @@ mod tests {
         let client = connect_protected(addr, &mut protect_socket).await.unwrap();
 
         assert!(protected.load(Ordering::SeqCst));
+        assert!(client.nodelay().unwrap());
         let _server = listener.accept().await.unwrap();
         drop(client);
     }

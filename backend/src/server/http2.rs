@@ -99,6 +99,9 @@ impl Http2Listener {
                 .accept()
                 .await
                 .context("HTTP/2 TCP accept failed")?;
+            if let Err(error) = tcp_stream.set_nodelay(true) {
+                warn!(%peer_addr, %error, "failed to enable TCP_NODELAY for HTTP/2");
+            }
             let Ok(handshake_permit) = handshake_limit.clone().try_acquire_owned() else {
                 warn!(%peer_addr, "HTTP/2 TLS handshake limit reached; dropping TCP connection");
                 continue;

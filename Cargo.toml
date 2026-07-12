@@ -56,6 +56,8 @@ tokio-stream = "0.1"
 async-trait = "0.1"
 
 [patch.crates-io]
+# Keep direct clients and Hyper's server on our branch-tracked HTTP/2 fork.
+h2 = { git = "https://github.com/zerox80/h2", branch = "master" }
 quinn = { git = "https://github.com/zerox80/quinn", branch = "main" }
 quinn-proto = { git = "https://github.com/zerox80/quinn", branch = "main" }
 quinn-udp = { git = "https://github.com/zerox80/quinn", branch = "main" }

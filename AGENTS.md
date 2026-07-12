@@ -130,15 +130,22 @@ them by branch, not by revision:
 
 - `quinn` / `quinn-proto` / `quinn-udp` → `git = "https://github.com/zerox80/quinn", branch = "main"`
 - `h3` / `h3-quinn` / `h3-datagram` → `git = "https://github.com/zerox80/h3", branch = "main"`
+- `h2` → `git = "https://github.com/zerox80/h2", branch = "master"`
 
 If you ever see a `rev = "..."` on one of these, replace it with the branch above immediately.
 To pull the newest commits into `Cargo.lock`, run
-`cargo update -p quinn -p quinn-proto -p quinn-udp -p h3 -p h3-quinn -p h3-datagram`.
+`cargo update -p quinn -p quinn-proto -p quinn-udp -p h3 -p h3-quinn -p h3-datagram -p h2`.
+
+`.github/workflows/update-forks.yml` performs that refresh every day and on manual dispatch. It
+builds the refreshed lockfile on Linux and Windows in read-only jobs, verifies that `h2` resolves
+from `zerox80/h2`, and grants repository write access only to the final `Cargo.lock` commit job.
+Keep every fork package in its update list and keep the fork-source verification intact.
 
 Branch discipline that keeps the build green:
 - Use `branch = "main"` for the `h3` fork, **not** `master`. The fork's `master` tracks upstream and
   still depends on `quinn 0.11`; `main` carries the QUIC 0.12 + datagram/ECH wiring. Tracking
   `master` pulls in a second `quinn 0.11` and breaks the Android core (`mavivpn`) build.
+- The `h2` fork follows upstream's default `master` branch.
 - `time` stays pinned to its rev — that is `time-rs/time`, not a `zerox80` fork, so it is out of
   scope for this rule.
 

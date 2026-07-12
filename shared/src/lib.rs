@@ -9,6 +9,7 @@ pub mod cert_pin;
 pub mod control;
 pub mod endpoint;
 pub mod hex;
+pub mod http2;
 pub mod icmp;
 pub mod ipc;
 #[cfg(feature = "oauth-client")]

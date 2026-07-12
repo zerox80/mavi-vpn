@@ -102,6 +102,8 @@ pub(super) async fn connect_and_handshake_h2(
                 continue;
             }
         };
+        tcp.set_nodelay(true)
+            .context("failed to enable TCP_NODELAY for HTTP/2")?;
         let remote_addr = tcp.peer_addr()?;
         let tls = match connector.connect(server_name.clone(), tcp).await {
             Ok(stream) => stream,
@@ -125,7 +127,10 @@ async fn establish_h2(
     remote_addr: std::net::SocketAddr,
     token: String,
 ) -> Result<(Http2Session, ControlMessage)> {
-    let builder = h2::client::Builder::new();
+    let mut builder = h2::client::Builder::new();
+    builder
+        .initial_window_size(shared::http2::CLIENT_INITIAL_STREAM_WINDOW_SIZE)
+        .initial_connection_window_size(shared::http2::CLIENT_INITIAL_CONNECTION_WINDOW_SIZE);
     let (mut sender, connection) = builder
         .handshake(tls)
         .await

@@ -1,10 +1,9 @@
 name: Update forks
 
-# Keeps Cargo.lock on the latest commit of the zerox80 quinn/h3 forks.
-# Runs on a schedule and on demand, verifies the workspace still builds, and
-# only then commits the refreshed lockfile to main. A broken fork commit fails
-# the build step, so the lockfile is never advanced to a state that does not
-# compile. On the server you then only need: git pull && docker compose build.
+# Keeps Cargo.lock on the latest commit of the zerox80 h2/quinn/h3 forks.
+# Runs on a schedule and on demand, verifies Linux and Windows builds, and only
+# then commits the refreshed lockfile to main. Fork code is built in read-only
+# jobs; only the final lockfile-only job receives repository write access.
 
 on:
   schedule:
@@ -16,16 +15,18 @@ env:
   RUST_BACKTRACE: 1
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: update-forks
   cancel-in-progress: false
 
 jobs:
-  update-forks:
+  prepare:
     name: Refresh fork lockfile
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -46,15 +47,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-update-forks-
             ${{ runner.os }}-cargo-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y cmake pkg-config libssl-dev
       - name: Update fork crates in Cargo.lock
         run: |
           cargo update \
+            -p h2 \
             -p quinn -p quinn-proto -p quinn-udp \
             -p h3 -p h3-quinn -p h3-datagram
+      - name: Verify h2 resolves from the zerox80 fork
+        shell: bash
+        run: |
+          cargo tree --locked --workspace -i h2 | tee "$RUNNER_TEMP/h2-tree.txt"
+          if ! grep -Fq "https://github.com/zerox80/h2?branch=master#" "$RUNNER_TEMP/h2-tree.txt"; then
+            echo "::error::h2 did not resolve from the zerox80/h2 master branch"
+            exit 1
+          fi
       - name: Stop if lockfile is unchanged
         id: diff
         run: |
@@ -64,16 +70,110 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Verify the workspace still builds
+      - name: Upload refreshed lockfile
         if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: refreshed-fork-lockfile
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
+
+  verify-linux:
+    name: Verify refreshed lockfile (Linux)
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          submodules: recursive
+      - name: Download refreshed lockfile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: refreshed-fork-lockfile
+          path: .
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        with:
+          toolchain: stable
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-verify-forks-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-verify-forks-
+            ${{ runner.os }}-cargo-
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake pkg-config libssl-dev
+      - name: Verify portable workspace and Linux client
         run: |
           cargo build --locked \
             -p shared -p mavivpn -p mavi-vpn -p linux-vpn -p quic-tester
+
+  verify-windows:
+    name: Verify refreshed lockfile (Windows)
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          submodules: recursive
+      - name: Download refreshed lockfile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: refreshed-fork-lockfile
+          path: .
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        with:
+          toolchain: stable
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-verify-forks-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-verify-forks-
+            ${{ runner.os }}-cargo-
+      - name: Verify Windows client
+        run: cargo build --locked -p windows-vpn
+
+  commit-lockfile:
+    name: Commit verified fork lockfile
+    needs: [prepare, verify-linux, verify-windows]
+    if: >-
+      always() &&
+      needs.prepare.outputs.changed == 'true' &&
+      needs.verify-linux.result == 'success' &&
+      needs.verify-windows.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Download verified lockfile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: refreshed-fork-lockfile
+          path: .
       - name: Commit and push refreshed lockfile
-        if: steps.diff.outputs.changed == 'true'
         run: |
           git config user.name "zerox80"
           git config user.email "rujbin@protonmail.com"
           git add Cargo.lock
-          git commit -m "Advance quinn and h3 fork lockfile to latest commits"
+          git commit -m "Advance h2, quinn, and h3 forks to latest commits"
           git push origin HEAD:main

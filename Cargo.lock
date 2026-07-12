@@ -1485,11 +1485,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1499,9 +1497,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1674,7 +1674,7 @@ dependencies = [
 [[package]]
 name = "h3"
 version = "0.0.8"
-source = "git+https://github.com/zerox80/h3?rev=99533cd3f198cd9b548d5264cd7bff07e7d08cc0#99533cd3f198cd9b548d5264cd7bff07e7d08cc0"
+source = "git+https://github.com/zerox80/h3?branch=main#99533cd3f198cd9b548d5264cd7bff07e7d08cc0"
 dependencies = [
  "bytes",
  "fastrand",
@@ -1687,7 +1687,7 @@ dependencies = [
 [[package]]
 name = "h3-datagram"
 version = "0.0.2"
-source = "git+https://github.com/zerox80/h3?rev=99533cd3f198cd9b548d5264cd7bff07e7d08cc0#99533cd3f198cd9b548d5264cd7bff07e7d08cc0"
+source = "git+https://github.com/zerox80/h3?branch=main#99533cd3f198cd9b548d5264cd7bff07e7d08cc0"
 dependencies = [
  "bytes",
  "h3",
@@ -1696,7 +1696,7 @@ dependencies = [
 [[package]]
 name = "h3-quinn"
 version = "0.0.10"
-source = "git+https://github.com/zerox80/h3?rev=99533cd3f198cd9b548d5264cd7bff07e7d08cc0#99533cd3f198cd9b548d5264cd7bff07e7d08cc0"
+source = "git+https://github.com/zerox80/h3?branch=main#99533cd3f198cd9b548d5264cd7bff07e7d08cc0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3266,7 +3266,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.12.0"
-source = "git+https://github.com/zerox80/quinn?rev=760ba55d0192cc2b3da86f184d7a9f3874738515#760ba55d0192cc2b3da86f184d7a9f3874738515"
+source = "git+https://github.com/zerox80/quinn?branch=main#ebbc771ea8e150cf24c44b4667a7d22bad84d7da"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -3286,12 +3286,13 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.12.0"
-source = "git+https://github.com/zerox80/quinn?rev=760ba55d0192cc2b3da86f184d7a9f3874738515#760ba55d0192cc2b3da86f184d7a9f3874738515"
+source = "git+https://github.com/zerox80/quinn?branch=main#ebbc771ea8e150cf24c44b4667a7d22bad84d7da"
 dependencies = [
  "bytes",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "lru-slab",
- "rand 0.9.4",
+ "rand 0.10.2",
+ "rand_pcg",
  "ring",
  "rustc-hash",
  "rustls",
@@ -3306,7 +3307,7 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.6.1"
-source = "git+https://github.com/zerox80/quinn?rev=760ba55d0192cc2b3da86f184d7a9f3874738515#760ba55d0192cc2b3da86f184d7a9f3874738515"
+source = "git+https://github.com/zerox80/quinn?branch=main#ebbc771ea8e150cf24c44b4667a7d22bad84d7da"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -3390,6 +3391,15 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "rand_pcg"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+dependencies = [
+ "rand_core 0.10.1",
+]
 
 [[package]]
 name = "rand_xorshift"

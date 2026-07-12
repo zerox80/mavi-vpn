@@ -122,9 +122,24 @@ exclusive with CR, HTTP/3 framing, and ECH. ECH (SNI spoofing via HPKE GREASE) l
 the QUIC/HTTP/3 paths. `quic-tester/` acts as a DPI probe to verify the server looks like a plain
 web server.
 
-## Forked dependencies — do not bump casually
-`Cargo.toml` `[patch.crates-io]` pins `quinn`/`quinn-proto`/`quinn-udp` and `h3`/`h3-quinn`/
-`h3-datagram` to specific revs of the `zerox80` forks (QUIC 0.12 + datagram/ECH support), plus a
-pinned `time` rev. These patches are load-bearing — changing the revs can pull in an incompatible
-second Quinn version or break the ECH/MASQUE paths. The release profile uses `lto=true`,
-`codegen-units=1`, `panic="abort"`, `strip=true`.
+## Forked dependencies — always track the latest commit
+
+The `zerox80` forks **must always follow the latest commit of their branch. Never pin them to a
+fixed `rev`. Never. Under no circumstances.** `Cargo.toml` `[patch.crates-io]` therefore tracks
+them by branch, not by revision:
+
+- `quinn` / `quinn-proto` / `quinn-udp` → `git = "https://github.com/zerox80/quinn", branch = "main"`
+- `h3` / `h3-quinn` / `h3-datagram` → `git = "https://github.com/zerox80/h3", branch = "main"`
+
+If you ever see a `rev = "..."` on one of these, replace it with the branch above immediately.
+To pull the newest commits into `Cargo.lock`, run
+`cargo update -p quinn -p quinn-proto -p quinn-udp -p h3 -p h3-quinn -p h3-datagram`.
+
+Branch discipline that keeps the build green:
+- Use `branch = "main"` for the `h3` fork, **not** `master`. The fork's `master` tracks upstream and
+  still depends on `quinn 0.11`; `main` carries the QUIC 0.12 + datagram/ECH wiring. Tracking
+  `master` pulls in a second `quinn 0.11` and breaks the Android core (`mavivpn`) build.
+- `time` stays pinned to its rev — that is `time-rs/time`, not a `zerox80` fork, so it is out of
+  scope for this rule.
+
+The release profile uses `lto=true`, `codegen-units=1`, `panic="abort"`, `strip=true`.

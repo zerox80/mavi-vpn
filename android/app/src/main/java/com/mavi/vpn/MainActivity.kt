@@ -22,6 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import com.mavi.vpn.ui.screens.SettingsScreen
+import com.mavi.vpn.ui.screens.SplitTunnelingScreen
 import com.mavi.vpn.ui.screens.VpnScreen
 import com.mavi.vpn.ui.theme.MaviVpnTheme
 import com.mavi.vpn.viewmodel.VpnViewModel
@@ -70,8 +71,8 @@ class MainActivity : ComponentActivity() {
                 ) {
                     var currentScreen by remember { mutableStateOf("home") }
 
-                    if (currentScreen == "home") {
-                        VpnScreen(
+                    when (currentScreen) {
+                        "home" -> VpnScreen(
                             viewModel = viewModel,
                             onConnect = { ip, port, token, pin ->
                                 if (viewModel.useKeycloak.value) {
@@ -129,14 +130,23 @@ class MainActivity : ComponentActivity() {
                             onDisconnect = { stopVpn() },
                             onOpenSettings = { currentScreen = "settings" },
                         )
-                    } else {
-                        SettingsScreen(
+                        "settings" -> SettingsScreen(
                             viewModel = viewModel,
                             onBack = { mode, pkgs, crMode, h3Mode, h2Mode, vpnMtu ->
                                 viewModel.saveSettings(mode, pkgs, crMode, h3Mode, h2Mode, vpnMtu)
                                 currentScreen = "home"
                             },
+                            onOpenSplitTunneling = { currentScreen = "splitTunneling" },
                         )
+                        "splitTunneling" -> SplitTunnelingScreen(
+                            viewModel = viewModel,
+                            onBack = { currentScreen = "settings" },
+                            onSave = { mode, packages ->
+                                viewModel.saveSplitTunneling(mode, packages)
+                                currentScreen = "settings"
+                            },
+                        )
+                        else -> currentScreen = "home"
                     }
                 }
             }

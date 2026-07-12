@@ -159,4 +159,11 @@ class VpnViewModel(
         prefs.savedHttp2Framing = normalizedH2
         prefs.savedVpnMtu = vpnMtuValue
     }
+
+    fun saveSplitTunneling(mode: String, packages: String) {
+        splitMode.value = mode
+        splitPackages.value = packages
+        prefs.savedSplitMode = mode
+        prefs.savedSplitPackages = packages
+    }
 }

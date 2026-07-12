@@ -1,14 +1,10 @@
 package com.mavi.vpn.ui.screens
 
-import android.content.Intent
-import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
-import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,19 +13,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CheckboxDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -38,10 +28,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -53,18 +41,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mavi.vpn.MainActivity
-import com.mavi.vpn.data.InstalledApp
-import com.mavi.vpn.includeSplitTunnelSelectionIsValid
-import com.mavi.vpn.ui.components.drawableToBitmap
-import com.mavi.vpn.ui.components.toImageBitmap
 import com.mavi.vpn.viewmodel.VpnViewModel
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen(
     viewModel: VpnViewModel,
     onBack: (String, String, Boolean, Boolean, Boolean, Int) -> Unit,
+    onOpenSplitTunneling: () -> Unit,
 ) {
     val context = LocalContext.current
     
@@ -75,7 +58,6 @@ fun SettingsScreen(
     val initialHttp2Framing by viewModel.http2Framing.collectAsState()
     val initialVpnMtu by viewModel.vpnMtu.collectAsState()
     
-    var mode by remember { mutableStateOf(initialMode) }
     var censorshipResistant by remember { mutableStateOf(initialCensorshipResistant) }
     var http3Framing by remember { mutableStateOf(initialHttp3Framing) }
     var http2Framing by remember { mutableStateOf(initialHttp2Framing) }
@@ -91,25 +73,11 @@ fun SettingsScreen(
         return value
     }
     
-    val selectedPackages = remember { 
-        mutableStateListOf<String>().apply { 
-            addAll(initialSelection.split(",").map { it.trim() }.filter { it.isNotEmpty() })
-        } 
-    }
-    
-    var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-
     fun saveAndBack() {
-        if (!includeSplitTunnelSelectionIsValid(mode, selectedPackages)) {
-            Toast.makeText(context, "Select at least one app for include split tunneling.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
         val mtu = parseValidatedMtu() ?: return
         onBack(
-            mode,
-            selectedPackages.joinToString(","),
+            initialMode,
+            initialSelection,
             censorshipResistant,
             http3Framing,
             http2Framing,
@@ -117,46 +85,12 @@ fun SettingsScreen(
         )
     }
 
-    LaunchedEffect(Unit) {
-        val appList = withContext(Dispatchers.IO) {
-             val pm = context.packageManager
-             val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-             val launchableActivities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                 pm.queryIntentActivities(launcherIntent, PackageManager.ResolveInfoFlags.of(0))
-             } else {
-                 @Suppress("DEPRECATION")
-                 pm.queryIntentActivities(launcherIntent, 0)
-             }
-             launchableActivities.mapNotNull { activity ->
-                 val activityInfo = activity.activityInfo ?: return@mapNotNull null
-                 val appInfo = activityInfo.applicationInfo ?: return@mapNotNull null
-                 val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                 val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-
-                 if (!isSystem || isUpdatedSystem) {
-                     val iconDrawable = appInfo.loadIcon(pm)
-                     val imageBitmap = drawableToBitmap(iconDrawable)?.toImageBitmap()
-                     
-                     InstalledApp(
-                         name = appInfo.loadLabel(pm).toString(),
-                         packageName = activityInfo.packageName,
-                         icon = imageBitmap
-                     )
-                 } else {
-                     null
-                 }
-             }.distinctBy { it.packageName }
-                 .sortedBy { it.name.lowercase() }
-        }
-        apps = appList
-        isLoading = false
-    }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF121212))
             .padding(16.dp)
+            .verticalScroll(rememberScrollState())
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -311,94 +245,23 @@ fun SettingsScreen(
             Icon(Icons.Default.Lock, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(24.dp))
         }
         
-        Spacer(modifier = Modifier.height(24.dp))
-        
-        Text(text = "Split Tunneling", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(bottom = 12.dp))
-        
+        Spacer(modifier = Modifier.height(16.dp))
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1E1E1E), RoundedCornerShape(8.dp))
-                .padding(4.dp)
+                .background(Color(0xFF1E1E1E), RoundedCornerShape(12.dp))
+                .clickable(onClick = onOpenSplitTunneling)
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Button(
-                onClick = { mode = "exclude" },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = if (mode == "exclude") Color(0xFF007AFF) else Color.Transparent),
-                shape = RoundedCornerShape(6.dp)
-            ) {
-                Text("Exclude Selected", color = Color.White)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = "Split Tunneling", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                val selectedCount = initialSelection.split(",").count { it.isNotBlank() }
+                val modeLabel = if (initialMode == "include") "Only selected apps use VPN" else "Selected apps bypass VPN"
+                Text(text = "$modeLabel · $selectedCount selected", color = Color.Gray, fontSize = 12.sp)
             }
-            Button(
-                onClick = { mode = "include" },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = if (mode == "include") Color(0xFF007AFF) else Color.Transparent),
-                shape = RoundedCornerShape(6.dp)
-            ) {
-                Text("Include Selected", color = Color.White)
-            }
-        }
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(text = if (mode == "include") "Only selected apps will use VPN." else "Selected apps will bypass VPN.", color = Color.Gray, fontSize = 14.sp, modifier = Modifier.padding(bottom = 8.dp))
-
-        if (isLoading) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = Color(0xFF007AFF))
-            }
-        } else {
-            LazyColumn(modifier = Modifier.weight(1f)) {
-                items(apps) { app ->
-                    val isSelected = selectedPackages.contains(app.packageName)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                if (isSelected) {
-                                    selectedPackages.remove(app.packageName)
-                                } else {
-                                    selectedPackages.add(app.packageName)
-                                }
-                            }
-                            .padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (app.icon != null) {
-                            androidx.compose.foundation.Image(
-                                bitmap = app.icon,
-                                contentDescription = null,
-                                modifier = Modifier.size(40.dp),
-                            )
-                        } else {
-                            Box(modifier = Modifier.size(40.dp).background(Color.DarkGray, RoundedCornerShape(20.dp)))
-                        }
-                        
-                        Spacer(modifier = Modifier.width(16.dp))
-                        
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(text = app.name, color = Color.White, fontWeight = FontWeight.Medium)
-                            Text(text = app.packageName, color = Color.Gray, fontSize = 12.sp)
-                        }
-                        
-                        Checkbox(
-                            checked = isSelected,
-                            onCheckedChange = { checked ->
-                                if (checked) {
-                                    selectedPackages.add(app.packageName)
-                                } else {
-                                    selectedPackages.remove(app.packageName)
-                                }
-                            },
-                            colors = CheckboxDefaults.colors(
-                                checkedColor = Color(0xFF007AFF),
-                                uncheckedColor = Color.Gray,
-                                checkmarkColor = Color.White,
-                            )
-                        )
-                    }
-                    HorizontalDivider(color = Color(0xFF2C2C2C))
-                }
-            }
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Open split tunneling", tint = Color.Gray)
         }
         
         Spacer(modifier = Modifier.height(16.dp))

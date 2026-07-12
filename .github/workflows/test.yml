@@ -21,6 +21,8 @@ jobs:
           submodules: recursive
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        with:
+          toolchain: stable
       - name: Cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -77,6 +79,8 @@ jobs:
           submodules: recursive
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        with:
+          toolchain: stable
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@e28ac56891501ddb0600608470dbe94544964ed4 # cargo-llvm-cov
       - name: Cache cargo registry
@@ -143,6 +147,8 @@ jobs:
           submodules: recursive
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        with:
+          toolchain: stable
       - name: Cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -166,6 +172,8 @@ jobs:
           submodules: recursive
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        with:
+          toolchain: stable
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@e28ac56891501ddb0600608470dbe94544964ed4 # cargo-llvm-cov
       - name: Cache cargo registry

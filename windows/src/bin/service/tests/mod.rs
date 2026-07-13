@@ -25,7 +25,8 @@ fn test_config() -> ipc::Config {
         ech_config: None,
         vpn_mtu: None,
         split_tunnel_mode: shared::split_tunnel::SplitTunnelMode::Disabled,
-        split_tunnel_targets: Vec::new(),
+        split_tunnel_apps: Vec::new(),
+        split_tunnel_uid: None,
     }
 }
 

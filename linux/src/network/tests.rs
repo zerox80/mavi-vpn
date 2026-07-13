@@ -34,12 +34,13 @@ fn interface_and_routes_build_ipv4_route_exception() {
         None,
         None,
         None,
+        Ipv4Addr::new(10, 8, 0, 53),
+        None,
         Some("192.0.2.1"),
         Some("eth0"),
         None,
         None,
         SplitTunnelMode::Disabled,
-        &[],
     )
     .unwrap();
     assert!(runner.calls.iter().any(|(_, args)| args
@@ -60,9 +61,7 @@ fn interface_and_routes_build_ipv4_route_exception() {
             "dev",
             "mavi0",
             "via",
-            "10.8.0.1",
-            "metric",
-            "1"
+            "10.8.0.1"
         ]));
 }
 
@@ -80,12 +79,13 @@ fn interface_and_routes_build_ipv6_address_and_exception() {
         Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)),
         Some(64),
         Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)),
+        Ipv4Addr::new(10, 8, 0, 53),
+        Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 53)),
         None,
         None,
         Some("fe80::1"),
         Some("eth0"),
         SplitTunnelMode::Disabled,
-        &[],
     )
     .unwrap();
     assert!(runner
@@ -129,12 +129,13 @@ fn interface_and_routes_fails_when_ipv6_split_route_fails() {
         Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)),
         Some(64),
         Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)),
+        Ipv4Addr::new(10, 8, 0, 53),
+        Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 53)),
         None,
         None,
         Some("fe80::1"),
         Some("eth0"),
         SplitTunnelMode::Disabled,
-        &[],
     )
     .unwrap_err();
     assert!(err
@@ -172,12 +173,13 @@ fn interface_and_routes_requires_a_physical_gateway_before_split_routes() {
         None,
         None,
         None,
+        Ipv4Addr::new(10, 8, 0, 53),
+        None,
         None,
         None,
         None,
         None,
         SplitTunnelMode::Disabled,
-        &[],
     )
     .unwrap_err();
     assert!(err
@@ -189,13 +191,8 @@ fn interface_and_routes_requires_a_physical_gateway_before_split_routes() {
 }
 
 #[test]
-fn include_mode_installs_only_selected_tunnel_routes() {
+fn include_mode_only_installs_the_marked_vpn_default() {
     let mut runner = RecordingRunner::default();
-    let routes = [SplitRoute {
-        destination: "198.51.100.0".parse().unwrap(),
-        prefix_len: 24,
-    }];
-
     apply_interface_and_routes(
         &mut runner,
         "mavi0",
@@ -206,40 +203,35 @@ fn include_mode_installs_only_selected_tunnel_routes() {
         "203.0.113.10",
         None,
         None,
+        None,
+        Ipv4Addr::new(10, 8, 0, 53),
         None,
         Some("192.0.2.1"),
         Some("eth0"),
         None,
         None,
         SplitTunnelMode::Include,
-        &routes,
     )
     .unwrap();
 
-    assert!(runner.calls.iter().any(|(_, args)| args
-        == &[
-            "route",
-            "add",
-            "198.51.100.0/24",
-            "dev",
-            "mavi0",
-            "via",
-            "10.8.0.1"
-        ]));
     assert!(!runner
         .calls
         .iter()
         .any(|(_, args)| args.contains(&"0.0.0.0/1".to_string())));
+    assert!(runner.calls.iter().any(|(_, args)| args
+        == &[
+            "route", "replace", "table", "42777", "default", "via", "10.8.0.1", "dev", "mavi0",
+            "onlink"
+        ]));
+    assert!(runner
+        .calls
+        .iter()
+        .any(|(_, args)| args.contains(&"fwmark".to_string())));
 }
 
 #[test]
-fn exclude_mode_installs_selected_physical_route() {
+fn exclude_mode_routes_marked_apps_physically_but_keeps_vpn_dns_reachable() {
     let mut runner = RecordingRunner::default();
-    let routes = [SplitRoute {
-        destination: "198.51.100.0".parse().unwrap(),
-        prefix_len: 24,
-    }];
-
     apply_interface_and_routes(
         &mut runner,
         "mavi0",
@@ -251,29 +243,39 @@ fn exclude_mode_installs_selected_physical_route() {
         None,
         None,
         None,
+        Ipv4Addr::new(10, 8, 0, 53),
+        None,
         Some("192.0.2.1"),
         Some("eth0"),
         None,
         None,
         SplitTunnelMode::Exclude,
-        &routes,
     )
     .unwrap();
 
     assert!(runner.calls.iter().any(|(_, args)| args
         == &[
             "route",
-            "add",
-            "198.51.100.0/24",
+            "replace",
+            "table",
+            "42777",
+            "default",
             "via",
             "192.0.2.1",
             "dev",
-            "eth0",
-            "metric",
-            "42777"
+            "eth0"
         ]));
-    assert!(runner
-        .calls
-        .iter()
-        .any(|(_, args)| args.contains(&"0.0.0.0/1".to_string())));
+    assert!(runner.calls.iter().any(|(_, args)| args
+        == &[
+            "route",
+            "replace",
+            "table",
+            "42777",
+            "10.8.0.53/32",
+            "via",
+            "10.8.0.1",
+            "dev",
+            "mavi0",
+            "onlink"
+        ]));
 }

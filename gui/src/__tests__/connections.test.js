@@ -47,18 +47,20 @@ describe('connectionFromLegacyConfig', () => {
     expect(conn.http3_framing).toBe(true);
     expect(conn.vpn_mtu).toBe(1340);
     expect(conn.split_tunnel_mode).toBe('disabled');
-    expect(conn.split_tunnel_targets).toEqual([]);
+    expect(conn.split_tunnel_apps).toEqual([]);
   });
 
   it('preserves desktop split-tunnel fields from legacy config', () => {
     const conn = connectionFromLegacyConfig({
       endpoint: 'vpn.example.com:443',
       split_tunnel_mode: 'exclude',
-      split_tunnel_targets: ['updates.example.com'],
+      split_tunnel_apps: [{ id: 'firefox.desktop', name: 'Firefox', exec: ['firefox'] }],
     });
 
     expect(conn.split_tunnel_mode).toBe('exclude');
-    expect(conn.split_tunnel_targets).toEqual(['updates.example.com']);
+    expect(conn.split_tunnel_apps).toEqual([
+      { id: 'firefox.desktop', name: 'Firefox', exec: ['firefox'] },
+    ]);
   });
 
   it('uses Keycloak mode without preserving stale token', () => {

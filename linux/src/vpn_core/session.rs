@@ -235,7 +235,8 @@ async fn run_session(
         dns_v6,
         &whitelist_domains,
         config.split_tunnel_mode,
-        &config.split_tunnel_targets,
+        &config.split_tunnel_apps,
+        config.split_tunnel_uid,
     )?;
 
     // 5. Start async TUN I/O

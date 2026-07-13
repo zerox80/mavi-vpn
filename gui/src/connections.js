@@ -106,10 +106,10 @@ export function connectionFromLegacyConfig(config, existing = null) {
     kc_realm: kcAuth ? config.kc_realm || null : null,
     kc_client_id: kcAuth ? config.kc_client_id || null : null,
     vpn_mtu: validMtu(config.vpn_mtu),
-    split_tunnel_mode: config.split_tunnel_mode || 'disabled',
-    split_tunnel_targets: Array.isArray(config.split_tunnel_targets)
-      ? config.split_tunnel_targets
-      : [],
+    split_tunnel_mode: Array.isArray(config.split_tunnel_apps) && config.split_tunnel_apps.length
+      ? config.split_tunnel_mode || 'disabled'
+      : 'disabled',
+    split_tunnel_apps: Array.isArray(config.split_tunnel_apps) ? config.split_tunnel_apps : [],
   };
 }
 

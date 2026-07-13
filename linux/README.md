@@ -9,6 +9,7 @@ High-performance VPN client for Linux using QUIC or HTTP/2 CONNECT-IP transport.
 - Linux Kernel 2.6.27+ (TUN/TAP support – practically any modern distro)
 - Root-Rechte (für TUN-Device und Routing)
 - `iproute2` Paket (stellt `ip` Befehl bereit)
+- Für App-Split-Tunneling: Linux 5.8+ mit cgroup v2
 
 **Fedora/RHEL:**
 ```bash
@@ -116,13 +117,30 @@ journalctl -u mavi-vpn -f
 Sobald der Service laeuft, kann die GUI oder CLI fuer Benutzer in `mavivpn` ohne `sudo` Verbindungen aufbauen und trennen.
 
 Der systemd-Service laeuft mit einer eingeschraenkten Sandbox:
-`CAP_NET_ADMIN` fuer VPN-Netzwerkoperationen, `CAP_CHOWN` fuer die
-Gruppenfreigabe des IPC-Tokens, Zugriff auf `/dev/net/tun`, Runtime-Token unter
+`CAP_NET_ADMIN` fuer VPN-Netzwerkoperationen, `CAP_BPF` fuer den kleinen
+App-Split-Tunnel-Classifier, `CAP_CHOWN` fuer die Gruppenfreigabe des IPC-Tokens,
+Zugriff auf `/dev/net/tun`, Runtime-Token unter
 `/run/mavi-vpn/ipc.token`, persistente DNS-Backups unter `/var/lib/mavi-vpn`
 und explizite Schreibrechte fuer `/etc/resolv.conf` beziehungsweise
 `/run/systemd/resolve`. Wenn die GUI den Daemon nicht erreicht, zuerst
 Gruppenmitgliedschaft, Token-Berechtigungen und `systemctl status mavi-vpn`
 pruefen.
+
+### App-Split-Tunneling
+
+Die GUI und der interaktive CLI-Dialog erkennen installierte Anwendungen
+automatisch ueber deren Desktop-Eintraege. Es muessen keine ausfuehrbaren Pfade,
+Domains oder IP-Netze eingetragen werden. Zwei Modi stehen zur Auswahl:
+
+- **Nur ausgewaehlte Apps:** Nur die markierten Anwendungen nutzen das VPN.
+- **Ausgewaehlte Apps ausschliessen:** Die markierten Anwendungen bleiben auf
+  der normalen Internetverbindung, alle anderen nutzen das VPN.
+
+Kindprozesse einer ausgewaehlten Anwendung werden automatisch mitgenommen.
+Bereits laufende Anwendungen nach dem Verbinden neu starten, damit ihre neuen
+Sockets korrekt zugeordnet werden. App-Split-Tunneling benoetigt cgroup v2 und
+Linux 5.8 oder neuer. Unter Windows wird diese Funktion bewusst nicht angeboten;
+Android nutzt weiterhin seine vorhandene native App-Auswahl.
 
 ### Logs
 
@@ -211,20 +229,12 @@ Berechtigungen werden automatisch auf `600` gesetzt (nur Eigentümer kann lesen)
   "http2_framing": false,
   "ech_config": null,
   "vpn_mtu": 1280,
-  "split_tunnel_mode": "exclude",
-  "split_tunnel_targets": ["updates.example.com", "10.20.0.0/16"],
   "kc_auth": false,
   "kc_url": null,
   "kc_realm": null,
   "kc_client_id": null
 }
 ```
-
-`split_tunnel_mode` kann `disabled`, `include` (nur die Ziele durch das VPN)
-oder `exclude` (die Ziele am VPN vorbei) sein. Ziele duerfen Domains, IPs oder
-CIDR-Praefixe sein. Domains werden beim Verbindungsaufbau einmalig ueber den
-physischen DNS-Resolver aufgeloest; Aenderungen werden bei der naechsten
-Verbindung uebernommen.
 
 ### Certificate PIN ermitteln
 
@@ -261,7 +271,7 @@ Auf **Wayland/Fedora** wird `xdg-open` direkt aufgerufen – funktioniert mit GN
 | Censorship Resistance | H3 ALPN (sieht aus wie HTTP/3) |
 | HTTP/2 CONNECT-IP | TLS/TCP mit ALPN `h2` und RFC-9297-Capsules; zuverlässig/geordnet |
 | DNS Leak Prevention | systemd-resolved oder /etc/resolv.conf |
-| Routing | Volltunnel per Split-Routes (0/1 + 128/1) oder Ziel-Include/-Exclude |
+| Routing | Split-Routes (0/1 + 128/1), kein Default-Route-Überschreiben |
 | Auto-Reconnect | Exponential Backoff (1s → 30s) |
 | Keycloak SSO | OAuth2 PKCE, öffnet Browser via xdg-open |
 | Graceful Shutdown | Routen/DNS werden bei SIGINT/SIGTERM sauber entfernt |

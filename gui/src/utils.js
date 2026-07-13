@@ -75,17 +75,9 @@ export function toConfig(conn) {
     ech_config: conn.ech_config ?? null,
     vpn_mtu: conn.vpn_mtu ?? null,
     split_tunnel_mode: conn.split_tunnel_mode ?? 'disabled',
-    split_tunnel_targets: Array.isArray(conn.split_tunnel_targets)
-      ? conn.split_tunnel_targets
-      : [],
+    split_tunnel_apps: Array.isArray(conn.split_tunnel_apps) ? conn.split_tunnel_apps : [],
+    split_tunnel_uid: null,
   };
-}
-
-export function parseSplitTunnelTargets(value) {
-  return String(value ?? '')
-    .split(/[\n,]+/)
-    .map((target) => target.trim())
-    .filter((target, index, targets) => target && targets.indexOf(target) === index);
 }
 
 export function parseOptionalMtu(value) {

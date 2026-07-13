@@ -166,17 +166,15 @@ pub(super) async fn handle_ipc_client(
     // Unix sockets have no meaningful remote address; log the peer's
     // credentials instead (pid/uid), which tokio exposes via SO_PEERCRED and
     // is strictly more useful for auditing than the old anonymous
-    // "127.0.0.1:PORT" line. This is informational only, not an
-    // authorization check — peer_cred()'s uid is never compared against an
-    // allowlist. The actual access-control boundary is the constant-time
-    // bearer-token comparison below, backed by the socket's file permissions
-    // and group ownership (see bind_ipc_socket_at): any process able to read
-    // the token file (root, or a member of the socket's owning group) can
-    // drive this daemon regardless of its own uid.
-    let peer_desc = socket
-        .peer_cred()
+    // "127.0.0.1:PORT" line. Authentication still uses the constant-time
+    // bearer-token comparison below. For split tunneling, the kernel-provided
+    // UID is copied into the request so a client cannot classify another
+    // user's processes by forging a UID in its serialized configuration.
+    let peer_cred = socket.peer_cred().ok();
+    let peer_uid = peer_cred.as_ref().map(|cred| cred.uid());
+    let peer_desc = peer_cred
         .map(|cred| format!("pid={:?} uid={}", cred.pid(), cred.uid()))
-        .unwrap_or_else(|_| "<unknown>".to_string());
+        .unwrap_or_else(|| "<unknown>".to_string());
     info!("IPC client connected: {}", peer_desc);
     let (mut rx, mut tx) = socket.into_split();
 
@@ -206,7 +204,14 @@ pub(super) async fn handle_ipc_client(
         );
         IpcResponse::Error("Unauthorized: Invalid IPC Token".to_string())
     } else {
-        dispatch_request(req_msg.request, &state).await
+        let mut request = req_msg.request;
+        match &mut request {
+            ipc::IpcRequest::Start(config) | ipc::IpcRequest::StartWithKeycloak { config, .. } => {
+                config.split_tunnel_uid = peer_uid;
+            }
+            _ => {}
+        }
+        dispatch_request(request, &state).await
     };
 
     let resp_buf = bincode::serde::encode_to_vec(&resp, bincode::config::standard())

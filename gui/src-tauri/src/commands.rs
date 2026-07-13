@@ -15,6 +15,30 @@ use shared::ipc::{Config, IpcRequest, IpcResponse, VpnState};
 use tauri::{AppHandle, Manager};
 use tracing::{info, warn};
 
+#[derive(serde::Serialize)]
+pub(crate) struct SplitTunnelCatalog {
+    supported: bool,
+    apps: Vec<shared::split_tunnel::SplitTunnelApp>,
+}
+
+#[tauri::command]
+pub(crate) fn split_tunnel_catalog() -> SplitTunnelCatalog {
+    #[cfg(target_os = "linux")]
+    {
+        SplitTunnelCatalog {
+            supported: true,
+            apps: shared::split_tunnel::discover_linux_apps(),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        SplitTunnelCatalog {
+            supported: false,
+            apps: Vec::new(),
+        }
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 pub(crate) struct VpnStatus {
     pub(crate) running: bool,
@@ -36,6 +60,12 @@ pub(crate) async fn vpn_connect(
     // pop a browser. Defaults to `false` when the caller omits it.
     force_login: Option<bool>,
 ) -> Result<String, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        config.split_tunnel_mode = shared::split_tunnel::SplitTunnelMode::Disabled;
+        config.split_tunnel_apps.clear();
+        config.split_tunnel_uid = None;
+    }
     let force_login = force_login.unwrap_or(false);
     let kc_session = prepare_keycloak_config(&mut config, &connection_id, force_login).await?;
     config.normalize_transport();

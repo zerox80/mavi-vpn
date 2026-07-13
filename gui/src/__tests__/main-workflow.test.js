@@ -56,6 +56,7 @@ describe('main startup workflow', () => {
       migrateLegacyConfig,
     }));
     vi.doMock('../modal.js', () => ({
+      initializeSplitTunnel: vi.fn(() => Promise.resolve()),
       wireModal: vi.fn(),
       openModal: vi.fn(),
     }));
@@ -152,6 +153,7 @@ describe('main startup workflow', () => {
       migrateLegacyConfig: vi.fn(),
     }));
     vi.doMock('../modal.js', () => ({
+      initializeSplitTunnel: vi.fn(() => Promise.resolve()),
       wireModal: vi.fn(),
       openModal: vi.fn(),
     }));

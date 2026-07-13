@@ -13,8 +13,8 @@ mod storage;
 mod tray;
 
 use commands::{
-    load_config, load_prefs, save_config, save_prefs, vpn_connect, vpn_disconnect,
-    vpn_repair_network, vpn_status,
+    load_config, load_prefs, save_config, save_prefs, split_tunnel_catalog, vpn_connect,
+    vpn_disconnect, vpn_repair_network, vpn_status,
 };
 use tray::{setup_tray, start_status_poller};
 
@@ -39,6 +39,7 @@ pub fn run() {
             load_config,
             load_prefs,
             save_prefs,
+            split_tunnel_catalog,
         ])
         .setup(|app| {
             setup_tray(app)?;

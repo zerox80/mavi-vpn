@@ -190,17 +190,23 @@
             <label for="m_vpn_mtu">VPN MTU (1280-1360, default 1280)</label>
             <input type="number" id="m_vpn_mtu" placeholder="1280" min="1280" max="1360" />
           </div>
-          <div class="field">
-            <label for="m_split_mode">Desktop split tunneling</label>
-            <select id="m_split_mode">
-              <option value="disabled">Disabled - all traffic uses VPN</option>
-              <option value="include">Include - only selected targets use VPN</option>
-              <option value="exclude">Exclude - selected targets bypass VPN</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="m_split_targets">Domains, IPs, or CIDRs</label>
-            <textarea id="m_split_targets" rows="3" placeholder="intranet.example.com&#10;10.20.0.0/16"></textarea>
+          <div id="m-split-section" class="hidden">
+            <div class="field">
+              <label for="m_split_mode">Linux application split tunneling</label>
+              <select id="m_split_mode">
+                <option value="disabled">Disabled - all applications use VPN</option>
+                <option value="include">Only selected applications use VPN</option>
+                <option value="exclude">Selected applications bypass VPN</option>
+              </select>
+            </div>
+            <div id="m-split-app-picker" class="hidden">
+              <div class="field">
+                <label for="m_split_search">Applications (detected automatically)</label>
+                <input type="text" id="m_split_search" placeholder="Search applications" />
+              </div>
+              <div id="m_split_apps" class="split-app-list"></div>
+              <div class="split-app-hint">Restart selected applications after connecting so new sockets use the chosen route.</div>
+            </div>
           </div>
           <hr class="panel-divider" />
           <div class="checkbox-field">

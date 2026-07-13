@@ -2,10 +2,28 @@ import { state, $ } from './state.js';
 import { savePrefs } from './theme.js';
 import { renderConnectionList, generateConnectionId } from './connections.js';
 import { showToast } from './toast.js';
-import { parseOptionalMtu, parseSplitTunnelTargets } from './utils.js';
+import { parseOptionalMtu } from './utils.js';
+import { invoke } from './api.js';
 
 let _applyHero = null;
 let _editingId = null;
+let _splitCatalog = [];
+let _splitSupported = false;
+let _selectedAppIds = new Set();
+
+export async function initializeSplitTunnel() {
+  try {
+    const catalog = await invoke('split_tunnel_catalog');
+    _splitSupported = !!catalog?.supported;
+    _splitCatalog = Array.isArray(catalog?.apps) ? catalog.apps : [];
+  } catch (error) {
+    console.warn('split tunnel app discovery failed:', error);
+    _splitSupported = false;
+    _splitCatalog = [];
+  }
+  $('m-split-section')?.classList.toggle('hidden', !_splitSupported);
+  renderSplitTunnelApps();
+}
 
 // Light format checks so a typo is caught immediately in the form instead of
 // surfacing later as an opaque connection failure. Not a security boundary -
@@ -35,6 +53,8 @@ export function wireModal({ applyHeroForSelection }) {
   _applyHero = applyHeroForSelection;
 
   $('m_kc_auth').addEventListener('change', updateModalAuthFields);
+  $('m_split_mode').addEventListener('change', updateSplitTunnelFields);
+  $('m_split_search').addEventListener('input', renderSplitTunnelApps);
   $('modal-cancel').addEventListener('click', closeModal);
   $('modal-backdrop').addEventListener('click', (e) => {
     if (e.target.id === 'modal-backdrop') closeModal();
@@ -66,8 +86,14 @@ export function openModal(id) {
   $('m_kc_realm').value = existing?.kc_realm ?? '';
   $('m_kc_client_id').value = existing?.kc_client_id ?? '';
   $('m_vpn_mtu').value = existing?.vpn_mtu ?? '';
-  $('m_split_mode').value = existing?.split_tunnel_mode ?? 'disabled';
-  $('m_split_targets').value = (existing?.split_tunnel_targets ?? []).join('\n');
+  const savedApps = Array.isArray(existing?.split_tunnel_apps) ? existing.split_tunnel_apps : [];
+  _selectedAppIds = new Set(savedApps.map((app) => app.id));
+  $('m_split_mode').value = _splitSupported
+    ? existing?.split_tunnel_mode ?? 'disabled'
+    : 'disabled';
+  $('m_split_search').value = '';
+  renderSplitTunnelApps();
+  updateSplitTunnelFields();
   updateModalAuthFields();
   $('modal-delete').classList.toggle('hidden', !existing);
   $('modal-backdrop').classList.add('visible');
@@ -110,10 +136,10 @@ export async function saveModal() {
   }
 
   const http2_framing = $('m_h2_framing').checked;
-  const split_tunnel_mode = $('m_split_mode').value;
-  const split_tunnel_targets = parseSplitTunnelTargets($('m_split_targets').value);
-  if (split_tunnel_mode !== 'disabled' && split_tunnel_targets.length === 0) {
-    return showToast('Add at least one split-tunnel domain, IP, or CIDR.', 'error');
+  const split_tunnel_mode = _splitSupported ? $('m_split_mode').value : 'disabled';
+  const split_tunnel_apps = _splitCatalog.filter((app) => _selectedAppIds.has(app.id));
+  if (split_tunnel_mode !== 'disabled' && split_tunnel_apps.length === 0) {
+    return showToast('Select at least one application for split tunneling.', 'error');
   }
   const conn = {
     id: _editingId || generateConnectionId(),
@@ -131,7 +157,7 @@ export async function saveModal() {
     kc_client_id: kc_auth ? $('m_kc_client_id').value.trim() || null : null,
     vpn_mtu: mtu.value,
     split_tunnel_mode,
-    split_tunnel_targets,
+    split_tunnel_apps,
   };
 
   if (_editingId) {
@@ -146,6 +172,41 @@ export async function saveModal() {
   renderConnectionList();
   if (_applyHero) _applyHero();
   showToast('Connection saved.', 'success');
+}
+
+export function updateSplitTunnelFields() {
+  const enabled = _splitSupported && $('m_split_mode').value !== 'disabled';
+  $('m-split-app-picker')?.classList.toggle('hidden', !enabled);
+}
+
+function renderSplitTunnelApps() {
+  const list = $('m_split_apps');
+  if (!list) return;
+  const query = ($('m_split_search')?.value ?? '').trim().toLowerCase();
+  const apps = _splitCatalog.filter((app) => !query || app.name.toLowerCase().includes(query));
+  list.replaceChildren();
+  if (apps.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'split-app-empty';
+    empty.textContent = _splitCatalog.length ? 'No matching applications.' : 'No applications found.';
+    list.appendChild(empty);
+    return;
+  }
+  for (const app of apps) {
+    const row = document.createElement('label');
+    row.className = 'split-app-row';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = _selectedAppIds.has(app.id);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) _selectedAppIds.add(app.id);
+      else _selectedAppIds.delete(app.id);
+    });
+    const name = document.createElement('span');
+    name.textContent = app.name;
+    row.append(checkbox, name);
+    list.appendChild(row);
+  }
 }
 
 export async function deleteModal() {

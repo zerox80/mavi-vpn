@@ -2,7 +2,7 @@ import { state, $ } from './state.js';
 import { bootstrapTauri, invoke, listen } from './api.js';
 import { wireThemeToggle, applyTheme, normalizePrefs } from './theme.js';
 import { wireSidebarSearch, renderConnectionList, migrateLegacyConfig } from './connections.js';
-import { wireModal, openModal } from './modal.js';
+import { initializeSplitTunnel, wireModal, openModal } from './modal.js';
 import {
   wireHero,
   refreshStatus,
@@ -32,6 +32,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   wireHero();
   wireThemeToggle();
   wireShortcuts();
+  await initializeSplitTunnel();
 
   // Load UI prefs (connections, theme) — tolerate missing backend
   try {

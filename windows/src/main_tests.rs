@@ -18,7 +18,8 @@ fn test_config() -> Config {
         ech_config: None,
         vpn_mtu: None,
         split_tunnel_mode: shared::split_tunnel::SplitTunnelMode::Disabled,
-        split_tunnel_targets: Vec::new(),
+        split_tunnel_apps: Vec::new(),
+        split_tunnel_uid: None,
     }
 }
 
@@ -166,28 +167,6 @@ fn save_and_load_config_preserves_vpn_mtu() {
     let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
 
     assert_eq!(loaded.vpn_mtu, Some(1340));
-}
-
-#[test]
-fn save_and_load_config_preserves_split_tunnel_settings() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.json");
-    let store = MemorySecretStore::default();
-    let mut config = test_config();
-    config.split_tunnel_mode = shared::split_tunnel::SplitTunnelMode::Exclude;
-    config.split_tunnel_targets = vec![
-        "192.168.50.0/24".to_string(),
-        "intranet.example.com".to_string(),
-    ];
-
-    save_config_to_path(&path, &config, &store).unwrap();
-    let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
-
-    assert_eq!(
-        loaded.split_tunnel_mode,
-        shared::split_tunnel::SplitTunnelMode::Exclude
-    );
-    assert_eq!(loaded.split_tunnel_targets, config.split_tunnel_targets);
 }
 
 #[test]

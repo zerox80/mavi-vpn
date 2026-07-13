@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
-import { deleteModal, openModal, saveModal, updateModalAuthFields, wireModal } from '../modal.js';
+import {
+  deleteModal,
+  initializeSplitTunnel,
+  openModal,
+  saveModal,
+  updateModalAuthFields,
+  wireModal,
+} from '../modal.js';
 import { savePrefs } from '../theme.js';
 import { renderConnectionList } from '../connections.js';
 import { showToast } from '../toast.js';
@@ -16,6 +23,20 @@ vi.mock('../connections.js', () => ({
 
 vi.mock('../toast.js', () => ({
   showToast: vi.fn(),
+}));
+
+const FIREFOX = { id: 'firefox.desktop', name: 'Firefox', exec: ['firefox'] };
+
+vi.mock('../api.js', () => ({
+  invoke: vi.fn(async (command) => {
+    if (command === 'split_tunnel_catalog') {
+      return {
+        supported: true,
+        apps: [{ id: 'firefox.desktop', name: 'Firefox', exec: ['firefox'] }],
+      };
+    }
+    return null;
+  }),
 }));
 
 // A syntactically valid 64-hex-char cert pin placeholder - saveModal() now
@@ -44,7 +65,10 @@ function setupModalDom() {
       <option value="include">Include</option>
       <option value="exclude">Exclude</option>
     </select>
-    <textarea id="m_split_targets"></textarea>
+    <div id="m-split-section">
+      <input id="m_split_search" />
+      <div id="m-split-app-picker"><div id="m_split_apps"></div></div>
+    </div>
     <div id="m-kc-fields"></div>
     <div id="m-token-field"></div>
     <button id="modal-cancel"></button>
@@ -54,12 +78,14 @@ function setupModalDom() {
 }
 
 describe('modal workflows', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     setupModalDom();
     state.prefs.connections = [];
     state.prefs.active_id = null;
     wireModal({ applyHeroForSelection: vi.fn() });
+    await initializeSplitTunnel();
+    openModal(null);
   });
 
   it('toggles Keycloak fields against token field', () => {
@@ -94,7 +120,7 @@ describe('modal workflows', () => {
       cert_pin: VALID_PIN,
       vpn_mtu: 1340,
       split_tunnel_mode: 'disabled',
-      split_tunnel_targets: [],
+      split_tunnel_apps: [],
     });
     expect(state.prefs.active_id).toBe('generated-id');
     expect(savePrefs).toHaveBeenCalledOnce();
@@ -161,6 +187,8 @@ describe('modal workflows', () => {
         http3_framing: false,
         kc_auth: false,
         vpn_mtu: null,
+        split_tunnel_mode: 'exclude',
+        split_tunnel_apps: [FIREFOX],
       },
     ];
 
@@ -178,7 +206,6 @@ describe('modal workflows', () => {
     document.getElementById('m_kc_client_id').value = 'client';
     document.getElementById('m_vpn_mtu').value = '';
     document.getElementById('m_split_mode').value = 'exclude';
-    document.getElementById('m_split_targets').value = ' updates.example.com, 10.20.0.0/16 ';
 
     await saveModal();
 
@@ -199,13 +226,13 @@ describe('modal workflows', () => {
         kc_client_id: 'client',
         vpn_mtu: null,
         split_tunnel_mode: 'exclude',
-        split_tunnel_targets: ['updates.example.com', '10.20.0.0/16'],
+        split_tunnel_apps: [FIREFOX],
       },
     ]);
     expect(applyHeroForSelection).toHaveBeenCalled();
   });
 
-  it('requires targets when split tunneling is enabled', async () => {
+  it('requires an application when split tunneling is enabled', async () => {
     document.getElementById('m_label').value = 'Primary';
     document.getElementById('m_endpoint').value = 'vpn.example.com:443';
     document.getElementById('m_token').value = 'secret';
@@ -215,7 +242,7 @@ describe('modal workflows', () => {
     await saveModal();
 
     expect(showToast).toHaveBeenLastCalledWith(
-      'Add at least one split-tunnel domain, IP, or CIDR.',
+      'Select at least one application for split tunneling.',
       'error'
     );
     expect(savePrefs).not.toHaveBeenCalled();

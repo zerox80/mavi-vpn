@@ -12,7 +12,7 @@
 //! protocol. An auth token (see [`ipc_token_path`]) is layered on top as
 //! defense-in-depth.
 
-use crate::split_tunnel::SplitTunnelMode;
+use crate::split_tunnel::{SplitTunnelApp, SplitTunnelMode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -76,14 +76,19 @@ pub struct Config {
     /// Appended to preserve the positional order of the established IPC fields.
     #[serde(default)]
     pub http2_framing: bool,
-    /// Desktop split-tunnel behavior. Android keeps its package-based policy
-    /// in the platform UI; Linux and Windows apply this destination policy.
+    /// Linux application split-tunnel behavior. Android keeps its existing
+    /// package-based policy; Windows intentionally leaves this disabled.
     #[serde(default)]
     pub split_tunnel_mode: SplitTunnelMode,
-    /// Domains, IP addresses, or CIDR prefixes selected for desktop split
-    /// tunneling. Domains are resolved once before routes and VPN DNS apply.
+    /// Applications selected from Linux `.desktop` entries. The executable
+    /// signatures are discovered automatically rather than entered by users.
     #[serde(default)]
-    pub split_tunnel_targets: Vec<String>,
+    pub split_tunnel_apps: Vec<SplitTunnelApp>,
+    /// UID whose application processes may be classified. The privileged
+    /// Linux daemon overwrites this with the authenticated IPC peer UID.
+    // Keep this serialized even when absent: IPC uses positional bincode.
+    #[serde(default)]
+    pub split_tunnel_uid: Option<u32>,
 }
 
 impl fmt::Debug for Config {
@@ -102,7 +107,8 @@ impl fmt::Debug for Config {
             .field("vpn_mtu", &self.vpn_mtu)
             .field("http2_framing", &self.http2_framing)
             .field("split_tunnel_mode", &self.split_tunnel_mode)
-            .field("split_tunnel_targets", &self.split_tunnel_targets)
+            .field("split_tunnel_apps", &self.split_tunnel_apps)
+            .field("split_tunnel_uid", &self.split_tunnel_uid)
             .finish()
     }
 }

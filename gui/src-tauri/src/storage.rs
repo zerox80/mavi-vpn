@@ -39,7 +39,7 @@ struct SavedConn {
     #[serde(default)]
     split_tunnel_mode: shared::split_tunnel::SplitTunnelMode,
     #[serde(default)]
-    split_tunnel_targets: Vec<String>,
+    split_tunnel_apps: Vec<shared::split_tunnel::SplitTunnelApp>,
 }
 
 impl SavedConn {
@@ -279,7 +279,8 @@ mod tests {
             ech_config: None,
             vpn_mtu: None,
             split_tunnel_mode: shared::split_tunnel::SplitTunnelMode::Disabled,
-            split_tunnel_targets: Vec::new(),
+            split_tunnel_apps: Vec::new(),
+            split_tunnel_uid: None,
         }
     }
 

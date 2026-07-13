@@ -17,7 +17,6 @@ workspace = true
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 etherparse = { workspace = true }
-ipnetwork = { workspace = true }
 # We don't need many deps here, just types.
 # Used by cert_pin's multi-pin SHA-256 matching (already pulled in transitively
 # by backend/linux/windows via rustls; listing it here just makes the direct
@@ -50,6 +49,7 @@ thiserror = { workspace = true, optional = true }
 [dev-dependencies]
 bincode = { workspace = true }
 proptest = { workspace = true }
+tempfile = { workspace = true }
 # Async runtime + test macro for the loopback callback-reader tests.
 # `test-util` enables paused-time tests of the per-connection read timeout.
 tokio = { workspace = true, features = ["test-util"] }

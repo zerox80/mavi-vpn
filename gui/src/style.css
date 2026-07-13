@@ -514,6 +514,35 @@ input::placeholder {
   border-color: var(--accent);
 }
 
+.split-app-list {
+  max-height: 170px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  margin-bottom: 6px;
+}
+.split-app-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  cursor: pointer;
+}
+.split-app-row:last-child { border-bottom: 0; }
+.split-app-row:hover { background: var(--row-hover); }
+.split-app-empty,
+.split-app-hint {
+  padding: 9px;
+  color: var(--mute);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.split-app-hint { padding: 0 2px 12px; }
+
 .checkbox-field {
   display: flex;
   align-items: center;

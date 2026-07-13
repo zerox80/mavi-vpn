@@ -6,7 +6,6 @@ use crate::client_ipc::{send_request, send_request_internal};
 use crate::ipc::{Config, IpcRequest, IpcResponse};
 use crate::oauth;
 use shared::kc_oauth::RefreshOutcome;
-use shared::split_tunnel::SplitTunnelMode;
 
 pub(crate) async fn interactive_mode() -> Result<()> {
     let status_res = send_request_internal(IpcRequest::Status).await;
@@ -81,7 +80,6 @@ pub(crate) async fn load_or_prompt_config() -> Result<Config> {
         if let Some(mtu) = saved.vpn_mtu {
             println!("  VPN MTU: {mtu}");
         }
-        println!("  Split tunnel: {:?}", saved.split_tunnel_mode);
         println!();
         print!("Use this configuration? [Y/n]: ");
         io::stdout().flush()?;
@@ -181,7 +179,6 @@ async fn prompt_new_config() -> Result<Config> {
             }
         }
     };
-    let (split_tunnel_mode, split_tunnel_targets) = prompt_split_tunnel(&mut stdout)?;
     println!();
     Ok(Config {
         endpoint,
@@ -197,35 +194,10 @@ async fn prompt_new_config() -> Result<Config> {
         refresh_token,
         ech_config,
         vpn_mtu,
-        split_tunnel_mode,
-        split_tunnel_targets,
+        split_tunnel_mode: shared::split_tunnel::SplitTunnelMode::Disabled,
+        split_tunnel_apps: Vec::new(),
+        split_tunnel_uid: None,
     })
-}
-
-fn prompt_split_tunnel(stdout: &mut impl Write) -> Result<(SplitTunnelMode, Vec<String>)> {
-    print!("Desktop split tunnel [off/include/exclude] (default: off): ");
-    stdout.flush()?;
-    let mode = match read_line()?.to_lowercase().as_str() {
-        "include" | "in" => SplitTunnelMode::Include,
-        "exclude" | "ex" => SplitTunnelMode::Exclude,
-        _ => SplitTunnelMode::Disabled,
-    };
-    if mode == SplitTunnelMode::Disabled {
-        return Ok((mode, Vec::new()));
-    }
-
-    print!("Domains, IPs, or CIDRs (comma-separated): ");
-    stdout.flush()?;
-    let targets = read_line()?
-        .split(',')
-        .map(str::trim)
-        .filter(|target| !target.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if targets.is_empty() {
-        anyhow::bail!("Split tunneling requires at least one domain, IP, or CIDR");
-    }
-    Ok((mode, targets))
 }
 
 struct KcPromptResult {

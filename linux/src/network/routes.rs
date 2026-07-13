@@ -1,12 +1,14 @@
 use super::command::{run_cmd, CommandRunner};
 use anyhow::{Context, Result};
-use shared::split_tunnel::SplitRoute;
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::Command;
 use tracing::{info, warn};
 
-const SPLIT_PHYSICAL_ROUTE_METRIC: &str = "42777";
-const SPLIT_TUNNEL_ROUTE_METRIC: &str = "1";
+use shared::split_tunnel::SplitTunnelMode;
+
+const APP_ROUTE_TABLE: &str = "42777";
+const APP_RULE_PRIORITY: &str = "10000";
+const APP_SOCKET_MARK: &str = "0x4d41/0xffffffff";
 
 /// Detects the current physical IPv4 default gateway and interface.
 pub(super) fn detect_physical_gateway() -> (Option<String>, Option<String>) {
@@ -100,189 +102,6 @@ pub(super) fn add_host_route_exception<R: CommandRunner>(
     Ok(())
 }
 
-/// Adds an arbitrary IP prefix through the physical gateway.
-pub(super) fn add_route_exception<R: CommandRunner>(
-    runner: &mut R,
-    route: SplitRoute,
-    physical_gateway: Option<&str>,
-    physical_device: Option<&str>,
-    physical_gateway_v6: Option<&str>,
-    physical_device_v6: Option<&str>,
-) -> Result<()> {
-    let prefix = route.prefix();
-    if route.is_ipv4() {
-        let (gateway, device) = physical_gateway.zip(physical_device).ok_or_else(|| {
-            anyhow::anyhow!("No physical IPv4 gateway found for split-tunnel exception")
-        })?;
-        runner.run(
-            "ip",
-            &[
-                "route",
-                "add",
-                &prefix,
-                "via",
-                gateway,
-                "dev",
-                device,
-                "metric",
-                SPLIT_PHYSICAL_ROUTE_METRIC,
-            ],
-        )
-    } else {
-        let (gateway, device) = physical_gateway_v6.zip(physical_device_v6).ok_or_else(|| {
-            anyhow::anyhow!("No physical IPv6 gateway found for split-tunnel exception")
-        })?;
-        runner.run(
-            "ip",
-            &[
-                "-6",
-                "route",
-                "add",
-                &prefix,
-                "via",
-                gateway,
-                "dev",
-                device,
-                "metric",
-                SPLIT_PHYSICAL_ROUTE_METRIC,
-            ],
-        )
-    }
-}
-
-pub(super) fn remove_route_exception(
-    route: SplitRoute,
-    physical_gateway: Option<&str>,
-    physical_device: Option<&str>,
-    physical_gateway_v6: Option<&str>,
-    physical_device_v6: Option<&str>,
-) {
-    let prefix = route.prefix();
-    if route.is_ipv4() {
-        if let (Some(gateway), Some(device)) = (physical_gateway, physical_device) {
-            let _ = run_cmd(
-                "ip",
-                &[
-                    "route",
-                    "del",
-                    &prefix,
-                    "via",
-                    gateway,
-                    "dev",
-                    device,
-                    "metric",
-                    SPLIT_PHYSICAL_ROUTE_METRIC,
-                ],
-            );
-        }
-    } else if let (Some(gateway), Some(device)) = (physical_gateway_v6, physical_device_v6) {
-        let _ = run_cmd(
-            "ip",
-            &[
-                "-6",
-                "route",
-                "del",
-                &prefix,
-                "via",
-                gateway,
-                "dev",
-                device,
-                "metric",
-                SPLIT_PHYSICAL_ROUTE_METRIC,
-            ],
-        );
-    }
-}
-
-pub(super) fn add_tunnel_route<R: CommandRunner>(
-    runner: &mut R,
-    route: SplitRoute,
-    tun_name: &str,
-    gateway_v4: Ipv4Addr,
-    gateway_v6: Option<std::net::Ipv6Addr>,
-) -> Result<()> {
-    let prefix = route.prefix();
-    if route.is_ipv4() {
-        let gateway = gateway_v4.to_string();
-        runner.run(
-            "ip",
-            &[
-                "route",
-                "add",
-                &prefix,
-                "dev",
-                tun_name,
-                "via",
-                &gateway,
-                "metric",
-                SPLIT_TUNNEL_ROUTE_METRIC,
-            ],
-        )
-    } else {
-        let gateway = gateway_v6
-            .ok_or_else(|| anyhow::anyhow!("No VPN IPv6 gateway for split-tunnel route"))?
-            .to_string();
-        runner.run(
-            "ip",
-            &[
-                "-6",
-                "route",
-                "add",
-                &prefix,
-                "dev",
-                tun_name,
-                "via",
-                &gateway,
-                "metric",
-                SPLIT_TUNNEL_ROUTE_METRIC,
-            ],
-        )
-    }
-}
-
-pub(super) fn remove_tunnel_route(
-    route: SplitRoute,
-    tun_name: &str,
-    gateway_v4: Ipv4Addr,
-    gateway_v6: Option<std::net::Ipv6Addr>,
-) {
-    let prefix = route.prefix();
-    if route.is_ipv4() {
-        let gateway = gateway_v4.to_string();
-        let _ = run_cmd(
-            "ip",
-            &[
-                "route",
-                "del",
-                &prefix,
-                "dev",
-                tun_name,
-                "via",
-                &gateway,
-                "metric",
-                SPLIT_TUNNEL_ROUTE_METRIC,
-            ],
-        );
-    } else if let Some(gateway) = gateway_v6 {
-        let gateway = gateway.to_string();
-        let _ = run_cmd(
-            "ip",
-            &[
-                "-6",
-                "route",
-                "del",
-                &prefix,
-                "dev",
-                tun_name,
-                "via",
-                &gateway,
-                "metric",
-                SPLIT_TUNNEL_ROUTE_METRIC,
-            ],
-        );
-    }
-}
-
 /// Removes only a route matching the physical gateway/device used when the
 /// exception was added. This avoids deleting an unrelated host route.
 pub(super) fn remove_host_route_exception(
@@ -306,6 +125,194 @@ pub(super) fn remove_host_route_exception(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn add_app_policy_routes<R: CommandRunner>(
+    runner: &mut R,
+    mode: SplitTunnelMode,
+    tun_name: &str,
+    gateway_v4: Ipv4Addr,
+    gateway_v6: Option<std::net::Ipv6Addr>,
+    dns_v4: Ipv4Addr,
+    dns_v6: Option<std::net::Ipv6Addr>,
+    physical_gateway: Option<&str>,
+    physical_device: Option<&str>,
+    physical_gateway_v6: Option<&str>,
+    physical_device_v6: Option<&str>,
+) -> Result<()> {
+    match mode {
+        SplitTunnelMode::Disabled => return Ok(()),
+        SplitTunnelMode::Include => {
+            let gateway = gateway_v4.to_string();
+            runner.run(
+                "ip",
+                &[
+                    "route",
+                    "replace",
+                    "table",
+                    APP_ROUTE_TABLE,
+                    "default",
+                    "via",
+                    &gateway,
+                    "dev",
+                    tun_name,
+                    "onlink",
+                ],
+            )?;
+            if let Some(gateway_v6) = gateway_v6 {
+                let gateway = gateway_v6.to_string();
+                runner.run(
+                    "ip",
+                    &[
+                        "-6",
+                        "route",
+                        "replace",
+                        "table",
+                        APP_ROUTE_TABLE,
+                        "default",
+                        "via",
+                        &gateway,
+                        "dev",
+                        tun_name,
+                        "onlink",
+                    ],
+                )?;
+            }
+        }
+        SplitTunnelMode::Exclude => {
+            // DNS is configured globally while the tunnel is active. A
+            // directly configured VPN resolver therefore needs a more
+            // specific route than the marked app's physical default. Local
+            // systemd-resolved stubs are unaffected by this route.
+            let dns = format!("{dns_v4}/32");
+            let gateway = gateway_v4.to_string();
+            runner.run(
+                "ip",
+                &[
+                    "route",
+                    "replace",
+                    "table",
+                    APP_ROUTE_TABLE,
+                    &dns,
+                    "via",
+                    &gateway,
+                    "dev",
+                    tun_name,
+                    "onlink",
+                ],
+            )?;
+            if let (Some(dns_v6), Some(gateway_v6)) = (dns_v6, gateway_v6) {
+                let dns = format!("{dns_v6}/128");
+                let gateway = gateway_v6.to_string();
+                runner.run(
+                    "ip",
+                    &[
+                        "-6",
+                        "route",
+                        "replace",
+                        "table",
+                        APP_ROUTE_TABLE,
+                        &dns,
+                        "via",
+                        &gateway,
+                        "dev",
+                        tun_name,
+                        "onlink",
+                    ],
+                )?;
+            }
+
+            let device = physical_device.ok_or_else(|| {
+                anyhow::anyhow!("No physical IPv4 interface found for application bypass")
+            })?;
+            let mut args = vec!["route", "replace", "table", APP_ROUTE_TABLE, "default"];
+            if let Some(gateway) = physical_gateway {
+                args.extend(["via", gateway]);
+            }
+            args.extend(["dev", device]);
+            runner.run("ip", &args)?;
+
+            if let Some(device_v6) = physical_device_v6 {
+                let mut args = vec![
+                    "-6",
+                    "route",
+                    "replace",
+                    "table",
+                    APP_ROUTE_TABLE,
+                    "default",
+                ];
+                if let Some(gateway_v6) = physical_gateway_v6 {
+                    args.extend(["via", gateway_v6]);
+                }
+                args.extend(["dev", device_v6]);
+                runner.run("ip", &args)?;
+            }
+        }
+    }
+
+    runner.run(
+        "ip",
+        &[
+            "rule",
+            "add",
+            "priority",
+            APP_RULE_PRIORITY,
+            "fwmark",
+            APP_SOCKET_MARK,
+            "lookup",
+            APP_ROUTE_TABLE,
+        ],
+    )?;
+    if gateway_v6.is_some() || physical_device_v6.is_some() {
+        runner.run(
+            "ip",
+            &[
+                "-6",
+                "rule",
+                "add",
+                "priority",
+                APP_RULE_PRIORITY,
+                "fwmark",
+                APP_SOCKET_MARK,
+                "lookup",
+                APP_ROUTE_TABLE,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn remove_app_policy_routes() {
+    let _ = run_cmd(
+        "ip",
+        &[
+            "rule",
+            "del",
+            "priority",
+            APP_RULE_PRIORITY,
+            "fwmark",
+            APP_SOCKET_MARK,
+            "lookup",
+            APP_ROUTE_TABLE,
+        ],
+    );
+    let _ = run_cmd(
+        "ip",
+        &[
+            "-6",
+            "rule",
+            "del",
+            "priority",
+            APP_RULE_PRIORITY,
+            "fwmark",
+            APP_SOCKET_MARK,
+            "lookup",
+            APP_ROUTE_TABLE,
+        ],
+    );
+    let _ = run_cmd("ip", &["route", "flush", "table", APP_ROUTE_TABLE]);
+    let _ = run_cmd("ip", &["-6", "route", "flush", "table", APP_ROUTE_TABLE]);
 }
 
 pub(super) fn netmask_to_prefix(netmask: Ipv4Addr) -> u8 {

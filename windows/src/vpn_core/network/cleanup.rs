@@ -1,7 +1,5 @@
 use super::adapter::{cleanup_mavi_adapter_dns_state, remove_nrpt_dns_rule};
-use super::host_route::{
-    clear_persisted_host_route, load_persisted_host_routes, PHYSICAL_ROUTE_METRIC,
-};
+use super::host_route::{clear_persisted_host_route, load_persisted_host_routes};
 use super::ip::win32_cleanup_all_ips_on_interface;
 use super::route::{
     cleanup_ipv6_prefix_policy, win32_cleanup_all_routes_on_interface, win32_delete_route,
@@ -52,9 +50,7 @@ pub fn cleanup_routes(host_routes: &[String]) {
         for prefix in host_prefixes {
             let _ = write!(
                 ps_script,
-                "Get-NetRoute -DestinationPrefix '{prefix}' -ErrorAction SilentlyContinue | \
-                 Where-Object {{ $_.RouteMetric -eq {PHYSICAL_ROUTE_METRIC} }} | \
-                 Remove-NetRoute -Confirm:$false; "
+                "Remove-NetRoute -DestinationPrefix '{prefix}' -Confirm:$false; "
             );
         }
         let _ = run_powershell_cmd("Cleanup host routes", &ps_script);

@@ -9,12 +9,13 @@ ExecStart=/usr/local/bin/mavi-vpn daemon
 Restart=on-failure
 RestartSec=5
 
-# The daemon must create a TUN device and adjust routes/DNS, but it should not
-# inherit broad root filesystem or device access beyond those operations.
+# The daemon must create a TUN device, adjust routes/DNS, and load the small
+# cgroup eBPF classifier used for application split tunneling. Keep the
+# capabilities limited to those operations.
 UMask=0077
 NoNewPrivileges=true
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN
-AmbientCapabilities=CAP_NET_ADMIN CAP_CHOWN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_CHOWN
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_CHOWN
 DevicePolicy=closed
 DeviceAllow=/dev/net/tun rw
 PrivateTmp=true

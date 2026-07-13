@@ -4,14 +4,11 @@ use super::adapter::{
 };
 use super::cleanup::cleanup_routes;
 use super::dns::configure_dns;
-use super::host_route::{
-    add_host_route_exception_fixed, add_host_route_exception_for_ip, add_route_exception,
-};
+use super::host_route::{add_host_route_exception_fixed, add_host_route_exception_for_ip};
 use super::ip::{wait_for_ipv4_address, win32_add_ip};
 use super::route::{apply_ipv6_prefix_policy, ipv6_network_prefix, win32_add_route};
 use super::whitelist::resolve_whitelist_ips;
 use anyhow::{Context, Result};
-use shared::split_tunnel::{resolve_split_tunnel_targets, SplitRoute, SplitTunnelMode};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 use tracing::info;
@@ -65,8 +62,6 @@ pub fn set_adapter_network_config(
     config: AdapterNetworkConfig,
     endpoint: &str,
     whitelist_domains: &[String],
-    split_tunnel_mode: SplitTunnelMode,
-    split_tunnel_targets: &[String],
 ) -> Result<Vec<String>> {
     let AdapterNetworkConfig {
         ip,
@@ -84,11 +79,6 @@ pub fn set_adapter_network_config(
     // or the split default routes are installed below, so this still queries
     // the physical (pre-VPN) resolver.
     let whitelist_ips = resolve_whitelist_ips(whitelist_domains, assigned_ipv6.is_some());
-    let split_routes = resolve_split_tunnel_targets(split_tunnel_targets, assigned_ipv6.is_some())
-        .map_err(anyhow::Error::msg)?;
-    if split_tunnel_mode != SplitTunnelMode::Disabled && split_routes.is_empty() {
-        anyhow::bail!("Split tunneling requires at least one usable target");
-    }
 
     let requested_adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());
     let adapter_index = adapter.get_adapter_index()?;
@@ -126,9 +116,7 @@ pub fn set_adapter_network_config(
         );
     }
 
-    if split_tunnel_mode != SplitTunnelMode::Include {
-        configure_dns(&adapter_name, dns);
-    }
+    configure_dns(&adapter_name, dns);
 
     win32_set_mtu(adapter_index, u32::from(tun_mtu), AF_INET);
     win32_set_mtu(adapter_index, u32::from(tun_mtu), AF_INET6 as _);
@@ -138,31 +126,17 @@ pub fn set_adapter_network_config(
         anyhow::anyhow!("Failed to install host route exception for VPN endpoint")
     })?;
     let mut host_routes = vec![endpoint_route];
-    if split_tunnel_mode != SplitTunnelMode::Include {
-        for ip in whitelist_ips {
-            if let Some(prefix) = add_host_route_exception_for_ip(ip) {
-                host_routes.push(prefix);
-            }
+    for ip in whitelist_ips {
+        if let Some(prefix) = add_host_route_exception_for_ip(ip) {
+            host_routes.push(prefix);
         }
     }
 
     let route_result = (|| -> Result<()> {
-        if split_tunnel_mode == SplitTunnelMode::Include {
-            install_included_routes(adapter_index, gateway, &split_routes)?;
-        } else {
-            install_ipv4_split_routes(adapter_index, gateway)?;
-            if gateway_v6.is_some() {
-                install_ipv6_split_routes(adapter_index)?;
-            }
-        }
+        install_ipv4_split_routes(adapter_index, gateway)?;
 
-        if split_tunnel_mode == SplitTunnelMode::Exclude {
-            for route in &split_routes {
-                let prefix = add_route_exception(*route).ok_or_else(|| {
-                    anyhow::anyhow!("Failed to exclude split-tunnel route {}", route.prefix())
-                })?;
-                host_routes.push(prefix);
-            }
+        if gateway_v6.is_some() {
+            install_ipv6_split_routes(adapter_index)?;
         }
 
         Ok(())
@@ -177,46 +151,13 @@ pub fn set_adapter_network_config(
         route_started.elapsed().as_millis()
     );
 
-    if split_tunnel_mode != SplitTunnelMode::Include {
-        configure_vpn_dns_preference(&adapter_name, adapter_index, dns, dns_v6);
-    }
+    configure_vpn_dns_preference(&adapter_name, adapter_index, dns, dns_v6);
 
     info!(
         "Network config complete: host route exceptions={}",
         host_routes.len()
     );
     Ok(host_routes)
-}
-
-fn install_included_routes(
-    adapter_index: u32,
-    gateway: Ipv4Addr,
-    routes: &[SplitRoute],
-) -> Result<()> {
-    install_included_routes_with(adapter_index, gateway, routes, win32_add_route)
-}
-
-fn install_included_routes_with<F>(
-    adapter_index: u32,
-    gateway: Ipv4Addr,
-    routes: &[SplitRoute],
-    mut add_route: F,
-) -> Result<()>
-where
-    F: FnMut(u32, IpAddr, u8, Option<IpAddr>, u32) -> Result<()>,
-{
-    for route in routes {
-        let next_hop = route.is_ipv4().then_some(IpAddr::V4(gateway));
-        add_route(
-            adapter_index,
-            route.destination,
-            route.prefix_len,
-            next_hop,
-            1,
-        )
-        .with_context(|| format!("Failed to install included VPN route {}", route.prefix()))?;
-    }
-    Ok(())
 }
 
 fn install_ipv4_split_routes(adapter_index: u32, gateway: Ipv4Addr) -> Result<()> {
@@ -329,34 +270,6 @@ mod tests {
 
         assert_eq!(calls.len(), 2);
         assert!(err.to_string().contains("128.0.0.0/1"));
-    }
-
-    #[test]
-    fn included_routes_keep_prefixes_and_family_specific_next_hops() {
-        let gateway = Ipv4Addr::new(10, 8, 0, 1);
-        let routes = [
-            SplitRoute {
-                destination: "198.51.100.0".parse().unwrap(),
-                prefix_len: 24,
-            },
-            SplitRoute {
-                destination: "2001:db8::".parse().unwrap(),
-                prefix_len: 48,
-            },
-        ];
-        let mut calls = Vec::new();
-
-        install_included_routes_with(9, gateway, &routes, |index, ip, prefix, hop, metric| {
-            calls.push((index, ip, prefix, hop, metric));
-            Ok(())
-        })
-        .unwrap();
-
-        assert_eq!(
-            calls[0],
-            (9, routes[0].destination, 24, Some(IpAddr::V4(gateway)), 1)
-        );
-        assert_eq!(calls[1], (9, routes[1].destination, 48, None, 1));
     }
 
     #[test]

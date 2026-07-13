@@ -1,6 +1,6 @@
 use anyhow::Result;
 use shared::ipc::Config;
-use shared::split_tunnel::SplitTunnelMode;
+use shared::split_tunnel::{discover_linux_apps, SplitTunnelApp, SplitTunnelMode};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -147,7 +147,18 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
         if let Some(mtu) = saved.vpn_mtu {
             println!("  VPN MTU: {}", mtu);
         }
-        println!("  Split tunnel: {:?}", saved.split_tunnel_mode);
+        if saved.split_tunnel_mode != SplitTunnelMode::Disabled {
+            println!(
+                "  Split tunnel: {:?} ({})",
+                saved.split_tunnel_mode,
+                saved
+                    .split_tunnel_apps
+                    .iter()
+                    .map(|app| app.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         println!();
 
         print!("Use this configuration? [Y/n]: ");
@@ -160,6 +171,7 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
                 save_config(&saved, &config_path)?;
             }
 
+            saved.split_tunnel_uid = desktop_user_uid();
             return Ok(saved);
         }
         println!();
@@ -167,6 +179,8 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
 
     let config = prompt_new_config().await?;
     save_config(&config, &config_path)?;
+    let mut config = config;
+    config.split_tunnel_uid = desktop_user_uid();
     Ok(config)
 }
 
@@ -325,7 +339,7 @@ async fn prompt_new_config() -> Result<Config> {
         }
     };
 
-    let (split_tunnel_mode, split_tunnel_targets) = prompt_split_tunnel(&mut stdout)?;
+    let (split_tunnel_mode, split_tunnel_apps) = prompt_split_tunnel()?;
 
     println!();
 
@@ -344,34 +358,56 @@ async fn prompt_new_config() -> Result<Config> {
         vpn_mtu,
         http2_framing,
         split_tunnel_mode,
-        split_tunnel_targets,
+        split_tunnel_apps,
+        split_tunnel_uid: None,
     })
 }
 
-fn prompt_split_tunnel(stdout: &mut impl Write) -> Result<(SplitTunnelMode, Vec<String>)> {
-    print!("Desktop split tunnel [off/include/exclude] (default: off): ");
-    stdout.flush()?;
-    let mode = match read_line()?.to_lowercase().as_str() {
-        "include" | "in" => SplitTunnelMode::Include,
-        "exclude" | "ex" => SplitTunnelMode::Exclude,
-        _ => SplitTunnelMode::Disabled,
+fn prompt_split_tunnel() -> Result<(SplitTunnelMode, Vec<SplitTunnelApp>)> {
+    println!("Linux application split tunneling:");
+    println!("  0) Disabled (all applications use the VPN)");
+    println!("  1) Only selected applications use the VPN");
+    println!("  2) Selected applications bypass the VPN");
+    print!("Mode [0]: ");
+    io::stdout().flush()?;
+    let mode = match read_line()?.as_str() {
+        "1" => SplitTunnelMode::Include,
+        "2" => SplitTunnelMode::Exclude,
+        _ => return Ok((SplitTunnelMode::Disabled, Vec::new())),
     };
-    if mode == SplitTunnelMode::Disabled {
-        return Ok((mode, Vec::new()));
-    }
 
-    print!("Domains, IPs, or CIDRs (comma-separated): ");
-    stdout.flush()?;
-    let targets = read_line()?
-        .split(',')
-        .map(str::trim)
-        .filter(|target| !target.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if targets.is_empty() {
-        anyhow::bail!("Split tunneling requires at least one domain, IP, or CIDR");
+    let apps = discover_linux_apps();
+    if apps.is_empty() {
+        anyhow::bail!("No desktop applications were found in the Linux application menu");
     }
-    Ok((mode, targets))
+    println!("Select applications by number (comma-separated):");
+    for (index, app) in apps.iter().enumerate() {
+        println!("  {}) {}", index + 1, app.name);
+    }
+    loop {
+        print!("Applications: ");
+        io::stdout().flush()?;
+        let input = read_line()?;
+        let mut selected = input
+            .split(',')
+            .filter_map(|value| value.trim().parse::<usize>().ok())
+            .filter_map(|index| index.checked_sub(1).and_then(|index| apps.get(index)))
+            .cloned()
+            .collect::<Vec<_>>();
+        selected.sort_by(|left, right| left.id.cmp(&right.id));
+        selected.dedup_by(|left, right| left.id == right.id);
+        if !selected.is_empty() {
+            return Ok((mode, selected));
+        }
+        println!("Please select at least one valid application number.");
+    }
+}
+
+fn desktop_user_uid() -> Option<u32> {
+    std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .or_else(|| Some(nix::unistd::Uid::current().as_raw()))
 }
 
 fn read_line() -> Result<String> {
@@ -425,7 +461,8 @@ mod tests {
             vpn_mtu: None,
             http2_framing: false,
             split_tunnel_mode: SplitTunnelMode::Disabled,
-            split_tunnel_targets: Vec::new(),
+            split_tunnel_apps: Vec::new(),
+            split_tunnel_uid: None,
         }
     }
 }

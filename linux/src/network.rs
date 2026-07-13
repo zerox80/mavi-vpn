@@ -5,6 +5,7 @@
 //! direct /etc/resolv.conf manipulation for DNS.
 
 use anyhow::{Context, Result};
+use shared::split_tunnel::{resolve_split_tunnel_targets, SplitRoute, SplitTunnelMode};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::info;
 
@@ -35,6 +36,8 @@ pub struct NetworkConfig {
     /// route, resolved once at connect time. Removed symmetrically in
     /// `cleanup()`.
     pub whitelist_ips: Vec<IpAddr>,
+    pub split_tunnel_mode: SplitTunnelMode,
+    pub split_routes: Vec<SplitRoute>,
 }
 
 impl NetworkConfig {
@@ -53,6 +56,8 @@ impl NetworkConfig {
         gateway_v6: Option<Ipv6Addr>,
         dns_v6: Option<Ipv6Addr>,
         whitelist_domains: &[String],
+        split_tunnel_mode: SplitTunnelMode,
+        split_tunnel_targets: &[String],
     ) -> Result<Self> {
         let prefix_len = routes::netmask_to_prefix(netmask);
 
@@ -62,6 +67,11 @@ impl NetworkConfig {
         // the tunnel below, so this still queries the physical (pre-VPN)
         // resolver.
         let whitelist_ips = whitelist::resolve_whitelist_ips(whitelist_domains, has_ipv6);
+        let split_routes = resolve_split_tunnel_targets(split_tunnel_targets, has_ipv6)
+            .map_err(anyhow::Error::msg)?;
+        if split_tunnel_mode != SplitTunnelMode::Disabled && split_routes.is_empty() {
+            anyhow::bail!("Split tunneling requires at least one usable target");
+        }
 
         // 5. Detect the physical gateway and device (before we add VPN routes)
         let (physical_gateway, physical_device) = routes::detect_physical_gateway();
@@ -81,6 +91,8 @@ impl NetworkConfig {
             used_resolvconf: false,
             dns_configured: false,
             whitelist_ips,
+            split_tunnel_mode,
+            split_routes,
         };
 
         // Add the endpoint exception before installing split-default routes.
@@ -102,31 +114,37 @@ impl NetworkConfig {
             network.physical_device.as_deref(),
             network.physical_gateway_v6.as_deref(),
             network.physical_device_v6.as_deref(),
+            network.split_tunnel_mode,
+            &network.split_routes,
         ) {
             network.cleanup();
             return Err(err);
         }
 
         // 7. Except each resolved whitelist domain IP from the tunnel too.
-        whitelist::add_whitelist_route_exceptions(
-            &mut runner,
-            &network.whitelist_ips,
-            network.physical_gateway.as_deref(),
-            network.physical_device.as_deref(),
-            network.physical_gateway_v6.as_deref(),
-            network.physical_device_v6.as_deref(),
-        );
+        if network.split_tunnel_mode != SplitTunnelMode::Include {
+            whitelist::add_whitelist_route_exceptions(
+                &mut runner,
+                &network.whitelist_ips,
+                network.physical_gateway.as_deref(),
+                network.physical_device.as_deref(),
+                network.physical_gateway_v6.as_deref(),
+                network.physical_device_v6.as_deref(),
+            );
+        }
 
-        let (dns_backup, used_resolvconf) = match dns::configure_dns(tun_name, dns, dns_v6) {
-            Ok(config) => config,
-            Err(err) => {
-                network.cleanup();
-                return Err(err);
-            }
-        };
-        network.dns_backup = dns_backup;
-        network.used_resolvconf = used_resolvconf;
-        network.dns_configured = true;
+        if network.split_tunnel_mode != SplitTunnelMode::Include {
+            let (dns_backup, used_resolvconf) = match dns::configure_dns(tun_name, dns, dns_v6) {
+                Ok(config) => config,
+                Err(err) => {
+                    network.cleanup();
+                    return Err(err);
+                }
+            };
+            network.dns_backup = dns_backup;
+            network.used_resolvconf = used_resolvconf;
+            network.dns_configured = true;
+        }
 
         info!(
             "Network configured: {} via {}, DNS={}",
@@ -140,61 +158,29 @@ impl NetworkConfig {
     pub fn cleanup(&self) {
         info!("Cleaning up network configuration...");
 
-        // Remove VPN routes
-        let gateway_v4 = self.gateway_v4.to_string();
-        let _ = run_cmd(
-            "ip",
-            &[
-                "route",
-                "del",
-                "0.0.0.0/1",
-                "dev",
-                &self.tun_name,
-                "via",
-                &gateway_v4,
-            ],
-        );
-        let _ = run_cmd(
-            "ip",
-            &[
-                "route",
-                "del",
-                "128.0.0.0/1",
-                "dev",
-                &self.tun_name,
-                "via",
-                &gateway_v4,
-            ],
-        );
+        if self.split_tunnel_mode == SplitTunnelMode::Include {
+            for route in &self.split_routes {
+                routes::remove_tunnel_route(
+                    *route,
+                    &self.tun_name,
+                    self.gateway_v4,
+                    self.gateway_v6,
+                );
+            }
+        } else {
+            remove_default_tunnel_routes(&self.tun_name, self.gateway_v4, self.gateway_v6);
+        }
 
-        if let Some(gateway_v6) = self.gateway_v6 {
-            let gateway_v6 = gateway_v6.to_string();
-            let _ = run_cmd(
-                "ip",
-                &[
-                    "-6",
-                    "route",
-                    "del",
-                    "::/1",
-                    "dev",
-                    &self.tun_name,
-                    "via",
-                    &gateway_v6,
-                ],
-            );
-            let _ = run_cmd(
-                "ip",
-                &[
-                    "-6",
-                    "route",
-                    "del",
-                    "8000::/1",
-                    "dev",
-                    &self.tun_name,
-                    "via",
-                    &gateway_v6,
-                ],
-            );
+        if self.split_tunnel_mode == SplitTunnelMode::Exclude {
+            for route in &self.split_routes {
+                routes::remove_route_exception(
+                    *route,
+                    self.physical_gateway.as_deref(),
+                    self.physical_device.as_deref(),
+                    self.physical_gateway_v6.as_deref(),
+                    self.physical_device_v6.as_deref(),
+                );
+            }
         }
 
         // Remove only the exact host-route exception we installed.
@@ -209,13 +195,15 @@ impl NetworkConfig {
         }
 
         // Remove each whitelist domain's route exception, symmetric with apply().
-        whitelist::remove_whitelist_route_exceptions(
-            &self.whitelist_ips,
-            self.physical_gateway.as_deref(),
-            self.physical_device.as_deref(),
-            self.physical_gateway_v6.as_deref(),
-            self.physical_device_v6.as_deref(),
-        );
+        if self.split_tunnel_mode != SplitTunnelMode::Include {
+            whitelist::remove_whitelist_route_exceptions(
+                &self.whitelist_ips,
+                self.physical_gateway.as_deref(),
+                self.physical_device.as_deref(),
+                self.physical_gateway_v6.as_deref(),
+                self.physical_device_v6.as_deref(),
+            );
+        }
 
         // Restore DNS
         if self.dns_configured {
@@ -245,6 +233,8 @@ fn apply_interface_and_routes<R: CommandRunner>(
     physical_device: Option<&str>,
     physical_gateway_v6: Option<&str>,
     physical_device_v6: Option<&str>,
+    split_tunnel_mode: SplitTunnelMode,
+    split_routes: &[SplitRoute],
 ) -> Result<()> {
     runner.run("ip", &["link", "set", tun_name, "up"])?;
 
@@ -270,6 +260,39 @@ fn apply_interface_and_routes<R: CommandRunner>(
         physical_device_v6,
     )?;
 
+    if split_tunnel_mode == SplitTunnelMode::Include {
+        for route in split_routes {
+            routes::add_tunnel_route(runner, *route, tun_name, gateway, gateway_v6).with_context(
+                || format!("Failed to install included VPN route {}", route.prefix()),
+            )?;
+        }
+    } else {
+        add_default_tunnel_routes(runner, tun_name, gateway, gateway_v6)?;
+    }
+
+    if split_tunnel_mode == SplitTunnelMode::Exclude {
+        for route in split_routes {
+            routes::add_route_exception(
+                runner,
+                *route,
+                physical_gateway,
+                physical_device,
+                physical_gateway_v6,
+                physical_device_v6,
+            )
+            .with_context(|| format!("Failed to exclude split-tunnel route {}", route.prefix()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn add_default_tunnel_routes<R: CommandRunner>(
+    runner: &mut R,
+    tun_name: &str,
+    gateway: Ipv4Addr,
+    gateway_v6: Option<Ipv6Addr>,
+) -> Result<()> {
     let gateway_s = gateway.to_string();
     runner.run(
         "ip",
@@ -296,25 +319,101 @@ fn apply_interface_and_routes<R: CommandRunner>(
         ],
     )?;
 
-    if let Some(gv6) = gateway_v6 {
-        let gv6_s = gv6.to_string();
+    if let Some(gateway_v6) = gateway_v6 {
+        let gateway_v6 = gateway_v6.to_string();
         runner
             .run(
                 "ip",
-                &["-6", "route", "add", "::/1", "dev", tun_name, "via", &gv6_s],
+                &[
+                    "-6",
+                    "route",
+                    "add",
+                    "::/1",
+                    "dev",
+                    tun_name,
+                    "via",
+                    &gateway_v6,
+                ],
             )
             .context("Failed to install IPv6 split route ::/1")?;
         runner
             .run(
                 "ip",
                 &[
-                    "-6", "route", "add", "8000::/1", "dev", tun_name, "via", &gv6_s,
+                    "-6",
+                    "route",
+                    "add",
+                    "8000::/1",
+                    "dev",
+                    tun_name,
+                    "via",
+                    &gateway_v6,
                 ],
             )
             .context("Failed to install IPv6 split route 8000::/1")?;
     }
-
     Ok(())
+}
+
+fn remove_default_tunnel_routes(
+    tun_name: &str,
+    gateway_v4: Ipv4Addr,
+    gateway_v6: Option<Ipv6Addr>,
+) {
+    let gateway_v4 = gateway_v4.to_string();
+    let _ = run_cmd(
+        "ip",
+        &[
+            "route",
+            "del",
+            "0.0.0.0/1",
+            "dev",
+            tun_name,
+            "via",
+            &gateway_v4,
+        ],
+    );
+    let _ = run_cmd(
+        "ip",
+        &[
+            "route",
+            "del",
+            "128.0.0.0/1",
+            "dev",
+            tun_name,
+            "via",
+            &gateway_v4,
+        ],
+    );
+    if let Some(gateway_v6) = gateway_v6 {
+        let gateway_v6 = gateway_v6.to_string();
+        let _ = run_cmd(
+            "ip",
+            &[
+                "-6",
+                "route",
+                "del",
+                "::/1",
+                "dev",
+                tun_name,
+                "via",
+                &gateway_v6,
+            ],
+        );
+        let _ = run_cmd(
+            "ip",
+            &[
+                "-6",
+                "route",
+                "del",
+                "8000::/1",
+                "dev",
+                tun_name,
+                "via",
+                &gateway_v6,
+            ],
+        );
+    }
 }
 
 fn add_endpoint_route_exception<R: CommandRunner>(

@@ -10,6 +10,7 @@ import {
   heroFromVpnStatus,
   toConfig,
   parseOptionalMtu,
+  parseSplitTunnelTargets,
 } from '../utils.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -152,6 +153,18 @@ describe('toConfig', () => {
     expect(config.kc_auth).toBeNull();
     expect(config.ech_config).toBeNull();
     expect(config.vpn_mtu).toBe(1340);
+    expect(config.split_tunnel_mode).toBe('disabled');
+    expect(config.split_tunnel_targets).toEqual([]);
+  });
+
+  it('preserves desktop split-tunnel settings', () => {
+    const config = toConfig({
+      split_tunnel_mode: 'include',
+      split_tunnel_targets: ['intranet.example.com', '10.20.0.0/16'],
+    });
+
+    expect(config.split_tunnel_mode).toBe('include');
+    expect(config.split_tunnel_targets).toEqual(['intranet.example.com', '10.20.0.0/16']);
   });
 
   it('preserves ECH config and valid MTU fields', () => {
@@ -222,6 +235,13 @@ describe('parseOptionalMtu', () => {
     expect(parseOptionalMtu('1279')).toEqual({ valid: false, value: null });
     expect(parseOptionalMtu('1361')).toEqual({ valid: false, value: null });
     expect(parseOptionalMtu('abc')).toEqual({ valid: false, value: null });
+  });
+});
+
+describe('parseSplitTunnelTargets', () => {
+  it('accepts comma and newline separators and removes duplicates', () => {
+    expect(parseSplitTunnelTargets('intranet.example.com, 10.20.0.0/16\nintranet.example.com'))
+      .toEqual(['intranet.example.com', '10.20.0.0/16']);
   });
 });
 

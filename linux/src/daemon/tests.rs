@@ -31,6 +31,8 @@ fn test_config() -> Config {
         ech_config: None,
         vpn_mtu: Some(1280),
         http2_framing: false,
+        split_tunnel_mode: shared::split_tunnel::SplitTunnelMode::Disabled,
+        split_tunnel_targets: Vec::new(),
     }
 }
 

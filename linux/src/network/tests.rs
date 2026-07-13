@@ -38,6 +38,8 @@ fn interface_and_routes_build_ipv4_route_exception() {
         Some("eth0"),
         None,
         None,
+        SplitTunnelMode::Disabled,
+        &[],
     )
     .unwrap();
     assert!(runner.calls.iter().any(|(_, args)| args
@@ -58,7 +60,9 @@ fn interface_and_routes_build_ipv4_route_exception() {
             "dev",
             "mavi0",
             "via",
-            "10.8.0.1"
+            "10.8.0.1",
+            "metric",
+            "1"
         ]));
 }
 
@@ -80,6 +84,8 @@ fn interface_and_routes_build_ipv6_address_and_exception() {
         None,
         Some("fe80::1"),
         Some("eth0"),
+        SplitTunnelMode::Disabled,
+        &[],
     )
     .unwrap();
     assert!(runner
@@ -127,6 +133,8 @@ fn interface_and_routes_fails_when_ipv6_split_route_fails() {
         None,
         Some("fe80::1"),
         Some("eth0"),
+        SplitTunnelMode::Disabled,
+        &[],
     )
     .unwrap_err();
     assert!(err
@@ -168,6 +176,8 @@ fn interface_and_routes_requires_a_physical_gateway_before_split_routes() {
         None,
         None,
         None,
+        SplitTunnelMode::Disabled,
+        &[],
     )
     .unwrap_err();
     assert!(err
@@ -176,4 +186,94 @@ fn interface_and_routes_requires_a_physical_gateway_before_split_routes() {
     assert!(!runner.calls.iter().any(|(_, args)| args
         .iter()
         .any(|arg| arg == "0.0.0.0/1" || arg == "128.0.0.0/1")));
+}
+
+#[test]
+fn include_mode_installs_only_selected_tunnel_routes() {
+    let mut runner = RecordingRunner::default();
+    let routes = [SplitRoute {
+        destination: "198.51.100.0".parse().unwrap(),
+        prefix_len: 24,
+    }];
+
+    apply_interface_and_routes(
+        &mut runner,
+        "mavi0",
+        Ipv4Addr::new(10, 8, 0, 2),
+        24,
+        Ipv4Addr::new(10, 8, 0, 1),
+        1280,
+        "203.0.113.10",
+        None,
+        None,
+        None,
+        Some("192.0.2.1"),
+        Some("eth0"),
+        None,
+        None,
+        SplitTunnelMode::Include,
+        &routes,
+    )
+    .unwrap();
+
+    assert!(runner.calls.iter().any(|(_, args)| args
+        == &[
+            "route",
+            "add",
+            "198.51.100.0/24",
+            "dev",
+            "mavi0",
+            "via",
+            "10.8.0.1"
+        ]));
+    assert!(!runner
+        .calls
+        .iter()
+        .any(|(_, args)| args.contains(&"0.0.0.0/1".to_string())));
+}
+
+#[test]
+fn exclude_mode_installs_selected_physical_route() {
+    let mut runner = RecordingRunner::default();
+    let routes = [SplitRoute {
+        destination: "198.51.100.0".parse().unwrap(),
+        prefix_len: 24,
+    }];
+
+    apply_interface_and_routes(
+        &mut runner,
+        "mavi0",
+        Ipv4Addr::new(10, 8, 0, 2),
+        24,
+        Ipv4Addr::new(10, 8, 0, 1),
+        1280,
+        "203.0.113.10",
+        None,
+        None,
+        None,
+        Some("192.0.2.1"),
+        Some("eth0"),
+        None,
+        None,
+        SplitTunnelMode::Exclude,
+        &routes,
+    )
+    .unwrap();
+
+    assert!(runner.calls.iter().any(|(_, args)| args
+        == &[
+            "route",
+            "add",
+            "198.51.100.0/24",
+            "via",
+            "192.0.2.1",
+            "dev",
+            "eth0",
+            "metric",
+            "42777"
+        ]));
+    assert!(runner
+        .calls
+        .iter()
+        .any(|(_, args)| args.contains(&"0.0.0.0/1".to_string())));
 }

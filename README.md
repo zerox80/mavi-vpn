@@ -48,7 +48,7 @@ cross-platform **Tauri GUI**.
 | | mimalloc | High-performance memory allocator on the server |
 | **Mobile-First** | Seamless Roaming | QUIC connection migration — no handshake restart on IP change |
 | | MTU Coupling (1280..1360) | QUIC payload is derived as TUN MTU + 80; ICMP PTB generation (RFC 4443) |
-| | Split Tunneling | Per-app VPN bypass on Android |
+| | Split Tunneling | Per-app policies on Android; destination include/exclude policies on Linux and Windows |
 | **Auth** | Static Token | Simple pre-shared key authentication |
 | | Keycloak OIDC | Enterprise SSO with JWT validation, PKCE, and JWKS rotation |
 | **Network** | Dual-Stack | Full IPv4 + IPv6 support (NAT66 via ip6tables) |
@@ -282,6 +282,29 @@ Full enterprise SSO with Keycloak:
 | Release Profile | `lto=true, codegen-units=1, strip=true` | Maximally optimized binary |
 
 ## Configuration Reference
+
+### Desktop split tunneling
+
+Linux and Windows connections support destination-based split tunneling in the
+CLI and Tauri GUI. Set `split_tunnel_mode` to `include` to send only selected
+destinations through the VPN, or `exclude` to send selected destinations over
+the physical connection while the rest uses the VPN. `split_tunnel_targets`
+accepts domains, IP addresses, and CIDR prefixes, for example:
+
+```json
+{
+  "split_tunnel_mode": "exclude",
+  "split_tunnel_targets": ["updates.example.com", "10.20.0.0/16"]
+}
+```
+
+Domains are resolved once through the physical DNS resolver before tunnel
+routes are installed. Their routes therefore stay fixed until the next
+connection. In `include` mode the desktop keeps physical DNS active so only
+the resolved destinations enter the VPN. Android continues to use its native
+package-based per-app policy.
+
+### Server settings
 
 All server settings can be configured via environment variables or CLI flags:
 

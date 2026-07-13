@@ -1,30 +1,48 @@
 use super::command_runner::{CommandRunner, SystemCommandRunner};
 use super::utils::split_endpoint;
+use shared::split_tunnel::SplitRoute;
 use std::net::IpAddr;
 use std::path::PathBuf;
+
+/// Distinguishes physical exceptions created by MaviVPN from pre-existing
+/// routes with the same destination prefix. Prefix length still gives these
+/// routes precedence over the VPN's /1 routes.
+pub(super) const PHYSICAL_ROUTE_METRIC: u32 = 42_777;
 
 pub(super) fn add_host_route_exception_fixed(endpoint: &str) -> Option<String> {
     let (host, _) = split_endpoint(endpoint);
     let host_ip = host.parse::<IpAddr>().ok()?;
-    add_host_route_exception_for_ip_with_runner(&SystemCommandRunner, host_ip, true)
+    add_route_exception_with_runner(
+        &SystemCommandRunner,
+        SplitRoute {
+            destination: host_ip,
+            prefix_len: if host_ip.is_ipv4() { 32 } else { 128 },
+        },
+        true,
+    )
 }
 
 /// Same as [`add_host_route_exception_fixed`], but for an already-resolved IP
 /// (a split-tunnel whitelist domain) rather than the VPN endpoint's own
 /// `host:port` string.
 pub(super) fn add_host_route_exception_for_ip(ip: IpAddr) -> Option<String> {
-    add_host_route_exception_for_ip_with_runner(&SystemCommandRunner, ip, true)
+    add_route_exception(SplitRoute {
+        destination: ip,
+        prefix_len: if ip.is_ipv4() { 32 } else { 128 },
+    })
 }
 
-fn add_host_route_exception_for_ip_with_runner(
+pub(super) fn add_route_exception(route: SplitRoute) -> Option<String> {
+    add_route_exception_with_runner(&SystemCommandRunner, route, true)
+}
+
+fn add_route_exception_with_runner(
     runner: &dyn CommandRunner,
-    host_ip: IpAddr,
+    route: SplitRoute,
     persist: bool,
 ) -> Option<String> {
-    let (prefix, default_prefix) = match host_ip {
-        IpAddr::V4(_) => (format!("{host_ip}/32"), "0.0.0.0/0"),
-        IpAddr::V6(_) => (format!("{host_ip}/128"), "::/0"),
-    };
+    let prefix = route.prefix();
+    let default_prefix = if route.is_ipv4() { "0.0.0.0/0" } else { "::/0" };
 
     let script = format!(
         "$ErrorActionPreference = 'Stop'; \
@@ -36,7 +54,7 @@ fn add_host_route_exception_for_ip_with_runner(
              $args = @{{ \
                  DestinationPrefix = '{prefix}'; \
                  InterfaceIndex = $gw.InterfaceIndex; \
-                 RouteMetric = 0; \
+                 RouteMetric = {PHYSICAL_ROUTE_METRIC}; \
                  Confirm = $false; \
              }}; \
              if ($gw.NextHop -and $gw.NextHop -ne '0.0.0.0' -and $gw.NextHop -ne '::') {{ $args.NextHop = $gw.NextHop }}; \
@@ -109,9 +127,12 @@ mod tests {
     fn host_route_exception_builds_ipv4_power_shell_plan() {
         let runner = RecordingRunner::new(true);
 
-        let prefix = add_host_route_exception_for_ip_with_runner(
+        let prefix = add_route_exception_with_runner(
             &runner,
-            "203.0.113.10".parse().unwrap(),
+            SplitRoute {
+                destination: "203.0.113.10".parse().unwrap(),
+                prefix_len: 32,
+            },
             false,
         );
 
@@ -124,6 +145,7 @@ mod tests {
         assert!(label.contains("203.0.113.10/32"));
         assert!(script.contains("DestinationPrefix = '203.0.113.10/32'"));
         assert!(script.contains("Get-NetRoute -DestinationPrefix '0.0.0.0/0'"));
+        assert!(script.contains("RouteMetric = 42777"));
         assert!(script.contains("New-NetRoute @args"));
     }
 
@@ -131,9 +153,12 @@ mod tests {
     fn host_route_exception_builds_ipv6_power_shell_plan() {
         let runner = RecordingRunner::new(true);
 
-        let prefix = add_host_route_exception_for_ip_with_runner(
+        let prefix = add_route_exception_with_runner(
             &runner,
-            "2001:db8::10".parse().unwrap(),
+            SplitRoute {
+                destination: "2001:db8::10".parse().unwrap(),
+                prefix_len: 128,
+            },
             false,
         );
 
@@ -150,9 +175,12 @@ mod tests {
     fn host_route_exception_returns_none_when_runner_fails() {
         let runner = RecordingRunner::new(false);
 
-        let prefix = add_host_route_exception_for_ip_with_runner(
+        let prefix = add_route_exception_with_runner(
             &runner,
-            "203.0.113.10".parse().unwrap(),
+            SplitRoute {
+                destination: "203.0.113.10".parse().unwrap(),
+                prefix_len: 32,
+            },
             false,
         );
 

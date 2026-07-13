@@ -36,6 +36,10 @@ struct SavedConn {
     kc_client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     vpn_mtu: Option<u16>,
+    #[serde(default)]
+    split_tunnel_mode: shared::split_tunnel::SplitTunnelMode,
+    #[serde(default)]
+    split_tunnel_targets: Vec<String>,
 }
 
 impl SavedConn {
@@ -274,6 +278,8 @@ mod tests {
             refresh_token: None,
             ech_config: None,
             vpn_mtu: None,
+            split_tunnel_mode: shared::split_tunnel::SplitTunnelMode::Disabled,
+            split_tunnel_targets: Vec::new(),
         }
     }
 

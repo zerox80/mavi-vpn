@@ -12,6 +12,7 @@
 //! protocol. An auth token (see [`ipc_token_path`]) is layered on top as
 //! defense-in-depth.
 
+use crate::split_tunnel::SplitTunnelMode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -75,6 +76,14 @@ pub struct Config {
     /// Appended to preserve the positional order of the established IPC fields.
     #[serde(default)]
     pub http2_framing: bool,
+    /// Desktop split-tunnel behavior. Android keeps its package-based policy
+    /// in the platform UI; Linux and Windows apply this destination policy.
+    #[serde(default)]
+    pub split_tunnel_mode: SplitTunnelMode,
+    /// Domains, IP addresses, or CIDR prefixes selected for desktop split
+    /// tunneling. Domains are resolved once before routes and VPN DNS apply.
+    #[serde(default)]
+    pub split_tunnel_targets: Vec<String>,
 }
 
 impl fmt::Debug for Config {
@@ -92,6 +101,8 @@ impl fmt::Debug for Config {
             .field("ech_config", &self.ech_config)
             .field("vpn_mtu", &self.vpn_mtu)
             .field("http2_framing", &self.http2_framing)
+            .field("split_tunnel_mode", &self.split_tunnel_mode)
+            .field("split_tunnel_targets", &self.split_tunnel_targets)
             .finish()
     }
 }

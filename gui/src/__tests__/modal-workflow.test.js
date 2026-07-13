@@ -39,6 +39,12 @@ function setupModalDom() {
     <input id="m_kc_realm" />
     <input id="m_kc_client_id" />
     <input id="m_vpn_mtu" />
+    <select id="m_split_mode">
+      <option value="disabled">Disabled</option>
+      <option value="include">Include</option>
+      <option value="exclude">Exclude</option>
+    </select>
+    <textarea id="m_split_targets"></textarea>
     <div id="m-kc-fields"></div>
     <div id="m-token-field"></div>
     <button id="modal-cancel"></button>
@@ -87,6 +93,8 @@ describe('modal workflows', () => {
       token: 'secret',
       cert_pin: VALID_PIN,
       vpn_mtu: 1340,
+      split_tunnel_mode: 'disabled',
+      split_tunnel_targets: [],
     });
     expect(state.prefs.active_id).toBe('generated-id');
     expect(savePrefs).toHaveBeenCalledOnce();
@@ -169,6 +177,8 @@ describe('modal workflows', () => {
     document.getElementById('m_kc_realm').value = 'realm';
     document.getElementById('m_kc_client_id').value = 'client';
     document.getElementById('m_vpn_mtu').value = '';
+    document.getElementById('m_split_mode').value = 'exclude';
+    document.getElementById('m_split_targets').value = ' updates.example.com, 10.20.0.0/16 ';
 
     await saveModal();
 
@@ -188,9 +198,27 @@ describe('modal workflows', () => {
         kc_realm: 'realm',
         kc_client_id: 'client',
         vpn_mtu: null,
+        split_tunnel_mode: 'exclude',
+        split_tunnel_targets: ['updates.example.com', '10.20.0.0/16'],
       },
     ]);
     expect(applyHeroForSelection).toHaveBeenCalled();
+  });
+
+  it('requires targets when split tunneling is enabled', async () => {
+    document.getElementById('m_label').value = 'Primary';
+    document.getElementById('m_endpoint').value = 'vpn.example.com:443';
+    document.getElementById('m_token').value = 'secret';
+    document.getElementById('m_cert_pin').value = VALID_PIN;
+    document.getElementById('m_split_mode').value = 'include';
+
+    await saveModal();
+
+    expect(showToast).toHaveBeenLastCalledWith(
+      'Add at least one split-tunnel domain, IP, or CIDR.',
+      'error'
+    );
+    expect(savePrefs).not.toHaveBeenCalled();
   });
 
   it('deleting the active connection clears active_id', async () => {

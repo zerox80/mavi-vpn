@@ -190,6 +190,18 @@
             <label for="m_vpn_mtu">VPN MTU (1280-1360, default 1280)</label>
             <input type="number" id="m_vpn_mtu" placeholder="1280" min="1280" max="1360" />
           </div>
+          <div class="field">
+            <label for="m_split_mode">Desktop split tunneling</label>
+            <select id="m_split_mode">
+              <option value="disabled">Disabled - all traffic uses VPN</option>
+              <option value="include">Include - only selected targets use VPN</option>
+              <option value="exclude">Exclude - selected targets bypass VPN</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="m_split_targets">Domains, IPs, or CIDRs</label>
+            <textarea id="m_split_targets" rows="3" placeholder="intranet.example.com&#10;10.20.0.0/16"></textarea>
+          </div>
           <hr class="panel-divider" />
           <div class="checkbox-field">
             <input type="checkbox" id="m_kc_auth" />

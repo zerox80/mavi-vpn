@@ -17,6 +17,7 @@ pub mod kc_oauth;
 pub mod masque;
 pub mod mtu;
 pub mod session_errors;
+pub mod split_tunnel;
 
 pub use endpoint::{
     endpoint_host, endpoint_host_is_explicit_ipv6, resolve_server_name, split_endpoint,

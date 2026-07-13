@@ -74,7 +74,18 @@ export function toConfig(conn) {
     kc_client_id: kcAuth ? conn.kc_client_id ?? null : null,
     ech_config: conn.ech_config ?? null,
     vpn_mtu: conn.vpn_mtu ?? null,
+    split_tunnel_mode: conn.split_tunnel_mode ?? 'disabled',
+    split_tunnel_targets: Array.isArray(conn.split_tunnel_targets)
+      ? conn.split_tunnel_targets
+      : [],
   };
+}
+
+export function parseSplitTunnelTargets(value) {
+  return String(value ?? '')
+    .split(/[\n,]+/)
+    .map((target) => target.trim())
+    .filter((target, index, targets) => target && targets.indexOf(target) === index);
 }
 
 export function parseOptionalMtu(value) {

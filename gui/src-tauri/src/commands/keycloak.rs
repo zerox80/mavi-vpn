@@ -385,6 +385,8 @@ mod tests {
             refresh_token: None,
             ech_config: None,
             vpn_mtu: None,
+            split_tunnel_mode: shared::split_tunnel::SplitTunnelMode::Disabled,
+            split_tunnel_targets: Vec::new(),
         }
     }
 

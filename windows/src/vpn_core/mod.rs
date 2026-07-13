@@ -304,6 +304,8 @@ async fn run_session(
         assignment.adapter_config(),
         &endpoint_ip_str,
         &assignment.whitelist_domains,
+        config.split_tunnel_mode,
+        &config.split_tunnel_targets,
     )?);
     info!(
         "Windows adapter/network config completed in {} ms",
@@ -334,7 +336,9 @@ async fn run_session(
         info!("IPv6 address {} verified", ipv6);
 
         // 2. Verify On-Link split routes exist
-        if !network::verify_ipv6_split_routes(idx)? {
+        if config.split_tunnel_mode != shared::split_tunnel::SplitTunnelMode::Include
+            && !network::verify_ipv6_split_routes(idx)?
+        {
             bail!(
                 "IPV6_SETUP_FAILED: IPv6 split routes (::/1, 8000::/1) not found in routing table"
             );

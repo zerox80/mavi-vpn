@@ -1,5 +1,6 @@
 use anyhow::Result;
 use shared::ipc::Config;
+use shared::split_tunnel::SplitTunnelMode;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -146,6 +147,7 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
         if let Some(mtu) = saved.vpn_mtu {
             println!("  VPN MTU: {}", mtu);
         }
+        println!("  Split tunnel: {:?}", saved.split_tunnel_mode);
         println!();
 
         print!("Use this configuration? [Y/n]: ");
@@ -323,6 +325,8 @@ async fn prompt_new_config() -> Result<Config> {
         }
     };
 
+    let (split_tunnel_mode, split_tunnel_targets) = prompt_split_tunnel(&mut stdout)?;
+
     println!();
 
     Ok(Config {
@@ -339,7 +343,35 @@ async fn prompt_new_config() -> Result<Config> {
         ech_config,
         vpn_mtu,
         http2_framing,
+        split_tunnel_mode,
+        split_tunnel_targets,
     })
+}
+
+fn prompt_split_tunnel(stdout: &mut impl Write) -> Result<(SplitTunnelMode, Vec<String>)> {
+    print!("Desktop split tunnel [off/include/exclude] (default: off): ");
+    stdout.flush()?;
+    let mode = match read_line()?.to_lowercase().as_str() {
+        "include" | "in" => SplitTunnelMode::Include,
+        "exclude" | "ex" => SplitTunnelMode::Exclude,
+        _ => SplitTunnelMode::Disabled,
+    };
+    if mode == SplitTunnelMode::Disabled {
+        return Ok((mode, Vec::new()));
+    }
+
+    print!("Domains, IPs, or CIDRs (comma-separated): ");
+    stdout.flush()?;
+    let targets = read_line()?
+        .split(',')
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        anyhow::bail!("Split tunneling requires at least one domain, IP, or CIDR");
+    }
+    Ok((mode, targets))
 }
 
 fn read_line() -> Result<String> {
@@ -392,6 +424,8 @@ mod tests {
             ech_config: None,
             vpn_mtu: None,
             http2_framing: false,
+            split_tunnel_mode: SplitTunnelMode::Disabled,
+            split_tunnel_targets: Vec::new(),
         }
     }
 }

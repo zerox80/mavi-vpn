@@ -16,6 +16,8 @@ fn test_effective_http3_framing() {
         ech_config: None,
         vpn_mtu: None,
         http2_framing: false,
+        split_tunnel_mode: SplitTunnelMode::Disabled,
+        split_tunnel_targets: Vec::new(),
     };
 
     // case: http3_framing=false, censorship_resistant=false => effective framing is false
@@ -51,6 +53,8 @@ fn test_normalize_transport() {
         ech_config: None,
         vpn_mtu: None,
         http2_framing: false,
+        split_tunnel_mode: SplitTunnelMode::Disabled,
+        split_tunnel_targets: Vec::new(),
     };
 
     // normalize_transport() returns true only when it actually changes http3_framing
@@ -85,6 +89,8 @@ fn http2_transport_is_mutually_exclusive_with_http3_and_cr() {
         ech_config: None,
         vpn_mtu: None,
         http2_framing: true,
+        split_tunnel_mode: SplitTunnelMode::Disabled,
+        split_tunnel_targets: Vec::new(),
     };
     assert!(config.normalize_transport());
     assert!(config.uses_http2());
@@ -109,6 +115,8 @@ fn test_ipc_request_roundtrip() {
             ech_config: None,
             vpn_mtu: Some(1300),
             http2_framing: false,
+            split_tunnel_mode: SplitTunnelMode::Exclude,
+            split_tunnel_targets: vec!["updates.example.com".to_string()],
         }),
         IpcRequest::Start(Config {
             endpoint: "vpn.example.com:4433".to_string(),
@@ -124,6 +132,8 @@ fn test_ipc_request_roundtrip() {
             ech_config: Some("ech-config".to_string()),
             vpn_mtu: None,
             http2_framing: false,
+            split_tunnel_mode: SplitTunnelMode::Disabled,
+            split_tunnel_targets: Vec::new(),
         }),
         IpcRequest::Stop,
         IpcRequest::Status,
@@ -146,6 +156,8 @@ fn test_ipc_request_roundtrip() {
                 ech_config: None,
                 vpn_mtu: Some(1300),
                 http2_framing: false,
+                split_tunnel_mode: SplitTunnelMode::Include,
+                split_tunnel_targets: vec!["10.20.0.0/16".to_string()],
             },
             keycloak: KeycloakRuntimeAuth {
                 connection_id: "conn-1".to_string(),
@@ -201,14 +213,19 @@ fn config_wire_format_is_stable() {
     assert_eq!(decoded.ech_config, None);
     assert_eq!(decoded.vpn_mtu, Some(1300));
     assert!(!decoded.http2_framing);
+    assert_eq!(decoded.split_tunnel_mode, SplitTunnelMode::Disabled);
+    assert!(decoded.split_tunnel_targets.is_empty());
 
     // Also confirm the current encoder still produces exactly this
     // fixture, so an accidental encoding-side change is caught too, not
     // just a decode-side one.
     let reencoded = bincode::serde::encode_to_vec(&decoded, bincode::config::standard())
         .expect("re-encoding a just-decoded Config cannot fail");
-    assert_eq!(&reencoded[..FIXTURE_BYTES.len()], FIXTURE_BYTES);
-    assert_eq!(reencoded.last(), Some(&0));
+    let mut expected = FIXTURE_BYTES.to_vec();
+    // The legacy fixture predates HTTP/2, followed now by the split mode and
+    // target list. All three fields encode to zero in their default state.
+    expected.extend_from_slice(&[0, 0, 0]);
+    assert_eq!(reencoded, expected);
 }
 
 #[test]

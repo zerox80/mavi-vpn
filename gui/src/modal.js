@@ -2,7 +2,7 @@ import { state, $ } from './state.js';
 import { savePrefs } from './theme.js';
 import { renderConnectionList, generateConnectionId } from './connections.js';
 import { showToast } from './toast.js';
-import { parseOptionalMtu } from './utils.js';
+import { parseOptionalMtu, parseSplitTunnelTargets } from './utils.js';
 
 let _applyHero = null;
 let _editingId = null;
@@ -66,6 +66,8 @@ export function openModal(id) {
   $('m_kc_realm').value = existing?.kc_realm ?? '';
   $('m_kc_client_id').value = existing?.kc_client_id ?? '';
   $('m_vpn_mtu').value = existing?.vpn_mtu ?? '';
+  $('m_split_mode').value = existing?.split_tunnel_mode ?? 'disabled';
+  $('m_split_targets').value = (existing?.split_tunnel_targets ?? []).join('\n');
   updateModalAuthFields();
   $('modal-delete').classList.toggle('hidden', !existing);
   $('modal-backdrop').classList.add('visible');
@@ -108,6 +110,11 @@ export async function saveModal() {
   }
 
   const http2_framing = $('m_h2_framing').checked;
+  const split_tunnel_mode = $('m_split_mode').value;
+  const split_tunnel_targets = parseSplitTunnelTargets($('m_split_targets').value);
+  if (split_tunnel_mode !== 'disabled' && split_tunnel_targets.length === 0) {
+    return showToast('Add at least one split-tunnel domain, IP, or CIDR.', 'error');
+  }
   const conn = {
     id: _editingId || generateConnectionId(),
     label,
@@ -123,6 +130,8 @@ export async function saveModal() {
     kc_realm: kc_auth ? $('m_kc_realm').value.trim() || null : null,
     kc_client_id: kc_auth ? $('m_kc_client_id').value.trim() || null : null,
     vpn_mtu: mtu.value,
+    split_tunnel_mode,
+    split_tunnel_targets,
   };
 
   if (_editingId) {

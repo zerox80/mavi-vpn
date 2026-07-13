@@ -211,12 +211,20 @@ Berechtigungen werden automatisch auf `600` gesetzt (nur Eigentümer kann lesen)
   "http2_framing": false,
   "ech_config": null,
   "vpn_mtu": 1280,
+  "split_tunnel_mode": "exclude",
+  "split_tunnel_targets": ["updates.example.com", "10.20.0.0/16"],
   "kc_auth": false,
   "kc_url": null,
   "kc_realm": null,
   "kc_client_id": null
 }
 ```
+
+`split_tunnel_mode` kann `disabled`, `include` (nur die Ziele durch das VPN)
+oder `exclude` (die Ziele am VPN vorbei) sein. Ziele duerfen Domains, IPs oder
+CIDR-Praefixe sein. Domains werden beim Verbindungsaufbau einmalig ueber den
+physischen DNS-Resolver aufgeloest; Aenderungen werden bei der naechsten
+Verbindung uebernommen.
 
 ### Certificate PIN ermitteln
 
@@ -253,7 +261,7 @@ Auf **Wayland/Fedora** wird `xdg-open` direkt aufgerufen – funktioniert mit GN
 | Censorship Resistance | H3 ALPN (sieht aus wie HTTP/3) |
 | HTTP/2 CONNECT-IP | TLS/TCP mit ALPN `h2` und RFC-9297-Capsules; zuverlässig/geordnet |
 | DNS Leak Prevention | systemd-resolved oder /etc/resolv.conf |
-| Routing | Split-Routes (0/1 + 128/1), kein Default-Route-Überschreiben |
+| Routing | Volltunnel per Split-Routes (0/1 + 128/1) oder Ziel-Include/-Exclude |
 | Auto-Reconnect | Exponential Backoff (1s → 30s) |
 | Keycloak SSO | OAuth2 PKCE, öffnet Browser via xdg-open |
 | Graceful Shutdown | Routen/DNS werden bei SIGINT/SIGTERM sauber entfernt |

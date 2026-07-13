@@ -157,6 +157,7 @@ Die GUI verbindet sich automatisch mit dem laufenden Service.
    - Pre-shared Key eintragen oder Keycloak aktivieren
    - Certificate PIN eingeben
    - optional ECH, CR/H3, HTTP/2 CONNECT-IP und VPN MTU setzen
+   - optional Desktop Split Tunneling als Include- oder Exclude-Zielliste setzen
    - HTTP/2 ist mit CR, HTTP/3 framing und ECH nicht kombinierbar
    - Verbindung speichern
 4. **Verbinden** - gespeicherte Verbindung auswaehlen und `CONNECT` klicken
@@ -196,9 +197,17 @@ Die CLI speichert `config.json` unter `%APPDATA%\MaviVPN`. Die GUI speichert die
   "http2_framing": false,
   "ech_config": null,
   "vpn_mtu": 1280,
+  "split_tunnel_mode": "exclude",
+  "split_tunnel_targets": ["updates.example.com", "10.20.0.0/16"],
   "kc_auth": false
 }
 ```
+
+`split_tunnel_mode` kann `disabled`, `include` (nur die Ziele durch das VPN)
+oder `exclude` (die Ziele am VPN vorbei) sein. Ziele duerfen Domains, IPs oder
+CIDR-Praefixe sein. Domains werden beim Verbindungsaufbau einmalig ueber den
+physischen DNS-Resolver aufgeloest; Aenderungen werden bei der naechsten
+Verbindung uebernommen.
 
 ### Certificate PIN ermitteln
 

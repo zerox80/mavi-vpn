@@ -83,15 +83,19 @@ fn persist_host_route(prefix: &str) {
 
 pub(super) fn load_persisted_host_routes() -> Vec<String> {
     std::fs::read_to_string(host_route_path())
-        .map(|contents| {
-            contents
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|contents| contents.lines().filter_map(canonical_host_prefix).collect())
         .unwrap_or_default()
+}
+
+pub(super) fn canonical_host_prefix(value: &str) -> Option<String> {
+    let (address, prefix_length) = value.trim().split_once('/')?;
+    let address = address.parse::<IpAddr>().ok()?;
+    let prefix_length = prefix_length.parse::<u8>().ok()?;
+    match (address, prefix_length) {
+        (IpAddr::V4(address), 32) => Some(format!("{address}/32")),
+        (IpAddr::V6(address), 128) => Some(format!("{address}/128")),
+        _ => None,
+    }
 }
 
 pub(super) fn clear_persisted_host_route() {
@@ -157,5 +161,21 @@ mod tests {
         );
 
         assert!(prefix.is_none());
+    }
+
+    #[test]
+    fn persisted_host_route_parser_accepts_only_canonical_host_prefixes() {
+        assert_eq!(
+            canonical_host_prefix(" 203.0.113.10/32 ").as_deref(),
+            Some("203.0.113.10/32")
+        );
+        assert_eq!(
+            canonical_host_prefix("2001:0db8::10/128").as_deref(),
+            Some("2001:db8::10/128")
+        );
+        assert!(canonical_host_prefix("203.0.113.0/24").is_none());
+        assert!(canonical_host_prefix("2001:db8::/64").is_none());
+        assert!(canonical_host_prefix("'; Remove-Item C:\\\\*; #/32").is_none());
+        assert!(canonical_host_prefix("203.0.113.10/32; Write-Output injected").is_none());
     }
 }

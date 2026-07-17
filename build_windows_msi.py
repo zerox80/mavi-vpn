@@ -22,9 +22,9 @@ ROOT = Path(__file__).resolve().parent
 GUI_DIR = ROOT / "gui"
 WIX_TEMPLATE = GUI_DIR / "src-tauri" / "wix" / "service.wxs"
 
-def run(cmd, cwd=None, env=None):
+def run(cmd: list[str], cwd=None, env=None):
     print(f"  -> Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd or ROOT, shell=isinstance(cmd, str), env=env)
+    result = subprocess.run(cmd, cwd=cwd or ROOT, env=env)
     if result.returncode != 0:
         print(f"  X  Command failed (exit {result.returncode})")
         sys.exit(result.returncode)

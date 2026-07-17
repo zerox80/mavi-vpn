@@ -104,12 +104,9 @@ pub async fn start_oauth_flow(
         .send()
         .await
         .context("Connection to Keycloak failed")?;
-    if !res.status().is_success() {
-        let error_text =
-            shared::kc_oauth::read_capped_text(res, shared::kc_oauth::MAX_TOKEN_RESPONSE_BYTES)
-                .await
-                .unwrap_or_default();
-        return Err(anyhow::anyhow!("Token exchange failed: {error_text}"));
+    let status = res.status();
+    if !status.is_success() {
+        return Err(token_exchange_error(status));
     }
 
     let body = shared::kc_oauth::read_capped_text(res, shared::kc_oauth::MAX_TOKEN_RESPONSE_BYTES)
@@ -117,4 +114,23 @@ pub async fn start_oauth_flow(
         .map_err(|e| anyhow::anyhow!(e))?;
     shared::kc_oauth::parse_token_response(&body, None)
         .ok_or_else(|| anyhow::anyhow!("Token response missing access_token or refresh_token"))
+}
+
+fn token_exchange_error(status: reqwest::StatusCode) -> anyhow::Error {
+    anyhow::anyhow!("Token exchange failed with HTTP status {status}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_exchange_error_only_reports_status() {
+        let error = token_exchange_error(reqwest::StatusCode::UNAUTHORIZED).to_string();
+
+        assert_eq!(
+            error,
+            "Token exchange failed with HTTP status 401 Unauthorized"
+        );
+    }
 }

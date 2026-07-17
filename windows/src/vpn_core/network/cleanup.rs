@@ -37,7 +37,10 @@ pub fn cleanup_routes(host_routes: &[String]) {
         }
     });
 
-    let mut host_prefixes: Vec<String> = host_routes.to_vec();
+    let mut host_prefixes: Vec<String> = host_routes
+        .iter()
+        .filter_map(|prefix| super::host_route::canonical_host_prefix(prefix))
+        .collect();
     for prefix in load_persisted_host_routes() {
         if !host_prefixes.contains(&prefix) {
             host_prefixes.push(prefix);

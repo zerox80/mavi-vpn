@@ -53,14 +53,8 @@ jobs:
             -p h2 \
             -p quinn -p quinn-proto -p quinn-udp \
             -p h3 -p h3-quinn -p h3-datagram
-      - name: Verify h2 resolves from the zerox80 fork
-        shell: bash
-        run: |
-          cargo tree --locked --workspace -i h2 | tee "$RUNNER_TEMP/h2-tree.txt"
-          if ! grep -Fq "https://github.com/zerox80/h2?branch=master#" "$RUNNER_TEMP/h2-tree.txt"; then
-            echo "::error::h2 did not resolve from the zerox80/h2 master branch"
-            exit 1
-          fi
+      - name: Verify every fork resolves to its latest branch head
+        run: python3 scripts/check_fork_sources.py --check-remote
       - name: Stop if lockfile is unchanged
         id: diff
         run: |

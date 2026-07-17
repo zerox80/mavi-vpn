@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Copy workspace files
 # 1. Prepare Metadata for Caching
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 # Remove unnecessary members from workspace for server build
 RUN sed -i '/members = \[/,/\]/c\members = ["backend", "shared"]' Cargo.toml
 
@@ -21,7 +21,7 @@ RUN mkdir -p shared/src backend/src && \
 
 # 3. Build Dependencies (Targeting the workspace)
 WORKDIR /app/backend
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # 4. Remove Dummy Artifacts
 RUN rm -f /app/target/release/deps/mavi_vpn* /app/target/release/deps/mavi-vpn* && \
@@ -38,7 +38,7 @@ RUN touch shared/src/lib.rs backend/src/main.rs
 
 # 6. Build Actual Application
 WORKDIR /app/backend
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Runtime Stage
 FROM debian:trixie-slim

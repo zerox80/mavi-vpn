@@ -39,13 +39,12 @@ cross-platform **Tauri GUI**.
 | | Probe Resistance | Unauthorized connections receive a fake **nginx** welcome page (H3 200 OK) |
 | | MASQUE / RFC 9484 | Optional `connect-ip` capsule framing for DPI-proof wire format |
 | | HTTP/2 CONNECT-IP | Optional TLS/TCP transport using Extended CONNECT and RFC 9297 capsules |
-| | Encrypted Client Hello | **ECH GREASE** + SNI spoofing via X25519/HPKE (RFC 9180) |
+| | TLS ClientHello Camouflage | Desktop **ECH GREASE** (RFC 9849) via HPKE (RFC 9180); Android cover SNI |
 | | Certificate Pinning | SHA-256 cert fingerprint verification on all clients |
 | **Performance** | Zero-Copy Path | `bytes`/`BytesMut` across the entire packet pipeline |
 | | BBR Congestion Control | Optimized for high-bandwidth, high-latency mobile networks |
 | | GSO/GRO | Generic Segmentation Offload to reduce syscall overhead |
 | | 4 MB UDP Buffers | Auto-tuned OS-level socket buffers for burst resilience |
-| | mimalloc | High-performance memory allocator on the server |
 | **Mobile-First** | Seamless Roaming | QUIC connection migration — no handshake restart on IP change |
 | | MTU Coupling (1280..1360) | QUIC payload is derived as TUN MTU + 80; ICMP PTB generation (RFC 4443) |
 | | Split Tunneling | Per-app VPN bypass on Android |
@@ -234,13 +233,13 @@ Mavi VPN offers several mutually exclusive transport modes:
 | **1** | CR Mode | QUIC + ALPN `h3` + probe resistance | `censorship_resistant: true` |
 | **2A** | HTTP/3 Framing | MASQUE connect-ip (RFC 9484) over QUIC | `http3_framing: true` |
 | **2B** | HTTP/2 CONNECT-IP | TLS/TCP + ALPN `h2` + RFC 8441 Extended CONNECT + RFC 9297 capsules | `http2_framing: true` |
-| **+** | ECH | SNI spoofing + HPKE GREASE (RFC 9180) | Provide `ech_config` hex |
+| **+** | ECH camouflage | Desktop ECH GREASE (RFC 9849) + cover SNI; HPKE is RFC 9180 | Provide `ech_config` hex |
 
 HTTP/2 mode requires `VPN_HTTP2_BIND_ADDR=0.0.0.0:10443` (or another TCP port) on the server and the **HTTP/2 CONNECT-IP** option on the client. It is mutually exclusive with CR mode, HTTP/3 framing, and ECH. The server and clients exchange real HTTP/2 frames and CONNECT-IP capsules. Unlike the QUIC data plane, HTTP/2 capsules are reliable and ordered because they run over TLS/TCP; traffic volume and timing can still differ from ordinary browsing.
 
 When CR Mode is enabled, the server responds to unauthorized connections with a fabricated HTTP/3 nginx welcome page, improving resistance to simple active probes.
 
-**ECH** is supported on QUIC clients via `EchMode::Grease` — the real SNI is hidden behind a cover domain (e.g. `cloudflare-ech.com`). The server persists the binary ECH config/key files and writes the administrator-facing hex config to `data/ech_config_hex.txt`. HTTP/2 mode does not use ECH.
+On Windows and Linux QUIC clients, an administrator-provided `ECHConfigList` configures rustls `EchMode::Grease` and a cover SNI. Android can use the config's `public_name` as its SNI but does not emit an ECH extension because its `ring` provider lacks HPKE. The server persists ECH config/key artifacts but does not currently decrypt an inner ClientHello, so this is camouflage and compatibility testing rather than full end-to-end ECH confidentiality. ECH is RFC 9849; its HPKE building block is RFC 9180. HTTP/2 mode does not use ECH.
 
 ## Authentication
 

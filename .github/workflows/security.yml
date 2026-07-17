@@ -49,13 +49,13 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-security-${{ hashFiles('**/Cargo.toml', 'deny.toml') }}
+          key: ${{ runner.os }}-cargo-security-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'deny.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-security-
             ${{ runner.os }}-cargo-
-      - name: Generate lockfile for audit tools
-        run: cargo generate-lockfile
-      - name: Validate RustSec exception expirations
+      - name: Validate latest branch-tracked fork sources
+        run: python3 scripts/check_fork_sources.py --check-remote
+      - name: Validate synchronized RustSec exceptions
         run: python3 scripts/check_security_exceptions.py
       - name: Install cargo-deny
         uses: taiki-e/install-action@1bc50175d5a5b2af5d7bc40ba011f153ec39715a # cargo-deny
@@ -64,5 +64,4 @@ jobs:
       - name: Install cargo-audit
         uses: taiki-e/install-action@17dfa9a7aa66ae804b5cbd9f505a33815221f967 # cargo-audit
       - name: Run cargo-audit
-        # Keep these in sync with deny.toml until tauri/plist can consume quick-xml >= 0.41.
-        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+        run: cargo audit --deny warnings

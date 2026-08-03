@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 pub type JwksFetchFuture<'a> = Pin<Box<dyn Future<Output = Result<JwkSet>> + Send + 'a>>;
@@ -80,6 +80,10 @@ pub struct KeycloakValidator {
     // Keeping them in a single RwLock prevents a TOCTOU race where `last_refresh`
     // could be written by a different task between the two separate writes.
     jwks_cache: RwLock<Option<(JwkSet, Instant)>>,
+    // Serializes JWKS refreshes per issuer. The timestamp is recorded before
+    // the network await so failed attempts are cooled down as well as successful
+    // cache updates.
+    jwks_refresh: Mutex<Option<Instant>>,
     fetcher: Arc<dyn JwksFetcher>,
 }
 
@@ -108,6 +112,7 @@ impl KeycloakValidator {
             required_role,
             required_scope,
             jwks_cache: RwLock::new(None),
+            jwks_refresh: Mutex::new(None),
             fetcher: Arc::new(DefaultJwksFetcher),
         }
     }
@@ -126,6 +131,7 @@ impl KeycloakValidator {
             required_role: None,
             required_scope: None,
             jwks_cache: RwLock::new(None),
+            jwks_refresh: Mutex::new(None),
             fetcher,
         }
     }
@@ -171,15 +177,31 @@ impl KeycloakValidator {
         let cache_is_stale = cache_age.is_none_or(|age| age >= JWKS_MAX_CACHE_AGE);
 
         if !kid_found || cache_is_stale {
-            let should_refresh = self
-                .jwks_cache
-                .read()
-                .await
+            // Only one validator may decide and perform a refresh at a time.
+            // Re-read the cache after acquiring the gate because an earlier
+            // waiter may already have fetched the requested key.
+            let mut last_refresh_attempt = self.jwks_refresh.lock().await;
+            let (kid_found_after_wait, cache_age_after_wait) = {
+                let cache = self.jwks_cache.read().await;
+                let kid_found = cache.as_ref().is_some_and(|(j, _)| j.find(&kid).is_some());
+                let cache_age = cache.as_ref().map(|(_, t)| t.elapsed());
+                (kid_found, cache_age)
+            };
+            let cache_is_stale_after_wait =
+                cache_age_after_wait.is_none_or(|age| age >= JWKS_MAX_CACHE_AGE);
+            let refresh_needed = !kid_found_after_wait || cache_is_stale_after_wait;
+            let recent_success =
+                cache_age_after_wait.is_some_and(|age| age < JWKS_REFRESH_COOLDOWN);
+            let recent_attempt = last_refresh_attempt
                 .as_ref()
-                .is_none_or(|(_, t)| t.elapsed() >= JWKS_REFRESH_COOLDOWN);
+                .is_some_and(|attempt| attempt.elapsed() < JWKS_REFRESH_COOLDOWN);
 
-            if should_refresh {
-                if kid_found {
+            if refresh_needed && !recent_success && !recent_attempt {
+                // Mark the attempt before awaiting the network so concurrent
+                // callers cannot fan out independent requests, including when
+                // the fetch fails.
+                *last_refresh_attempt = Some(Instant::now());
+                if kid_found_after_wait {
                     info!(
                         "Periodic JWKS refresh (cache age exceeded {:?})",
                         JWKS_MAX_CACHE_AGE
@@ -197,7 +219,7 @@ impl KeycloakValidator {
                     }
                     Err(e) => warn!("JWKS refresh failed: {}. Proceeding with cached keys.", e),
                 }
-            } else if !kid_found {
+            } else if refresh_needed && !kid_found_after_wait {
                 warn!(
                     "Token kid '{}' not found but JWKS refresh is on cooldown. Rejecting token.",
                     kid

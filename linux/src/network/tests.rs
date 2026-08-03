@@ -63,6 +63,32 @@ fn interface_and_routes_build_ipv4_route_exception() {
 }
 
 #[test]
+fn interface_and_routes_block_ipv6_without_vpn_assignment() {
+    let mut runner = RecordingRunner::default();
+    apply_interface_and_routes(
+        &mut runner,
+        "mavi0",
+        Ipv4Addr::new(10, 8, 0, 2),
+        24,
+        Ipv4Addr::new(10, 8, 0, 1),
+        1280,
+        "203.0.113.10",
+        None,
+        None,
+        None,
+        Some("192.0.2.1"),
+        Some("eth0"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(runner.calls.iter().any(|(_, args)| args
+        == &["-6", "route", "add", "unreachable", "::/1"]));
+    assert!(runner.calls.iter().any(|(_, args)| args
+        == &["-6", "route", "add", "unreachable", "8000::/1"]));
+}
+
+#[test]
 fn interface_and_routes_build_ipv6_address_and_exception() {
     let mut runner = RecordingRunner::default();
     apply_interface_and_routes(
@@ -97,6 +123,21 @@ fn interface_and_routes_build_ipv6_address_and_exception() {
             "dev",
             "eth0"
         ]));
+    assert!(runner.calls.iter().any(|(_, args)| args
+        == &[
+            "-6",
+            "route",
+            "add",
+            "::/1",
+            "dev",
+            "mavi0",
+            "via",
+            "fd00::1"
+        ]));
+    assert!(!runner
+        .calls
+        .iter()
+        .any(|(_, args)| args.iter().any(|arg| arg == "unreachable")));
 }
 
 #[test]
@@ -132,6 +173,39 @@ fn interface_and_routes_fails_when_ipv6_split_route_fails() {
     assert!(err
         .to_string()
         .contains("Failed to install IPv6 split route ::/1"));
+}
+
+#[test]
+fn interface_and_routes_fails_when_ipv6_block_route_fails() {
+    let mut runner = RecordingRunner {
+        fail_on_args: Some(
+            vec!["-6", "route", "add", "unreachable", "::/1"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        ),
+        ..RecordingRunner::default()
+    };
+    let err = apply_interface_and_routes(
+        &mut runner,
+        "mavi0",
+        Ipv4Addr::new(10, 8, 0, 2),
+        24,
+        Ipv4Addr::new(10, 8, 0, 1),
+        1280,
+        "203.0.113.10",
+        None,
+        None,
+        None,
+        Some("192.0.2.1"),
+        Some("eth0"),
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("Failed to install IPv6 leak-prevention route ::/1"));
 }
 
 #[test]

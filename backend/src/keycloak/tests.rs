@@ -450,3 +450,4 @@ async fn read_capped_jwks_body_rejects_oversized_response() {
 }
 
 mod claim_policy_tests;
+mod refresh_singleflight_tests;

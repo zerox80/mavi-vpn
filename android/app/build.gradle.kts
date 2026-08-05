@@ -38,7 +38,11 @@ fun isHttpsAppLinkRedirect(uri: URI): Boolean =
 
 android {
     namespace = "com.mavi.vpn"
-    compileSdk = 37
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 1
+        }
+    }
     ndkVersion = "28.1.13356709"
 
     defaultConfig {

@@ -240,7 +240,7 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Install Android SDK platform
-        run: echo "y" | ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager "platforms;android-37"
+        run: echo "y" | ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager "platforms;android-37.1" "build-tools;37.0.0" --channel=3
       - name: Validate Gradle Wrapper and configure Gradle
         uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
       - name: Run Android JVM tests

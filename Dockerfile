@@ -1,44 +1,22 @@
+# syntax=docker/dockerfile:1
+
 # Builder Stage
 FROM rust:1.97-slim AS builder
 WORKDIR /app
 
-# Copy workspace files
-# 1. Prepare Metadata for Caching
-COPY Cargo.toml Cargo.lock ./
-# Remove unnecessary members from workspace for server build
-RUN sed -i '/members = \[/,/\]/c\members = ["backend", "shared"]' Cargo.toml
-
-COPY shared/Cargo.toml ./shared/Cargo.toml
-COPY backend/Cargo.toml ./backend/Cargo.toml
 # Install git for Cargo to fetch git dependencies
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
-# 2. Create Dummy Source to Cache Dependencies
-RUN mkdir -p shared/src backend/src && \
-    echo "fn main() {}" > backend/src/main.rs && \
-    touch shared/src/lib.rs
-
-# 3. Build Dependencies (Targeting the workspace)
-WORKDIR /app/backend
-RUN cargo build --release --locked
-
-# 4. Remove Dummy Artifacts
-RUN rm -f /app/target/release/deps/mavi_vpn* /app/target/release/deps/mavi-vpn* && \
-    rm -f /app/target/release/deps/shared*
-
-WORKDIR /app
-
-# 5. Copy Real Source
-COPY shared ./shared
-COPY backend ./backend
-
-# Fix timestamp issue: Ensure source files are newer than dummy build artifacts
-RUN touch shared/src/lib.rs backend/src/main.rs
-
-# 6. Build Actual Application
-WORKDIR /app/backend
-RUN cargo build --release --locked
+# Keep the checked-in workspace manifest and lockfile together. Rewriting the
+# workspace member list would require Cargo to rewrite Cargo.lock and is
+# therefore incompatible with --locked.
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo build --release --locked -p mavi-vpn && \
+    cp /app/target/release/mavi-vpn /mavi-vpn
 
 # Runtime Stage
 FROM debian:trixie-slim
@@ -53,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/mavi-vpn /app/mavi-vpn
+COPY --from=builder /mavi-vpn /app/mavi-vpn
 COPY backend/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/entrypoint.sh && mkdir -p /app/data

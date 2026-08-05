@@ -199,17 +199,17 @@ tasks.register<JacocoCoverageVerification>("jacocoDebugUnitTestVerification") {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.18.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
+    implementation("androidx.core:core-ktx:1.19.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
     implementation("androidx.activity:activity-compose:1.13.0")
-    implementation(platform("androidx.compose:compose-bom:2026.05.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.06.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.browser:browser:1.10.0")
-    implementation("com.squareup.okhttp3:okhttp:5.3.2") // For token exchange
+    implementation("com.squareup.okhttp3:okhttp:5.4.0") // For token exchange
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20251224")

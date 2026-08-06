@@ -24,7 +24,7 @@ jobs:
         with:
           toolchain: stable
       - name: Cache cargo registry
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -84,7 +84,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@e28ac56891501ddb0600608470dbe94544964ed4 # cargo-llvm-cov
       - name: Cache cargo registry
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -150,7 +150,7 @@ jobs:
         with:
           toolchain: stable
       - name: Cache cargo registry
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -177,7 +177,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@e28ac56891501ddb0600608470dbe94544964ed4 # cargo-llvm-cov
       - name: Cache cargo registry
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/

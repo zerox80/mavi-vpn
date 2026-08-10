@@ -138,8 +138,11 @@ To pull the newest commits into `Cargo.lock`, run
 
 `.github/workflows/update-forks.yml` performs that refresh every day and on manual dispatch. It
 builds the refreshed lockfile on Linux and Windows in read-only jobs, verifies that `h2` resolves
-from `zerox80/h2`, and grants repository write access only to the final `Cargo.lock` commit job.
-Keep every fork package in its update list and keep the fork-source verification intact.
+from `zerox80/h2`, and grants repository write access only to the final `Cargo.lock` commit job. To
+avoid daily history noise, consecutive automated refreshes are folded into one rolling tip commit
+with `--force-with-lease`; the job first checks that `main` is still the exact revision it verified.
+Keep every fork package in its update list, keep the fork-source verification intact, and never
+replace the guarded lease with an unconditional force-push.
 
 Branch discipline that keeps the build green:
 - Use `branch = "main"` for the `h3` fork, **not** `master`. The fork's `master` tracks upstream and

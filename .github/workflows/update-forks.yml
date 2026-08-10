@@ -1,9 +1,9 @@
 name: Update forks
 
 # Keeps Cargo.lock on the latest commit of the zerox80 h2/quinn/h3 forks.
-# Runs on a schedule and on demand, verifies Linux and Windows builds, and only
-# then commits the refreshed lockfile to main. Fork code is built in read-only
-# jobs; only the final lockfile-only job receives repository write access.
+# Runs on a schedule and on demand, verifies Linux and Windows builds, and then
+# maintains one rolling lockfile commit at the tip of main. Fork code is built
+# in read-only jobs; only the final lockfile-only job receives write access.
 
 on:
   schedule:
@@ -13,6 +13,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  FORK_UPDATE_COMMIT_MESSAGE: Advance h2, quinn, and h3 forks to latest commits
 
 permissions:
   contents: read
@@ -27,10 +28,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
+      base_sha: ${{ steps.base.outputs.sha }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: main
           submodules: recursive
+      - name: Record the verified main revision
+        id: base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
         with:
@@ -81,6 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
           submodules: recursive
       - name: Download refreshed lockfile
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -120,6 +127,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
           submodules: recursive
       - name: Download refreshed lockfile
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -159,6 +167,18 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 2
+      - name: Refuse to overwrite newer main changes
+        env:
+          EXPECTED_HEAD: ${{ needs.prepare.outputs.base_sha }}
+        run: |
+          actual_head="$(git rev-parse HEAD)"
+          if [ "$actual_head" != "$EXPECTED_HEAD" ]; then
+            echo "::error::main moved from $EXPECTED_HEAD to $actual_head while fork updates were being verified."
+            exit 1
+          fi
       - name: Download verified lockfile
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -169,5 +189,18 @@ jobs:
           git config user.name "zerox80"
           git config user.email "rujbin@protonmail.com"
           git add Cargo.lock
-          git commit -m "Advance h2, quinn, and h3 forks to latest commits"
-          git push origin HEAD:main
+
+          previous_head="$(git rev-parse HEAD)"
+          previous_subject="$(git log -1 --format=%s)"
+          previous_paths="$(git diff-tree --no-commit-id --name-only -r HEAD)"
+
+          if [ "$previous_subject" = "$FORK_UPDATE_COMMIT_MESSAGE" ] && \
+             [ "$previous_paths" = "Cargo.lock" ]; then
+            git commit --amend --no-edit
+            git push \
+              --force-with-lease="refs/heads/main:$previous_head" \
+              origin HEAD:main
+          else
+            git commit -m "$FORK_UPDATE_COMMIT_MESSAGE"
+            git push origin HEAD:main
+          fi

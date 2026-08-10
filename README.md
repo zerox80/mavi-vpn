@@ -27,7 +27,8 @@ Mavi VPN tunnels all network traffic over **QUIC** by default, with an optional
 forks, both tracked on `main`, to deliver secure, low-latency connectivity even
 on unstable mobile networks. The HTTP/2 path uses the branch-tracked
 [`h2`](https://github.com/zerox80/h2) fork on `master`. A scheduled CI workflow
-tests and advances `Cargo.lock` to the latest fork commits every day. It supports
+tests and advances `Cargo.lock` to the latest fork commits every day while folding
+consecutive refreshes into one rolling commit. It supports
 **Windows**, **Linux**, and **Android** with native clients and an optional
 cross-platform **Tauri GUI**.
 

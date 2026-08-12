@@ -231,7 +231,7 @@ Mavi VPN offers several mutually exclusive transport modes:
 | Level | Mode | Wire Format | Activate |
 |---|---|---|---|
 | **0** | Standard | Raw QUIC datagrams | Default |
-| **1** | CR Mode | QUIC + ALPN `h3` + probe resistance | `censorship_resistant: true` |
+| **1** | CR Mode | QUIC + ALPN `h3` + probe resistance | `VPN_CENSORSHIP_RESISTANT=true` |
 | **2A** | HTTP/3 Framing | MASQUE connect-ip (RFC 9484) over QUIC | `http3_framing: true` |
 | **2B** | HTTP/2 CONNECT-IP | TLS/TCP + ALPN `h2` + RFC 8441 Extended CONNECT + RFC 9297 capsules | `http2_framing: true` |
 | **+** | ECH camouflage | Desktop ECH GREASE (RFC 9849) + cover SNI; HPKE is RFC 9180 | Provide `ech_config` hex |

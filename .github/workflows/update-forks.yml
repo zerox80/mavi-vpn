@@ -37,6 +37,10 @@ jobs:
       - name: Record the verified main revision
         id: base
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Record locked fork revisions
+        run: |
+          python3 scripts/check_fork_sources.py --print-lock-revisions \
+            > "$RUNNER_TEMP/fork-revisions-before"
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
@@ -61,12 +65,19 @@ jobs:
             -p h3 -p h3-quinn -p h3-datagram
       - name: Verify every fork resolves to its latest branch head
         run: python3 scripts/check_fork_sources.py --check-remote
-      - name: Stop if lockfile is unchanged
+      - name: Stop if fork revisions are unchanged
         id: diff
         run: |
-          if git diff --quiet -- Cargo.lock; then
+          python3 scripts/check_fork_sources.py --print-lock-revisions \
+            > "$RUNNER_TEMP/fork-revisions-after"
+          if cmp --silent \
+            "$RUNNER_TEMP/fork-revisions-before" \
+            "$RUNNER_TEMP/fork-revisions-after"; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Cargo.lock already on the latest fork commits; nothing to do."
+            echo "Fork commits are already current; nothing to do."
+          elif git diff --quiet -- Cargo.lock; then
+            echo "::error::Fork revisions changed but Cargo.lock did not."
+            exit 1
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
@@ -196,10 +207,19 @@ jobs:
 
           if [ "$previous_subject" = "$FORK_UPDATE_COMMIT_MESSAGE" ] && \
              [ "$previous_paths" = "Cargo.lock" ]; then
-            git commit --amend --no-edit
-            git push \
-              --force-with-lease="refs/heads/main:$previous_head" \
-              origin HEAD:main
+            if git diff --cached --quiet HEAD^ -- Cargo.lock; then
+              # The latest fork state is the parent tree, so remove the
+              # previous rolling lockfile-only commit instead of amending it
+              # into an empty commit.
+              git push \
+                --force-with-lease="refs/heads/main:$previous_head" \
+                origin HEAD^:main
+            else
+              git commit --amend --no-edit
+              git push \
+                --force-with-lease="refs/heads/main:$previous_head" \
+                origin HEAD:main
+            fi
           else
             git commit -m "$FORK_UPDATE_COMMIT_MESSAGE"
             git push origin HEAD:main

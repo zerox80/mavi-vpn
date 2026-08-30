@@ -127,6 +127,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="also require Cargo.lock commits to equal the current remote branch heads",
     )
+    parser.add_argument(
+        "--print-lock-revisions",
+        action="store_true",
+        help="print the currently locked revision for each zerox80 fork",
+    )
     return parser.parse_args()
 
 
@@ -146,6 +151,11 @@ def main() -> int:
     if errors:
         print("Fork source validation failed:", *errors, sep="\n- ")
         return 1
+
+    if args.print_lock_revisions:
+        for fork in sorted(set(EXPECTED.values()), key=lambda item: item.repository):
+            print(f"{fork.repository} {fork.branch} {resolved[fork]}")
+        return 0
 
     mode = " and remote heads" if args.check_remote else ""
     print(f"Validated {len(EXPECTED)} branch-tracked fork packages{mode}.")

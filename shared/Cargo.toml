@@ -22,7 +22,7 @@ etherparse = { workspace = true }
 # by backend/linux/windows via rustls; listing it here just makes the direct
 # dependency explicit for this crate).
 sha2 = "0.11"
-constant_time_eq = "0.5"
+constant_time_eq = "0.6"
 
 # Keycloak OAuth client helpers (token parse / JWT-exp / refresh). Optional so
 # the backend — which only validates tokens — does not pull a HTTP client.

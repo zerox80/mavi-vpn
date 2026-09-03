@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Builder Stage
-FROM rust:1.97-slim AS builder
+FROM rust:1.98-slim AS builder
 WORKDIR /app
 
 # Install git for Cargo to fetch git dependencies

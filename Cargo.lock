@@ -2577,7 +2577,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "linux-vpn"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "mavi-vpn"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2703,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "mavi-vpn-gui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -2731,7 +2731,7 @@ dependencies = [
 
 [[package]]
 name = "mavivpn"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3550,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "quic-tester"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "h3",
  "h3-quinn",
@@ -4359,7 +4359,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.23.1",
  "bincode-next",
@@ -6101,7 +6101,7 @@ dependencies = [
 
 [[package]]
 name = "windows-vpn"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

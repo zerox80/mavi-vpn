@@ -1,5 +1,8 @@
+use crate::secure_path::{ensure_trusted_owner, lock_directory_tree, lock_path, replace_dacl};
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
@@ -14,17 +17,29 @@ enum DriverAclTarget {
     File,
 }
 
+/// Verified driver together with the handles that prevent its replacement.
+pub struct ExtractedDriver {
+    pub path: PathBuf,
+    // Keep the verified object and all ancestors pinned through LoadLibrary
+    // and for as long as the cached WinTUN adapter uses the library.
+    _file: File,
+    _directories: Vec<File>,
+}
+
 /// Extracts the embedded `wintun.dll` to a locked-down ProgramData directory.
-pub fn extract_wintun_dll() -> Result<PathBuf> {
+pub fn extract_wintun_dll() -> Result<ExtractedDriver> {
     let base = std::env::var_os("ProgramData")
         .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
         .join("mavi-vpn")
         .join("drivers");
 
-    extract_wintun_dll_to(&base, harden_driver_path)
+    let directories = lock_directory_tree(&base, true)?;
+    let mut driver = extract_wintun_dll_to(&base, harden_driver_path)?;
+    driver._directories = directories;
+    Ok(driver)
 }
 
-fn extract_wintun_dll_to<F>(driver_dir: &Path, mut harden_path: F) -> Result<PathBuf>
+fn extract_wintun_dll_to<F>(driver_dir: &Path, mut harden_path: F) -> Result<ExtractedDriver>
 where
     F: FnMut(&Path, DriverAclTarget) -> Result<()>,
 {
@@ -34,6 +49,7 @@ where
             driver_dir.display()
         )
     })?;
+    let directory = lock_path(driver_dir, true)?;
     harden_path(driver_dir, DriverAclTarget::Directory).with_context(|| {
         format!(
             "Failed to harden WinTUN driver directory {}",
@@ -44,38 +60,62 @@ where
     let dll_path = driver_dir.join("wintun.dll");
     let expected_hash = sha256_digest(WINTUN_DLL);
 
-    if dll_path.exists() {
-        let existing = std::fs::read(&dll_path)
-            .with_context(|| format!("Failed to read existing {}", dll_path.display()))?;
+    if dll_path.symlink_metadata().is_ok() {
+        let mut file = lock_path(&dll_path, false)?;
+        harden_path(&dll_path, DriverAclTarget::File)
+            .with_context(|| format!("Failed to harden {}", dll_path.display()))?;
+        let mut existing = Vec::new();
+        if file.metadata()?.len() == WINTUN_DLL.len() as u64 {
+            file.read_to_end(&mut existing)
+                .with_context(|| format!("Failed to read existing {}", dll_path.display()))?;
+        }
         let existing_hash = sha256_digest(&existing);
         if existing_hash == expected_hash {
-            harden_path(&dll_path, DriverAclTarget::File)
-                .with_context(|| format!("Failed to harden {}", dll_path.display()))?;
-            return Ok(dll_path);
+            return Ok(ExtractedDriver {
+                path: dll_path,
+                _file: file,
+                _directories: vec![directory],
+            });
         }
 
         info!(
             "Replacing WinTUN DLL at {} because its SHA-256 does not match the embedded driver",
             dll_path.display()
         );
+        drop(file);
         std::fs::remove_file(&dll_path)
             .with_context(|| format!("Failed to remove mismatched {}", dll_path.display()))?;
     }
 
     info!("Extracting wintun.dll to {}...", dll_path.display());
-    std::fs::write(&dll_path, WINTUN_DLL)
-        .with_context(|| format!("Failed to extract wintun.dll to {}", dll_path.display()))?;
+    // The directory is already protected. Never follow or truncate a file
+    // planted at this name; create_new also rejects dangling symbolic links.
+    let mut output = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&dll_path)
+        .with_context(|| format!("Failed to create {}", dll_path.display()))?;
+    output
+        .write_all(WINTUN_DLL)
+        .context("Failed to extract wintun.dll")?;
+    drop(output);
+    let mut file = lock_path(&dll_path, false)?;
     harden_path(&dll_path, DriverAclTarget::File)
         .with_context(|| format!("Failed to harden {}", dll_path.display()))?;
 
-    let written = std::fs::read(&dll_path)
+    let mut written = Vec::new();
+    file.read_to_end(&mut written)
         .with_context(|| format!("Failed to verify {}", dll_path.display()))?;
     let written_hash = sha256_digest(&written);
     if written_hash != expected_hash {
         bail!("Extracted wintun.dll failed integrity verification");
     }
 
-    Ok(dll_path)
+    Ok(ExtractedDriver {
+        path: dll_path,
+        _file: file,
+        _directories: vec![directory],
+    })
 }
 
 fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
@@ -83,48 +123,16 @@ fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn harden_driver_path(path: &Path, target: DriverAclTarget) -> Result<()> {
-    #[cfg(not(windows))]
-    {
-        let _ = (path, target);
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    {
-        let args = driver_acl_args(path, target);
-        let out = std::process::Command::new("icacls")
-            .args(&args)
-            .output()
-            .context("Failed to execute icacls for WinTUN ACL hardening")?;
-
-        if !out.status.success() {
-            bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Ok(())
-    }
+    let guard = lock_path(path, target == DriverAclTarget::Directory)?;
+    ensure_trusted_owner(&guard)?;
+    replace_dacl(path, driver_acl_sddl(target))
 }
 
-fn driver_acl_args(path: &Path, target: DriverAclTarget) -> Vec<String> {
-    let system_acl = match target {
-        DriverAclTarget::Directory => "*S-1-5-18:(OI)(CI)(F)",
-        DriverAclTarget::File => "*S-1-5-18:(F)",
-    };
-    let admins_acl = match target {
-        DriverAclTarget::Directory => "*S-1-5-32-544:(OI)(CI)(F)",
-        DriverAclTarget::File => "*S-1-5-32-544:(F)",
-    };
-
-    vec![
-        path.to_string_lossy().to_string(),
-        "/inheritance:r".to_string(),
-        "/remove:g".to_string(),
-        "*S-1-1-0".to_string(),
-        "*S-1-5-11".to_string(),
-        "*S-1-5-32-545".to_string(),
-        "/grant:r".to_string(),
-        system_acl.to_string(),
-        admins_acl.to_string(),
-    ]
+fn driver_acl_sddl(target: DriverAclTarget) -> &'static str {
+    match target {
+        DriverAclTarget::Directory => "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+        DriverAclTarget::File => "D:P(A;;FA;;;SY)(A;;FA;;;BA)",
+    }
 }
 
 /// Helper to ensure the "`MaviVPN`" adapter exists in Windows.
@@ -166,21 +174,15 @@ mod tests {
     use std::rc::Rc;
 
     #[test]
-    fn driver_acl_args_grant_only_system_and_admins() {
-        let args = driver_acl_args(
-            Path::new(r"C:\ProgramData\mavi-vpn\drivers"),
-            DriverAclTarget::Directory,
+    fn driver_dacl_has_a_complete_system_and_admins_only_allow_list() {
+        assert_eq!(
+            driver_acl_sddl(DriverAclTarget::Directory),
+            "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
         );
-
-        assert!(args.contains(&"/inheritance:r".to_string()));
-        assert!(args.contains(&"/remove:g".to_string()));
-        assert!(args.contains(&"*S-1-1-0".to_string()));
-        assert!(args.contains(&"*S-1-5-11".to_string()));
-        assert!(args.contains(&"*S-1-5-32-545".to_string()));
-        assert!(args.contains(&"*S-1-5-18:(OI)(CI)(F)".to_string()));
-        assert!(args.contains(&"*S-1-5-32-544:(OI)(CI)(F)".to_string()));
-        assert!(!args.iter().any(|arg| arg.contains("S-1-1-0:")));
-        assert!(!args.iter().any(|arg| arg.contains("S-1-5-32-545:")));
+        assert_eq!(
+            driver_acl_sddl(DriverAclTarget::File),
+            "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+        );
     }
 
     #[test]
@@ -197,15 +199,20 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(dll_path, dir.path().join("wintun.dll"));
-        assert_eq!(std::fs::read(&dll_path).unwrap(), WINTUN_DLL);
+        assert_eq!(dll_path.path, dir.path().join("wintun.dll"));
+        assert_eq!(std::fs::read(&dll_path.path).unwrap(), WINTUN_DLL);
         let calls = calls.borrow();
         assert_eq!(calls.len(), 2);
         assert_eq!(
             calls[0],
             (dir.path().to_path_buf(), DriverAclTarget::Directory)
         );
-        assert_eq!(calls[1], (dll_path, DriverAclTarget::File));
+        assert_eq!(calls[1], (dll_path.path.clone(), DriverAclTarget::File));
+        assert!(std::fs::write(&dll_path.path, b"replacement").is_err());
+        assert!(std::fs::remove_file(&dll_path.path).is_err());
+        assert!(std::fs::rename(dir.path(), dir.path().with_extension("moved")).is_err());
+        // Only load/resolve exports; do not create an adapter or touch networking.
+        let _library = unsafe { wintun::load_from_path(&dll_path.path) }.unwrap();
     }
 
     #[test]
@@ -216,8 +223,8 @@ mod tests {
 
         let extracted = extract_wintun_dll_to(dir.path(), |_path, _target| Ok(())).unwrap();
 
-        assert_eq!(extracted, dll_path);
-        assert_eq!(std::fs::read(extracted).unwrap(), WINTUN_DLL);
+        assert_eq!(extracted.path, dll_path);
+        assert_eq!(std::fs::read(&extracted.path).unwrap(), WINTUN_DLL);
     }
 
     #[test]
@@ -228,7 +235,7 @@ mod tests {
 
         let extracted = extract_wintun_dll_to(dir.path(), |_path, _target| Ok(())).unwrap();
 
-        assert_eq!(extracted, dll_path);
-        assert_eq!(std::fs::read(extracted).unwrap(), WINTUN_DLL);
+        assert_eq!(extracted.path, dll_path);
+        assert_eq!(std::fs::read(&extracted.path).unwrap(), WINTUN_DLL);
     }
 }

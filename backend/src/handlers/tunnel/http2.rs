@@ -204,31 +204,14 @@ fn forward_packet(
 
 async fn run_until_expiry(
     remote_ip: IpAddr,
-    mut expiry_rx: watch::Receiver<Option<i64>>,
+    expiry_rx: watch::Receiver<Option<i64>>,
     tunnel: impl std::future::Future<Output = Result<()>>,
 ) -> Result<()> {
-    tokio::pin!(tunnel);
-    loop {
-        let Some(deadline) = crate::handlers::connection::session_deadline(*expiry_rx.borrow())
-        else {
-            return tunnel.await;
-        };
-        tokio::select! {
-            result = &mut tunnel => return result,
-            changed = expiry_rx.changed() => {
-                if changed.is_err() {
-                    return tunnel.await;
-                }
-            }
-            () = tokio::time::sleep_until(deadline) => {
-                if crate::handlers::connection::session_deadline(*expiry_rx.borrow())
-                    .is_some_and(|current| current > deadline)
-                {
-                    continue;
-                }
-                warn!(%remote_ip, "Closing HTTP/2 tunnel: session token expired");
-                return Ok(());
-            }
+    tokio::select! {
+        result = tunnel => result,
+        () = crate::handlers::session_expiry::wait_for_session_expiry(expiry_rx) => {
+            warn!(%remote_ip, "Closing HTTP/2 tunnel: session token expired");
+            Ok(())
         }
     }
 }

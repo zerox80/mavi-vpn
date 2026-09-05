@@ -75,22 +75,6 @@ fn unauthorized_control_message() -> ControlMessage {
     }
 }
 
-/// Leeway applied on top of the token's `exp` before force-closing the
-/// session, mirroring the validation leeway in `KeycloakValidator`.
-const SESSION_EXPIRY_LEEWAY: Duration = Duration::from_secs(30);
-
-/// Converts a token expiry (Unix seconds) into a tokio deadline. Returns
-/// `None` when the session has no expiry (static token auth).
-pub(super) fn session_deadline(expiry: Option<i64>) -> Option<tokio::time::Instant> {
-    let exp = expiry?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let remaining = u64::try_from(exp).unwrap_or(0).saturating_sub(now);
-    Some(tokio::time::Instant::now() + Duration::from_secs(remaining) + SESSION_EXPIRY_LEEWAY)
-}
-
 /// Runs the tunnel future, force-closing the QUIC connection when the
 /// authenticating token expires so revoked/expired credentials cannot keep a
 /// session alive indefinitely.
@@ -101,38 +85,18 @@ pub(super) fn session_deadline(expiry: Option<i64>) -> Option<tokio::time::Insta
 /// survives the original token's expiry without a reconnect.
 pub(super) async fn run_tunnel_until_session_expiry(
     connection: &quinn::Connection,
-    mut expiry_rx: tokio::sync::watch::Receiver<Option<i64>>,
+    expiry_rx: tokio::sync::watch::Receiver<Option<i64>>,
     tunnel: impl Future<Output = Result<()>>,
 ) -> Result<()> {
-    tokio::pin!(tunnel);
-    loop {
-        let Some(deadline) = session_deadline(*expiry_rx.borrow()) else {
-            // No expiry (static-token auth): run the tunnel to completion.
-            return tunnel.await;
-        };
-
-        tokio::select! {
-            res = &mut tunnel => return res,
-            // A reauth changed the expiry → re-arm with the new deadline. `Err`
-            // means every sender was dropped (session ending), so just await.
-            changed = expiry_rx.changed() => {
-                if changed.is_err() {
-                    return tunnel.await;
-                }
-            }
-            () = tokio::time::sleep_until(deadline) => {
-                // A reauth may have landed in the same wakeup and pushed the
-                // deadline out; re-check before tearing the session down.
-                if session_deadline(*expiry_rx.borrow()).is_some_and(|d| d > deadline) {
-                    continue;
-                }
-                warn!(
-                    "Closing connection from {}: session token expired",
-                    connection.remote_address()
-                );
-                connection.close(0u32.into(), b"session token expired");
-                return Ok(());
-            }
+    tokio::select! {
+        result = tunnel => result,
+        () = super::session_expiry::wait_for_session_expiry(expiry_rx) => {
+            warn!(
+                "Closing connection from {}: session token expired",
+                connection.remote_address()
+            );
+            connection.close(0u32.into(), b"session token expired");
+            Ok(())
         }
     }
 }

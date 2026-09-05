@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Notify, Semaphore};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
@@ -36,8 +36,9 @@ use crate::state::AppState;
 const CONNECT_IP_PROTOCOL: &str = "connect-ip";
 const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/*/*/";
 const MAX_CONNECTIONS: usize = 1_000;
-const MAX_PENDING_HANDSHAKES: usize = 100;
+const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 100;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
 type ResponseBody = BoxBody<Bytes, Infallible>;
 
 /// A bound HTTP/2 CONNECT-IP listener.
@@ -91,7 +92,7 @@ impl Http2Listener {
         let local_addr = self.local_addr()?;
         info!(%local_addr, "HTTP/2 CONNECT-IP listener ready on TCP");
         let connection_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-        let handshake_limit = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
+        let pending_limit = Arc::new(Semaphore::new(MAX_UNAUTHENTICATED_CONNECTIONS));
 
         loop {
             let (tcp_stream, peer_addr) = self
@@ -102,8 +103,8 @@ impl Http2Listener {
             if let Err(error) = tcp_stream.set_nodelay(true) {
                 warn!(%peer_addr, %error, "failed to enable TCP_NODELAY for HTTP/2");
             }
-            let Ok(handshake_permit) = handshake_limit.clone().try_acquire_owned() else {
-                warn!(%peer_addr, "HTTP/2 TLS handshake limit reached; dropping TCP connection");
+            let Ok(pending_permit) = pending_limit.clone().try_acquire_owned() else {
+                warn!(%peer_addr, "HTTP/2 unauthenticated connection limit reached; dropping TCP connection");
                 continue;
             };
             let connection_limit = connection_limit.clone();
@@ -115,7 +116,6 @@ impl Http2Listener {
             let ipv6_enabled = self.ipv6_enabled;
 
             tokio::spawn(async move {
-                let _handshake_permit = handshake_permit;
                 let tls_stream =
                     match accept_tls(&tls_acceptor, tcp_stream, TLS_HANDSHAKE_TIMEOUT).await {
                         Ok(stream) => stream,
@@ -124,8 +124,6 @@ impl Http2Listener {
                             return;
                         }
                     };
-                drop(_handshake_permit);
-
                 let Ok(_connection_permit) = connection_limit.try_acquire_owned() else {
                     warn!(%peer_addr, "HTTP/2 connection limit reached; dropping TLS connection");
                     return;
@@ -138,6 +136,7 @@ impl Http2Listener {
                     tx_tun,
                     keycloak,
                     ipv6_enabled,
+                    pending_permit,
                 )
                 .await
                 {
@@ -182,11 +181,14 @@ async fn serve_connection(
     tx_tun: mpsc::Sender<Bytes>,
     keycloak: Option<Arc<KeycloakValidator>>,
     ipv6_enabled: bool,
+    pending_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()> {
     if tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
         anyhow::bail!("client did not negotiate ALPN h2");
     }
 
+    let authenticated = Arc::new(Notify::new());
+    let authentication_complete = authenticated.clone();
     let mut builder = http2::Builder::new(TokioExecutor::new());
     builder
         .timer(TokioTimer::new())
@@ -196,23 +198,33 @@ async fn serve_connection(
         .initial_stream_window_size(1024 * 1024)
         .keep_alive_interval(Some(Duration::from_secs(15)))
         .keep_alive_timeout(Duration::from_secs(60));
-    builder
-        .serve_connection(
-            TokioIo::new(tls_stream),
-            service_fn(move |request| {
-                handle_request(
-                    request,
-                    peer_addr.ip(),
-                    state.clone(),
-                    config.clone(),
-                    tx_tun.clone(),
-                    keycloak.clone(),
-                    ipv6_enabled,
-                )
-            }),
-        )
-        .await
-        .context("HTTP/2 connection failed")
+    let connection = builder.serve_connection(
+        TokioIo::new(tls_stream),
+        service_fn(move |request| {
+            handle_request(
+                request,
+                peer_addr.ip(),
+                state.clone(),
+                config.clone(),
+                tx_tun.clone(),
+                keycloak.clone(),
+                ipv6_enabled,
+                authenticated.clone(),
+            )
+        }),
+    );
+    tokio::pin!(connection);
+    // TLS and PING acknowledgements prove liveness, not VPN authentication.
+    // Keep the smaller pending budget until a CONNECT-IP request succeeds.
+    tokio::select! {
+        result = &mut connection => return result.context("HTTP/2 connection failed"),
+        () = authentication_complete.notified() => {},
+        () = tokio::time::sleep(AUTHENTICATION_TIMEOUT) => {
+            anyhow::bail!("HTTP/2 VPN authentication timed out");
+        }
+    }
+    drop(pending_permit);
+    connection.await.context("HTTP/2 connection failed")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -224,6 +236,7 @@ async fn handle_request(
     tx_tun: mpsc::Sender<Bytes>,
     keycloak: Option<Arc<KeycloakValidator>>,
     ipv6_enabled: bool,
+    authenticated: Arc<Notify>,
 ) -> Result<Response<ResponseBody>, Infallible> {
     if !is_connect_ip_request(&request) {
         return Ok(non_connect_response(&request, config.censorship_resistant));
@@ -299,6 +312,7 @@ async fn handle_request(
     });
 
     info!(%remote_addr, %assigned_ip, "HTTP/2 CONNECT-IP authenticated");
+    authenticated.notify_one();
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("capsule-protocol", "?1")

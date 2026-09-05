@@ -166,28 +166,6 @@ fn unauthorized_response_frame_is_generic() {
 }
 
 #[test]
-fn session_deadline_none_for_static_auth() {
-    assert!(session_deadline(None).is_none());
-}
-
-#[tokio::test]
-async fn session_deadline_expired_token_is_due_after_leeway() {
-    #[allow(clippy::cast_possible_wrap)]
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-
-    // Already-expired token: deadline is now + leeway only.
-    let deadline = session_deadline(Some(now - 100)).unwrap();
-    assert!(deadline <= tokio::time::Instant::now() + SESSION_EXPIRY_LEEWAY);
-
-    // Future expiry: deadline is at least the remaining lifetime.
-    let deadline = session_deadline(Some(now + 600)).unwrap();
-    assert!(deadline >= tokio::time::Instant::now() + Duration::from_secs(590));
-}
-
-#[test]
 fn config_message_omits_ipv6_when_disabled() {
     let state = AppState::new("10.8.0.0/24").unwrap();
     let config = test_config();

@@ -3,10 +3,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 use tracing::{info, warn};
 
-use super::command::run_cmd;
+use super::command::{CommandRunner, ProductionCommandRunner};
 
 /// Configures DNS to use the VPN's DNS servers.
-/// Returns the backup of the previous resolv.conf (if applicable) and whether resolvconf was used.
+/// Returns the previous resolv.conf (if applicable) and whether systemd-resolved was used.
 pub(super) fn configure_dns(
     tun_name: &str,
     dns_v4: Ipv4Addr,
@@ -16,17 +16,7 @@ pub(super) fn configure_dns(
     if is_systemd_resolved_active() {
         info!("Using systemd-resolved for DNS configuration");
 
-        let dns_v4_s = dns_v4.to_string();
-        let dns_v6_s = dns_v6.map(|v6| v6.to_string());
-        let mut dns_args: Vec<&str> = vec!["dns", tun_name, &dns_v4_s];
-        if let Some(ref v6) = dns_v6_s {
-            dns_args.push(v6);
-        }
-
-        let _ = run_cmd("resolvectl", &dns_args);
-        let _ = run_cmd("resolvectl", &["domain", tun_name, "~."]);
-        // Set the VPN interface as default route for DNS
-        let _ = run_cmd("resolvectl", &["default-route", tun_name, "true"]);
+        configure_resolved_dns(&mut ProductionCommandRunner, tun_name, dns_v4, dns_v6)?;
 
         return Ok((None, true));
     }
@@ -97,6 +87,42 @@ pub(super) fn configure_dns(
         .context("Failed to write /etc/resolv.conf. Are you running as root?")?;
 
     Ok((backup, false))
+}
+
+fn configure_resolved_dns(
+    runner: &mut impl CommandRunner,
+    tun_name: &str,
+    dns_v4: Ipv4Addr,
+    dns_v6: Option<Ipv6Addr>,
+) -> Result<()> {
+    let dns_v4_s = dns_v4.to_string();
+    let dns_v6_s = dns_v6.map(|v6| v6.to_string());
+    let mut dns_args = vec!["dns", tun_name, &dns_v4_s];
+    if let Some(ref v6) = dns_v6_s {
+        dns_args.push(v6);
+    }
+
+    let result = (|| {
+        runner
+            .run("resolvectl", &dns_args)
+            .context("Failed to set VPN DNS servers with systemd-resolved")?;
+        runner
+            .run("resolvectl", &["domain", tun_name, "~."])
+            .context("Failed to route DNS through the VPN with systemd-resolved")?;
+        runner
+            .run("resolvectl", &["default-route", tun_name, "true"])
+            .context("Failed to set the VPN DNS default route with systemd-resolved")
+    })();
+
+    if result.is_err() {
+        // A preceding command may have succeeded. Revert this TUN link's DNS
+        // settings before NetworkConfig::apply rolls back its routes/interface.
+        // Never fall through to a successful session with the old LAN resolver.
+        if let Err(error) = runner.run("resolvectl", &["revert", tun_name]) {
+            warn!(%error, "Failed to revert partial VPN DNS configuration");
+        }
+    }
+    result
 }
 
 /// Restores DNS configuration to its pre-VPN state.
@@ -251,6 +277,75 @@ pub(super) fn is_mavi_generated_resolv_conf(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct DnsRunner {
+        calls: Vec<Vec<String>>,
+        fail_step: Option<usize>,
+        fail_revert: bool,
+    }
+
+    impl CommandRunner for DnsRunner {
+        fn run(&mut self, cmd: &str, args: &[&str]) -> Result<()> {
+            assert_eq!(cmd, "resolvectl");
+            let step = self.calls.len();
+            self.calls
+                .push(args.iter().map(|arg| (*arg).to_string()).collect());
+            if self.fail_step == Some(step) || (self.fail_revert && args[0] == "revert") {
+                anyhow::bail!("simulated failure at {}", args[0]);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn resolved_dns_requires_all_settings_for_ipv4_and_dual_stack() {
+        for dns_v6 in [None, Some("fd00::1".parse().unwrap())] {
+            let mut runner = DnsRunner::default();
+            configure_resolved_dns(&mut runner, "test-tun", Ipv4Addr::new(10, 8, 0, 1), dns_v6)
+                .unwrap();
+            let mut servers = vec!["dns", "test-tun", "10.8.0.1"];
+            if dns_v6.is_some() {
+                servers.push("fd00::1");
+            }
+            assert_eq!(
+                runner.calls,
+                vec![
+                    servers,
+                    vec!["domain", "test-tun", "~."],
+                    vec!["default-route", "test-tun", "true"],
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn every_resolved_dns_failure_aborts_and_reverts_partial_settings() {
+        for fail_step in 0..3 {
+            let mut runner = DnsRunner {
+                fail_step: Some(fail_step),
+                ..Default::default()
+            };
+            let error = configure_resolved_dns(&mut runner, "test-tun", Ipv4Addr::LOCALHOST, None)
+                .unwrap_err();
+            assert!(error.to_string().contains("systemd-resolved"));
+            assert_eq!(runner.calls.len(), fail_step + 2);
+            assert_eq!(runner.calls.last().unwrap(), &["revert", "test-tun"]);
+        }
+    }
+
+    #[test]
+    fn failed_dns_rollback_does_not_hide_the_setup_failure() {
+        let mut runner = DnsRunner {
+            fail_step: Some(1),
+            fail_revert: true,
+            ..Default::default()
+        };
+        let error =
+            configure_resolved_dns(&mut runner, "test-tun", Ipv4Addr::LOCALHOST, None).unwrap_err();
+        assert!(format!("{error:#}").contains("simulated failure at domain"));
+        assert_eq!(runner.calls.last().unwrap(), &["revert", "test-tun"]);
+    }
 
     #[test]
     fn marker_detected_on_mavi_generated_file() {

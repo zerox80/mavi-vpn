@@ -82,10 +82,14 @@ fn interface_and_routes_block_ipv6_without_vpn_assignment() {
         None,
     )
     .unwrap();
-    assert!(runner.calls.iter().any(|(_, args)| args
-        == &["-6", "route", "add", "unreachable", "::/1"]));
-    assert!(runner.calls.iter().any(|(_, args)| args
-        == &["-6", "route", "add", "unreachable", "8000::/1"]));
+    assert!(runner
+        .calls
+        .iter()
+        .any(|(_, args)| args == &["-6", "route", "add", "unreachable", "::/1"]));
+    assert!(runner
+        .calls
+        .iter()
+        .any(|(_, args)| args == &["-6", "route", "add", "unreachable", "8000::/1"]));
 }
 
 #[test]
@@ -123,17 +127,13 @@ fn interface_and_routes_build_ipv6_address_and_exception() {
             "dev",
             "eth0"
         ]));
-    assert!(runner.calls.iter().any(|(_, args)| args
-        == &[
-            "-6",
-            "route",
-            "add",
-            "::/1",
-            "dev",
-            "mavi0",
-            "via",
-            "fd00::1"
-        ]));
+    assert!(
+        runner
+            .calls
+            .iter()
+            .any(|(_, args)| args
+                == &["-6", "route", "add", "::/1", "dev", "mavi0", "via", "fd00::1"])
+    );
     assert!(!runner
         .calls
         .iter()

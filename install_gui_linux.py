@@ -22,6 +22,7 @@ import sys
 import shutil
 import subprocess
 from pathlib import Path
+from install_cli_linux import configure_ipc_group
 
 from installer_common import (
     c, info, ok, warn, err, step,
@@ -171,10 +172,15 @@ def ensure_daemon():
             warn("Install daemon manually: python install_cli_linux.py")
             return
 
+    target_user = configure_ipc_group()
+    if target_user:
+        warn(f"Log out and back in as '{target_user}' before using the GUI.")
+
     if shutil.which("systemctl"):
         result = run_capture(["systemctl", "is-active", "mavi-vpn"])
         if result.stdout.strip() == "active":
-            ok("mavi-vpn.service is already running")
+            sudo("systemctl", "restart", "mavi-vpn")
+            ok("Daemon restarted with the configured IPC group")
         elif ask("Start daemon now (sudo systemctl start mavi-vpn)?"):
             sudo("systemctl", "start", "mavi-vpn")
             ok("Daemon started")
@@ -229,6 +235,9 @@ def main():
     install_frontend_deps()
 
     # ── Build ────────────────────────────────────────────────────────────────
+    step("Building VPN daemon (Release)")
+    run(["cargo", "build", "--release", "-p", "linux-vpn"], cwd=ROOT)
+
     step("Building GUI (Release)")
     build_env = os.environ.copy()
     build_env["APPIMAGE_EXTRACT_AND_RUN"] = "1"

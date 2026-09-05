@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use wintun::Adapter;
 
 use self::handshake::decode_hex_pins;
-use self::network::{cleanup_routes, remove_nrpt_dns_rule};
+use self::network::cleanup_routes;
 use self::reconnect::{
     compute_reconnect_delay, sleep_unless_stopped, ReconnectDecision, RECONNECT_INITIAL_SECS,
 };
@@ -123,7 +123,6 @@ pub async fn run_vpn(
     // 4. Cleanup - routes first, then DNS/NRPT
     runtime.set_connected(false);
     cleanup_routes(&[]);
-    remove_nrpt_dns_rule();
     runtime.clear_assigned_ip();
     info!("VPN Service Stopped.");
     Ok(())

@@ -21,6 +21,33 @@ fn test_config() -> Config {
 }
 
 #[test]
+fn cli_keycloak_start_carries_runtime_refresh_credentials_over_ipc() {
+    let mut config = test_config();
+    config.kc_auth = Some(true);
+    config.kc_url = Some("https://auth.example.test".into());
+    config.refresh_token = Some("refresh".into());
+    let request = crate::client_ipc::start_request(config.clone());
+    let wire = bincode::serde::encode_to_vec(&request, bincode::config::standard()).unwrap();
+    let (decoded, _): (crate::ipc::IpcRequest, _) =
+        bincode::serde::decode_from_slice(&wire, bincode::config::standard()).unwrap();
+    let crate::ipc::IpcRequest::StartWithKeycloak {
+        config: received,
+        keycloak,
+    } = decoded
+    else {
+        panic!("Keycloak CLI must enable service-side refresh");
+    };
+    assert_eq!(received, config);
+    assert_eq!(keycloak.refresh_token, "refresh");
+    assert_eq!(keycloak.kc_url, "https://auth.example.test");
+    assert_eq!(keycloak.realm, "mavi-vpn");
+    assert!(matches!(
+        crate::client_ipc::start_request(test_config()),
+        crate::ipc::IpcRequest::Start(_)
+    ));
+}
+
+#[test]
 fn save_config_redacts_token_and_load_merges_secret() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");

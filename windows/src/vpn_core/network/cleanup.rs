@@ -11,6 +11,8 @@ use tracing::{debug, info};
 
 pub fn cleanup_routes(host_routes: &[String]) {
     info!("Cleaning up MaviVPN routes...");
+    // A reconnect must resolve the endpoint using the physical network again.
+    remove_nrpt_dns_rule();
     cleanup_ipv6_prefix_policy();
 
     let started = Instant::now();
@@ -69,5 +71,4 @@ pub fn cleanup_routes(host_routes: &[String]) {
 
 pub fn cleanup_stale_network_state() {
     cleanup_routes(&[]);
-    remove_nrpt_dns_rule();
 }

@@ -1,8 +1,24 @@
 #!/bin/sh
 set -e
 
-# Reload systemd manager configuration
-systemctl daemon-reload
+# The daemon resolves this group before creating its socket and token file.
+# Create it before starting (or restarting) the service on either DEB or RPM.
+if ! getent group mavivpn >/dev/null; then
+    groupadd --system mavivpn
+fi
 
-# Enable and start the Mavi VPN background service
-systemctl enable --now mavi-vpn.service || true
+# Grant access to the user who explicitly installed through sudo. Package
+# managers without an invoking desktop user need an explicit administrator step.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    usermod -a -G mavivpn "$SUDO_USER"
+    echo "Mavi VPN: $SUDO_USER was added to mavivpn. Log out and back in before using the GUI/CLI."
+else
+    echo "Mavi VPN: grant a trusted desktop user access with: sudo usermod -aG mavivpn USER"
+    echo "Then log out and back in before using the GUI/CLI."
+fi
+
+if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable mavi-vpn.service || true
+    systemctl restart mavi-vpn.service || true
+fi

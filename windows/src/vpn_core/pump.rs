@@ -57,7 +57,10 @@ pub(super) fn pump_tun_to_quic(
                         Err(_) => {}
                     },
                     TunnelConnection::Http2(connection) => {
-                        if connection.send_packet_blocking(payload).is_err() {
+                        if connection
+                            .send_packet_blocking(payload, running, alive)
+                            .is_err()
+                        {
                             alive.store(false, Ordering::SeqCst);
                             break;
                         }

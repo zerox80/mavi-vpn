@@ -15,6 +15,7 @@ use crate::connection::{connect_and_handshake, connect_and_handshake_http2};
 use crate::session::VpnSession;
 use crate::vpn_loop::run_vpn_loop;
 
+mod initialization;
 mod socket;
 use socket::{create_udp_socket, protect_socket};
 
@@ -100,6 +101,7 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
     http2_framing: jni::sys::jboolean,
     ech_config: JString<'local>,
     vpn_mtu: jint,
+    init_id: jlong,
 ) -> jlong {
     let mut guard = unsafe { AttachGuard::from_unowned(env_unowned.as_raw()) };
     let env = guard.borrow_env_mut();
@@ -183,12 +185,11 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
         // the handshake call below consumes `token`.
         let session_token = token.clone();
         let result = if http2_framing {
-            rt.block_on(connect_and_handshake_http2(
-                token,
-                endpoint,
-                cert_pin_str,
-                vpn_mtu_opt,
-                |tcp| protect_socket(env, &service, tcp),
+            rt.block_on(initialization::run(
+                init_id,
+                connect_and_handshake_http2(token, endpoint, cert_pin_str, vpn_mtu_opt, |tcp| {
+                    protect_socket(env, &service, tcp)
+                }),
             ))
             .map(|(connection, config)| (connection, config, None))
         } else {
@@ -200,15 +201,18 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
                     return INIT_RETRYABLE_FAILURE;
                 }
             };
-            rt.block_on(connect_and_handshake(
-                socket,
-                token,
-                endpoint,
-                cert_pin_str,
-                censorship_resistant,
-                effective_http3_framing,
-                ech_config_hex,
-                vpn_mtu_opt,
+            rt.block_on(initialization::run(
+                init_id,
+                connect_and_handshake(
+                    socket,
+                    token,
+                    endpoint,
+                    cert_pin_str,
+                    censorship_resistant,
+                    effective_http3_framing,
+                    ech_config_hex,
+                    vpn_mtu_opt,
+                ),
             ))
         };
 
@@ -226,6 +230,9 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_init<'local>(
                 Box::into_raw(Box::new(session)) as jlong
             }
             Err(e) => {
+                // DNS resolution can use blocking OS calls. Do not let runtime
+                // teardown defeat the cancellation/deadline of the handshake.
+                rt.shutdown_timeout(std::time::Duration::from_millis(100));
                 let message = e.to_string();
                 error!("Handshake failed: {message}");
                 set_last_init_error(&message);

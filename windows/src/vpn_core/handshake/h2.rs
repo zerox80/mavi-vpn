@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use h2::{RecvStream, SendStream};
 use shared::{looks_like_html_response, masque, masque::CAPSULE_MAVI_CONFIG, ControlMessage};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
@@ -12,12 +13,24 @@ use tokio_rustls::TlsConnector;
 
 const CHANNEL_CAPACITY: usize = 4096;
 
+#[derive(Default)]
+struct TransportTasks(Vec<tokio::task::AbortHandle>);
+
+impl Drop for TransportTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(in crate::vpn_core) struct Http2Session {
     outbound: mpsc::Sender<Bytes>,
     inbound: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     reauth_results: Arc<Mutex<mpsc::Receiver<bool>>>,
     remote_addr: std::net::SocketAddr,
+    _tasks: Arc<TransportTasks>,
 }
 
 impl Http2Session {
@@ -25,11 +38,24 @@ impl Http2Session {
         self.remote_addr
     }
 
-    pub(in crate::vpn_core) fn send_packet_blocking(&self, packet: Bytes) -> Result<()> {
-        let capsule = Bytes::from(masque::encode_connect_ip_datagram_capsule(&packet));
-        self.outbound
-            .blocking_send(capsule)
-            .map_err(|_| anyhow::anyhow!("HTTP/2 CONNECT-IP send task stopped"))
+    pub(in crate::vpn_core) fn send_packet_blocking(
+        &self,
+        packet: Bytes,
+        running: &AtomicBool,
+        alive: &AtomicBool,
+    ) -> Result<()> {
+        let mut capsule = Bytes::from(masque::encode_connect_ip_datagram_capsule(&packet));
+        while running.load(Ordering::Relaxed) && alive.load(Ordering::Relaxed) {
+            match self.outbound.try_send(capsule) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Full(value)) => {
+                    capsule = value;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => break,
+            }
+        }
+        anyhow::bail!("HTTP/2 CONNECT-IP send stopped")
     }
 
     pub(in crate::vpn_core) async fn recv_packet(&self) -> Result<Bytes> {
@@ -128,9 +154,13 @@ async fn establish_h2(
         .handshake(tls)
         .await
         .context("HTTP/2 client handshake failed")?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
+    let mut tasks = TransportTasks::default();
+    tasks.0.push(
+        tokio::spawn(async move {
+            let _ = connection.await;
+        })
+        .abort_handle(),
+    );
     sender
         .clone()
         .ready()
@@ -171,14 +201,19 @@ async fn establish_h2(
     let (outbound, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (inbound_tx, inbound) = mpsc::channel(CHANNEL_CAPACITY);
     let (reauth_tx, reauth_results) = mpsc::channel(CHANNEL_CAPACITY);
-    tokio::spawn(send_capsules(send_stream, outbound_rx));
-    tokio::spawn(receive_capsules(recv_stream, buffer, inbound_tx, reauth_tx));
+    tasks
+        .0
+        .push(tokio::spawn(send_capsules(send_stream, outbound_rx)).abort_handle());
+    tasks.0.push(
+        tokio::spawn(receive_capsules(recv_stream, buffer, inbound_tx, reauth_tx)).abort_handle(),
+    );
     Ok((
         Http2Session {
             outbound,
             inbound: Arc::new(Mutex::new(inbound)),
             reauth_results: Arc::new(Mutex::new(reauth_results)),
             remote_addr,
+            _tasks: Arc::new(tasks),
         },
         config,
     ))
@@ -270,6 +305,52 @@ async fn receive_capsules(
                 }
             }
             None | Some(Err(_)) => return,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_upload_queue_can_be_stopped_without_peer_progress() {
+        for stop_session in [false, true] {
+            let (outbound, _receiver) = mpsc::channel(1);
+            outbound.try_send(Bytes::from_static(b"full")).unwrap();
+            let (_, inbound) = mpsc::channel(1);
+            let (_, results) = mpsc::channel(1);
+            let connection = Http2Session {
+                outbound,
+                inbound: Arc::new(Mutex::new(inbound)),
+                reauth_results: Arc::new(Mutex::new(results)),
+                remote_addr: "127.0.0.1:443".parse().unwrap(),
+                _tasks: Arc::default(),
+            };
+            let running = Arc::new(AtomicBool::new(true));
+            let alive = Arc::new(AtomicBool::new(true));
+            let run = running.clone();
+            let live = alive.clone();
+            let (done, result) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                done.send(connection.send_packet_blocking(
+                    Bytes::from_static(b"packet"),
+                    &run,
+                    &live,
+                ))
+                .unwrap();
+            });
+            assert!(result.recv_timeout(Duration::from_millis(30)).is_err());
+            if stop_session {
+                alive.store(false, Ordering::SeqCst);
+            } else {
+                running.store(false, Ordering::SeqCst);
+            }
+            assert!(result
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_err());
+            thread.join().unwrap();
         }
     }
 }

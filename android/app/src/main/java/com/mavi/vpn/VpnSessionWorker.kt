@@ -26,12 +26,19 @@ internal class VpnSessionWorker(
     private val tokenManager: KeycloakTokenManager,
     private val handleRegistry: SessionHandleRegistry,
     private val sessionGeneration: Long,
+    private val initId: Long,
     private val callbacks: VpnSessionCallbacks,
 ) {
-    fun createThread(): Thread = Thread { runSessionLoop() }
+    fun createThread(): Thread =
+        Thread {
+            try {
+                runSessionLoop()
+            } finally {
+                NativeLib.cancelInit(initId)
+            }
+        }
 
-    private fun isCurrentSessionActive(): Boolean =
-        callbacks.isRunning() && handleRegistry.isCurrent(sessionGeneration)
+    private fun isCurrentSessionActive(): Boolean = callbacks.isRunning() && handleRegistry.isCurrent(sessionGeneration)
 
     private fun runSessionLoop() {
         Log.d("MaviVPN", "Starting VPN Thread")
@@ -50,9 +57,10 @@ internal class VpnSessionWorker(
                 while (isCurrentSessionActive()) {
                     if (prefs.savedUseKeycloak) {
                         when (
-                            val tokenResult = runBlocking {
-                                tokenManager.getUsableAccessToken(skewSeconds = 300)
-                            }
+                            val tokenResult =
+                                runBlocking {
+                                    tokenManager.getUsableAccessToken(skewSeconds = 300)
+                                }
                         ) {
                             is TokenAcquireResult.Usable -> {
                                 currentToken = tokenResult.accessToken
@@ -112,10 +120,14 @@ internal class VpnSessionWorker(
                             prefs.savedHttp2Framing,
                             prefs.savedEchConfig,
                             prefs.savedVpnMtu,
+                            initId,
                         )
                     // Valid 64-bit pointers on Android MTE/TBI can be negative when cast to a signed Long.
                     // NativeLib error codes are strictly in the range [-3, 0].
                     if (handle in -3L..0L) {
+                        if (!isCurrentSessionActive()) {
+                            break
+                        }
                         val initError = NativeLib.getLastInitError()
                         if (handle < 0L) {
                             val retryToken =

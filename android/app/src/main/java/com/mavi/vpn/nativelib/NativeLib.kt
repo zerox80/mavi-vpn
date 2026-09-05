@@ -7,6 +7,10 @@ object NativeLib {
         System.loadLibrary("mavivpn")
     }
 
+    external fun prepareInit(): Long
+
+    external fun cancelInit(id: Long)
+
     external fun init(
         service: MaviVpnService,
         token: String,
@@ -17,6 +21,7 @@ object NativeLib {
         http2Framing: Boolean,
         echConfig: String,
         vpnMtu: Int,
+        initId: Long,
     ): Long
 
     external fun getLastInitError(): String

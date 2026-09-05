@@ -8,7 +8,7 @@ mod ipc;
 mod oauth;
 mod secrets;
 
-use client_ipc::send_request;
+use client_ipc::{send_request, start_request};
 use client_prompt::{interactive_mode, load_or_prompt_config, read_line};
 use ipc::IpcRequest;
 
@@ -41,7 +41,7 @@ async fn dispatch_cli(args: &[String]) -> Result<()> {
     match cmd.as_str() {
         "start" => {
             let config = load_or_prompt_config().await?;
-            send_request(IpcRequest::Start(config)).await
+            send_request(start_request(config)).await
         }
         "stop" => send_request(IpcRequest::Stop).await,
         "status" => send_request(IpcRequest::Status).await,

@@ -194,7 +194,7 @@ python3 install_cli_linux.py       # Installs CLI + optional systemd service
 python3 install_gui_linux.py       # Installs Tauri GUI (deb/rpm/AppImage)
 ```
 
-The CLI installer creates the `mavivpn` group and adds your desktop user so the GUI/CLI can control the root daemon after you log out and back in.
+The CLI and GUI installers create the `mavivpn` group and add your desktop user so the GUI/CLI can control the root daemon after you log out and back in. DEB/RPM packages also create this group and add the invoking `sudo` user when available. When installing through a graphical package manager or directly as root, explicitly grant a trusted user access with `sudo usermod -aG mavivpn USER`, then log out and back in.
 
 **Usage:**
 ```bash

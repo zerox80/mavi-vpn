@@ -1,14 +1,12 @@
 use base64::Engine;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
-use tracing::{info, warn};
+use tracing::info;
 
 use super::named_pipe;
 use super::state::VpnServiceState;
-use super::utils::{
-    prepare_ipc_auth_token, reharden_ipc_token_permissions, run_network_repair_cleanup,
-};
+use super::utils::{prepare_ipc_auth_token, run_network_repair_cleanup};
 use crate::ipc;
 
 pub const MAX_CONCURRENT_IPC_CLIENTS: usize = 32;
@@ -40,34 +38,14 @@ pub async fn run_service_loop(
     let auth_token = Arc::new(auth_token);
     let ipc_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_IPC_CLIENTS));
 
-    // The named-pipe re-harden signal (fast-user-switching) is a no-op for
-    // the pipe itself: each recycled instance computes its ACL fresh from
-    // the current console user (see `named_pipe::create_pipe_instance`). The
-    // token file's ACL still needs the explicit re-harden below.
-    let reharden_task = {
-        let stop_signal = stop_signal.clone();
-        let reharden_signal = reharden_signal.clone();
-        let token_path = token_path.clone();
-        tokio::spawn(async move {
-            loop {
-                if stop_signal.load(Ordering::SeqCst) {
-                    break;
-                }
-                if reharden_signal.swap(false, Ordering::SeqCst) {
-                    info!("Re-hardening IPC token ACL after session change");
-                    if let Err(e) = reharden_ipc_token_permissions(&token_path) {
-                        warn!("Failed to re-harden IPC token ACL after session change: {e:#}");
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-        })
-    };
-
-    let result =
-        named_pipe::accept_loop(state.clone(), auth_token, ipc_slots, stop_signal.clone()).await;
-
-    reharden_task.abort();
+    let result = named_pipe::accept_loop(
+        state.clone(),
+        auth_token,
+        ipc_slots,
+        stop_signal,
+        reharden_signal,
+    )
+    .await;
 
     info!("Stop signal flag is true, terminating service loop.");
     let task = {

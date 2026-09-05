@@ -8,6 +8,7 @@
 //! for callers is unchanged — only the transport primitive differs.
 
 use std::ffi::c_void;
+use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,11 +19,13 @@ use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::Security::{
+    SetKernelObjectSecurity, DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES,
+};
 
 use super::handlers::handle_ipc_client;
 use super::state::VpnServiceState;
-use super::utils::ipc_pipe_sddl;
+use super::utils::{ipc_pipe_sddl, reharden_ipc_token_permissions};
 use crate::ipc;
 
 /// Owns a self-relative security descriptor allocated by
@@ -95,6 +98,7 @@ fn create_pipe_instance_at(
     let server = unsafe {
         ServerOptions::new()
             .first_pipe_instance(first)
+            .write_dac(true)
             .reject_remote_clients(true)
             .in_buffer_size(65536)
             .out_buffer_size(65536)
@@ -114,6 +118,26 @@ fn create_pipe_instance(first: bool) -> anyhow::Result<NamedPipeServer> {
     create_pipe_instance_at(ipc::ipc_pipe_name(), first, &ipc_pipe_sddl())
 }
 
+#[allow(unsafe_code)]
+fn update_pipe_acl(pipe: &NamedPipeServer, sddl: &str) -> anyhow::Result<()> {
+    let (attrs, _guard) = build_security_attributes(sddl)?;
+    // The live pipe owns this handle and the descriptor remains valid for the call.
+    let ok = unsafe {
+        SetKernelObjectSecurity(
+            pipe.as_raw_handle(),
+            DACL_SECURITY_INFORMATION,
+            attrs.lpSecurityDescriptor,
+        )
+    };
+    if ok == 0 {
+        anyhow::bail!(
+            "Failed to update IPC pipe ACL: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
 /// Serves IPC clients over the named pipe until `stop_signal` is set.
 ///
 /// The instance-recycling step (creating the next instance immediately after
@@ -128,12 +152,25 @@ pub async fn accept_loop(
     auth_token: Arc<String>,
     ipc_slots: Arc<Semaphore>,
     stop_signal: Arc<AtomicBool>,
+    reharden_signal: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let mut current = create_pipe_instance(true)?;
 
     loop {
         if stop_signal.load(Ordering::SeqCst) {
             break;
+        }
+        if reharden_signal.swap(false, Ordering::SeqCst) {
+            // Update the already-listening instance: an unprivileged client cannot
+            // connect to a pre-login pipe just to trigger instance recycling.
+            if let Err(error) = update_pipe_acl(&current, &ipc_pipe_sddl()) {
+                warn!("Failed to refresh IPC pipe permissions: {error:#}");
+                reharden_signal.store(true, Ordering::SeqCst);
+            }
+            if let Err(error) = reharden_ipc_token_permissions(&ipc::ipc_token_path()) {
+                warn!("Failed to refresh IPC token permissions: {error:#}");
+                reharden_signal.store(true, Ordering::SeqCst);
+            }
         }
 
         tokio::select! {
@@ -251,5 +288,20 @@ mod tests {
 
         connect_fut.await.expect("server accepts connection");
         drop(client);
+    }
+
+    #[tokio::test]
+    async fn waiting_pipe_accepts_clients_after_acl_refresh() {
+        let name = unique_test_pipe_name();
+        let server = create_pipe_instance_at(&name, true, TEST_SDDL_EVERYONE_FULL_CONTROL)
+            .expect("create server");
+        update_pipe_acl(&server, "D:P(D;;GW;;;WD)(A;;GA;;;WD)").unwrap();
+        let options = tokio::net::windows::named_pipe::ClientOptions::new();
+        assert!(options.open(&name).is_err());
+        update_pipe_acl(&server, TEST_SDDL_EVERYONE_FULL_CONTROL).unwrap();
+        let _client = options
+            .open(&name)
+            .expect("login grants access to the same instance");
+        server.connect().await.unwrap();
     }
 }

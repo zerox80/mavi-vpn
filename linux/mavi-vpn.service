@@ -32,6 +32,8 @@ RuntimeDirectory=mavi-vpn
 RuntimeDirectoryMode=0711
 StateDirectory=mavi-vpn
 StateDirectoryMode=0700
+# Resolver fallback writes the existing file in place, preserving symlinks and
+# working through this file bind mount without making /etc writable.
 ReadWritePaths=/run/mavi-vpn /var/lib/mavi-vpn /etc/resolv.conf -/run/systemd/resolve
 
 [Install]

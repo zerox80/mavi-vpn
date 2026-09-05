@@ -18,6 +18,7 @@ class MaviVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
 
     @Volatile private var thread: Thread? = null
+    private var initId = 0L
 
     private var connectivityManager: ConnectivityManager? = null
 
@@ -76,6 +77,7 @@ class MaviVpnService : VpnService() {
         val cleanup = invalidateCurrentSession()
         stopCurrentSession(cleanup)
         val sessionGeneration = cleanup.generation
+        initId = NativeLib.prepareInit()
 
         registerNetworkCallback(sessionGeneration)
 
@@ -104,6 +106,7 @@ class MaviVpnService : VpnService() {
                 tokenManager = tokenManager,
                 handleRegistry = handleRegistry,
                 sessionGeneration = sessionGeneration,
+                initId = initId,
                 callbacks = callbacks,
             ).createThread()
         thread = sessionThread
@@ -166,6 +169,8 @@ class MaviVpnService : VpnService() {
     private fun invalidateCurrentSession(): SessionCleanup {
         synchronized(vpnLock) {
             val invalidation = handleRegistry.invalidate()
+            NativeLib.cancelInit(initId)
+            initId = 0L
             if (invalidation.previousHandle != 0L) {
                 // The worker frees this handle after its native loop exits. Do
                 // the stop while retaining the same monitor used by callbacks

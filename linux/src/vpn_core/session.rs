@@ -62,8 +62,35 @@ pub async fn run_vpn(
     )?;
 
     let mut backoff = Duration::from_secs(RECONNECT_INITIAL_SECS);
+    let refresher =
+        super::kc_refresh::TokenRefresher::new(&config, current_token.clone(), refresh_token);
+    let refresh_task = refresher
+        .as_ref()
+        .map(|r| r.spawn(running.clone(), last_error.clone()));
 
     while running.load(Ordering::Relaxed) {
+        // An outage may outlast the access token. Renew before authentication
+        // instead of submitting an expired token and treating rejection as fatal.
+        if let Some(refresher) = &refresher {
+            let refreshed = tokio::select! {
+                result = refresher.refresh_if_needed(30) => result,
+                () = wait_until_stopped(&running) => break,
+            };
+            if let Err(error) = refreshed {
+                let message = error.message();
+                warn!("{message}");
+                if let Ok(mut last) = last_error.lock() {
+                    *last = Some(message);
+                }
+                if matches!(error, super::kc_refresh::RefreshError::NeedsLogin(_)) {
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                sleep_unless_stopped(backoff, &running).await;
+                backoff = (backoff * 2).min(Duration::from_secs(RECONNECT_MAX_SECS));
+                continue;
+            }
+        }
         let outcome = run_session(
             &config,
             &cert_pin_hashes,
@@ -72,7 +99,6 @@ pub async fn run_vpn(
             &last_error,
             &assigned_ip,
             &current_token,
-            &refresh_token,
         )
         .await;
 
@@ -115,6 +141,9 @@ pub async fn run_vpn(
         backoff = next_backoff;
     }
 
+    if let Some(task) = refresh_task {
+        task.abort();
+    }
     info!("VPN stopped.");
     Ok(())
 }
@@ -129,7 +158,6 @@ async fn run_session(
     last_error_state: &Arc<StdMutex<Option<String>>>,
     assigned_ip_state: &Arc<StdMutex<Option<String>>>,
     current_token: &Arc<StdMutex<String>>,
-    refresh_token: &Arc<StdMutex<Option<String>>>,
 ) -> Result<SessionEnd> {
     let socket = super::socket::create_udp_socket()?;
 
@@ -269,29 +297,6 @@ async fn run_session(
         token,
     );
 
-    // Task: background Keycloak access-token refresh. Renews the short-lived
-    // access token using the long-lived refresh token and writes it into
-    // current_token so the in-band reauth task can push it to the server.
-    let kc_refresh_task = if config.kc_auth.unwrap_or(false) {
-        let kc_url = config.kc_url.clone().unwrap_or_default();
-        let realm = config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into());
-        let client_id = config
-            .kc_client_id
-            .clone()
-            .unwrap_or_else(|| "mavi-client".into());
-        Some(super::kc_refresh::spawn_refresh_task(
-            current_token.clone(),
-            refresh_token.clone(),
-            global_running.clone(),
-            session_alive.clone(),
-            kc_url,
-            realm,
-            client_id,
-        ))
-    } else {
-        None
-    };
-
     // Task: MTU Monitor
     let conn_monitor = connection.quic().cloned();
     let alive_monitor = session_alive.clone();
@@ -358,9 +363,6 @@ async fn run_session(
         task.abort();
     }
     reauth_task.abort();
-    if let Some(task) = kc_refresh_task {
-        task.abort();
-    }
 
     // Cleanup networking
     net_config.cleanup();

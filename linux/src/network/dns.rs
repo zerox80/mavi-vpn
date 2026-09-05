@@ -83,7 +83,7 @@ pub(super) fn configure_dns(
         content.push_str(&format!("nameserver {}\n", v6));
     }
 
-    atomic_write_resolv_conf(content.as_bytes())
+    write_resolver_file(std::path::Path::new(RESOLV_CONF_PATH), content.as_bytes())
         .context("Failed to write /etc/resolv.conf. Are you running as root?")?;
 
     Ok((backup, false))
@@ -159,7 +159,7 @@ pub(super) fn restore_dns(backup: &Option<Vec<u8>>, used_resolvconf: bool) {
 }
 
 fn write_resolv_conf(data: &[u8], source_label: &str) -> bool {
-    match atomic_write_resolv_conf(data) {
+    match write_resolver_file(std::path::Path::new(RESOLV_CONF_PATH), data) {
         Ok(()) => {
             info!("Restored /etc/resolv.conf from {}", source_label);
             true
@@ -174,12 +174,17 @@ fn write_resolv_conf(data: &[u8], source_label: &str) -> bool {
     }
 }
 
-/// Atomically writes data to /etc/resolv.conf via write-to-temp + rename.
-/// This prevents a truncated resolv.conf if the process is killed mid-write.
-fn atomic_write_resolv_conf(data: &[u8]) -> std::io::Result<()> {
-    let tmp_path = format!("{RESOLV_CONF_PATH}.mavi-tmp");
-    std::fs::write(&tmp_path, data)?;
-    std::fs::rename(&tmp_path, RESOLV_CONF_PATH)
+/// Update the existing inode, following resolver-manager symlinks. Renaming
+/// would destroy those links and cannot work on systemd's writable file bind
+/// mount. The durable backup is saved before mutation for crash recovery.
+fn write_resolver_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(data)?;
+    file.sync_all()
 }
 
 /// Writes the pre-VPN resolv.conf to a durable location that survives crashes.
@@ -277,6 +282,27 @@ pub(super) fn is_mavi_generated_resolv_conf(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolver_update_preserves_symlink_inode_and_permissions() {
+        use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("managed-resolv.conf");
+        let link = dir.path().join("resolv.conf");
+        let original = b"nameserver 192.0.2.1\nsearch local.example\n";
+        std::fs::write(&target, original).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, &link).unwrap();
+        let before = std::fs::metadata(&target).unwrap();
+        write_resolver_file(&link, b"nameserver 10.8.0.1\n").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"nameserver 10.8.0.1\n");
+        write_resolver_file(&link, original).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(std::fs::read(&link).unwrap(), original);
+        let after = std::fs::metadata(&target).unwrap();
+        assert_eq!(before.ino(), after.ino());
+        assert_eq!(before.mode(), after.mode());
+    }
 
     #[derive(Default)]
     struct DnsRunner {

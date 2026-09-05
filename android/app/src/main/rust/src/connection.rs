@@ -244,16 +244,22 @@ pub async fn connect_and_handshake(
     for addr in addrs {
         info!("Connecting to {addr} (SNI: {server_name})");
         match endpoint.connect(addr, &server_name) {
-            Ok(connecting) => match connecting.await {
-                Ok(conn) => {
-                    connection = Some(conn);
-                    break;
+            Ok(connecting) => {
+                match tokio::time::timeout(Duration::from_secs(5), connecting).await {
+                    Ok(Ok(conn)) => {
+                        connection = Some(conn);
+                        break;
+                    }
+                    Ok(Err(err)) => {
+                        info!("QUIC handshake to {addr} failed: {err}");
+                        last_error = Some(anyhow::Error::from(err));
+                    }
+                    Err(_) => {
+                        info!("QUIC handshake to {addr} timed out; trying the next address");
+                        last_error = Some(anyhow::anyhow!("QUIC handshake to {addr} timed out"));
+                    }
                 }
-                Err(err) => {
-                    info!("QUIC handshake to {addr} failed: {err}");
-                    last_error = Some(anyhow::Error::from(err));
-                }
-            },
+            }
             Err(err) => {
                 info!("endpoint.connect() failed for {addr}: {err}");
                 last_error = Some(anyhow::Error::from(err));

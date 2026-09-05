@@ -1,9 +1,4 @@
-//! Background Keycloak access-token refresh for the live Linux session.
-//!
-//! When the VPN was started with a Keycloak refresh token, this task renews the
-//! short-lived access token before it expires and writes the fresh token into
-//! `current_token`. The existing in-band reauth task picks it up and presents it
-//! to the server, so the live tunnel survives the original token's expiry.
+//! Keycloak refresh lives for the whole VPN run, including reconnect backoff.
 
 use shared::kc_oauth::{self, RefreshOutcome};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,68 +6,140 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tracing::{info, warn};
 
-/// Refresh the access token this many seconds before its `exp`, leaving headroom
-/// for the refresh round-trip and the in-band reauth exchange.
-const REFRESH_SKEW_SECS: u64 = 300;
-
-/// How often the background task checks whether the access token needs renewal.
-const REFRESH_TICK: Duration = Duration::from_secs(30);
-
-/// Spawns a background task that silently refreshes the Keycloak access token
-/// while the VPN session is active. Exits when either `running` or
-/// `session_alive` is cleared.
-pub(super) fn spawn_refresh_task(
+pub(super) struct TokenRefresher {
     current_token: Arc<StdMutex<String>>,
     refresh_token: Arc<StdMutex<Option<String>>>,
-    running: Arc<AtomicBool>,
-    session_alive: Arc<AtomicBool>,
+    refresh_lock: tokio::sync::Mutex<()>,
     kc_url: String,
     realm: String,
     client_id: String,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        while running.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
-            tokio::time::sleep(REFRESH_TICK).await;
-            if !running.load(Ordering::Relaxed) || !session_alive.load(Ordering::Relaxed) {
-                break;
-            }
+}
 
-            let token = match current_token.lock() {
-                Ok(t) => t.clone(),
-                Err(_) => continue,
-            };
-            if kc_oauth::is_access_token_usable(&token, REFRESH_SKEW_SECS) {
-                continue;
-            }
+#[derive(Debug)]
+pub(super) enum RefreshError {
+    Temporary(String),
+    NeedsLogin(String),
+}
 
-            let refresh = match refresh_token.lock() {
-                Ok(guard) => guard.clone().filter(|r| !r.is_empty()),
-                Err(_) => None,
-            };
-            let Some(refresh) = refresh else {
-                warn!("Keycloak refresh token unavailable; session will expire");
-                break;
-            };
-
-            match kc_oauth::refresh_access_token(&kc_url, &realm, &client_id, &refresh).await {
-                RefreshOutcome::Success(tokens) => {
-                    if let Ok(mut current) = current_token.lock() {
-                        *current = tokens.access_token.clone();
-                    }
-                    if let Ok(mut stored) = refresh_token.lock() {
-                        *stored = tokens.refresh_token.clone();
-                    }
-                    info!("Keycloak access token refreshed in the background");
-                }
-                RefreshOutcome::NetworkError(e) => {
-                    warn!("Keycloak refresh failed (network): {e}; retrying later");
-                }
-                RefreshOutcome::NeedsLogin(e) => {
-                    warn!("Keycloak refresh rejected: {e}; session cannot be extended");
-                    session_alive.store(false, Ordering::SeqCst);
-                    break;
-                }
+impl RefreshError {
+    pub(super) fn message(&self) -> String {
+        match self {
+            Self::Temporary(message) => format!("Keycloak refresh temporarily failed: {message}"),
+            Self::NeedsLogin(message) => {
+                format!("{} {message}", shared::ipc::KEYCLOAK_LOGIN_REQUIRED_PREFIX)
             }
         }
-    })
+    }
 }
+
+impl TokenRefresher {
+    pub(super) fn new(
+        config: &shared::ipc::Config,
+        current_token: Arc<StdMutex<String>>,
+        refresh_token: Arc<StdMutex<Option<String>>>,
+    ) -> Option<Arc<Self>> {
+        config.kc_auth.unwrap_or(false).then(|| {
+            Arc::new(Self {
+                current_token,
+                refresh_token,
+                refresh_lock: tokio::sync::Mutex::new(()),
+                kc_url: config.kc_url.clone().unwrap_or_default(),
+                realm: config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into()),
+                client_id: config
+                    .kc_client_id
+                    .clone()
+                    .unwrap_or_else(|| "mavi-client".into()),
+            })
+        })
+    }
+
+    /// Serialize reconnect and background refreshes so a rotated refresh token
+    /// cannot be submitted twice. Recheck the access token after taking the lock.
+    pub(super) async fn refresh_if_needed(&self, skew_secs: u64) -> Result<(), RefreshError> {
+        self.refresh_with(skew_secs, |refresh| async move {
+            kc_oauth::refresh_access_token(&self.kc_url, &self.realm, &self.client_id, &refresh)
+                .await
+        })
+        .await
+    }
+
+    async fn refresh_with<F, Fut>(&self, skew_secs: u64, exchange: F) -> Result<(), RefreshError>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = RefreshOutcome>,
+    {
+        let _lock = self.refresh_lock.lock().await;
+        let token = self
+            .current_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if kc_oauth::is_access_token_usable(&token, skew_secs) {
+            return Ok(());
+        }
+        let refresh = self
+            .refresh_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .filter(|r| !r.is_empty());
+        let Some(refresh) = refresh else {
+            // A login without a refresh token remains usable until expiry.
+            return if kc_oauth::is_access_token_usable(&token, 0) {
+                Ok(())
+            } else {
+                Err(RefreshError::NeedsLogin(
+                    "No refresh token available".into(),
+                ))
+            };
+        };
+        match exchange(refresh).await {
+            RefreshOutcome::Success(tokens) => {
+                *self
+                    .current_token
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = tokens.access_token;
+                if let Some(refresh) = tokens.refresh_token {
+                    *self
+                        .refresh_token
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(refresh);
+                }
+                info!("Keycloak access token refreshed");
+                Ok(())
+            }
+            RefreshOutcome::NetworkError(message) => Err(RefreshError::Temporary(message)),
+            RefreshOutcome::NeedsLogin(message) => Err(RefreshError::NeedsLogin(message)),
+        }
+    }
+
+    pub(super) fn spawn(
+        self: &Arc<Self>,
+        running: Arc<AtomicBool>,
+        last_error: Arc<StdMutex<Option<String>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let refresher = self.clone();
+        tokio::spawn(async move {
+            while running.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Err(error) = refresher.refresh_if_needed(300).await {
+                    warn!("{}", error.message());
+                    if matches!(error, RefreshError::NeedsLogin(_)) {
+                        *last_error
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(error.message());
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests;

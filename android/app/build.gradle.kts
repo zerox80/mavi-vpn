@@ -1,8 +1,8 @@
 import org.apache.tools.ant.taskdefs.condition.Os
 import org.gradle.api.GradleException
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.gradle.testing.jacoco.tasks.JacocoCoverageVerification
 import org.gradle.testing.jacoco.tasks.JacocoReport
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.net.URI
 
 plugins {
@@ -40,9 +40,10 @@ fun isHttpsAppLinkRedirect(uri: URI): Boolean =
 android {
     namespace = "com.mavi.vpn"
     compileSdk {
-        version = release(37) {
-            minorApiLevel = 1
-        }
+        version =
+            release(37) {
+                minorApiLevel = 1
+            }
     }
     ndkVersion = "28.1.13356709"
 

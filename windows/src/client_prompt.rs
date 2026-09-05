@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::{self, Write};
 
 use crate::client_config::{load_config, save_config};
-use crate::client_ipc::{send_request, send_request_internal};
+use crate::client_ipc::{send_request, send_request_internal, start_request};
 use crate::ipc::{Config, IpcRequest, IpcResponse};
 use crate::oauth;
 use shared::kc_oauth::RefreshOutcome;
@@ -31,7 +31,7 @@ pub(crate) async fn interactive_mode() -> Result<()> {
         Ok(IpcResponse::Status { running: false, .. }) => {
             println!("VPN is disconnected.");
             let config = load_or_prompt_config().await?;
-            send_request(IpcRequest::Start(config)).await?;
+            send_request(start_request(config)).await?;
             println!("\nVPN is now CONNECTED!");
             println!("To safely DISCONNECT and exit, press Enter...");
             let _ = read_line();

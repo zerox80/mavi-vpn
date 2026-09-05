@@ -7,6 +7,29 @@ use crate::ipc::{self, IpcRequest, IpcResponse};
 
 const MAX_IPC_RESPONSE_BYTES: usize = 65_536;
 
+pub(crate) fn start_request(config: ipc::Config) -> IpcRequest {
+    if config.kc_auth.unwrap_or(false) {
+        if let Some(refresh_token) = config
+            .refresh_token
+            .clone()
+            .filter(|token| !token.is_empty())
+        {
+            let keycloak = ipc::KeycloakRuntimeAuth {
+                connection_id: "windows-cli".into(),
+                kc_url: config.kc_url.clone().unwrap_or_default(),
+                realm: config.kc_realm.clone().unwrap_or_else(|| "mavi-vpn".into()),
+                client_id: config
+                    .kc_client_id
+                    .clone()
+                    .unwrap_or_else(|| "mavi-client".into()),
+                refresh_token,
+            };
+            return IpcRequest::StartWithKeycloak { config, keycloak };
+        }
+    }
+    IpcRequest::Start(config)
+}
+
 /// Windows returns this OS error when every server-side pipe instance is
 /// momentarily connected (`ERROR_PIPE_BUSY`) — unlike TCP's backlog queue, a
 /// named pipe client must retry rather than block.

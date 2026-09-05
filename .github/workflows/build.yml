@@ -46,7 +46,7 @@ jobs:
 
       - name: Package DEB and RPM
         run: |
-          VERSION="0.1.0"
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
           mkdir -p dist
           fpm -s dir -t deb -n mavi-vpn-cli -v $VERSION \
             --after-install gui/src-tauri/linux/postinst \

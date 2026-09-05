@@ -21,6 +21,15 @@ Der **Service** muss einmalig als Administrator installiert werden und läuft da
 - Windows 10 / 11 (x64)
 - Administrator-Rechte für die **einmalige** Service-Installation
 - WinTUN ist eingebettet – kein separater Download nötig
+- `%ProgramData%\mavi-vpn` und seine privilegierten Dateien müssen SYSTEM,
+  Administratoren oder TrustedInstaller gehören. Vorhandene Pfade mit einem
+  anderen Eigentümer sowie Junctions/Symlinks werden abgewiesen. Bei einem
+  solchen Fehler den Dienst stoppen und die betroffenen Dienstpfade durch
+  einen Administrator prüfen und neu anlegen lassen. Die geprüfte WinTUN-DLL
+  bleibt während ihrer Nutzung gegen Schreiben und Austausch gesperrt.
+- Der Server muss eine vollständige IPv6-Tunnelkonfiguration liefern. Bei einer
+  reinen IPv4-Zuweisung bricht der Windows-Client vor der Netzwerkkonfiguration
+  mit `IPV6_SETUP_FAILED` ab, damit IPv6-Verbindungen nicht den VPN umgehen.
 
 ---
 

@@ -11,6 +11,8 @@ use tokio_rustls::TlsConnector;
 
 const TEST_TOKEN: &str = "http2-e2e-token";
 
+mod authentication;
+
 fn connect_ip_request(path: &str) -> Request<()> {
     let mut request = Request::builder()
         .method(Method::CONNECT)
@@ -88,7 +90,11 @@ fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr) -> Bytes {
 async fn connect_client(
     addr: SocketAddr,
     trusted_cert: CertificateDer<'static>,
-) -> (h2::client::SendRequest<Bytes>, tokio::task::JoinHandle<()>) {
+) -> (
+    h2::client::SendRequest<Bytes>,
+    h2::PingPong,
+    tokio::task::JoinHandle<()>,
+) {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(trusted_cert).unwrap();
     let mut tls_config = rustls::ClientConfig::builder_with_provider(
@@ -107,11 +113,13 @@ async fn connect_client(
         .unwrap();
     assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
 
-    let (sender, connection) = h2::client::handshake(tls).await.unwrap();
+    let (sender, mut connection) = h2::client::handshake(tls).await.unwrap();
+    let ping_pong = connection.ping_pong().unwrap();
     let driver = tokio::spawn(async move {
-        connection.await.unwrap();
+        // Authentication deadline tests intentionally close the transport.
+        let _ = connection.await;
     });
-    (sender, driver)
+    (sender, ping_pong, driver)
 }
 
 async fn wait_for_extended_connect(sender: &mut h2::client::SendRequest<Bytes>) {
@@ -176,7 +184,7 @@ async fn tls_h2_connect_ip_moves_packets_in_both_directions() {
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(listener.run());
 
-    let (mut sender, driver) = connect_client(addr, trusted_cert).await;
+    let (mut sender, _ping_pong, driver) = connect_client(addr, trusted_cert).await;
     wait_for_extended_connect(&mut sender).await;
     let mut request = Request::builder()
         .method(Method::CONNECT)

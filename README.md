@@ -238,6 +238,12 @@ Mavi VPN offers several mutually exclusive transport modes:
 
 HTTP/2 mode requires `VPN_HTTP2_BIND_ADDR=0.0.0.0:10443` (or another TCP port) on the server and the **HTTP/2 CONNECT-IP** option on the client. It is mutually exclusive with CR mode, HTTP/3 framing, and ECH. The server and clients exchange real HTTP/2 frames and CONNECT-IP capsules. Unlike the QUIC data plane, HTTP/2 capsules are reliable and ordered because they run over TLS/TCP; traffic volume and timing can still differ from ordinary browsing.
 
+The HTTP/2 listener allows at most 100 connections awaiting TLS or VPN authentication,
+within its overall 1,000-connection limit. TLS must complete within 10 seconds;
+the first authenticated CONNECT-IP must then succeed within another 10 seconds.
+HTTP requests and PINGs do not extend this deadline. Authenticated tunnels release
+the pending-authentication slot and are not subject to this setup deadline.
+
 When CR Mode is enabled, the server responds to unauthorized connections with a fabricated HTTP/3 nginx welcome page, improving resistance to simple active probes.
 
 On Windows and Linux QUIC clients, an administrator-provided `ECHConfigList` configures rustls `EchMode::Grease` and a cover SNI. Android can use the config's `public_name` as its SNI but does not emit an ECH extension because its `ring` provider lacks HPKE. The server persists ECH config/key artifacts but does not currently decrypt an inner ClientHello, so this is camouflage and compatibility testing rather than full end-to-end ECH confidentiality. ECH is RFC 9849; its HPKE building block is RFC 9180. HTTP/2 mode does not use ECH.

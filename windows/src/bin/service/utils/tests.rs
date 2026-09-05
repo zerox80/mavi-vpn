@@ -142,12 +142,18 @@ fn hardening_script_removes_stale_aces() {
         .expect("run icacls");
     assert!(plant.status.success(), "icacls grant failed");
 
+    let mut guard = crate::secure_path::lock_writable_file(&token_path).unwrap();
     let script = ipc_acl_script(
         &token_path,
         IpcAclTarget::TokenFile,
         Some(&current_user_sid),
     );
     run_powershell_script(&script).expect("hardening script must succeed");
+    guard.set_len(0).unwrap();
+    guard.write_all(b"new secret").unwrap();
+    assert!(std::fs::write(&token_path, "replacement").is_err());
+    drop(guard);
+    assert_eq!(std::fs::read_to_string(&token_path).unwrap(), "new secret");
 
     // Read the DACL back via the .NET API for the same reason the script
     // does: the Get-Acl cmdlet's Microsoft.PowerShell.Security module is
@@ -202,7 +208,11 @@ fn prepare_ipc_token_hardens_directory_before_writing_new_token() {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let calls_for_closure = calls.clone();
 
-    prepare_ipc_auth_token_with(&token_path, "secret", |path, target| {
+    prepare_ipc_auth_token_with(&token_path, "secret", |path, target, _guard| {
+        if target == IpcAclTarget::TokenFile {
+            assert!(std::fs::write(path, "attacker").is_err());
+            assert!(std::fs::remove_file(path).is_err());
+        }
         calls_for_closure
             .borrow_mut()
             .push((path.to_path_buf(), target));
@@ -233,7 +243,7 @@ fn prepare_ipc_token_hardens_existing_token_before_rewrite() {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let calls_for_closure = calls.clone();
 
-    prepare_ipc_auth_token_with(&token_path, "new", |path, target| {
+    prepare_ipc_auth_token_with(&token_path, "new", |path, target, _guard| {
         calls_for_closure
             .borrow_mut()
             .push((path.to_path_buf(), target));
@@ -243,7 +253,7 @@ fn prepare_ipc_token_hardens_existing_token_before_rewrite() {
 
     assert_eq!(std::fs::read_to_string(&token_path).unwrap(), "new");
     let calls = calls.borrow();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 2);
     assert_eq!(
         calls[0],
         (
@@ -252,7 +262,6 @@ fn prepare_ipc_token_hardens_existing_token_before_rewrite() {
         )
     );
     assert_eq!(calls[1], (token_path.clone(), IpcAclTarget::TokenFile));
-    assert_eq!(calls[2], (token_path.clone(), IpcAclTarget::TokenFile));
 }
 
 #[test]
@@ -260,7 +269,7 @@ fn prepare_ipc_token_fails_before_write_when_directory_hardening_fails() {
     let temp = tempfile::tempdir().unwrap();
     let token_path = temp.path().join("mavi-vpn").join("ipc.token");
 
-    let err = prepare_ipc_auth_token_with(&token_path, "secret", |_path, target| {
+    let err = prepare_ipc_auth_token_with(&token_path, "secret", |_path, target, _guard| {
         if target == IpcAclTarget::Directory {
             Err(anyhow!("acl failure"))
         } else {
@@ -276,28 +285,39 @@ fn prepare_ipc_token_fails_before_write_when_directory_hardening_fails() {
 }
 
 #[test]
-fn prepare_ipc_token_reports_final_file_hardening_failure() {
-    let temp = tempfile::tempdir().unwrap();
-    let token_path = temp.path().join("mavi-vpn").join("ipc.token");
-    let token_file_calls = Rc::new(RefCell::new(0usize));
-    let token_file_calls_for_closure = token_file_calls.clone();
-
-    let err = prepare_ipc_auth_token_with(&token_path, "secret", |_path, target| {
-        if target == IpcAclTarget::TokenFile {
-            let mut count = token_file_calls_for_closure.borrow_mut();
-            *count += 1;
-            if *count == 1 {
+fn prepare_ipc_token_never_writes_secret_when_file_hardening_fails() {
+    for previous in [None, Some("old token")] {
+        let temp = tempfile::tempdir().unwrap();
+        let token_path = temp.path().join("ipc.token");
+        if let Some(previous) = previous {
+            std::fs::write(&token_path, previous).unwrap();
+        }
+        let err = prepare_ipc_auth_token_with(&token_path, "secret", |_path, target, _guard| {
+            if target == IpcAclTarget::TokenFile {
                 return Err(anyhow!("acl failure"));
             }
-        }
-        Ok(())
-    })
-    .unwrap_err();
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Failed to harden IPC token permissions"));
+        assert_eq!(
+            std::fs::read_to_string(&token_path).unwrap(),
+            previous.unwrap_or_default()
+        );
+    }
+}
 
-    assert!(err
-        .to_string()
-        .contains("Failed to harden IPC token permissions"));
-    assert_eq!(std::fs::read_to_string(&token_path).unwrap(), "secret");
+#[test]
+fn prepare_ipc_token_rejects_hard_links_without_overwriting_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("original");
+    let token_path = temp.path().join("ipc.token");
+    std::fs::write(&target, "unchanged").unwrap();
+    std::fs::hard_link(&target, &token_path).unwrap();
+    assert!(prepare_ipc_auth_token_with(&token_path, "secret", |_, _, _| Ok(())).is_err());
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "unchanged");
 }
 
 #[test]

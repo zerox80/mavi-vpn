@@ -44,6 +44,21 @@ pub struct AdapterNetworkConfig {
     pub dns_v6: Option<Ipv6Addr>,
 }
 
+impl AdapterNetworkConfig {
+    fn require_ipv6_tunnel(&self) -> Result<()> {
+        // Without a complete IPv6 assignment the split routes and the later
+        // IPv6 verification would be skipped, leaving the physical default
+        // route active. Refuse the session before changing any networking.
+        match (self.assigned_ipv6, self.netmask_v6, self.gateway_v6) {
+            (Some(_), Some(0..=128), Some(_)) => Ok(()),
+            _ => anyhow::bail!(
+                "IPV6_SETUP_FAILED: The server must provide a complete IPv6 tunnel configuration. \
+                 Connection refused to prevent IPv6 traffic bypassing the VPN."
+            ),
+        }
+    }
+}
+
 /// Converts an IPv4 netmask to a CIDR prefix length. Falls back to the safe
 /// `/32` (host-only) prefix for a non-contiguous mask rather than guessing,
 /// mirroring `linux::network::routes::netmask_to_prefix`.
@@ -63,6 +78,8 @@ pub fn set_adapter_network_config(
     endpoint: &str,
     whitelist_domains: &[String],
 ) -> Result<Vec<String>> {
+    config.require_ipv6_tunnel()?;
+
     let AdapterNetworkConfig {
         ip,
         netmask,
@@ -71,8 +88,8 @@ pub fn set_adapter_network_config(
         tun_mtu,
         assigned_ipv6,
         netmask_v6,
-        gateway_v6,
         dns_v6,
+        ..
     } = config;
 
     // Resolve split-tunnel whitelist domains before this adapter's DNS server
@@ -135,9 +152,7 @@ pub fn set_adapter_network_config(
     let route_result = (|| -> Result<()> {
         install_ipv4_split_routes(adapter_index, gateway)?;
 
-        if gateway_v6.is_some() {
-            install_ipv6_split_routes(adapter_index)?;
-        }
+        install_ipv6_split_routes(adapter_index)?;
 
         Ok(())
     })();
@@ -213,6 +228,54 @@ fn install_ipv6_split_routes(adapter_index: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn complete_network_config() -> AdapterNetworkConfig {
+        AdapterNetworkConfig {
+            ip: Ipv4Addr::new(10, 8, 0, 2),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Ipv4Addr::new(10, 8, 0, 1),
+            dns: Ipv4Addr::new(9, 9, 9, 9),
+            tun_mtu: 1280,
+            assigned_ipv6: Some("fd00::2".parse().unwrap()),
+            netmask_v6: Some(64),
+            gateway_v6: Some("fd00::1".parse().unwrap()),
+            dns_v6: None,
+        }
+    }
+
+    #[test]
+    fn ipv4_only_and_partial_ipv6_assignments_are_permanent_failures() {
+        use crate::vpn_core::reconnect::{compute_reconnect_delay, ReconnectDecision};
+
+        for has_address in [false, true] {
+            for has_prefix in [false, true] {
+                for has_gateway in [false, true] {
+                    let mut config = complete_network_config();
+                    config.assigned_ipv6 = config.assigned_ipv6.filter(|_| has_address);
+                    config.netmask_v6 = config.netmask_v6.filter(|_| has_prefix);
+                    config.gateway_v6 = config.gateway_v6.filter(|_| has_gateway);
+                    let result = config.require_ipv6_tunnel();
+                    if has_address && has_prefix && has_gateway {
+                        assert!(result.is_ok());
+                    } else {
+                        let error = result.unwrap_err();
+                        assert!(error.to_string().contains("prevent IPv6 traffic bypassing"));
+                        assert!(matches!(
+                            compute_reconnect_delay(Err(error), std::time::Duration::from_secs(1)),
+                            ReconnectDecision::PermanentFailure { .. }
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_ipv6_prefix_is_rejected_before_network_setup() {
+        let mut config = complete_network_config();
+        config.netmask_v6 = Some(129);
+        assert!(config.require_ipv6_tunnel().is_err());
+    }
 
     #[test]
     fn ipv4_split_routes_install_both_halves() {

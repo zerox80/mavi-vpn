@@ -26,7 +26,7 @@ use self::reconnect::{
     compute_reconnect_delay, sleep_unless_stopped, ReconnectDecision, RECONNECT_INITIAL_SECS,
 };
 use self::runtime_state::VpnRuntimeState;
-use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter};
+use self::wintun_mod::{extract_wintun_dll, get_or_create_adapter, ExtractedDriver};
 
 #[cfg_attr(test, allow(dead_code))]
 pub fn cleanup_stale_network_state() {
@@ -35,19 +35,19 @@ pub fn cleanup_stale_network_state() {
 
 use std::sync::OnceLock;
 
-static WINTUN_ADAPTER: OnceLock<(wintun::Wintun, Arc<Adapter>)> = OnceLock::new();
+static WINTUN_ADAPTER: OnceLock<(wintun::Wintun, Arc<Adapter>, ExtractedDriver)> = OnceLock::new();
 
 fn get_global_adapter() -> Result<Arc<Adapter>> {
-    if let Some((_, adapter)) = WINTUN_ADAPTER.get() {
+    if let Some((_, adapter, _)) = WINTUN_ADAPTER.get() {
         return Ok(adapter.clone());
     }
 
     let dll_path = extract_wintun_dll()?;
     let wintun =
-        unsafe { wintun::load_from_path(&dll_path) }.context("Failed to load wintun.dll")?;
+        unsafe { wintun::load_from_path(&dll_path.path) }.context("Failed to load wintun.dll")?;
     let adapter = get_or_create_adapter(&wintun)?;
 
-    let (_, adapter) = WINTUN_ADAPTER.get_or_init(|| (wintun, adapter));
+    let (_, adapter, _) = WINTUN_ADAPTER.get_or_init(|| (wintun, adapter, dll_path));
     Ok(adapter.clone())
 }
 

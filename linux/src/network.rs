@@ -197,10 +197,7 @@ impl NetworkConfig {
             );
         } else {
             let _ = run_cmd("ip", &["-6", "route", "del", "unreachable", "::/1"]);
-            let _ = run_cmd(
-                "ip",
-                &["-6", "route", "del", "unreachable", "8000::/1"],
-            );
+            let _ = run_cmd("ip", &["-6", "route", "del", "unreachable", "8000::/1"]);
         }
 
         // Remove only the exact host-route exception we installed.
@@ -323,10 +320,7 @@ fn apply_interface_and_routes<R: CommandRunner>(
             .run("ip", &["-6", "route", "add", "unreachable", "::/1"])
             .context("Failed to install IPv6 leak-prevention route ::/1")?;
         runner
-            .run(
-                "ip",
-                &["-6", "route", "add", "unreachable", "8000::/1"],
-            )
+            .run("ip", &["-6", "route", "add", "unreachable", "8000::/1"])
             .context("Failed to install IPv6 leak-prevention route 8000::/1")?;
     }
 
@@ -363,10 +357,7 @@ pub fn cleanup_stale_network_state() {
     let _ = run_cmd("ip", &["-6", "route", "del", "::/1", "dev", "mavi0"]);
     let _ = run_cmd("ip", &["-6", "route", "del", "8000::/1", "dev", "mavi0"]);
     let _ = run_cmd("ip", &["-6", "route", "del", "unreachable", "::/1"]);
-    let _ = run_cmd(
-        "ip",
-        &["-6", "route", "del", "unreachable", "8000::/1"],
-    );
+    let _ = run_cmd("ip", &["-6", "route", "del", "unreachable", "8000::/1"]);
     let _ = run_cmd("ip", &["link", "set", "mavi0", "down"]);
 
     let current = std::fs::read(dns::RESOLV_CONF_PATH).ok();

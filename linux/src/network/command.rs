@@ -19,7 +19,7 @@ impl CommandRunner for ProductionCommandRunner {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Don't fail on "RTNETLINK answers: File exists" (route already present)
-            if stderr.contains("File exists") {
+            if cmd == "ip" && stderr.contains("RTNETLINK answers: File exists") {
                 return Ok(());
             }
             warn!("{} {} failed: {}", cmd, args.join(" "), stderr.trim());

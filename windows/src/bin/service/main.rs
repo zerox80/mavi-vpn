@@ -20,6 +20,8 @@ use windows_service::{
 mod ech_client;
 #[path = "../../ipc.rs"]
 mod ipc;
+#[path = "../../secure_path.rs"]
+mod secure_path;
 #[path = "../../vpn_core/mod.rs"]
 mod vpn_core;
 

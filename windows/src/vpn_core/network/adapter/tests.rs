@@ -1,19 +1,36 @@
 use super::*;
 
 #[test]
-fn nrpt_cleanup_removes_tagged_and_fingerprinted_policies() {
-    let script =
-        nrpt_cleanup_script_for_path(Path::new(r"C:\ProgramData\mavi-vpn\last_dns_servers.txt"));
-
-    assert!(script.contains("Remove-DnsClientNrptRule -Force"));
-    assert!(script.contains("$comment -eq 'MaviVPN'"));
-    assert!(script.contains("$displayName -eq 'MaviVPN DNS Force'"));
-    assert!(script.contains("$namespace -eq '.'"));
-    assert!(script.contains("1.1.1.1"));
-    assert!(script.contains("8.8.8.8"));
-    assert!(script.contains("2606:4700:4700::1111"));
-    assert!(script.contains("last_dns_servers.txt"));
-    assert!(script.contains("DnsPolicyConfig"));
+fn nrpt_cleanup_preserves_foreign_rules_and_removes_owned_rules() {
+    use std::io::Write;
+    use std::process::Command;
+    let cleanup = nrpt_cleanup_script_for_path(Path::new(r"C:\mock\last_dns_servers.txt"));
+    let script = include_str!("tests/nrpt_mock.ps1").replace("# CLEANUP_SCRIPT", &cleanup);
+    let mut file = tempfile::Builder::new().suffix(".ps1").tempfile().unwrap();
+    file.write_all(script.as_bytes()).unwrap();
+    let path = file.into_temp_path();
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ownership checks passed"));
 }
 
 #[test]
@@ -93,8 +110,8 @@ fn nrpt_cleanup_script_clears_dns_cache() {
 fn nrpt_cleanup_script_checks_persisted_path() {
     let script =
         nrpt_cleanup_script_for_path(Path::new(r"C:\ProgramData\mavi-vpn\last_dns_servers.txt"));
-    assert!(script.contains("Test-Path $persistedDnsPath"));
-    assert!(script.contains("Get-Content $persistedDnsPath"));
+    assert!(script.contains("Remove-Item -LiteralPath"));
+    assert!(!script.contains("Get-Content"));
 }
 
 #[test]

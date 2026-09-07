@@ -72,6 +72,20 @@ internal class SessionHandleRegistry(
     fun isCurrent(workerGeneration: Long): Boolean =
         synchronized(lock) { generation == workerGeneration }
 
+    /** Runs session state changes atomically with stop/restart, even before adoption. */
+    fun withCurrent(
+        workerGeneration: Long,
+        action: () -> Unit,
+    ): Boolean =
+        synchronized(lock) {
+            if (generation != workerGeneration) {
+                false
+            } else {
+                action()
+                true
+            }
+        }
+
     /** The adopted handle if it still belongs to [workerGeneration], else 0. */
     fun handleIfCurrent(workerGeneration: Long): Long =
         synchronized(lock) { if (generation == workerGeneration) handle else 0L }

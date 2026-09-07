@@ -178,7 +178,9 @@ impl VpnServiceState {
     }
 
     pub fn set_keycloak_refresh_task(&mut self, task: JoinHandle<()>) {
-        self.keycloak_refresh_task = Some(task);
+        if let Some(previous) = self.keycloak_refresh_task.replace(task) {
+            previous.abort();
+        }
     }
 
     pub fn take_task(&mut self) -> Option<JoinHandle<()>> {
@@ -201,6 +203,10 @@ impl VpnServiceState {
     }
 
     pub fn mark_session_starting(&mut self, config: ipc::Config) {
+        // Cancellation may race with a refresh response already being processed.
+        // Fresh handles keep all late writes confined to the previous session.
+        self.stop_session();
+        *self = Self::new();
         self.active_config = Some(config.clone());
         self.vpn_running.store(true, Ordering::SeqCst);
         self.vpn_connected.store(false, Ordering::SeqCst);
@@ -290,5 +296,55 @@ mod tests {
         assert!(snapshot.last_error.is_none());
         assert!(snapshot.assigned_ip.is_none());
         assert!(snapshot.endpoint.is_none());
+    }
+
+    #[test]
+    fn late_previous_session_writes_cannot_change_new_session() {
+        let mut state = VpnServiceState::new();
+        state.mark_session_starting(test_config());
+        let old = state.runtime_handles();
+        old.finish_session_flags();
+        let mut config = test_config();
+        config.token = "new-session-token".to_string();
+        state.mark_session_starting(config);
+        state.vpn_connected.store(true, Ordering::SeqCst);
+
+        // A refresh response or final cleanup can already be executing when
+        // cancellation is requested. It must only reach the old session.
+        old.set_current_token("old-account-token".to_string());
+        old.publish_keycloak_refresh_token(PendingKeycloakRefreshToken {
+            connection_id: "old-account".to_string(),
+            refresh_token: "old-refresh".to_string(),
+        });
+        *old.last_error.lock().unwrap() = Some("KEYCLOAK_LOGIN_REQUIRED: old account".into());
+        *old.assigned_ip.lock().unwrap() = Some("10.8.0.99".into());
+        old.finish_session_flags();
+
+        assert!(state.is_running());
+        assert!(state.status_snapshot().connected);
+        assert_eq!(*state.current_token.lock().unwrap(), "new-session-token");
+        assert!(state.status_snapshot().last_error.is_none());
+        assert!(state.status_snapshot().assigned_ip.is_none());
+        assert!(state.take_pending_keycloak_refresh_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn restarting_cancels_previous_refresh_task() {
+        let mut state = VpnServiceState::new();
+        state.mark_session_starting(test_config());
+        let (alive, dropped) = tokio::sync::oneshot::channel::<()>();
+        state.set_keycloak_refresh_task(tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        }));
+        state.runtime_handles().finish_session_flags();
+        state.mark_session_starting(test_config());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(state.keycloak_refresh_task.is_none());
     }
 }

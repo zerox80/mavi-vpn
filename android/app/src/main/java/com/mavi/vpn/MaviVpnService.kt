@@ -90,10 +90,16 @@ class MaviVpnService : VpnService() {
 
         val callbacks =
             VpnSessionCallbacks(
-                isRunning = { isRunning },
-                setRunning = { isRunning = it },
-                setConnected = { isConnected.value = it },
-                attachInterface = ::attachVpnInterface,
+                isRunning = { isRunning && handleRegistry.isCurrent(sessionGeneration) },
+                setRunning = { value ->
+                    handleRegistry.withCurrent(sessionGeneration) { isRunning = value }
+                },
+                setConnected = { value ->
+                    handleRegistry.withCurrent(sessionGeneration) { isConnected.value = value }
+                },
+                attachInterface = { localInterface ->
+                    handleRegistry.withCurrent(sessionGeneration) { attachVpnInterface(localInterface) }
+                },
                 detachInterface = ::detachVpnInterface,
                 releaseNativeHandle = ::releaseNativeHandle,
             )

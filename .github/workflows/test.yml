@@ -55,6 +55,8 @@ jobs:
         run: cargo test -p linux-vpn --verbose
       - name: Test quic-tester
         run: cargo test -p quic-tester --verbose
+      - name: Test package lifecycle scripts
+        run: python3 -m unittest discover -s scripts/tests -p test_package_scripts.py
       - name: Setup Node.js for Tauri frontend
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
@@ -161,6 +163,8 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - name: Test windows crate
         run: cargo test -p windows-vpn --verbose
+      - name: Test Windows uninstaller DNS ownership
+        run: python -m unittest discover -s scripts/tests -p test_windows_dns_cleanup.py
 
   coverage-windows:
     name: Windows Rust Coverage

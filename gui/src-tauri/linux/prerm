@@ -1,6 +1,13 @@
 #!/bin/sh
 set -e
 
-# Stop and disable the Mavi VPN background service before uninstallation
+# RPM passes the number of remaining package versions: 1 on upgrade, 0 on
+# removal. Debian passes a verb; preserve the daemon during upgrade there too.
+case "${1:-}" in
+    0|remove|deconfigure) ;;
+    *) exit 0 ;;
+esac
+
+# Stop and disable only when the package is actually being removed.
 systemctl stop mavi-vpn.service || true
 systemctl disable mavi-vpn.service || true

@@ -7,6 +7,27 @@ import org.junit.Test
 
 class SessionHandleRegistryTest {
     @Test
+    fun lateRefreshCannotStopReplacementSessionBeforeHandleAdoption() {
+        val registry = SessionHandleRegistry()
+        val oldGeneration = registry.currentGeneration
+        val releaseRefresh = java.util.concurrent.CountDownLatch(1)
+        val running = java.util.concurrent.atomic.AtomicBoolean(true)
+        val worker = Thread {
+            releaseRefresh.await()
+            registry.withCurrent(oldGeneration) { running.set(false) }
+        }
+        worker.start()
+
+        val newGeneration = registry.invalidate().generation
+        releaseRefresh.countDown()
+        worker.join(1000)
+        assertFalse(worker.isAlive)
+        assertTrue(running.get())
+        assertTrue(registry.withCurrent(newGeneration) { running.set(false) })
+        assertFalse(running.get())
+    }
+
+    @Test
     fun adoptsHandleForCurrentGeneration() {
         val registry = SessionHandleRegistry()
         val generation = registry.currentGeneration

@@ -11,7 +11,23 @@ fn test_default_config() {
     assert_eq!(config.http2_bind_addr, None);
     assert!(!config.censorship_resistant);
     assert!(!config.mss_clamping);
+    assert!(!config.disable_ipv6);
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn ipv6_can_be_disabled_for_native_and_container_startup() {
+    let config = Config::parse_from(["mavi-vpn", "--auth-token", "secret", "--disable-ipv6"]);
+    assert!(config.disable_ipv6);
+    let argument = <Config as clap::CommandFactory>::command()
+        .get_arguments()
+        .find(|arg| arg.get_id() == "disable_ipv6")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        argument.get_env(),
+        Some(std::ffi::OsStr::new("VPN_DISABLE_IPV6"))
+    );
 }
 
 #[test]

@@ -40,6 +40,16 @@ internal class VpnSessionWorker(
 
     private fun isCurrentSessionActive(): Boolean = callbacks.isRunning() && handleRegistry.isCurrent(sessionGeneration)
 
+    private fun updateNotification(
+        id: Int,
+        title: String,
+        text: String,
+    ) {
+        handleRegistry.withCurrent(sessionGeneration) {
+            notificationHelper.updateNotification(id, title, text)
+        }
+    }
+
     private fun runSessionLoop() {
         Log.d("MaviVPN", "Starting VPN Thread")
         var currentToken = request.token
@@ -82,7 +92,7 @@ internal class VpnSessionWorker(
                                     "Keycloak session cannot be refreshed: ${tokenResult.message}",
                                 )
                                 callbacks.setRunning(false)
-                                notificationHelper.updateNotification(
+                                updateNotification(
                                     1,
                                     "Mavi VPN",
                                     "Keycloak session expired. Please login again.",
@@ -102,7 +112,7 @@ internal class VpnSessionWorker(
                     )
 
                     if (retryCount > 1) {
-                        notificationHelper.updateNotification(
+                        updateNotification(
                             1,
                             "Mavi VPN",
                             "Retrying connection to ${request.ip} (Attempt $retryCount)...",
@@ -143,7 +153,7 @@ internal class VpnSessionWorker(
                             }
                             callbacks.setConnected(false)
                             callbacks.setRunning(false)
-                            notificationHelper.updateNotification(
+                            updateNotification(
                                 1,
                                 "Mavi VPN",
                                 if (initError.isNotBlank()) {
@@ -213,7 +223,7 @@ internal class VpnSessionWorker(
                 }
             }
         }
-        if (handleRegistry.isCurrent(sessionGeneration)) {
+        handleRegistry.withCurrent(sessionGeneration) {
             vpnService.stopSelf()
         }
     }
@@ -277,7 +287,7 @@ internal class VpnSessionWorker(
                 } catch (e: Ipv6TunnelException) {
                     callbacks.setConnected(false)
                     callbacks.setRunning(false)
-                    notificationHelper.updateNotification(
+                    updateNotification(
                         1,
                         "Mavi VPN",
                         "IPv6 VPN setup failed. Disconnecting.",
@@ -285,11 +295,14 @@ internal class VpnSessionWorker(
                     throw e
                 }
 
-                localInterface = builder.establish()
-                callbacks.attachInterface(localInterface)
+                handleRegistry.withCurrent(sessionGeneration) {
+                    localInterface = builder.establish()
+                    callbacks.attachInterface(localInterface)
+                }
 
-                if (localInterface != null) {
-                    val fd = localInterface.fd
+                val establishedInterface = localInterface
+                if (establishedInterface != null) {
+                    val fd = establishedInterface.fd
                     Log.d("MaviVPN", "Interface established. Starting Loop.")
                     callbacks.setConnected(true)
                     runNativeLoopWithRefresh(handle, fd)
@@ -336,7 +349,7 @@ internal class VpnSessionWorker(
                 onSessionExpired = {
                     callbacks.setRunning(false)
                     callbacks.setConnected(false)
-                    notificationHelper.updateNotification(
+                    updateNotification(
                         1,
                         "Mavi VPN",
                         "Keycloak session expired. Please login again.",

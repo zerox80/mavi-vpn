@@ -10,10 +10,6 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 
 use super::utils::{run_cmd, run_powershell_cmd};
 
-const DEFAULT_MAVI_DNS_V4: &str = "1.1.1.1";
-const FALLBACK_MAVI_DNS_V4: &str = "8.8.8.8";
-const DEFAULT_MAVI_DNS_V6: &str = "2606:4700:4700::1111";
-
 pub fn wait_for_adapter_alias(adapter_index: u32, requested_name: &str) -> Result<String> {
     let started = Instant::now();
     let mut row: MIB_IF_ROW2 = unsafe { std::mem::zeroed() };
@@ -105,7 +101,6 @@ pub fn configure_vpn_dns_preference(
 
     // 2. Add an NRPT rule to force all DNS queries through the VPN adapter's DNS
     // This is more effective than just metrics on modern Windows 10/11
-    persist_dns_servers();
     let dns_v4_str = dns_v4.to_string();
     let dns_v6_str = dns_v6.map(|v| v.to_string()).unwrap_or_default();
     let nrpt_script = if dns_v6.is_some() {
@@ -131,7 +126,6 @@ pub fn configure_vpn_dns_preference(
 pub fn remove_nrpt_dns_rule() {
     let script = nrpt_cleanup_script();
     run_powershell_cmd("Cleanup NRPT DNS Rule", &script);
-    clear_persisted_dns_servers();
 }
 
 pub fn cleanup_mavi_adapter_dns_state() {
@@ -161,48 +155,11 @@ fn nrpt_cleanup_script_for_path(path: &Path) -> String {
     format!(
         r#"
 $ErrorActionPreference = 'SilentlyContinue'
-$maviDns = @('{DEFAULT_MAVI_DNS_V4}', '{FALLBACK_MAVI_DNS_V4}', '{DEFAULT_MAVI_DNS_V6}')
-$persistedDnsPath = {persisted_dns_path}
-if (Test-Path $persistedDnsPath) {{
-    $maviDns += Get-Content $persistedDnsPath -ErrorAction SilentlyContinue |
-        Where-Object {{ $_ -and $_.Trim() }} |
-        ForEach-Object {{ $_.Trim() }}
-}}
-$maviDns = @($maviDns | Sort-Object -Unique)
-
+# Resolver addresses are shared by unrelated VPNs and enterprise policies.
+# Only Mavi's explicit ownership markers authorize removal.
 function Test-MaviDnsPolicy {{
     param($Policy)
-    $comment = "$($Policy.Comment)"
-    $displayName = "$($Policy.DisplayName)"
-    $name = "$($Policy.Name)"
-    $namespace = @($Policy.Namespace)
-    $servers = @($Policy.NameServers) | ForEach-Object {{ "$_" }}
-    if ($comment -eq 'MaviVPN' -or $displayName -eq 'MaviVPN DNS Force') {{ return $true }}
-    $isRootPolicy = ($namespace -contains '.') -or $name -eq '.'
-    if (-not $isRootPolicy) {{ return $false }}
-    foreach ($server in $servers) {{
-        if ($maviDns -contains $server) {{ return $true }}
-    }}
-    return $false
-}}
-
-function Test-MaviDnsPolicyRegistryEntry {{
-    param($Props)
-    $comment = "$($Props.Comment)"
-    $displayName = "$($Props.DisplayName)"
-    $name = "$($Props.Name)"
-    $namespace = "$($Props.Namespace)"
-    $keyName = Split-Path -Leaf $Props.PSPath
-    if ($comment -eq 'MaviVPN' -or $displayName -eq 'MaviVPN DNS Force') {{ return $true }}
-    $isRootPolicy = $namespace -eq '.' -or $name -eq '.' -or $keyName -eq '.'
-    if (-not $isRootPolicy) {{ return $false }}
-    $valueText = ($Props.PSObject.Properties |
-        Where-Object {{ $_.Name -notlike 'PS*' }} |
-        ForEach-Object {{ "$($_.Value)" }}) -join ' '
-    foreach ($server in $maviDns) {{
-        if ($valueText -like "*$server*") {{ return $true }}
-    }}
-    return $false
+    return ($Policy.Comment -eq 'MaviVPN' -or $Policy.DisplayName -eq 'MaviVPN DNS Force')
 }}
 
 Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
@@ -218,11 +175,13 @@ foreach ($root in $policyRoots) {{
     if (-not (Test-Path $root)) {{ continue }}
     Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {{
         $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-        if ($props -and (Test-MaviDnsPolicyRegistryEntry $props)) {{
+        if ($props -and (Test-MaviDnsPolicy $props)) {{
             Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
         }}
     }}
 }}
+# Remove obsolete resolver metadata without using it to identify owned rules.
+Remove-Item -LiteralPath {persisted_dns_path} -Force -ErrorAction SilentlyContinue
 Clear-DnsClientCache -ErrorAction SilentlyContinue
 Register-DnsClient -ErrorAction SilentlyContinue
 "#,
@@ -238,20 +197,6 @@ fn dns_servers_path() -> PathBuf {
     let base = std::env::var_os("ProgramData")
         .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
     base.join("mavi-vpn").join("last_dns_servers.txt")
-}
-
-fn persist_dns_servers() {
-    let path = dns_servers_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let servers = format!("{DEFAULT_MAVI_DNS_V4}\n{FALLBACK_MAVI_DNS_V4}");
-    let _ = std::fs::write(path, servers);
-}
-
-fn clear_persisted_dns_servers() {
-    let _ = std::fs::remove_file(dns_servers_path());
 }
 
 #[cfg(test)]

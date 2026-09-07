@@ -152,6 +152,7 @@ echo "NAT configured: $VPN_NETWORK -> $DEFAULT_IFACE (IPv4)"
 # ---------------------------------------------------------------------------
 if [ ! -e /proc/sys/net/ipv6/conf/all/forwarding ]; then
     echo "Info: IPv6 is disabled in this kernel; running IPv4-only."
+    export VPN_DISABLE_IPV6=true
 elif [ "${VPN_DISABLE_IPV6:-false}" = "true" ]; then
     echo "Info: VPN_DISABLE_IPV6=true; skipping IPv6 setup (IPv4-only)."
 else
@@ -200,6 +201,7 @@ else
     if [ "$have_global_v6" != "true" ]; then
         echo "Warning: no global IPv6 on $DEFAULT_IFACE after ${VPN_IPV6_WAIT}s; continuing IPv4-only."
         echo "         (Set VPN_DISABLE_IPV6=true to skip this wait on IPv4-only hosts.)"
+        export VPN_DISABLE_IPV6=true
     else
         # Enable IPv6 forwarding. Do not trust the command's exit code -- the
         # container's /proc/sys may be read-only -- verify the result below.

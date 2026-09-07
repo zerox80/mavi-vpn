@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+mod addresses;
 mod cert;
 mod h2;
 mod h3;
@@ -230,45 +231,7 @@ pub(super) async fn connect_and_handshake(
     )?;
     endpoint.set_default_client_config(client_config);
 
-    let mut last_error = None;
-    let mut connection = None;
-    for addr in addrs {
-        let handshake_started = Instant::now();
-        info!(
-            "Connecting to {} (resolved: {}, SNI: {})",
-            endpoint_str, addr, server_name
-        );
-        match endpoint.connect(addr, &server_name) {
-            Ok(connecting) => match connecting.await {
-                Ok(conn) => {
-                    info!(
-                        "QUIC handshake to {} completed in {} ms",
-                        addr,
-                        handshake_started.elapsed().as_millis()
-                    );
-                    connection = Some(conn);
-                    break;
-                }
-                Err(err) => {
-                    warn!(
-                        "QUIC handshake to {} failed after {} ms: {}",
-                        addr,
-                        handshake_started.elapsed().as_millis(),
-                        err
-                    );
-                    last_error = Some(anyhow::Error::from(err));
-                }
-            },
-            Err(err) => {
-                warn!("endpoint.connect() failed for {}: {}", addr, err);
-                last_error = Some(anyhow::Error::from(err));
-            }
-        }
-    }
-    let Some(connection) = connection else {
-        return Err(last_error
-            .unwrap_or_else(|| anyhow::anyhow!("No reachable address for {endpoint_str}")));
-    };
+    let connection = addresses::connect(&endpoint, addrs, &server_name).await?;
     info!(
         "QUIC handshake OK, sending auth token ({} bytes)",
         token.len()

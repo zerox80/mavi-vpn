@@ -55,6 +55,10 @@ pub struct Config {
     #[arg(long, env = "VPN_NETWORK_V6", default_value = "fd00::/64")]
     pub network_cidr_v6: String,
 
+    /// Disable IPv6 tunnel setup and omit IPv6 assignments from client config.
+    #[arg(long, env = "VPN_DISABLE_IPV6", default_value = "false")]
+    pub disable_ipv6: bool,
+
     /// Optional explicit TUN interface name.
     /// If not provided, the server will create one (usually `tun0`).
     #[arg(long, env = "VPN_TUN_DEVICE")]

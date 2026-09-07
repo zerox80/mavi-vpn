@@ -76,47 +76,10 @@ foreach ($prefix in @('::/1','8000::/1')) {
         Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -IncludeHidden -ErrorAction SilentlyContinue).Name -like 'MaviVPN*' } |
         Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
 }
-$maviDns = @('1.1.1.1', '2606:4700:4700::1111')
 $persistedDnsPath = Join-Path $env:ProgramData 'mavi-vpn\last_dns_servers.txt'
-if (Test-Path $persistedDnsPath) {
-    $maviDns += Get-Content $persistedDnsPath -ErrorAction SilentlyContinue |
-        Where-Object { $_ -and $_.Trim() } |
-        ForEach-Object { $_.Trim() }
-}
-$maviDns = @($maviDns | Sort-Object -Unique)
 function Test-MaviDnsPolicy {
     param($Policy)
-    $comment = "$($Policy.Comment)"
-    $displayName = "$($Policy.DisplayName)"
-    $name = "$($Policy.Name)"
-    $namespace = @($Policy.Namespace)
-    $servers = @($Policy.NameServers) | ForEach-Object { "$_" }
-    if ($comment -eq 'MaviVPN' -or $displayName -eq 'MaviVPN DNS Force') { return $true }
-    $isRootPolicy = ($namespace -contains '.') -or $name -eq '.'
-    if (-not $isRootPolicy) { return $false }
-    if ($servers.Count -eq 0) { return $false }
-    foreach ($server in $servers) {
-        if ($maviDns -notcontains $server) { return $false }
-    }
-    return $true
-}
-function Test-MaviDnsPolicyRegistryEntry {
-    param($Props)
-    $comment = "$($Props.Comment)"
-    $displayName = "$($Props.DisplayName)"
-    $name = "$($Props.Name)"
-    $namespace = "$($Props.Namespace)"
-    $keyName = Split-Path -Leaf $Props.PSPath
-    if ($comment -eq 'MaviVPN' -or $displayName -eq 'MaviVPN DNS Force') { return $true }
-    $isRootPolicy = $namespace -eq '.' -or $name -eq '.' -or $keyName -eq '.'
-    if (-not $isRootPolicy) { return $false }
-    $valueText = ($Props.PSObject.Properties |
-        Where-Object { $_.Name -notlike 'PS*' } |
-        ForEach-Object { "$($_.Value)" }) -join ' '
-    foreach ($server in $maviDns) {
-        if ($valueText -like "*$server*") { return $true }
-    }
-    return $false
+    return ($Policy.Comment -eq 'MaviVPN' -or $Policy.DisplayName -eq 'MaviVPN DNS Force')
 }
 Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
     Where-Object { Test-MaviDnsPolicy $_ } |
@@ -130,12 +93,12 @@ foreach ($root in $policyRoots) {
     if (-not (Test-Path $root)) { continue }
     Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
         $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-        if ($props -and (Test-MaviDnsPolicyRegistryEntry $props)) {
+        if ($props -and (Test-MaviDnsPolicy $props)) {
             Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
-Remove-Item $persistedDnsPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $persistedDnsPath -Force -ErrorAction SilentlyContinue
 Clear-DnsClientCache -ErrorAction SilentlyContinue
 Register-DnsClient -ErrorAction SilentlyContinue
 Start-Service -Name Dnscache -ErrorAction SilentlyContinue

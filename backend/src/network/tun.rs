@@ -49,7 +49,12 @@ pub fn create_tun_device(config: &Config, state: &AppState) -> Result<(tun::Asyn
         tun_name, gateway_ip, config.mtu
     );
 
-    let ipv6_enabled = setup_ipv6(tun_name, state);
+    let ipv6_enabled = if config.disable_ipv6 {
+        info!("IPv6 tunnel setup disabled by configuration");
+        false
+    } else {
+        setup_ipv6(tun_name, state)
+    };
 
     Ok((dev, ipv6_enabled))
 }

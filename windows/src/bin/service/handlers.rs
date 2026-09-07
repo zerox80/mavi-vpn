@@ -158,13 +158,16 @@ pub fn handle_start_request(
         guard.mark_session_starting(config.clone());
         let task_runtime = guard.runtime_handles();
 
-        if let Some(keycloak) = keycloak {
-            guard.set_keycloak_refresh_task(keycloak_refresh::spawn_keycloak_refresh_task(
+        let refresh_abort = keycloak.map(|keycloak| {
+            let task = keycloak_refresh::spawn_keycloak_refresh_task(
                 keycloak,
                 config.token.clone(),
                 task_runtime.clone(),
-            ));
-        }
+            );
+            let abort = task.abort_handle();
+            guard.set_keycloak_refresh_task(task);
+            abort
+        });
 
         guard.set_task(tokio::spawn(async move {
             if let Err(e) = vpn_core::run_vpn(
@@ -181,6 +184,9 @@ pub fn handle_start_request(
                 let msg = e.to_string();
                 error!("VPN task failed: {}", msg);
                 task_runtime.record_task_error_if_running(msg);
+            }
+            if let Some(abort) = refresh_abort {
+                abort.abort();
             }
             let _ = tokio::task::spawn_blocking(|| {
                 run_network_repair_cleanup();

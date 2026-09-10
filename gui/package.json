@@ -23,7 +23,7 @@
     "jsdom": "^30",
     "prettier": "^3.9.6",
     "vite": "^8.2.2",
-    "vitest": "^4"
+    "vitest": "^5"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1"

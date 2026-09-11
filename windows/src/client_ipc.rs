@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
@@ -105,24 +105,22 @@ pub(crate) async fn send_request(req: IpcRequest) -> Result<()> {
         req,
         IpcRequest::Start(_) | IpcRequest::StartWithKeycloak { .. }
     );
-    match send_request_internal(req).await {
-        Ok(IpcResponse::Ok) => {
+    let response = send_request_internal(req.clone()).await;
+    match validate_response(&req, response)? {
+        IpcResponse::Ok => {
             if is_start {
                 wait_for_connected().await?;
             } else {
                 println!("Action executed successfully.");
             }
         }
-        Ok(IpcResponse::Error(msg)) => {
-            println!("Service returned an error: {msg}");
-        }
-        Ok(IpcResponse::Status {
+        IpcResponse::Status {
             running,
             endpoint,
             state,
             last_error,
             assigned_ip,
-        }) => {
+        } => {
             println!("Status: {}", if running { "RUNNING" } else { "STOPPED" });
             println!("State: {state:?}");
             if let Some(ep) = endpoint {
@@ -135,14 +133,22 @@ pub(crate) async fn send_request(req: IpcRequest) -> Result<()> {
                 println!("Last error: {err}");
             }
         }
-        Ok(IpcResponse::RefreshTokenUpdate { .. }) => {
-            println!("Unexpected refresh-token response.");
-        }
-        Err(e) => {
-            println!("Failed to communicate with service: {e}");
-        }
+        _ => anyhow::bail!("Unexpected response from service"),
     }
     Ok(())
+}
+
+fn validate_response(req: &IpcRequest, response: Result<IpcResponse>) -> Result<IpcResponse> {
+    let response = response.context("Failed to communicate with service")?;
+    match (&response, req) {
+        (IpcResponse::Error(message), _) => anyhow::bail!("Service returned an error: {message}"),
+        (IpcResponse::Status { .. }, IpcRequest::Status) => Ok(response),
+        (IpcResponse::Ok, IpcRequest::Status) => {
+            anyhow::bail!("Unexpected response from service")
+        }
+        (IpcResponse::Ok, _) => Ok(response),
+        _ => anyhow::bail!("Unexpected response from service"),
+    }
 }
 
 async fn wait_for_connected() -> Result<()> {
@@ -200,6 +206,58 @@ fn validate_response_len(len: usize) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status_response() -> IpcResponse {
+        IpcResponse::Status {
+            running: false,
+            endpoint: None,
+            state: ipc::VpnState::Stopped,
+            last_error: None,
+            assigned_ip: None,
+        }
+    }
+
+    #[test]
+    fn actions_reject_service_errors_ipc_failures_and_unrelated_responses() {
+        let config = crate::main_tests::test_config();
+        let mut keycloak_config = config.clone();
+        keycloak_config.kc_auth = Some(true);
+        keycloak_config.refresh_token = Some("refresh".into());
+        for req in [
+            start_request(config),
+            start_request(keycloak_config),
+            IpcRequest::Stop,
+            IpcRequest::RepairNetwork,
+        ] {
+            assert!(validate_response(&req, Ok(IpcResponse::Ok)).is_ok());
+            let error = validate_response(&req, Ok(IpcResponse::Error("request rejected".into())))
+                .unwrap_err();
+            assert!(error.to_string().contains("request rejected"));
+            let error =
+                validate_response(&req, Err(anyhow::anyhow!("pipe unavailable"))).unwrap_err();
+            assert!(format!("{error:#}").contains("pipe unavailable"));
+            assert!(validate_response(&req, Ok(status_response())).is_err());
+            assert!(validate_response(
+                &req,
+                Ok(IpcResponse::RefreshTokenUpdate {
+                    connection_id: None,
+                    refresh_token: None,
+                })
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn status_requires_a_status_response() {
+        assert!(validate_response(&IpcRequest::Status, Ok(status_response())).is_ok());
+        assert!(validate_response(&IpcRequest::Status, Ok(IpcResponse::Ok)).is_err());
+        assert!(validate_response(
+            &IpcRequest::Status,
+            Ok(IpcResponse::Error("access denied".into())),
+        )
+        .is_err());
+    }
 
     #[test]
     fn response_len_accepts_limit() {

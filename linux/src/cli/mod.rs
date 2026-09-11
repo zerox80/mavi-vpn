@@ -184,50 +184,51 @@ fn run_daemon() -> Result<()> {
 fn run_ipc_start(config_path: Option<PathBuf>) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-    let config = config::load_or_prompt_config(config_path).await?;
-    match daemon::send_request(shared::ipc::IpcRequest::Start(config)).await {
-        Ok(shared::ipc::IpcResponse::Ok) => println!("\x1b[1;32mVPN started.\x1b[0m"),
-        Ok(shared::ipc::IpcResponse::Error(e)) => eprintln!("Error: {}", e),
-        Ok(shared::ipc::IpcResponse::Status { .. }) => eprintln!("Unexpected response"),
-        Ok(_) => eprintln!("Unexpected response"),
-        Err(e) => eprintln!("Failed to communicate with daemon: {}\nIs the daemon running? (sudo mavi-vpn daemon)", e),
-    }
-    Ok(())
-})
+        let config = config::load_or_prompt_config(config_path).await?;
+        handle_action_response(
+            daemon::send_request(shared::ipc::IpcRequest::Start(config)).await,
+            "Start accepted. Run status to check tunnel readiness.",
+        )
+    })
 }
 
 fn run_ipc_stop() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        match daemon::send_request(shared::ipc::IpcRequest::Stop).await {
-            Ok(shared::ipc::IpcResponse::Ok) => println!("\x1b[1;32mVPN stopped.\x1b[0m"),
-            Ok(shared::ipc::IpcResponse::Error(e)) => eprintln!("Error: {}", e),
-            Ok(_) => eprintln!("Unexpected response"),
-            Err(e) => eprintln!(
-                "Failed to communicate with daemon: {}\nIs the daemon running?",
-                e
-            ),
-        }
-        Ok(())
+        handle_action_response(
+            daemon::send_request(shared::ipc::IpcRequest::Stop).await,
+            "Stop accepted. Run status to check shutdown progress.",
+        )
     })
 }
 
 fn run_ipc_repair() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        match daemon::send_request(shared::ipc::IpcRequest::RepairNetwork).await {
-            Ok(shared::ipc::IpcResponse::Ok) => {
-                println!("\x1b[1;32mNetwork repair cleanup completed.\x1b[0m")
-            }
-            Ok(shared::ipc::IpcResponse::Error(e)) => eprintln!("Error: {}", e),
-            Ok(_) => eprintln!("Unexpected response"),
-            Err(e) => eprintln!(
-                "Failed to communicate with daemon: {}\nIs the daemon running?",
-                e
-            ),
-        }
-        Ok(())
+        handle_action_response(
+            daemon::send_request(shared::ipc::IpcRequest::RepairNetwork).await,
+            "Network repair cleanup completed.",
+        )
     })
+}
+
+fn handle_action_response(
+    response: Result<shared::ipc::IpcResponse>,
+    success_message: &str,
+) -> Result<()> {
+    use anyhow::Context;
+    use shared::ipc::IpcResponse;
+
+    match response.context(
+        "Failed to communicate with daemon. Is the daemon running? (sudo mavi-vpn daemon)",
+    )? {
+        IpcResponse::Ok => {
+            println!("\x1b[1;32m{success_message}\x1b[0m");
+            Ok(())
+        }
+        IpcResponse::Error(message) => anyhow::bail!("Daemon returned an error: {message}"),
+        _ => anyhow::bail!("Unexpected response from daemon"),
+    }
 }
 
 fn run_status() {
@@ -319,3 +320,6 @@ fn print_help() {
 fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
+
+#[cfg(test)]
+mod tests;

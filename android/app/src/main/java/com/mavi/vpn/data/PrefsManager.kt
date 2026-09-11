@@ -21,7 +21,7 @@ class PrefsManager(
         set(value) = prefs.edit().putString("saved_ip", value).apply()
 
     var savedPort: String
-        get() = prefs.getString("saved_port", "4433") ?: "4433"
+        get() = prefs.getString("saved_port", "10443") ?: "10443"
         set(value) = prefs.edit().putString("saved_port", value).apply()
 
     var savedToken: String

@@ -225,6 +225,9 @@ async fn main() -> Result<()> {
     info!("Server Ready. Waiting for connections...");
 
     let connection_semaphore = Arc::new(tokio::sync::Semaphore::new(1000));
+    let pending_semaphore = Arc::new(tokio::sync::Semaphore::new(
+        handlers::connection::MAX_UNAUTHENTICATED_CONNECTIONS,
+    ));
 
     // Periodically evict stale auth-rate-limiter entries so the map doesn't
     // grow unboundedly under sustained probing from many distinct source IPs.
@@ -241,6 +244,10 @@ async fn main() -> Result<()> {
 
     // Accept incoming connections
     while let Some(conn) = endpoint.accept().await {
+        let Ok(pending_permit) = pending_semaphore.clone().try_acquire_owned() else {
+            warn!("Unauthenticated QUIC connection limit reached, rejecting new connection");
+            continue;
+        };
         let Ok(permit) = connection_semaphore.clone().try_acquire_owned() else {
             warn!("Connection limit reached (1000), rejecting new connection");
             continue;
@@ -253,8 +260,16 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) =
-                handle_connection(conn, state, config, tx_tun, keycloak, ipv6_enabled).await
+            if let Err(e) = handle_connection(
+                conn,
+                state,
+                config,
+                tx_tun,
+                keycloak,
+                ipv6_enabled,
+                pending_permit,
+            )
+            .await
             {
                 warn!("Connection handler exited: {}", e);
             }

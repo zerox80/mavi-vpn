@@ -2,7 +2,7 @@ use crate::client_config::{config_path, load_config_from_path, save_config_to_pa
 use crate::ipc::Config;
 use crate::secrets::{config_token_account, tests::MemorySecretStore, SecretStore};
 
-fn test_config() -> Config {
+pub(crate) fn test_config() -> Config {
     Config {
         endpoint: "vpn.example.com:443".to_string(),
         token: "token".to_string(),
@@ -316,4 +316,12 @@ fn load_config_normalizes_transport_on_load() {
     let loaded = load_config_from_path(&path, &store).unwrap().unwrap();
     assert!(loaded.censorship_resistant);
     assert!(loaded.http3_framing);
+}
+
+#[tokio::test]
+async fn unknown_cli_command_fails() {
+    let error = crate::dispatch_cli(&["invalid-command".into()])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Unknown command"));
 }

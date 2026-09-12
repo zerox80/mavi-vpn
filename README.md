@@ -5,32 +5,40 @@
 <h1 align="center">Mavi VPN</h1>
 
 <p align="center">
-  <strong>High-performance, censorship-resistant VPN built with Rust</strong>
+  <strong>Self-hosted VPN over QUIC, HTTP/3, or HTTP/2, built with Rust</strong>
 </p>
 
 <p align="center">
-  <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_Start-blue?style=flat-square" alt="Quick Start" /></a>
+  <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-blue?style=flat-square" alt="Quick Start" /></a>
+  <a href="https://github.com/zerox80/mavi-vpn/releases/latest"><img src="https://img.shields.io/github/v/release/zerox80/mavi-vpn?style=flat-square" alt="Latest release" /></a>
   <a href="https://github.com/zerox80/mavi-vpn/actions"><img src="https://img.shields.io/github/actions/workflow/status/zerox80/mavi-vpn/build.yml?style=flat-square&label=Build" alt="Build" /></a>
   <a href="https://github.com/zerox80/mavi-vpn/actions"><img src="https://img.shields.io/github/actions/workflow/status/zerox80/mavi-vpn/test.yml?style=flat-square&label=Tests" alt="Tests" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/Rust-1.95+-orange?style=flat-square&logo=rust" alt="Rust" />
 </p>
 
-<img width="948" height="709" alt="image" src="https://github.com/user-attachments/assets/a56f2e27-9065-4115-80c4-81084605df61" />
+<img width="948" height="709" alt="Mavi VPN desktop client" src="https://github.com/user-attachments/assets/a56f2e27-9065-4115-80c4-81084605df61" />
 
 ---
-> ⚠️ Mavi VPN is early beta software and has not been independently audited. Do not rely on it for high-risk security use cases yet.
+**[Mavi VPN 1.0.1 is available](https://github.com/zerox80/mavi-vpn/releases/tag/1.0.1).**
 
-Mavi VPN tunnels all network traffic over **QUIC** by default, with an optional
-**HTTP/2 CONNECT-IP** transport over TLS/TCP. The QUIC path uses the
-[`quinn`](https://github.com/zerox80/quinn) and [`h3`](https://github.com/zerox80/h3)
-forks, both tracked on `main`, to deliver secure, low-latency connectivity even
-on unstable mobile networks. The HTTP/2 path uses the branch-tracked
-[`h2`](https://github.com/zerox80/h2) fork on `master`. A scheduled CI workflow
-tests and advances `Cargo.lock` to the latest fork commits every day while folding
-consecutive refreshes into one rolling commit. It supports
-**Windows**, **Linux**, and **Android** with native clients and an optional
-cross-platform **Tauri GUI**.
+> Mavi VPN has not been independently security-audited. Do not rely on it for high-risk security use cases.
+
+Mavi VPN tunnels IP traffic through your own Linux server. It uses **QUIC** by
+default, with optional **HTTP/3 MASQUE** framing and an **HTTP/2 CONNECT-IP**
+transport over TLS/TCP for networks where UDP is unavailable. You select the
+transport in the client; HTTP/2 is not an automatic fallback.
+
+Clients are available for **Windows**, **Linux**, and **Android**, with a
+**Tauri desktop GUI** for Windows and Linux. Authentication uses a static token
+or an existing Keycloak server.
+
+For a server without a local Rust build, start with
+**[mavi-vpn-docker](https://github.com/zerox80/mavi-vpn-docker)**: prebuilt Linux
+AMD64 and ARM64 images with Docker Compose. Client downloads are on the
+[releases page](https://github.com/zerox80/mavi-vpn/releases). Check the Assets
+section for your chosen version; if a platform archive is not attached yet,
+use the source build instructions below.
 
 ## Key Features
 
@@ -38,21 +46,173 @@ cross-platform **Tauri GUI**.
 |---|---|---|
 | **Censorship Resistance** | Layer 7 Obfuscation | VPN traffic can masquerade as **HTTP/3** via ALPN `h3` |
 | | Probe Resistance | Unauthorized connections receive a fake **nginx** welcome page (H3 200 OK) |
-| | MASQUE / RFC 9484 | Optional `connect-ip` capsule framing for DPI-proof wire format |
+| | MASQUE / RFC 9484 | Optional HTTP/3 `connect-ip` framing; resistance to filtering depends on the network |
 | | HTTP/2 CONNECT-IP | Optional TLS/TCP transport using Extended CONNECT and RFC 9297 capsules |
 | | TLS ClientHello Camouflage | Desktop **ECH GREASE** (RFC 9849) via HPKE (RFC 9180); Android cover SNI |
 | | Certificate Pinning | SHA-256 cert fingerprint verification on all clients |
-| **Performance** | Zero-Copy Path | `bytes`/`BytesMut` across the entire packet pipeline |
-| | BBR Congestion Control | Optimized for high-bandwidth, high-latency mobile networks |
+| **Performance** | Packet Buffers | `bytes`/`BytesMut` reduce copying in the packet pipeline |
+| | BBR Congestion Control | BBR configured for QUIC transport |
 | | GSO/GRO | Generic Segmentation Offload to reduce syscall overhead |
-| | 4 MB UDP Buffers | Auto-tuned OS-level socket buffers for burst resilience |
-| **Mobile-First** | Seamless Roaming | QUIC connection migration — no handshake restart on IP change |
+| | UDP Buffers | Requests 4 MiB socket buffers; effective sizes depend on OS limits |
+| **Mobile-First** | Network Changes | QUIC connection migration and client reconnect handling |
 | | MTU Coupling (1280..1360) | QUIC payload is derived as TUN MTU + 80; ICMP PTB generation (RFC 4443) |
 | | Split Tunneling | Per-app VPN bypass on Android |
 | **Auth** | Static Token | Simple pre-shared key authentication |
 | | Keycloak OIDC | Enterprise SSO with JWT validation, PKCE, and JWKS rotation |
 | **Network** | Dual-Stack | Full IPv4 + IPv6 support (NAT66 via ip6tables) |
 | | DNS Isolation | NRPT rules on Windows; per-tunnel DNS on Linux/Android |
+
+## Quick Start
+
+### Server Deployment (Prebuilt Docker Images)
+
+Use [mavi-vpn-docker](https://github.com/zerox80/mavi-vpn-docker#installation)
+for the Compose file and setup steps. It runs the VPN server on Linux AMD64 or
+ARM64 without installing Rust or compiling on the host. You need Docker Compose,
+`/dev/net/tun`, host IP forwarding, and the configured port open in both host and
+provider firewalls. The setup guide covers these requirements and client pairing.
+
+The Docker repository defaults to IPv4-only. **The Windows client in 1.0.1 and
+current `main` requires a complete IPv6 tunnel configuration**: follow the Docker
+repository's [IPv6 setup](https://github.com/zerox80/mavi-vpn-docker#enabling-ipv6)
+and set `VPN_DISABLE_IPV6=false` before connecting those clients.
+
+Images are built from `main`; `latest` is not a versioned release image. See the Docker
+repository's [update and rollback instructions](https://github.com/zerox80/mavi-vpn-docker#updates-and-rollbacks).
+
+### Server Deployment (Build from Source)
+
+Use this repository to build the server locally or run the optional
+Keycloak/Traefik stack:
+
+```bash
+git clone https://github.com/zerox80/mavi-vpn.git
+cd mavi-vpn/backend
+cp .env.example .env
+chmod 600 .env
+openssl rand -hex 32         # Copy this value into VPN_AUTH_TOKEN in .env
+nano .env                   # Set the token and check VPN_BIND_ADDR
+```
+
+Enable IPv4 forwarding on the host and persist it:
+
+```bash
+echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-mavi-vpn-ipv4.conf
+sudo sysctl -p /etc/sysctl.d/99-mavi-vpn-ipv4.conf
+```
+
+For IPv6, complete the [host setup below](#ipv6-on-aws-lightsail--other-ra-based-hosts)
+before starting the server. To run IPv4-only, set `VPN_DISABLE_IPV6=true`;
+the current Windows client on `main` requires IPv6. This repository's
+`.env.example` enables CR mode, so select the matching mode in the client.
+
+```bash
+docker compose up -d --build
+docker compose logs --tail=100 vpn-server
+```
+
+Once the server has started, retrieve the certificate pin:
+
+```bash
+sudo cat data/cert_pin.txt
+```
+
+Enter the server address, port, token, and certificate pin in the client.
+Back up `data/` before upgrades to preserve the certificates and keys.
+
+> **Ports:** The Compose default is UDP `10443` for QUIC. If HTTP/2 is enabled,
+> also allow the TCP port configured by `VPN_HTTP2_BIND_ADDR` (it may use the
+> same numeric port as the QUIC listener).
+
+The Dockerfile builds with `--locked`; rebuilding without a cache does not
+refresh Git dependencies. To update the fork commits explicitly, run from the
+repository root, then rebuild the server:
+
+```bash
+cargo update -p quinn -p quinn-proto -p quinn-udp -p h3 -p h3-quinn -p h3-datagram -p h2
+```
+
+### Windows Client
+
+Download and extract the Windows archive from
+[Releases](https://github.com/zerox80/mavi-vpn/releases), then run the
+included MSI or NSIS installer as administrator. The installer includes the
+GUI, CLI, and background service. For a CLI-only installation, keep the extracted
+CLI and service binaries in an administrator-controlled installation directory,
+then run there as administrator:
+
+```powershell
+.\mavi-vpn-service.exe install
+net start MaviVPNService
+```
+
+Run the CLI from its installed or extracted directory:
+
+```powershell
+.\mavi-vpn-client.exe start     # Prompts for config on first run
+.\mavi-vpn-client.exe stop
+.\mavi-vpn-client.exe status
+```
+
+For source builds, see [windows/README.md](windows/README.md). The
+[`build_windows_msi.py`](build_windows_msi.py) helper builds and packages the
+Windows GUI, CLI, and service together.
+
+### Linux Client
+
+From a checkout of this repository, choose one source installer:
+
+```bash
+python3 install_cli_linux.py       # Builds CLI + optional systemd service
+# Or, for the desktop GUI and daemon integration:
+python3 install_gui_linux.py       # Builds GUI and bundled CLI (DEB/RPM)
+```
+
+The CLI and GUI installers create the `mavivpn` group and add your desktop user so the GUI/CLI can control the root daemon after you log out and back in. DEB/RPM packages also create this group and add the invoking `sudo` user when available. When installing through a graphical package manager or directly as root, explicitly grant a trusted user access with `sudo usermod -aG mavivpn USER`, then log out and back in.
+
+With the systemd service installed:
+
+```bash
+sudo systemctl start mavi-vpn
+mavi-vpn start                     # Connect via daemon
+mavi-vpn stop                      # Disconnect
+mavi-vpn status                    # Check VPN status
+```
+
+For a direct connection without the daemon, run `sudo mavi-vpn` instead.
+
+### Android Client
+
+Download and extract the Android archive from
+[Releases](https://github.com/zerox80/mavi-vpn/releases), then install the
+APK on Android 8.0 or newer. The current CI build is a **debug APK**. Updating
+in place requires the same signing certificate; a different signing key can
+require reinstalling the app and re-entering its configuration.
+
+To build from source:
+
+1. Install **Rust** targets + `cargo-ndk`:
+   ```bash
+   cargo install cargo-ndk
+   rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+   ```
+2. Open the `android/` folder in **Android Studio**.
+3. Build the APK; Gradle compiles the Rust core automatically. From `android/`,
+   `./gradlew assembleDebug` runs the same debug build used in CI.
+
+### Tauri GUI Development
+
+Install the platform's build dependencies and VPN service first; the GUI uses
+that service to manage connections. From the repository root:
+
+```bash
+cd gui
+npm ci
+npm run tauri -- dev
+```
+
+For distributable packages, use the platform helpers above. They build the
+bundled CLI/service and prepare the installer resources before packaging.
 
 ## Architecture
 
@@ -109,7 +269,7 @@ mavi-vpn/
 │   └── src/
 │       ├── main.rs           # CLI client (start/stop/status)
 │       ├── bin/service.rs    # Windows Service (WinTUN, routing, NRPT DNS)
-│       ├── vpn_core.rs       # QUIC/HTTP2 tunnel logic, ECH, MASQUE framing
+│       ├── vpn_core/         # QUIC/HTTP2 tunnel logic, ECH, MASQUE framing
 │       └── oauth.rs          # PKCE OAuth2 flow for Keycloak
 │
 ├── linux/              # Linux client (Rust) — TUN via /dev/net/tun, systemd
@@ -122,7 +282,7 @@ mavi-vpn/
 │
 ├── android/            # Android app (Kotlin + Rust JNI)
 │   └── app/src/main/
-│       ├── kotlin/           # Jetpack Compose UI, VpnService, NetworkCallback
+│       ├── java/             # Kotlin: Jetpack Compose UI, VpnService, NetworkCallback
 │       └── rust/src/lib.rs   # JNI core: QUIC/HTTP2, cert pinning, migration
 │
 ├── gui/                # Cross-platform Tauri v2 GUI (HTML/CSS/JS + Rust)
@@ -133,95 +293,14 @@ mavi-vpn/
 │   └── src/
 │       ├── lib.rs            # ControlMessage protocol (Auth → Config → Datagrams)
 │       ├── icmp.rs           # ICMP "Packet Too Big" generation (RFC 792/4443)
-│       ├── ipc.rs            # IPC protocol (SecureIpcRequest, Config, Response)
+│       ├── ipc/              # IPC protocol (SecureIpcRequest, Config, Response)
 │       ├── masque.rs         # CONNECT-IP capsules, varints, datagram framing
 │       └── hex.rs            # Hex encode/decode utilities
 │
-├── quic-tester/        # DPI probe simulator — verifies censorship resistance
+├── quic-tester/        # Checks the response to unauthenticated HTTP/3 probes
 ├── docs/               # INSTALLATION.md, NGINX_PROXY.md, whitepaper.tex
-├── Dockerfile          # Multi-stage build (rust:1.95 → debian:trixie-slim)
+├── Dockerfile          # Multi-stage build (rust:1.97-slim → debian:trixie-slim)
 └── .github/workflows/  # CI: build (Linux CLI, Android APK, Linux/Windows GUI), tests
-```
-
-## Quick Start
-
-### Server Deployment (Docker)
-
-```bash
-cd backend
-cp .env.example .env
-nano .env                    # Set VPN_AUTH_TOKEN and optionally VPN_PORT
-docker compose up -d --build
-```
-
-To force-refresh the forked Rust Git dependencies during deployment:
-```bash
-docker compose pull --ignore-buildable
-docker compose build --pull --no-cache vpn-server
-docker compose up -d --force-recreate
-```
-
-Retrieve the certificate PIN for clients:
-```bash
-cat data/cert_pin.txt
-```
-
-> **Ports:** The Compose default is UDP `10443` for QUIC. If HTTP/2 is enabled,
-> also allow the TCP port configured by `VPN_HTTP2_BIND_ADDR` (it may use the
-> same numeric port as the QUIC listener).
-
-### Windows Client
-
-**Automated (recommended):**
-```powershell
-# Run PowerShell as Administrator
-python install_cli_windows.py      # Installs CLI + Windows Service
-python install_gui_windows.py      # Installs Tauri GUI (optional)
-```
-
-**Usage:**
-```powershell
-mavi-vpn-client start     # Connect (prompts for config on first run)
-mavi-vpn-client stop      # Disconnect
-mavi-vpn-client status    # Check connection status
-```
-
-### Linux Client
-
-**Automated (recommended):**
-```bash
-python3 install_cli_linux.py       # Installs CLI + optional systemd service
-python3 install_gui_linux.py       # Installs Tauri GUI (deb/rpm/AppImage)
-```
-
-The CLI and GUI installers create the `mavivpn` group and add your desktop user so the GUI/CLI can control the root daemon after you log out and back in. DEB/RPM packages also create this group and add the invoking `sudo` user when available. When installing through a graphical package manager or directly as root, explicitly grant a trusted user access with `sudo usermod -aG mavivpn USER`, then log out and back in.
-
-**Usage:**
-```bash
-sudo mavi-vpn                      # Interactive connect (direct mode)
-sudo mavi-vpn daemon &             # Start IPC daemon (for GUI)
-mavi-vpn start                     # Connect via daemon
-mavi-vpn stop                      # Disconnect
-mavi-vpn status                    # Check VPN status
-```
-
-### Android Client
-
-1. Install **Rust** targets + `cargo-ndk`:
-   ```bash
-   cargo install cargo-ndk
-   rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
-   ```
-2. Open the `android/` folder in **Android Studio**
-3. Build → Build APK — the Rust core compiles automatically via Gradle
-
-### Tauri GUI (Cross-Platform)
-
-```bash
-cd gui
-npm install
-npm run tauri -- dev       # Development
-npm run tauri -- build     # Production (generates MSI/DEB/RPM)
 ```
 
 ## Censorship Resistance Modes
@@ -265,11 +344,12 @@ Full enterprise SSO with Keycloak:
    VPN_KEYCLOAK_REALM=mavi-vpn
    VPN_KEYCLOAK_CLIENT_ID=mavi-client
    ```
-2. Deploy Keycloak via the included `docker-compose`:
+2. Add the Compose overlay and profiles to `backend/.env`:
    ```bash
    COMPOSE_FILE=docker-compose.yml:keycloak/docker-compose.yml
    COMPOSE_PROFILES=traefik,keycloak
    ```
+   From `backend/`, run `docker compose up -d --build` to start the enabled services.
 3. On first start, Keycloak **auto-imports** the `mavi-vpn` realm from `backend/keycloak/mavi-vpn-realm.json` — including the `mavi-client` public PKCE client, the `vpn-user` realm role, and token lifespans tuned for the VPN refresh cycle (10 min access token, 1 h SSO idle, 24 h SSO max). You only need to create your users in the Keycloak admin console; the realm and client setup is automated. See `docs/INSTALLATION.md` Step 4 for details.
 4. Clients authenticate via **browser-based PKCE OAuth2** — the CLI/GUI opens a local HTTP server on port `18923`, redirects to Keycloak, and captures the JWT automatically.
 5. Android release builds must use a verified HTTPS App Link redirect. Build with `-Pmavi.oauthRedirectUri=https://<verified-domain>/<callback-path>`, register that exact URI in Keycloak, and host `/.well-known/assetlinks.json` for the `com.mavi.vpn` package. Debug builds use `com.mavi.vpn://oauth/callback` by default.
@@ -280,22 +360,26 @@ Full enterprise SSO with Keycloak:
 
 | Setting | Value | Why |
 |---|---|---|
-| Inner TUN MTU | **1280** | IPv6 minimum — universally supported, avoids fragmentation |
+| Inner TUN MTU | **1280** | Default inner MTU; allowed range 1280–1360. QUIC needs additional outer packet space |
 | QUIC Payload | **TUN MTU + 80** | Derived from the selected inner MTU; default is 1360 |
-| Congestion Control | **BBR** | Bandwidth-based, not loss-based — optimal for mobile/high-latency |
-| UDP Socket Buffers | **4 MB** | Prevents kernel drops during GSO bursts |
+| Congestion Control | **BBR** | QUIC congestion controller; tune and measure for your network |
+| UDP Socket Buffers | **4 MiB requested** | Helps absorb bursts; OS limits can cap the effective size |
 | Allocator | **system default** | Avoids an unused native allocator dependency in test and build paths |
 | Release Profile | `lto=true, codegen-units=1, strip=true` | Maximally optimized binary |
 
 ## Configuration Reference
 
-All server settings can be configured via environment variables or CLI flags:
+Defaults below are for the server binary unless noted. `VPN_IPV6_WAIT` is a
+Docker entrypoint setting. Compose and `.env` can override these defaults:
+the source Compose setup uses port `10443`, while `mavi-vpn-docker` also defaults
+to `VPN_DISABLE_IPV6=true`. In the source Compose file, environment variables must
+be listed under the service's `environment` mapping to reach the container.
 
 | Variable | Default | Description |
 |---|---|---|
 | `VPN_BIND_ADDR` | `0.0.0.0:4433` | QUIC listen address |
 | `VPN_HTTP2_BIND_ADDR` | *(disabled)* | Optional TLS/TCP listener for HTTP/2 CONNECT-IP; may use the same numeric port as QUIC |
-| `VPN_AUTH_TOKEN` | *(required)* | Pre-shared authentication token |
+| `VPN_AUTH_TOKEN` | *(required unless Keycloak is enabled)* | Pre-shared authentication token |
 | `VPN_NETWORK` | `10.8.0.0/24` | IPv4 client subnet (supports /8 to /30) |
 | `VPN_NETWORK_V6` | `fd00::/64` | IPv6 client subnet (ULA) |
 | `VPN_DISABLE_IPV6` | `false` | Skip all IPv6 setup and run IPv4-only |
@@ -304,7 +388,7 @@ All server settings can be configured via environment variables or CLI flags:
 | `VPN_DNS_V6` | *(automatic)* | IPv6 DNS server pushed when IPv6 is active |
 | `VPN_MTU` | `1280` | TUN interface MTU |
 | `VPN_CENSORSHIP_RESISTANT` | `false` | Enable Layer 7 obfuscation |
-| `VPN_MSS_CLAMPING` | `false` (`true` in the Docker Compose example) | TCP MSS rewriting via iptables mangle (MSS derived from `VPN_MTU`) |
+| `VPN_MSS_CLAMPING` | `false` | TCP MSS rewriting via iptables mangle; Compose defaults to `true`, but the source `.env.example` sets `false` |
 | `VPN_ALLOW_CLIENT_TO_CLIENT` | `false` | Allow VPN clients to reach each other (blocked by default) |
 | `VPN_TUN_DEVICE` | *(automatic; `mavi0` in Docker)* | Optional server TUN device name |
 | `VPN_WHITELIST_DOMAINS` | *(empty)* | Comma-separated client-side split-tunnel domain allow-list |
@@ -324,21 +408,35 @@ All server settings can be configured via environment variables or CLI flags:
 
 ## Testing
 
+Source builds require Rust 1.95 or newer. The [`quinn`](https://github.com/zerox80/quinn)
+and [`h3`](https://github.com/zerox80/h3) forks track `main`; [`h2`](https://github.com/zerox80/h2)
+tracks `master`. The [fork update workflow](.github/workflows/update-forks.yml)
+refreshes their lockfile revisions daily after Linux and Windows build checks.
+
 ```bash
 # Run the portable Rust core without Tauri/WebView or OS service deps
 cargo test-core-workspace --verbose
-
-# Run the Tauri Rust backend separately when WebView/Tauri deps are installed
-cargo test-gui-backend --verbose
 
 # Focused core checks
 cargo test -p shared --verbose
 cargo test -p mavi-vpn --verbose
 ```
 
-The `quic-tester/` tool simulates a DPI scanner to verify censorship resistance:
+For the Tauri backend, install WebView/Tauri dependencies and build the frontend
+assets before running its tests:
+
 ```bash
-cargo run -p quic-tester -- <server:port>
+cd gui
+npm ci
+npm run build
+cd ..
+cargo test-gui-backend --verbose
+```
+
+The `quic-tester/` tool checks the server's response to an unauthenticated HTTP/3
+probe. A successful response confirms that behavior, not resistance to every DPI system:
+```bash
+cargo run -p quic-tester -- 127.0.0.1:10443  # Replace with your server's IP:port
 # Expects HTTP/3 nginx response → confirms probe resistance is active
 ```
 
@@ -348,30 +446,31 @@ cargo run -p quic-tester -- <server:port>
 
 On AWS Lightsail (and similar clouds) the instance receives its public IPv6 address and default route via **Router Advertisements (RA)** on the WAN interface (e.g. `ens5`), and the public address is typically a single `/128`. Mavi VPN does **not** hand that public prefix to clients — clients get internal **ULA** addresses from `fd00::/64` and reach the internet through **NAT66**. For that to work:
 
-- **Forwarding must be enabled on the host.** The VPN container is deliberately hardened (non-privileged, `cap_drop: ALL` + `NET_ADMIN`), so its `/proc/sys` is read-only and it *cannot* set host sysctls itself. Enable forwarding on the host and persist it (see [`docs/INSTALLATION.md`](docs/INSTALLATION.md)):
+- **Keep accepting Router Advertisements before enabling forwarding.** On RA-based hosts, set `accept_ra=2` on the WAN interface first so enabling forwarding does not drop the IPv6 default route:
+  ```bash
+  MAVI_WAN=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+  sudo sysctl -w "net.ipv6.conf.${MAVI_WAN}.accept_ra=2"
+  ```
+- **Enable forwarding on the host.** The container uses `cap_drop: ALL` with `NET_ADMIN`, `NET_RAW`, and `NET_BIND_SERVICE` added back. Its `/proc/sys` is read-only, so it cannot configure host sysctls itself. Enable forwarding and persist both settings (see [`docs/INSTALLATION.md`](docs/INSTALLATION.md)):
   ```bash
   sudo sysctl -w net.ipv6.conf.all.forwarding=1
-  ```
-- **Keep `accept_ra=2` on the WAN while forwarding is on.** Turning the host into a router makes Linux stop accepting RAs (which drops the IPv6 default route) unless the WAN interface uses `accept_ra=2`:
-  ```bash
-  WAN=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
-  sudo sysctl -w "net.ipv6.conf.${WAN}.accept_ra=2"
   ```
 
 If the host has public IPv6 but forwarding is not enabled, the container now **fails loudly** at startup (instead of pretending IPv6 works) and prints the exact host commands to run. To run IPv4-only on purpose, set `VPN_DISABLE_IPV6=true`.
 
-If IPv6 still fails, check (replace `<wan>` with your interface, e.g. `ens5`):
+If IPv6 still fails, check using the `MAVI_WAN` interface identified above:
 ```bash
-cat /proc/sys/net/ipv6/conf/all/forwarding    # expect: 1
-cat /proc/sys/net/ipv6/conf/<wan>/accept_ra   # expect: 2
-ip -6 route show default                       # expect: default via fe80::… dev <wan> proto ra
-ip6tables -t nat -S POSTROUTING                # expect: -A POSTROUTING -s fd00::/64 -o <wan> -j MASQUERADE
+cat /proc/sys/net/ipv6/conf/all/forwarding        # expect: 1
+cat "/proc/sys/net/ipv6/conf/${MAVI_WAN}/accept_ra" # expect: 2
+ip -6 route show default                        # expect: default via fe80::… dev <wan> proto ra
+sudo ip6tables -t nat -S MAVI_VPN6_NAT            # expect: MASQUERADE for fd00::/64 via <wan>
 ```
 
 ## Documentation
 
 | Document | Description |
 |---|---|
+| [mavi-vpn-docker](https://github.com/zerox80/mavi-vpn-docker) | Prebuilt server images, Docker Compose setup, updates, and migration |
 | [`docs/INSTALLATION.md`](docs/INSTALLATION.md) | Comprehensive installation guide for all platforms |
 | [`docs/NGINX_PROXY.md`](docs/NGINX_PROXY.md) | Deploying behind an existing Nginx with wildcard SSL |
 | [`CODEWIKI.md`](CODEWIKI.md) | Deep technical encyclopedia of the entire codebase |

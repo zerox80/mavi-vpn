@@ -19,6 +19,9 @@ use crate::handlers::utils::{emulate_http3, negotiated_alpn, negotiated_sni, IpG
 
 pub(super) mod reauth;
 use reauth::reauth_listener;
+mod preauth;
+
+pub(crate) const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 100;
 
 enum InitialStreams {
     Raw {
@@ -33,11 +36,8 @@ enum InitialStreams {
 
 const RAW_AUTH_MAX_BYTES: usize = 16_384;
 
-/// Upper bound on how long a freshly accepted connection may take to open its
-/// initial control stream (and, for H3, to send its request). Without it, a peer
-/// that completes the handshake but never opens a stream would pin a bounded
-/// connection-handler slot until the 60s idle timeout — cheap, unauthenticated
-/// connection-slot exhaustion. Bounding the pre-auth phase releases stalled slots.
+/// One budget from transport handshake through successful config delivery.
+/// Stream credit, response flow control and keepalives cannot extend it.
 pub(crate) const PREAUTH_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn validate_raw_auth_len(len: usize) -> Result<()> {
@@ -122,7 +122,11 @@ pub(super) async fn run_authenticated_tunnel(
     mtu: u16,
     is_h3: bool,
     keycloak: Option<Arc<KeycloakValidator>>,
+    setup_complete: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
+    // Signal synchronously before spawning any tunnel tasks. The outer guard
+    // must stop canceling this future once the authenticated tunnel starts.
+    setup_complete.notify_one();
     let (tx_client, rx_client) = tokio::sync::mpsc::channel::<Bytes>(CLIENT_CHANNEL_CAPACITY);
     state.register_client(assigned_ip, assigned_ip6, tx_client);
 
@@ -237,8 +241,6 @@ async fn detect_initial_streams(connection: &quinn::Connection) -> Result<Initia
     }
 }
 
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::cast_possible_truncation)]
 pub async fn handle_connection(
     conn: quinn::Incoming,
     state: Arc<AppState>,
@@ -246,8 +248,44 @@ pub async fn handle_connection(
     tx_tun: tokio::sync::mpsc::Sender<Bytes>,
     keycloak: Option<Arc<KeycloakValidator>>,
     ipv6_enabled: bool,
+    pending_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()> {
-    let connection = conn.await?;
+    let deadline = tokio::time::Instant::now() + PREAUTH_PHASE_TIMEOUT;
+    // Dropping Quinn's owned Incoming/Connecting on timeout closes its last
+    // application reference, including connections still in the TLS handshake.
+    let connection = tokio::time::timeout_at(deadline, conn)
+        .await
+        .map_err(|_| anyhow::anyhow!("QUIC handshake timed out"))??;
+    let setup_complete = Arc::new(tokio::sync::Notify::new());
+    let handler = handle_established_connection(
+        connection.clone(),
+        state,
+        config,
+        tx_tun,
+        keycloak,
+        ipv6_enabled,
+        setup_complete.clone(),
+    );
+    preauth::until_ready(
+        &connection,
+        deadline,
+        pending_permit,
+        setup_complete,
+        handler,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn handle_established_connection(
+    connection: quinn::Connection,
+    state: Arc<AppState>,
+    config: Config,
+    tx_tun: tokio::sync::mpsc::Sender<Bytes>,
+    keycloak: Option<Arc<KeycloakValidator>>,
+    ipv6_enabled: bool,
+    setup_complete: Arc<tokio::sync::Notify>,
+) -> Result<()> {
     let remote_addr = connection.remote_address();
 
     let sni = negotiated_sni(&connection);
@@ -281,10 +319,7 @@ pub async fn handle_connection(
         );
     }
 
-    let initial_streams =
-        tokio::time::timeout(PREAUTH_PHASE_TIMEOUT, detect_initial_streams(&connection))
-            .await
-            .map_err(|_| anyhow::anyhow!("Pre-auth handshake timeout from {remote_addr}"))??;
+    let initial_streams = detect_initial_streams(&connection).await?;
     let (pre_bi, pre_uni) = match initial_streams {
         InitialStreams::Raw {
             send_stream,
@@ -304,6 +339,7 @@ pub async fn handle_connection(
             keycloak,
             ipv6_enabled,
             sni,
+            setup_complete,
         )
         .await;
     }
@@ -396,9 +432,13 @@ pub async fn handle_connection(
         config.mtu,
         false, // is_h3
         keycloak,
+        setup_complete,
     )
     .await
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod preauth_tests;

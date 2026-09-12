@@ -1,5 +1,6 @@
 #![allow(clippy::multiple_crate_versions)]
 use anyhow::Result;
+use std::process::ExitCode;
 
 mod client_config;
 mod client_ipc;
@@ -13,7 +14,7 @@ use client_prompt::{interactive_mode, load_or_prompt_config, read_line};
 use ipc::IpcRequest;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     println!();
     println!("========================================");
     println!("         Mavi VPN - Windows");
@@ -28,12 +29,19 @@ async fn main() {
         dispatch_cli(&args).await
     };
 
-    if let Err(e) = result {
-        println!("\n[ERROR] Error: {e}");
-    }
+    let exit_code = match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("\n[ERROR] Error: {e:#}");
+            ExitCode::FAILURE
+        }
+    };
 
-    println!("\nPress Enter to exit...");
-    let _ = read_line();
+    if args.is_empty() {
+        println!("\nPress Enter to exit...");
+        let _ = read_line();
+    }
+    exit_code
 }
 
 async fn dispatch_cli(args: &[String]) -> Result<()> {
@@ -47,9 +55,9 @@ async fn dispatch_cli(args: &[String]) -> Result<()> {
         "status" => send_request(IpcRequest::Status).await,
         "repair" => send_request(IpcRequest::RepairNetwork).await,
         _ => {
-            println!("Unknown command: {cmd}");
-            println!("Usage: mavi-vpn-client [start|stop|status|repair]");
-            Ok(())
+            anyhow::bail!(
+                "Unknown command: {cmd}\nUsage: mavi-vpn-client [start|stop|status|repair]"
+            )
         }
     }
 }

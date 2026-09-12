@@ -34,7 +34,7 @@ internal fun resolveVpnStartRequest(
     }
 
     val ip = intent.getStringExtra("IP") ?: ""
-    val port = intent.getStringExtra("PORT") ?: "4433"
+    val port = intent.getStringExtra("PORT") ?: "10443"
     val token = intent.getStringExtra("TOKEN") ?: ""
     val pin = intent.getStringExtra("PIN") ?: ""
     val splitMode = intent.getStringExtra("SPLIT_MODE") ?: ""

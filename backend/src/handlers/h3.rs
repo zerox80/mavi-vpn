@@ -75,6 +75,7 @@ pub async fn handle_h3_connection(
     keycloak: Option<Arc<KeycloakValidator>>,
     ipv6_enabled: bool,
     sni: Option<String>,
+    setup_complete: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     let remote_addr = connection.remote_address();
     info!(
@@ -95,18 +96,16 @@ pub async fn handle_h3_connection(
         .await
         .map_err(|e| anyhow::anyhow!("H3 build failed: {e}"))?;
 
-    // Bound the wait for the client's first request so an H3 peer that opens the
-    // control stream but never sends a request cannot pin a connection slot until
-    // the idle timeout (connection-slot exhaustion DoS).
-    let preauth_timeout = crate::handlers::connection::PREAUTH_PHASE_TIMEOUT;
-    let resolver = tokio::time::timeout(preauth_timeout, h3_conn.accept())
+    // The outer connection guard bounds all setup work with one deadline,
+    // including construction above and flow-controlled responses below.
+    let resolver = h3_conn
+        .accept()
         .await
-        .map_err(|_| anyhow::anyhow!("H3 accept timeout from {remote_addr}"))?
         .map_err(|e| anyhow::anyhow!("H3 accept error: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("Expected H3 request"))?;
-    let (req, mut req_stream) = tokio::time::timeout(preauth_timeout, resolver.resolve_request())
+    let (req, mut req_stream) = resolver
+        .resolve_request()
         .await
-        .map_err(|_| anyhow::anyhow!("H3 resolve timeout from {remote_addr}"))?
         .map_err(|e| anyhow::anyhow!("H3 resolve error: {e}"))?;
     let connect_ip_requested = is_connect_ip_request(&req);
     info!(
@@ -230,6 +229,7 @@ pub async fn handle_h3_connection(
         config.mtu,
         true, // is_h3
         keycloak,
+        setup_complete,
     )
     .await
 }

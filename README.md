@@ -20,7 +20,7 @@
 <img width="948" height="709" alt="Mavi VPN desktop client" src="https://github.com/user-attachments/assets/a56f2e27-9065-4115-80c4-81084605df61" />
 
 ---
-**[Mavi VPN 1.0.1 is available](https://github.com/zerox80/mavi-vpn/releases/tag/1.0.1).**
+**[Mavi VPN 1.0.2 is available](https://github.com/zerox80/mavi-vpn/releases/tag/1.0.2).**
 
 > Mavi VPN has not been independently security-audited. Do not rely on it for high-risk security use cases.
 

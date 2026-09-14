@@ -1128,7 +1128,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1330,7 +1330,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2580,7 +2580,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "linux-vpn"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2660,7 +2660,7 @@ dependencies = [
 
 [[package]]
 name = "mavi-vpn"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2706,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "mavi-vpn-gui"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -2734,7 +2734,7 @@ dependencies = [
 
 [[package]]
 name = "mavivpn"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -2894,7 +2894,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "quic-tester"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "h3",
  "h3-quinn",
@@ -3580,7 +3580,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.12.0"
-source = "git+https://github.com/zerox80/quinn?branch=main#5b000a842e5fb87adb38697a635612c3f1e67d3b"
+source = "git+https://github.com/zerox80/quinn?branch=main#a456686938ec846c1a7ffb6255ce985e91ca0ced"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -3600,7 +3600,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.12.0"
-source = "git+https://github.com/zerox80/quinn?branch=main#5b000a842e5fb87adb38697a635612c3f1e67d3b"
+source = "git+https://github.com/zerox80/quinn?branch=main#a456686938ec846c1a7ffb6255ce985e91ca0ced"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -3621,13 +3621,13 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.6.2"
-source = "git+https://github.com/zerox80/quinn?branch=main#5b000a842e5fb87adb38697a635612c3f1e67d3b"
+source = "git+https://github.com/zerox80/quinn?branch=main#a456686938ec846c1a7ffb6255ce985e91ca0ced"
 dependencies = [
  "cfg_aliases",
  "libc",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3910,7 +3910,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3969,7 +3969,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4362,7 +4362,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "base64 0.23.1",
  "bincode-next",
@@ -4901,7 +4901,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5830,7 +5830,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6104,7 +6104,7 @@ dependencies = [
 
 [[package]]
 name = "windows-vpn"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

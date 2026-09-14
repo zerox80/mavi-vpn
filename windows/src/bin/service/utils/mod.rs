@@ -5,6 +5,9 @@ use std::io::Write;
 use std::path::Path;
 use tracing::{info, warn};
 
+mod console_user;
+pub use console_user::active_console_user_sid;
+
 #[cfg(not(test))]
 pub fn run_network_repair_cleanup() {
     crate::vpn_core::cleanup_stale_network_state();
@@ -247,24 +250,6 @@ fn run_powershell_script(script: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-pub fn active_console_user_sid() -> Option<String> {
-    let ps = "$user = (Get-CimInstance Win32_ComputerSystem).UserName; if ($user) { try { (New-Object System.Security.Principal.NTAccount($user)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { '' } }";
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", ps])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let sid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if sid.is_empty() {
-        None
-    } else {
-        Some(sid)
-    }
 }
 
 #[cfg(test)]

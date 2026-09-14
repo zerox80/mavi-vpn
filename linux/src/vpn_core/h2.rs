@@ -13,6 +13,17 @@ use tokio_rustls::TlsConnector;
 const CHANNEL_CAPACITY: usize = 4096;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Default)]
+struct TransportTasks(Vec<tokio::task::AbortHandle>);
+
+impl Drop for TransportTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// Packet-plane handle. Unlike QUIC, HTTP/2 capsules are reliable and ordered.
 #[derive(Clone)]
 pub(super) struct Http2Session {
@@ -20,6 +31,7 @@ pub(super) struct Http2Session {
     inbound: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     reauth_results: Arc<Mutex<mpsc::Receiver<bool>>>,
     remote_addr: std::net::SocketAddr,
+    _tasks: Arc<TransportTasks>,
 }
 
 impl Http2Session {
@@ -122,24 +134,32 @@ pub(super) async fn connect_and_handshake_h2(
         .unwrap_or_else(|| anyhow::anyhow!("TCP connection failed for every resolved address")))
 }
 
-async fn establish_h2(
-    tls: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+async fn establish_h2<T>(
+    io: T,
     remote_addr: std::net::SocketAddr,
     token: String,
-) -> Result<(Http2Session, ControlMessage)> {
+) -> Result<(Http2Session, ControlMessage)>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let mut builder = h2::client::Builder::new();
     builder
         .initial_window_size(shared::http2::CLIENT_INITIAL_STREAM_WINDOW_SIZE)
         .initial_connection_window_size(shared::http2::CLIENT_INITIAL_CONNECTION_WINDOW_SIZE);
     let (mut sender, connection) = builder
-        .handshake(tls)
+        .handshake(io)
         .await
         .context("HTTP/2 client handshake failed")?;
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            tracing::debug!(%error, "HTTP/2 connection driver ended");
-        }
-    });
+    // Own the driver immediately so failed/cancelled handshakes also stop it.
+    let mut tasks = TransportTasks::default();
+    tasks.0.push(
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::debug!(%error, "HTTP/2 connection driver ended");
+            }
+        })
+        .abort_handle(),
+    );
 
     sender
         .clone()
@@ -183,19 +203,25 @@ async fn establish_h2(
     let (outbound, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (inbound_tx, inbound) = mpsc::channel(CHANNEL_CAPACITY);
     let (reauth_tx, reauth_results) = mpsc::channel(CHANNEL_CAPACITY);
-    tokio::spawn(send_capsules(send_stream, outbound_rx));
-    tokio::spawn(receive_capsules(
-        recv_stream,
-        capsule_buf,
-        inbound_tx,
-        reauth_tx,
-    ));
+    tasks
+        .0
+        .push(tokio::spawn(send_capsules(send_stream, outbound_rx)).abort_handle());
+    tasks.0.push(
+        tokio::spawn(receive_capsules(
+            recv_stream,
+            capsule_buf,
+            inbound_tx,
+            reauth_tx,
+        ))
+        .abort_handle(),
+    );
     Ok((
         Http2Session {
             outbound,
             inbound: Arc::new(Mutex::new(inbound)),
             reauth_results: Arc::new(Mutex::new(reauth_results)),
             remote_addr,
+            _tasks: Arc::new(tasks),
         },
         config,
     ))
@@ -292,3 +318,6 @@ async fn receive_capsules(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

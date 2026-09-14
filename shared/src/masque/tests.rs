@@ -101,6 +101,21 @@ fn http2_datagram_capsule_roundtrip() {
 }
 
 #[test]
+fn http2_datagram_capsules_preserve_wire_format_at_length_boundaries() {
+    for size in [1, 62, 63, 64, 1280, 1360, 16_382, 16_383] {
+        let packet = vec![0x45; size];
+        let capsule = encode_connect_ip_datagram_capsule(&packet);
+        // Compare with generic capsule framing, including varint transitions.
+        let mut payload = vec![0];
+        payload.extend_from_slice(&packet);
+        let mut expected = Vec::new();
+        encode_capsule(CAPSULE_DATAGRAM, &payload, &mut expected);
+        assert_eq!(capsule, expected, "packet size {size}");
+        assert_eq!(capsule.capacity(), capsule.len(), "packet size {size}");
+    }
+}
+
+#[test]
 fn http2_datagram_capsule_rejects_missing_context_or_packet() {
     assert!(decode_connect_ip_datagram_payload(&[]).is_none());
     assert!(decode_connect_ip_datagram_payload(&[0]).is_none());

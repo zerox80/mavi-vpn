@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 /// Removes a peer registration only if the entry still holds the exact channel
 /// whose closure we observed.
 ///
-/// The TUN reader clones the sender out of the map before `try_send`. By the
+/// The TUN reader clones the sender out of the map before `try_reserve`. By the
 /// time it sees `Closed`, the client may already have disconnected *and* a new
 /// client may have leased the same virtual IP and registered its own channel
 /// (`release_ips` removes the peer before returning the IP to the pool). A blind
@@ -95,7 +95,7 @@ pub fn spawn_tun_writer(
 fn deliver_to_client<K>(
     peers: &DashMap<K, ClientTx>,
     dest_ip: K,
-    framed: Bytes,
+    framed: &[u8],
     packet_len: u64,
     stats: &mut TunReaderStats,
     drop_count: &mut u64,
@@ -108,8 +108,11 @@ where
         return false;
     };
 
-    match tx_client.try_send(framed) {
-        Ok(()) => {
+    match tx_client.try_reserve() {
+        Ok(permit) => {
+            // Each queued packet owns only its own bytes. Sharing a large slab
+            // across peers lets one stalled peer retain fast peers' buffers.
+            permit.send(Bytes::copy_from_slice(framed));
             stats.routed_packets += 1;
             stats.routed_bytes += packet_len;
         }
@@ -149,8 +152,8 @@ pub fn spawn_tun_reader(
     state_reader: Arc<AppState>,
 ) {
     tokio::spawn(async move {
-        let mut pool = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
-        let mut scratch = vec![0u8; 65536];
+        let mut scratch = vec![0u8; 65536 + DATAGRAM_PREFIX.len()];
+        scratch[..DATAGRAM_PREFIX.len()].copy_from_slice(&DATAGRAM_PREFIX);
 
         let mut last_drop_warn = std::time::Instant::now();
         let mut drop_count = 0u64;
@@ -169,23 +172,17 @@ pub fn spawn_tun_reader(
         flush_tick.tick().await;
 
         loop {
-            if pool.capacity() < 65536 + DATAGRAM_PREFIX.len() {
-                pool.reserve(4 * 1024 * 1024);
-            }
-
             tokio::select! {
                 biased;
-                res = tun_reader.read(&mut scratch) => {
+                res = tun_reader.read(&mut scratch[DATAGRAM_PREFIX.len()..]) => {
                     match res {
                         Ok(0) => break,
                         Ok(n) => {
                             stats.read_packets += 1;
                             stats.read_bytes += n as u64;
 
-                            pool.extend_from_slice(&DATAGRAM_PREFIX);
-                            pool.extend_from_slice(&scratch[..n]);
-                            let framed = pool.split().freeze();
-                            let packet = framed.slice(DATAGRAM_PREFIX.len()..);
+                            let framed = &scratch[..DATAGRAM_PREFIX.len() + n];
+                            let packet = &framed[DATAGRAM_PREFIX.len()..];
 
                             if packet.is_empty() {
                                 stats.invalid_ip += 1;
@@ -194,7 +191,7 @@ pub fn spawn_tun_reader(
 
                             let packet_len = packet.len() as u64;
                             match packet[0] >> 4 {
-                                4 => match Ipv4HeaderSlice::from_slice(&packet) {
+                                4 => match Ipv4HeaderSlice::from_slice(packet) {
                                     Ok(header) => {
                                         if !deliver_to_client(
                                             &state_reader.peers,
@@ -210,7 +207,7 @@ pub fn spawn_tun_reader(
                                     }
                                     Err(_) => stats.invalid_ip += 1,
                                 },
-                                6 => match Ipv6HeaderSlice::from_slice(&packet) {
+                                6 => match Ipv6HeaderSlice::from_slice(packet) {
                                     Ok(header) => {
                                         if !deliver_to_client(
                                             &state_reader.peers_v6,
@@ -335,6 +332,49 @@ mod tests {
         let data = Bytes::from_static(b"hello");
         assert!(tx.try_send(data.clone()).is_ok());
         assert!(tx.try_send(data).is_err());
+    }
+
+    #[test]
+    fn queued_packets_have_independent_bounded_storage() {
+        let peers = DashMap::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        peers.insert(1_u8, tx);
+        // Reuse the TUN scratch buffer while the client consumes no packets.
+        let mut scratch = vec![0; 1280 + DATAGRAM_PREFIX.len()];
+        let mut stats = TunReaderStats::default();
+        let mut drops = 0;
+        let mut last_warn = std::time::Instant::now();
+        for sequence in 0..32_u8 {
+            scratch[DATAGRAM_PREFIX.len()..].fill(sequence);
+            assert!(deliver_to_client(
+                &peers,
+                1,
+                &scratch,
+                1280,
+                &mut stats,
+                &mut drops,
+                &mut last_warn,
+            ));
+        }
+        scratch.fill(255);
+
+        let mut retained_capacity = 0;
+        for sequence in 0..32_u8 {
+            let packet = rx.try_recv().unwrap();
+            assert_eq!(&packet[..DATAGRAM_PREFIX.len()], &DATAGRAM_PREFIX);
+            assert!(packet[DATAGRAM_PREFIX.len()..]
+                .iter()
+                .all(|&b| b == sequence));
+            // A packet must not share an allocation with other queued packets
+            // or retain a multi-MiB allocation once it is the last slice.
+            let owned = packet
+                .try_into_mut()
+                .expect("independent packet allocation");
+            retained_capacity += owned.capacity();
+        }
+        assert_eq!(retained_capacity, 32 * scratch.len());
+        assert_eq!(stats.routed_packets, 32);
+        assert_eq!(drops, 0);
     }
 
     #[tokio::test]

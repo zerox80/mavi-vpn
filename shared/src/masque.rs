@@ -169,12 +169,14 @@ pub fn read_capsule(buf: &[u8]) -> Option<(u64, &[u8], usize)> {
 /// The Context ID is zero because Mavi creates no additional IP contexts.
 #[must_use]
 pub fn encode_connect_ip_datagram_capsule(ip_packet: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(ip_packet.len() + 1);
-    write_varint(0, &mut payload);
-    payload.extend_from_slice(ip_packet);
-
-    let mut capsule = Vec::with_capacity(payload.len() + 2);
-    encode_capsule(CAPSULE_DATAGRAM, &payload, &mut capsule);
+    let payload_len = ip_packet.len() + 1; // Context ID 0 + IP packet.
+    let mut capsule = Vec::with_capacity(
+        varint_len(CAPSULE_DATAGRAM) + varint_len(payload_len as u64) + payload_len,
+    );
+    write_varint(CAPSULE_DATAGRAM, &mut capsule);
+    write_varint(payload_len as u64, &mut capsule);
+    write_varint(0, &mut capsule);
+    capsule.extend_from_slice(ip_packet);
     capsule
 }
 

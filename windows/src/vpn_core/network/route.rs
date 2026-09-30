@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use tracing::{info, warn};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -19,6 +19,22 @@ pub fn win32_add_route(
     next_hop: Option<IpAddr>,
     metric: u32,
 ) -> Result<()> {
+    let row = route_row(adapter_index, destination, prefix_len, next_hop, metric);
+    let res = unsafe { CreateIpForwardEntry2(&raw const row) };
+    if res == 0 || res == ERROR_OBJECT_ALREADY_EXISTS {
+        Ok(())
+    } else {
+        Err(win_err(res))
+    }
+}
+
+fn route_row(
+    adapter_index: u32,
+    destination: IpAddr,
+    prefix_len: u8,
+    next_hop: Option<IpAddr>,
+    metric: u32,
+) -> MIB_IPFORWARD_ROW2 {
     // SAFETY: MIB_IPFORWARD_ROW2 is a plain-old-data Win32 struct with no invalid
     // bit patterns; zeroing it is the documented way to start a fresh entry, and
     // InitializeIpForwardEntry then fills in the sentinel defaults the API expects.
@@ -28,17 +44,13 @@ pub fn win32_add_route(
     row.InterfaceIndex = adapter_index;
     row.DestinationPrefix.Prefix = to_sockaddr_inet(destination);
     row.DestinationPrefix.PrefixLength = prefix_len;
-    if let Some(hop) = next_hop {
-        row.NextHop = to_sockaddr_inet(hop);
-    }
+    // On-link routes still need an address family; AF_UNSPEC is rejected by Win32.
+    row.NextHop = to_sockaddr_inet(next_hop.unwrap_or(match destination {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    }));
     row.Metric = metric;
-
-    let res = unsafe { CreateIpForwardEntry2(&raw const row) };
-    if res == 0 || res == ERROR_OBJECT_ALREADY_EXISTS {
-        Ok(())
-    } else {
-        Err(win_err(res))
-    }
+    row
 }
 
 pub fn win32_delete_route(adapter_index: u32, destination: IpAddr, prefix_len: u8) -> Result<()> {
@@ -229,6 +241,48 @@ mod tests {
     use crate::vpn_core::network::command_runner::test_support::{
         RecordedCommand, RecordingRunner,
     };
+
+    #[test]
+    fn ipv6_on_link_routes_have_an_ipv6_next_hop() {
+        for destination in [Ipv6Addr::UNSPECIFIED, "8000::".parse().unwrap()] {
+            let row = route_row(7, IpAddr::V6(destination), 1, None, 1);
+            // SAFETY: these rows were constructed from IPv6 destinations above.
+            unsafe {
+                assert_eq!(row.NextHop.si_family, AF_INET6);
+                assert_eq!(row.NextHop.Ipv6.sin6_addr.u.Byte, [0; 16]);
+            }
+        }
+    }
+
+    #[test]
+    fn ipv4_on_link_routes_have_an_ipv4_next_hop() {
+        let row = route_row(7, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1, None, 1);
+        // SAFETY: the row was constructed from an IPv4 destination above.
+        unsafe {
+            assert_eq!(row.NextHop.si_family, AF_INET);
+            assert_eq!(row.NextHop.Ipv4.sin_addr.S_un.S_addr, 0);
+        }
+    }
+
+    #[test]
+    fn route_row_preserves_explicit_next_hops() {
+        let gateway = Ipv4Addr::new(10, 8, 0, 1);
+        let row = route_row(
+            7,
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            1,
+            Some(gateway.into()),
+            1,
+        );
+        // SAFETY: the row's next hop was set to an IPv4 address above.
+        unsafe {
+            assert_eq!(row.NextHop.si_family, AF_INET);
+            assert_eq!(
+                row.NextHop.Ipv4.sin_addr.S_un.S_addr,
+                u32::from_ne_bytes(gateway.octets())
+            );
+        }
+    }
 
     #[test]
     fn prefix_policy_uses_set_command_first() {

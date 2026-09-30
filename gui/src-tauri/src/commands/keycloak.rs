@@ -1,12 +1,17 @@
 use crate::ipc::send_ipc_request;
 use crate::oauth;
 use crate::secret_store::{connection_refresh_token_account, KeyringSecretStore, SecretStore};
-use shared::ipc::{Config, IpcRequest, IpcResponse};
+#[cfg(target_os = "windows")]
+use shared::ipc::IpcResponse;
+use shared::ipc::{Config, IpcRequest};
 use shared::kc_oauth::{self, RefreshOutcome};
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{debug, info, warn};
+
+#[cfg(not(target_os = "windows"))]
+mod refresh;
 
 /// Refresh the access token this many seconds before its `exp`, leaving headroom
 /// for the refresh round-trip and the reconnect handshake (matches Android's
@@ -263,8 +268,11 @@ async fn service_refresh_token_sync_loop(app: AppHandle) {
 /// failures (keep retrying) from a dead refresh token (`kc-needs-login` -> stop).
 #[cfg(not(target_os = "windows"))]
 async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
+    use refresh::{refresh_tick, TickError, TickOutcome};
+
     let store = KeyringSecretStore;
     let refresh_account = connection_refresh_token_account(&session.connection_id);
+    let mut pending_token = None;
     info!(
         connection_id = %session.connection_id,
         "Starting GUI Keycloak access-token refresh loop"
@@ -273,86 +281,38 @@ async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
     loop {
         tokio::time::sleep(REFRESH_TICK).await;
 
-        if kc_oauth::is_access_token_usable(&session.access_token, REFRESH_SKEW_SECS) {
-            continue;
-        }
-
-        let Some(refresh_token) = store
-            .get_secret(&refresh_account)
-            .ok()
-            .flatten()
-            .filter(|t| !t.is_empty())
-        else {
-            warn!(
-                connection_id = %session.connection_id,
-                "Stored Keycloak refresh token is missing during active session"
-            );
-            let _ = send_ipc_request(&IpcRequest::Stop).await;
-            let _ = app.emit("kc-needs-login", "Session expired; please log in again.");
-            break;
-        };
-
-        match kc_oauth::refresh_access_token(
-            &session.kc_url,
-            &session.realm,
-            &session.client_id,
-            &refresh_token,
+        let (kc_url, realm, client_id) = (&session.kc_url, &session.realm, &session.client_id);
+        let result = refresh_tick(
+            &mut session.access_token,
+            &mut pending_token,
+            &store,
+            &refresh_account,
+            |token| async move {
+                kc_oauth::refresh_access_token(kc_url, realm, client_id, &token).await
+            },
+            |token| async move { send_ipc_request(&IpcRequest::UpdateToken { token }).await },
         )
-        .await
-        {
-            RefreshOutcome::Success(tokens) => {
-                if let Err(e) =
-                    persist_refresh_token(&store, &refresh_account, tokens.refresh_token.as_deref())
-                {
-                    warn!(
-                        connection_id = %session.connection_id,
-                        error = %e,
-                        "Failed to persist rotated Keycloak refresh token"
-                    );
-                    let _ = send_ipc_request(&IpcRequest::Stop).await;
-                    let _ = app.emit(
-                        "kc-needs-login",
-                        format!("Session could not be saved; please log in again. {e}"),
-                    );
-                    break;
-                }
-
-                session.access_token = tokens.access_token.clone();
-                match send_ipc_request(&IpcRequest::UpdateToken {
-                    token: tokens.access_token,
-                })
-                .await
-                {
-                    Ok(IpcResponse::Ok) => info!(
-                        connection_id = %session.connection_id,
-                        "Refreshed Keycloak access token and notified service"
-                    ),
-                    Ok(IpcResponse::Error(error)) => warn!(
-                        connection_id = %session.connection_id,
-                        error = %error,
-                        "Service rejected refreshed Keycloak access token"
-                    ),
-                    Ok(response) => warn!(
-                        connection_id = %session.connection_id,
-                        response = ?response,
-                        "Service returned unexpected response to refreshed Keycloak access token"
-                    ),
-                    Err(error) => warn!(
-                        connection_id = %session.connection_id,
-                        error = %error,
-                        "Failed to notify service about refreshed Keycloak access token"
-                    ),
-                }
-            }
+        .await;
+        match result {
+            Ok(TickOutcome::Skipped) => {}
+            Ok(TickOutcome::Delivered) => info!(
+                connection_id = %session.connection_id,
+                "Refreshed Keycloak access token and notified service"
+            ),
+            Err(TickError::Delivery(error)) => warn!(
+                connection_id = %session.connection_id,
+                error = %error,
+                "Failed to deliver refreshed Keycloak access token; will retry"
+            ),
             // Transient: keep the tunnel up and try again on the next tick.
-            RefreshOutcome::NetworkError(error) => {
+            Err(TickError::Network(error)) => {
                 warn!(
                     connection_id = %session.connection_id,
                     error = %error,
                     "Keycloak access-token refresh failed due to network error"
                 );
             }
-            RefreshOutcome::NeedsLogin(msg) => {
+            Err(TickError::NeedsLogin(msg)) => {
                 warn!(
                     connection_id = %session.connection_id,
                     "Keycloak refresh token requires a fresh login during active session"
@@ -360,6 +320,16 @@ async fn token_refresh_loop(app: AppHandle, mut session: KeycloakSession) {
                 let _ = store.delete_secret(&refresh_account);
                 let _ = send_ipc_request(&IpcRequest::Stop).await;
                 let _ = app.emit("kc-needs-login", msg);
+                break;
+            }
+            Err(TickError::Persistence(error)) => {
+                warn!(connection_id = %session.connection_id, error = %error,
+                    "Failed to persist rotated Keycloak refresh token");
+                let _ = send_ipc_request(&IpcRequest::Stop).await;
+                let _ = app.emit(
+                    "kc-needs-login",
+                    format!("Session could not be saved; please log in again. {error}"),
+                );
                 break;
             }
         }

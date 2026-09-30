@@ -1,8 +1,16 @@
-use super::command::{run_cmd, CommandRunner};
+use super::command::{CommandOutcome, CommandRunner};
 use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::Command;
 use tracing::{info, warn};
+
+/// A host route newly installed by this session, with its cleanup selectors.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct HostRoute {
+    ip: IpAddr,
+    gateway: Option<String>,
+    device: String,
+}
 
 /// Detects the current physical IPv4 default gateway and interface.
 pub(super) fn detect_physical_gateway() -> (Option<String>, Option<String>) {
@@ -76,48 +84,52 @@ pub(super) fn add_host_route_exception<R: CommandRunner>(
     physical_device: Option<&str>,
     physical_gateway_v6: Option<&str>,
     physical_device_v6: Option<&str>,
-) -> Result<()> {
-    match ip {
-        IpAddr::V4(v4) => {
-            let (gw, dev) = physical_gateway.zip(physical_device).ok_or_else(|| {
-                anyhow::anyhow!("No physical IPv4 gateway found for host route exception")
-            })?;
-            let route = format!("{v4}/32");
-            runner.run("ip", &["route", "add", &route, "via", gw, "dev", dev])?;
-        }
-        IpAddr::V6(v6) => {
-            let (gw, dev) = physical_gateway_v6.zip(physical_device_v6).ok_or_else(|| {
-                anyhow::anyhow!("No physical IPv6 gateway found for host route exception")
-            })?;
-            let route = format!("{v6}/128");
-            runner.run("ip", &["-6", "route", "add", &route, "via", gw, "dev", dev])?;
-        }
+) -> Result<Option<HostRoute>> {
+    let (gw, dev) = match ip {
+        IpAddr::V4(_) => (physical_gateway, physical_device),
+        IpAddr::V6(_) => (physical_gateway_v6, physical_device_v6),
+    };
+    let dev = dev.ok_or_else(|| {
+        anyhow::anyhow!("No physical interface found for host route exception to {ip}")
+    })?;
+    let args = host_route_args(ip, "add", gw, dev);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match runner.run_with_outcome("ip", &args)? {
+        CommandOutcome::AlreadyExists => Ok(None),
+        CommandOutcome::Applied => Ok(Some(HostRoute {
+            ip,
+            gateway: gw.map(str::to_string),
+            device: dev.to_string(),
+        })),
     }
-    Ok(())
 }
 
-/// Removes only a route matching the physical gateway/device used when the
-/// exception was added. This avoids deleting an unrelated host route.
-pub(super) fn remove_host_route_exception(
-    ip: IpAddr,
-    physical_gateway: Option<&str>,
-    physical_device: Option<&str>,
-    physical_gateway_v6: Option<&str>,
-    physical_device_v6: Option<&str>,
+fn host_route_args(ip: IpAddr, action: &str, gateway: Option<&str>, device: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if ip.is_ipv6() {
+        args.push("-6".to_string());
+    }
+    args.extend([
+        "route".to_string(),
+        action.to_string(),
+        format!("{ip}/{}", if ip.is_ipv4() { 32 } else { 128 }),
+    ]);
+    if let Some(gw) = gateway {
+        args.extend(["via".to_string(), gw.to_string()]);
+    }
+    args.extend(["dev".to_string(), device.to_string()]);
+    args
+}
+
+/// Removes only newly installed exceptions, using their original selectors.
+pub(super) fn remove_host_route_exceptions(
+    runner: &mut impl CommandRunner,
+    owned_routes: &[HostRoute],
 ) {
-    match ip {
-        IpAddr::V4(v4) => {
-            if let (Some(gw), Some(dev)) = (physical_gateway, physical_device) {
-                let route = format!("{v4}/32");
-                let _ = run_cmd("ip", &["route", "del", &route, "via", gw, "dev", dev]);
-            }
-        }
-        IpAddr::V6(v6) => {
-            if let (Some(gw), Some(dev)) = (physical_gateway_v6, physical_device_v6) {
-                let route = format!("{v6}/128");
-                let _ = run_cmd("ip", &["-6", "route", "del", &route, "via", gw, "dev", dev]);
-            }
-        }
+    for route in owned_routes {
+        let args = host_route_args(route.ip, "del", route.gateway.as_deref(), &route.device);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _ = runner.run("ip", &args);
     }
 }
 
@@ -135,6 +147,52 @@ pub(super) fn netmask_to_prefix(netmask: Ipv4Addr) -> u8 {
 mod tests {
     use super::*;
     use std::net::Ipv6Addr;
+
+    #[test]
+    fn gatewayless_host_routes_use_the_physical_interface() {
+        use super::super::command::test_support::RecordingRunner;
+
+        for (ip, expected) in [
+            (
+                "203.0.113.10",
+                vec!["route", "add", "203.0.113.10/32", "dev", "ppp0"],
+            ),
+            (
+                "2001:db8::10",
+                vec!["-6", "route", "add", "2001:db8::10/128", "dev", "ppp0"],
+            ),
+        ] {
+            let mut runner = RecordingRunner::default();
+            add_host_route_exception(
+                &mut runner,
+                ip.parse().unwrap(),
+                None,
+                Some("ppp0"),
+                None,
+                Some("ppp0"),
+            )
+            .unwrap();
+            assert_eq!(
+                runner.calls,
+                vec![(
+                    "ip".into(),
+                    expected.into_iter().map(String::from).collect()
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn gatewayless_cleanup_keeps_the_original_interface_selector() {
+        assert_eq!(
+            host_route_args("203.0.113.10".parse().unwrap(), "del", None, "ppp0"),
+            ["route", "del", "203.0.113.10/32", "dev", "ppp0"]
+        );
+        assert_eq!(
+            host_route_args("2001:db8::10".parse().unwrap(), "del", None, "ppp0"),
+            ["-6", "route", "del", "2001:db8::10/128", "dev", "ppp0"]
+        );
+    }
 
     #[test]
     fn parse_endpoint_ip_accepts_plain_ipv4() {

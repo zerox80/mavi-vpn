@@ -244,7 +244,9 @@ fi
 
 # Verify tables
 iptables -t nat -L -v -n
-ip6tables -t nat -L -v -n
+if [ "${VPN_DISABLE_IPV6:-false}" != "true" ]; then
+    ip6tables -t nat -L -v -n
+fi
 
 echo "Executing mavi-vpn binary..."
 SERVER_PID=""

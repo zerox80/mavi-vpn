@@ -8,6 +8,7 @@ use super::host_route::{add_host_route_exception_fixed, add_host_route_exception
 use super::ip::{wait_for_ipv4_address, win32_add_ip};
 use super::route::{apply_ipv6_prefix_policy, ipv6_network_prefix, win32_add_route};
 use super::whitelist::resolve_whitelist_ips;
+use super::HostRoute;
 use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
@@ -16,11 +17,11 @@ use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use wintun::Adapter;
 
 pub struct SessionRouteGuard {
-    host_routes: Vec<String>,
+    host_routes: Vec<HostRoute>,
 }
 
 impl SessionRouteGuard {
-    pub const fn new(host_routes: Vec<String>) -> Self {
+    pub const fn new(host_routes: Vec<HostRoute>) -> Self {
         Self { host_routes }
     }
 }
@@ -77,7 +78,7 @@ pub fn set_adapter_network_config(
     config: AdapterNetworkConfig,
     endpoint: &str,
     whitelist_domains: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Vec<HostRoute>> {
     config.require_ipv6_tunnel()?;
 
     let AdapterNetworkConfig {
@@ -139,13 +140,12 @@ pub fn set_adapter_network_config(
     win32_set_mtu(adapter_index, u32::from(tun_mtu), AF_INET6 as _);
 
     let route_started = Instant::now();
-    let endpoint_route = add_host_route_exception_fixed(endpoint).ok_or_else(|| {
-        anyhow::anyhow!("Failed to install host route exception for VPN endpoint")
-    })?;
-    let mut host_routes = vec![endpoint_route];
+    let endpoint_route = add_host_route_exception_fixed(endpoint)
+        .context("Failed to install host route exception for VPN endpoint")?;
+    let mut host_routes: Vec<_> = endpoint_route.into_iter().collect();
     for ip in whitelist_ips {
-        if let Some(prefix) = add_host_route_exception_for_ip(ip) {
-            host_routes.push(prefix);
+        if let Ok(Some(route)) = add_host_route_exception_for_ip(ip) {
+            host_routes.push(route);
         }
     }
 
@@ -337,23 +337,32 @@ mod tests {
 
     #[test]
     fn session_route_guard_stores_host_routes() {
-        let guard = SessionRouteGuard::new(vec!["10.0.0.0/32".to_string()]);
-        assert_eq!(guard.host_routes, vec!["10.0.0.0/32".to_string()]);
+        let route = test_host_route("10.0.0.0");
+        let guard = std::mem::ManuallyDrop::new(SessionRouteGuard::new(vec![route.clone()]));
+        assert_eq!(guard.host_routes, vec![route]);
     }
 
     #[test]
     fn session_route_guard_stores_multiple_host_routes() {
-        let guard = SessionRouteGuard::new(vec![
-            "10.0.0.0/32".to_string(),
-            "203.0.113.10/32".to_string(),
-        ]);
+        let guard = std::mem::ManuallyDrop::new(SessionRouteGuard::new(vec![
+            test_host_route("10.0.0.0"),
+            test_host_route("203.0.113.10"),
+        ]));
         assert_eq!(guard.host_routes.len(), 2);
     }
 
     #[test]
     fn session_route_guard_empty_host_routes() {
-        let guard = SessionRouteGuard::new(Vec::new());
+        let guard = std::mem::ManuallyDrop::new(SessionRouteGuard::new(Vec::new()));
         assert!(guard.host_routes.is_empty());
+    }
+
+    fn test_host_route(destination: &str) -> HostRoute {
+        HostRoute {
+            destination: destination.parse().unwrap(),
+            interface_index: 7,
+            next_hop: "192.0.2.1".parse().unwrap(),
+        }
     }
 
     #[test]

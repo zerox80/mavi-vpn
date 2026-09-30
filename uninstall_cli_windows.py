@@ -61,17 +61,25 @@ def ask(question, default="y"):
 def repair_network_state():
     """Remove stale MaviVPN routes and DNS policy left by interrupted sessions."""
     ps = r"""
-route delete 0.0.0.0 mask 128.0.0.0 2>$null | Out-Null
-route delete 128.0.0.0 mask 128.0.0.0 2>$null | Out-Null
 $persisted = Join-Path $env:ProgramData 'mavi-vpn\last_host_route.txt'
 if (Test-Path $persisted) {
-    $prefix = (Get-Content $persisted -Raw -ErrorAction SilentlyContinue).Trim()
-    if ($prefix) {
-        Remove-NetRoute -DestinationPrefix $prefix -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    foreach ($line in Get-Content -LiteralPath $persisted -ErrorAction SilentlyContinue) {
+        # Legacy prefix-only records cannot establish ownership safely.
+        try { $record = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+        [System.Net.IPAddress]$destination = $null
+        [System.Net.IPAddress]$nextHop = $null
+        [uint32]$interfaceIndex = 0
+        if (-not [System.Net.IPAddress]::TryParse([string]$record.destination, [ref]$destination) -or
+            -not [System.Net.IPAddress]::TryParse([string]$record.next_hop, [ref]$nextHop) -or
+            -not [uint32]::TryParse([string]$record.interface_index, [ref]$interfaceIndex) -or
+            $interfaceIndex -eq 0 -or $destination.AddressFamily -ne $nextHop.AddressFamily) { continue }
+        $length = if ($destination.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { 32 } else { 128 }
+        $prefix = "$($destination.ToString())/$length"
+        Remove-NetRoute -DestinationPrefix $prefix -InterfaceIndex $interfaceIndex -NextHop ($nextHop.ToString()) -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
     }
     Remove-Item $persisted -Force -ErrorAction SilentlyContinue
 }
-foreach ($prefix in @('::/1','8000::/1')) {
+foreach ($prefix in @('0.0.0.0/1','128.0.0.0/1','::/1','8000::/1')) {
     Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue |
         Where-Object { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -IncludeHidden -ErrorAction SilentlyContinue).Name -like 'MaviVPN*' } |
         Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue | Out-Null

@@ -312,7 +312,11 @@ mod tests {
     }
 
     impl CommandRunner for DnsRunner {
-        fn run(&mut self, cmd: &str, args: &[&str]) -> Result<()> {
+        fn run_with_outcome(
+            &mut self,
+            cmd: &str,
+            args: &[&str],
+        ) -> Result<super::super::command::CommandOutcome> {
             assert_eq!(cmd, "resolvectl");
             let step = self.calls.len();
             self.calls
@@ -320,7 +324,7 @@ mod tests {
             if self.fail_step == Some(step) || (self.fail_revert && args[0] == "revert") {
                 anyhow::bail!("simulated failure at {}", args[0]);
             }
-            Ok(())
+            Ok(super::super::command::CommandOutcome::Applied)
         }
     }
 

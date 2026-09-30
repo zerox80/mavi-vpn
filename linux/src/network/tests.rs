@@ -1,13 +1,15 @@
+use super::command::CommandOutcome;
 use super::*;
 
 #[derive(Default)]
 struct RecordingRunner {
     calls: Vec<(String, Vec<String>)>,
     fail_on_args: Option<Vec<String>>,
+    existing_host_prefixes: Vec<String>,
 }
 
 impl CommandRunner for RecordingRunner {
-    fn run(&mut self, cmd: &str, args: &[&str]) -> Result<()> {
+    fn run_with_outcome(&mut self, cmd: &str, args: &[&str]) -> Result<CommandOutcome> {
         let args = args
             .iter()
             .map(|arg| (*arg).to_string())
@@ -16,7 +18,14 @@ impl CommandRunner for RecordingRunner {
         if self.fail_on_args.as_ref().is_some_and(|fail| fail == &args) {
             anyhow::bail!("forced command failure");
         }
-        Ok(())
+        if args.iter().any(|arg| arg == "add")
+            && args
+                .iter()
+                .any(|arg| self.existing_host_prefixes.contains(arg))
+        {
+            return Ok(CommandOutcome::AlreadyExists);
+        }
+        Ok(CommandOutcome::Applied)
     }
 }
 
@@ -25,6 +34,7 @@ fn interface_and_routes_build_ipv4_route_exception() {
     let mut runner = RecordingRunner::default();
     apply_interface_and_routes(
         &mut runner,
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
@@ -67,6 +77,7 @@ fn interface_and_routes_block_ipv6_without_vpn_assignment() {
     let mut runner = RecordingRunner::default();
     apply_interface_and_routes(
         &mut runner,
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
@@ -97,6 +108,7 @@ fn interface_and_routes_build_ipv6_address_and_exception() {
     let mut runner = RecordingRunner::default();
     apply_interface_and_routes(
         &mut runner,
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
@@ -155,6 +167,7 @@ fn interface_and_routes_fails_when_ipv6_split_route_fails() {
     };
     let err = apply_interface_and_routes(
         &mut runner,
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
@@ -188,6 +201,7 @@ fn interface_and_routes_fails_when_ipv6_block_route_fails() {
     };
     let err = apply_interface_and_routes(
         &mut runner,
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
@@ -225,10 +239,11 @@ fn invalid_endpoint_fails_before_split_routes_are_installed() {
 }
 
 #[test]
-fn interface_and_routes_requires_a_physical_gateway_before_split_routes() {
+fn interface_and_routes_requires_a_physical_interface_before_split_routes() {
     let mut runner = RecordingRunner::default();
     let err = apply_interface_and_routes(
         &mut runner,
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
@@ -246,8 +261,147 @@ fn interface_and_routes_requires_a_physical_gateway_before_split_routes() {
     .unwrap_err();
     assert!(err
         .to_string()
-        .contains("No physical IPv4 gateway found for host route exception"));
+        .contains("No physical interface found for host route exception"));
     assert!(!runner.calls.iter().any(|(_, args)| args
         .iter()
         .any(|arg| arg == "0.0.0.0/1" || arg == "128.0.0.0/1")));
+}
+
+#[test]
+fn gatewayless_default_routes_allow_tunnel_setup() {
+    for endpoint in ["203.0.113.10", "2001:db8::10"] {
+        let mut runner = RecordingRunner::default();
+        apply_interface_and_routes(
+            &mut runner,
+            &mut Vec::new(),
+            "mavi0",
+            Ipv4Addr::new(10, 8, 0, 2),
+            24,
+            Ipv4Addr::new(10, 8, 0, 1),
+            1280,
+            endpoint,
+            Some("fd00::2".parse().unwrap()),
+            Some(64),
+            Some("fd00::1".parse().unwrap()),
+            None,
+            Some("ppp0"),
+            None,
+            Some("ppp0"),
+        )
+        .unwrap();
+        let exception = runner
+            .calls
+            .iter()
+            .position(|(_, args)| args.iter().any(|arg| arg == "ppp0"))
+            .unwrap();
+        let split_route = runner
+            .calls
+            .iter()
+            .position(|(_, args)| args.iter().any(|arg| arg == "0.0.0.0/1"))
+            .unwrap();
+        assert!(exception < split_route);
+        assert!(!runner.calls[exception].1.iter().any(|arg| arg == "via"));
+    }
+}
+
+#[test]
+fn endpoint_cleanup_preserves_existing_routes_on_success_and_rollback() {
+    for endpoint in ["203.0.113.10", "2001:db8::10"] {
+        for gatewayless in [false, true] {
+            for existing in [false, true] {
+                for fail_after_exception in [false, true] {
+                    let prefix = format!(
+                        "{endpoint}/{}",
+                        if endpoint.contains(':') { 128 } else { 32 }
+                    );
+                    let mut runner = RecordingRunner {
+                        existing_host_prefixes: if existing {
+                            vec![prefix.clone()]
+                        } else {
+                            Vec::new()
+                        },
+                        fail_on_args: fail_after_exception.then(|| {
+                            [
+                                "route",
+                                "add",
+                                "0.0.0.0/1",
+                                "dev",
+                                "mavi0",
+                                "via",
+                                "10.8.0.1",
+                            ]
+                            .into_iter()
+                            .map(String::from)
+                            .collect()
+                        }),
+                        ..RecordingRunner::default()
+                    };
+                    let mut owned_routes = Vec::new();
+                    let result = apply_interface_and_routes(
+                        &mut runner,
+                        &mut owned_routes,
+                        "mavi0",
+                        Ipv4Addr::new(10, 8, 0, 2),
+                        24,
+                        Ipv4Addr::new(10, 8, 0, 1),
+                        1280,
+                        endpoint,
+                        Some("fd00::2".parse().unwrap()),
+                        Some(64),
+                        Some("fd00::1".parse().unwrap()),
+                        (!gatewayless).then_some("192.0.2.1"),
+                        Some("ppp0"),
+                        (!gatewayless).then_some("fe80::1"),
+                        Some("ppp0"),
+                    );
+                    assert_eq!(result.is_err(), fail_after_exception);
+                    assert_eq!(owned_routes.len(), usize::from(!existing));
+
+                    let setup_calls = runner.calls.len();
+                    routes::remove_host_route_exceptions(&mut runner, &owned_routes);
+                    let cleanup_calls = &runner.calls[setup_calls..];
+                    assert_eq!(cleanup_calls.len(), usize::from(!existing));
+                    if !existing {
+                        assert!(cleanup_calls[0].1.contains(&prefix));
+                        assert!(cleanup_calls[0].1.iter().any(|arg| arg == "ppp0"));
+                        assert_eq!(
+                            cleanup_calls[0].1.iter().any(|arg| arg == "via"),
+                            !gatewayless
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn failure_before_endpoint_setup_has_no_host_routes_to_clean_up() {
+    let mut runner = RecordingRunner {
+        fail_on_args: Some(["link", "set", "mavi0", "up"].map(String::from).into()),
+        ..RecordingRunner::default()
+    };
+    let mut owned_routes = Vec::new();
+    assert!(apply_interface_and_routes(
+        &mut runner,
+        &mut owned_routes,
+        "mavi0",
+        Ipv4Addr::new(10, 8, 0, 2),
+        24,
+        Ipv4Addr::new(10, 8, 0, 1),
+        1280,
+        "203.0.113.10",
+        None,
+        None,
+        None,
+        None,
+        Some("ppp0"),
+        None,
+        None,
+    )
+    .is_err());
+    assert!(owned_routes.is_empty());
+    let setup_calls = runner.calls.len();
+    routes::remove_host_route_exceptions(&mut runner, &owned_routes);
+    assert_eq!(runner.calls.len(), setup_calls);
 }

@@ -31,10 +31,10 @@ pub struct NetworkConfig {
     /// Whether DNS was successfully changed by this instance. This prevents a
     /// rollback before DNS setup from writing a fallback resolver config.
     dns_configured: bool,
-    /// Split-tunnel whitelist domain IPs excepted from the tunnel via a host
-    /// route, resolved once at connect time. Removed symmetrically in
-    /// `cleanup()`.
+    /// Split-tunnel whitelist domain IPs resolved once at connect time.
     pub whitelist_ips: Vec<IpAddr>,
+    /// Only newly installed exceptions belong to this session's cleanup.
+    owned_host_routes: Vec<routes::HostRoute>,
 }
 
 impl NetworkConfig {
@@ -81,6 +81,7 @@ impl NetworkConfig {
             used_resolvconf: false,
             dns_configured: false,
             whitelist_ips,
+            owned_host_routes: Vec::new(),
         };
 
         // Add the endpoint exception before installing split-default routes.
@@ -89,12 +90,13 @@ impl NetworkConfig {
         let mut runner = command::ProductionCommandRunner;
         if let Err(err) = apply_interface_and_routes(
             &mut runner,
+            &mut network.owned_host_routes,
             tun_name,
             assigned_ip,
             prefix_len,
             gateway,
             mtu,
-            endpoint_ip,
+            &network.endpoint_ip,
             assigned_ipv6,
             netmask_v6,
             gateway_v6,
@@ -108,14 +110,16 @@ impl NetworkConfig {
         }
 
         // 7. Except each resolved whitelist domain IP from the tunnel too.
-        whitelist::add_whitelist_route_exceptions(
-            &mut runner,
-            &network.whitelist_ips,
-            network.physical_gateway.as_deref(),
-            network.physical_device.as_deref(),
-            network.physical_gateway_v6.as_deref(),
-            network.physical_device_v6.as_deref(),
-        );
+        network
+            .owned_host_routes
+            .extend(whitelist::add_whitelist_route_exceptions(
+                &mut runner,
+                &network.whitelist_ips,
+                network.physical_gateway.as_deref(),
+                network.physical_device.as_deref(),
+                network.physical_gateway_v6.as_deref(),
+                network.physical_device_v6.as_deref(),
+            ));
 
         let (dns_backup, used_resolvconf) = match dns::configure_dns(tun_name, dns, dns_v6) {
             Ok(config) => config,
@@ -200,24 +204,9 @@ impl NetworkConfig {
             let _ = run_cmd("ip", &["-6", "route", "del", "unreachable", "8000::/1"]);
         }
 
-        // Remove only the exact host-route exception we installed.
-        if let Ok(endpoint_ip) = routes::parse_endpoint_ip(&self.endpoint_ip) {
-            routes::remove_host_route_exception(
-                endpoint_ip,
-                self.physical_gateway.as_deref(),
-                self.physical_device.as_deref(),
-                self.physical_gateway_v6.as_deref(),
-                self.physical_device_v6.as_deref(),
-            );
-        }
-
-        // Remove each whitelist domain's route exception, symmetric with apply().
-        whitelist::remove_whitelist_route_exceptions(
-            &self.whitelist_ips,
-            self.physical_gateway.as_deref(),
-            self.physical_device.as_deref(),
-            self.physical_gateway_v6.as_deref(),
-            self.physical_device_v6.as_deref(),
+        routes::remove_host_route_exceptions(
+            &mut command::ProductionCommandRunner,
+            &self.owned_host_routes,
         );
 
         // Restore DNS
@@ -235,6 +224,7 @@ impl NetworkConfig {
 #[allow(clippy::too_many_arguments)]
 fn apply_interface_and_routes<R: CommandRunner>(
     runner: &mut R,
+    owned_host_routes: &mut Vec<routes::HostRoute>,
     tun_name: &str,
     assigned_ip: Ipv4Addr,
     prefix_len: u8,
@@ -264,14 +254,17 @@ fn apply_interface_and_routes<R: CommandRunner>(
         runner.run("ip", &["-6", "addr", "add", &assigned_v6, "dev", tun_name])?;
     }
 
-    add_endpoint_route_exception(
+    if let Some(route) = add_endpoint_route_exception(
         runner,
         endpoint_ip,
         physical_gateway,
         physical_device,
         physical_gateway_v6,
         physical_device_v6,
-    )?;
+    )? {
+        // Record ownership before any later setup step can fail and roll back.
+        owned_host_routes.push(route);
+    }
 
     let gateway_s = gateway.to_string();
     runner.run(
@@ -334,7 +327,7 @@ fn add_endpoint_route_exception<R: CommandRunner>(
     physical_device: Option<&str>,
     physical_gateway_v6: Option<&str>,
     physical_device_v6: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<routes::HostRoute>> {
     let ip = routes::parse_endpoint_ip(endpoint_ip)
         .with_context(|| format!("Could not parse VPN endpoint IP {endpoint_ip:?}"))?;
     routes::add_host_route_exception(

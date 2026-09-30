@@ -148,6 +148,10 @@ pub fn run_cmd(program: &str, args: &[&str]) -> bool {
 }
 
 pub fn run_powershell_cmd(display: &str, script: &str) -> bool {
+    run_powershell_cmd_output(display, script).is_some()
+}
+
+pub(super) fn run_powershell_cmd_output(display: &str, script: &str) -> Option<String> {
     match std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", script])
         .output()
@@ -155,19 +159,19 @@ pub fn run_powershell_cmd(display: &str, script: &str) -> bool {
         Ok(out) if out.status.success() => {
             let msg = format!("[OK]  {display}");
             info!(cmd = %msg);
-            true
+            Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let msg = format!("[FAIL] {display} -> {stdout} {stderr}");
             warn!(cmd = %msg);
-            false
+            None
         }
         Err(e) => {
             let msg = format!("[ERR] {display} -> {e}");
             warn!(cmd = %msg);
-            false
+            None
         }
     }
 }

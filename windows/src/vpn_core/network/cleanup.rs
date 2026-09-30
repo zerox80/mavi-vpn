@@ -1,5 +1,7 @@
 use super::adapter::{cleanup_mavi_adapter_dns_state, remove_nrpt_dns_rule};
-use super::host_route::{clear_persisted_host_route, load_persisted_host_routes};
+use super::host_route::{
+    clear_persisted_host_route, host_route_cleanup_script, load_persisted_host_routes, HostRoute,
+};
 use super::ip::win32_cleanup_all_ips_on_interface;
 use super::route::{
     cleanup_ipv6_prefix_policy, win32_cleanup_all_routes_on_interface, win32_delete_route,
@@ -9,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 use tracing::{debug, info};
 
-pub fn cleanup_routes(host_routes: &[String]) {
+pub fn cleanup_routes(host_routes: &[HostRoute]) {
     info!("Cleaning up MaviVPN routes...");
     // A reconnect must resolve the endpoint using the physical network again.
     remove_nrpt_dns_rule();
@@ -39,26 +41,18 @@ pub fn cleanup_routes(host_routes: &[String]) {
         }
     });
 
-    let mut host_prefixes: Vec<String> = host_routes
-        .iter()
-        .filter_map(|prefix| super::host_route::canonical_host_prefix(prefix))
-        .collect();
-    for prefix in load_persisted_host_routes() {
-        if !host_prefixes.contains(&prefix) {
-            host_prefixes.push(prefix);
+    let mut owned_routes = host_routes.to_vec();
+    for route in load_persisted_host_routes() {
+        if !owned_routes.contains(&route) {
+            owned_routes.push(route);
         }
     }
 
-    if !host_prefixes.is_empty() {
-        use std::fmt::Write;
-        let mut ps_script = String::from("$ErrorActionPreference = 'SilentlyContinue'; ");
-        for prefix in host_prefixes {
-            let _ = write!(
-                ps_script,
-                "Remove-NetRoute -DestinationPrefix '{prefix}' -Confirm:$false; "
-            );
-        }
-        let _ = run_powershell_cmd("Cleanup host routes", &ps_script);
+    if !owned_routes.is_empty() {
+        let _ = run_powershell_cmd(
+            "Cleanup host routes",
+            &host_route_cleanup_script(&owned_routes),
+        );
     }
 
     info!(

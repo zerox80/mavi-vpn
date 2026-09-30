@@ -12,6 +12,7 @@ mod socket;
 mod whitelist;
 
 pub use self::cleanup::{cleanup_routes, cleanup_stale_network_state};
+pub use self::host_route::HostRoute;
 pub use self::ip::wait_for_ipv6_address;
 pub use self::route::verify_ipv6_split_routes;
 pub use self::session::{set_adapter_network_config, AdapterNetworkConfig, SessionRouteGuard};

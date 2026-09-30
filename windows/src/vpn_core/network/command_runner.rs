@@ -1,9 +1,10 @@
-use super::utils::{run_cmd, run_powershell_cmd};
+use super::utils::{run_cmd, run_powershell_cmd_output};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CommandOutcome {
     success: bool,
     stderr: Option<String>,
+    stdout: Option<String>,
 }
 
 impl CommandOutcome {
@@ -12,6 +13,7 @@ impl CommandOutcome {
         Self {
             success: true,
             stderr: None,
+            stdout: None,
         }
     }
 
@@ -20,6 +22,7 @@ impl CommandOutcome {
         Self {
             success: false,
             stderr: Some(stderr.into()),
+            stdout: None,
         }
     }
 
@@ -27,11 +30,24 @@ impl CommandOutcome {
         Self {
             success,
             stderr: None,
+            stdout: None,
         }
     }
 
     pub(super) fn is_success(&self) -> bool {
         self.success
+    }
+
+    pub(super) fn with_stdout(stdout: String) -> Self {
+        Self {
+            success: true,
+            stderr: None,
+            stdout: Some(stdout),
+        }
+    }
+
+    pub(super) fn stdout(&self) -> Option<&str> {
+        self.stdout.as_deref()
     }
 
     #[cfg(test)]
@@ -67,7 +83,8 @@ impl CommandRunner for SystemCommandRunner {
     }
 
     fn run_powershell_cmd_result(&self, label: &str, script: &str) -> CommandOutcome {
-        run_powershell_cmd(label, script).into()
+        run_powershell_cmd_output(label, script)
+            .map_or_else(|| false.into(), CommandOutcome::with_stdout)
     }
 }
 
@@ -108,6 +125,13 @@ pub(super) mod test_support {
 
         pub(crate) fn commands(&self) -> Vec<RecordedCommand> {
             self.commands.borrow().to_vec()
+        }
+
+        pub(crate) fn with_stdout(stdout: &str) -> Self {
+            Self {
+                default: CommandOutcome::with_stdout(stdout.to_string()),
+                ..Self::new(true)
+            }
         }
 
         fn next_result(&self) -> CommandOutcome {

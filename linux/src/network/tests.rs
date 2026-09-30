@@ -225,7 +225,7 @@ fn invalid_endpoint_fails_before_split_routes_are_installed() {
 }
 
 #[test]
-fn interface_and_routes_requires_a_physical_gateway_before_split_routes() {
+fn interface_and_routes_requires_a_physical_interface_before_split_routes() {
     let mut runner = RecordingRunner::default();
     let err = apply_interface_and_routes(
         &mut runner,
@@ -246,8 +246,44 @@ fn interface_and_routes_requires_a_physical_gateway_before_split_routes() {
     .unwrap_err();
     assert!(err
         .to_string()
-        .contains("No physical IPv4 gateway found for host route exception"));
+        .contains("No physical interface found for host route exception"));
     assert!(!runner.calls.iter().any(|(_, args)| args
         .iter()
         .any(|arg| arg == "0.0.0.0/1" || arg == "128.0.0.0/1")));
+}
+
+#[test]
+fn gatewayless_default_routes_allow_tunnel_setup() {
+    for endpoint in ["203.0.113.10", "2001:db8::10"] {
+        let mut runner = RecordingRunner::default();
+        apply_interface_and_routes(
+            &mut runner,
+            "mavi0",
+            Ipv4Addr::new(10, 8, 0, 2),
+            24,
+            Ipv4Addr::new(10, 8, 0, 1),
+            1280,
+            endpoint,
+            Some("fd00::2".parse().unwrap()),
+            Some(64),
+            Some("fd00::1".parse().unwrap()),
+            None,
+            Some("ppp0"),
+            None,
+            Some("ppp0"),
+        )
+        .unwrap();
+        let exception = runner
+            .calls
+            .iter()
+            .position(|(_, args)| args.iter().any(|arg| arg == "ppp0"))
+            .unwrap();
+        let split_route = runner
+            .calls
+            .iter()
+            .position(|(_, args)| args.iter().any(|arg| arg == "0.0.0.0/1"))
+            .unwrap();
+        assert!(exception < split_route);
+        assert!(!runner.calls[exception].1.iter().any(|arg| arg == "via"));
+    }
 }

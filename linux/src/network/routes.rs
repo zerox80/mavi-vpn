@@ -1,8 +1,16 @@
-use super::command::{run_cmd, CommandRunner};
+use super::command::{CommandOutcome, CommandRunner};
 use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::Command;
 use tracing::{info, warn};
+
+/// A host route newly installed by this session, with its cleanup selectors.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct HostRoute {
+    ip: IpAddr,
+    gateway: Option<String>,
+    device: String,
+}
 
 /// Detects the current physical IPv4 default gateway and interface.
 pub(super) fn detect_physical_gateway() -> (Option<String>, Option<String>) {
@@ -76,7 +84,7 @@ pub(super) fn add_host_route_exception<R: CommandRunner>(
     physical_device: Option<&str>,
     physical_gateway_v6: Option<&str>,
     physical_device_v6: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<HostRoute>> {
     let (gw, dev) = match ip {
         IpAddr::V4(_) => (physical_gateway, physical_device),
         IpAddr::V6(_) => (physical_gateway_v6, physical_device_v6),
@@ -86,7 +94,14 @@ pub(super) fn add_host_route_exception<R: CommandRunner>(
     })?;
     let args = host_route_args(ip, "add", gw, dev);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    runner.run("ip", &args)
+    match runner.run_with_outcome("ip", &args)? {
+        CommandOutcome::AlreadyExists => Ok(None),
+        CommandOutcome::Applied => Ok(Some(HostRoute {
+            ip,
+            gateway: gw.map(str::to_string),
+            device: dev.to_string(),
+        })),
+    }
 }
 
 fn host_route_args(ip: IpAddr, action: &str, gateway: Option<&str>, device: &str) -> Vec<String> {
@@ -106,23 +121,15 @@ fn host_route_args(ip: IpAddr, action: &str, gateway: Option<&str>, device: &str
     args
 }
 
-/// Removes only a route matching the physical gateway/device used when the
-/// exception was added. This avoids deleting an unrelated host route.
-pub(super) fn remove_host_route_exception(
-    ip: IpAddr,
-    physical_gateway: Option<&str>,
-    physical_device: Option<&str>,
-    physical_gateway_v6: Option<&str>,
-    physical_device_v6: Option<&str>,
+/// Removes only newly installed exceptions, using their original selectors.
+pub(super) fn remove_host_route_exceptions(
+    runner: &mut impl CommandRunner,
+    owned_routes: &[HostRoute],
 ) {
-    let (gw, dev) = match ip {
-        IpAddr::V4(_) => (physical_gateway, physical_device),
-        IpAddr::V6(_) => (physical_gateway_v6, physical_device_v6),
-    };
-    if let Some(dev) = dev {
-        let args = host_route_args(ip, "del", gw, dev);
+    for route in owned_routes {
+        let args = host_route_args(route.ip, "del", route.gateway.as_deref(), &route.device);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let _ = run_cmd("ip", &args);
+        let _ = runner.run("ip", &args);
     }
 }
 

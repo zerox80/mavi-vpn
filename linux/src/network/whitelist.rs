@@ -42,9 +42,10 @@ pub(super) fn add_whitelist_route_exceptions<R: CommandRunner>(
     physical_device: Option<&str>,
     physical_gateway_v6: Option<&str>,
     physical_device_v6: Option<&str>,
-) {
+) -> Vec<routes::HostRoute> {
+    let mut owned_routes = Vec::new();
     for &ip in ips {
-        if let Err(err) = routes::add_host_route_exception(
+        match routes::add_host_route_exception(
             runner,
             ip,
             physical_gateway,
@@ -52,30 +53,12 @@ pub(super) fn add_whitelist_route_exceptions<R: CommandRunner>(
             physical_gateway_v6,
             physical_device_v6,
         ) {
-            warn!("Could not install whitelist route exception for {ip}: {err}");
+            Ok(Some(route)) => owned_routes.push(route),
+            Ok(None) => {}
+            Err(err) => warn!("Could not install whitelist route exception for {ip}: {err}"),
         }
     }
-}
-
-/// Removes the host route exceptions installed by
-/// [`add_whitelist_route_exceptions`], mirroring the VPN endpoint's own route
-/// removal in [`super::NetworkConfig::cleanup`].
-pub(super) fn remove_whitelist_route_exceptions(
-    ips: &[IpAddr],
-    physical_gateway: Option<&str>,
-    physical_device: Option<&str>,
-    physical_gateway_v6: Option<&str>,
-    physical_device_v6: Option<&str>,
-) {
-    for &ip in ips {
-        routes::remove_host_route_exception(
-            ip,
-            physical_gateway,
-            physical_device,
-            physical_gateway_v6,
-            physical_device_v6,
-        );
-    }
+    owned_routes
 }
 
 #[cfg(test)]
@@ -131,5 +114,44 @@ mod tests {
 
         assert_eq!(runner.calls.len(), 2);
         assert!(runner.calls.iter().all(|(cmd, _)| cmd == "ip"));
+    }
+
+    #[test]
+    fn whitelist_cleanup_only_removes_newly_installed_routes() {
+        use super::super::command::CommandOutcome;
+
+        for ips in [
+            ["203.0.113.10", "203.0.113.11", "203.0.113.12"],
+            ["2001:db8::10", "2001:db8::11", "2001:db8::12"],
+        ] {
+            let mut runner = RecordingRunner {
+                outcomes: [
+                    Ok(CommandOutcome::AlreadyExists),
+                    Ok(CommandOutcome::Applied),
+                    Err(anyhow::anyhow!("route denied")),
+                ]
+                .into(),
+                ..RecordingRunner::default()
+            };
+            let ips = ips.map(|ip| ip.parse::<IpAddr>().unwrap());
+            let owned_routes = add_whitelist_route_exceptions(
+                &mut runner,
+                &ips,
+                None,
+                Some("ppp0"),
+                None,
+                Some("ppp0"),
+            );
+            assert_eq!(owned_routes.len(), 1);
+            routes::remove_host_route_exceptions(&mut runner, &owned_routes);
+            assert_eq!(runner.calls.len(), 4);
+            let cleanup = &runner.calls[3].1;
+            assert!(cleanup.iter().any(|arg| arg == "del"));
+            assert!(cleanup.contains(&format!(
+                "{}/{}",
+                ips[1],
+                if ips[1].is_ipv4() { 32 } else { 128 }
+            )));
+        }
     }
 }

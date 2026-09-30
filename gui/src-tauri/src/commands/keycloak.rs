@@ -1,7 +1,9 @@
 use crate::ipc::send_ipc_request;
 use crate::oauth;
 use crate::secret_store::{connection_refresh_token_account, KeyringSecretStore, SecretStore};
-use shared::ipc::{Config, IpcRequest, IpcResponse};
+#[cfg(target_os = "windows")]
+use shared::ipc::IpcResponse;
+use shared::ipc::{Config, IpcRequest};
 use shared::kc_oauth::{self, RefreshOutcome};
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;

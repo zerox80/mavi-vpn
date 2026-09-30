@@ -69,10 +69,6 @@ pub(super) trait CommandRunner {
     fn run_cmd(&self, program: &str, args: &[&str]) -> bool {
         self.run_cmd_result(program, args).is_success()
     }
-
-    fn run_powershell_cmd(&self, label: &str, script: &str) -> bool {
-        self.run_powershell_cmd_result(label, script).is_success()
-    }
 }
 
 pub(super) struct SystemCommandRunner;

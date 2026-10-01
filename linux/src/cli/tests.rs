@@ -2,6 +2,19 @@ use super::handle_action_response;
 use shared::ipc::{IpcResponse, VpnState};
 
 #[test]
+fn unknown_repair_options_fail_before_any_network_changes() {
+    for args in [
+        vec!["--legacy".into()],
+        vec!["--legacy-ipv6".into(), "extra".into()],
+    ] {
+        let error = super::run_repair(&args).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Usage: mavi-vpn repair [--legacy-ipv6]"));
+    }
+}
+
+#[test]
 fn action_acknowledgement_succeeds() {
     assert!(handle_action_response(Ok(IpcResponse::Ok), "Accepted").is_ok());
 }

@@ -107,7 +107,10 @@ pub(crate) async fn vpn_connect(
                 // while holding the operation lock, before any new start.
                 stop_token_refresh_ticker(&app);
                 match send_ipc_request(&IpcRequest::Stop).await? {
-                    IpcResponse::Ok => return Err(error),
+                    IpcResponse::Ok => {
+                        attempt.stopped();
+                        return Err(error);
+                    }
                     IpcResponse::Error(stop_error) => return Err(stop_error),
                     _ => return Err("Unexpected response to cancelled start cleanup".into()),
                 }
@@ -157,7 +160,7 @@ pub(crate) async fn vpn_disconnect(
         return Ok("Disconnected".into());
     };
     let _operation = lifecycle.operation.lock().await;
-    if !stop.needs_service_stop {
+    if !stop.needs_service_stop()? {
         // Cancelling a pre-IPC login requires no running service. Acquiring
         // the lock above waits for the OAuth listener to be dropped.
         return Ok("Disconnected".into());

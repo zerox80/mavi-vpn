@@ -11,6 +11,7 @@ use tracing::info;
 mod command;
 mod dns;
 mod ipv6_block;
+mod legacy_ipv6;
 mod routes;
 mod whitelist;
 
@@ -306,7 +307,7 @@ fn resolve_endpoint_route(
 
 /// Best-effort cleanup for daemon repair requests and stale state after crashes.
 /// This intentionally tolerates missing routes or DNS backups.
-pub fn cleanup_stale_network_state() {
+pub fn cleanup_stale_network_state() -> Result<()> {
     info!("Cleaning stale MaviVPN network state...");
 
     cleanup_stale_routes(&mut command::ProductionCommandRunner, "mavi0");
@@ -319,7 +320,14 @@ pub fn cleanup_stale_network_state() {
         dns::restore_dns(&None, false);
     }
 
+    legacy_ipv6::check(&mut command::ProductionCommandRunner)?;
     info!("Stale MaviVPN network cleanup complete.");
+    Ok(())
+}
+
+/// Operator-approved migration for unmarked blocks from older releases.
+pub fn repair_legacy_ipv6_blocks() -> Result<usize> {
+    legacy_ipv6::repair(&mut command::ProductionCommandRunner)
 }
 
 fn cleanup_stale_routes(runner: &mut impl CommandRunner, tun_name: &str) {

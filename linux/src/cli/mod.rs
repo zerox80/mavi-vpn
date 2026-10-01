@@ -65,7 +65,7 @@ pub fn run() {
             run_ipc_start(config_path)
         }
         Some("stop") => run_ipc_stop(),
-        Some("repair") => run_ipc_repair(),
+        Some("repair") => run_repair(&args[1..]),
 
         Some("status") => {
             run_status();
@@ -202,6 +202,20 @@ fn run_ipc_stop() -> Result<()> {
     })
 }
 
+fn run_repair(args: &[String]) -> Result<()> {
+    if args == ["--legacy-ipv6"] {
+        anyhow::ensure!(
+            is_root(),
+            "Legacy IPv6 repair requires root: sudo mavi-vpn repair --legacy-ipv6"
+        );
+        let removed = crate::network::repair_legacy_ipv6_blocks()?;
+        println!("Removed {removed} legacy IPv6 block(s).");
+        return Ok(());
+    }
+    anyhow::ensure!(args.is_empty(), "Usage: mavi-vpn repair [--legacy-ipv6]");
+    run_ipc_repair()
+}
+
 fn run_ipc_repair() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -292,6 +306,7 @@ fn print_help() {
     println!();
     println!("Direct mode (standalone, no daemon):");
     println!("  connect, up           Connect to VPN directly (requires root)");
+    println!("  repair --legacy-ipv6  Remove old unmarked IPv6 blocks (root; VPN stopped)");
     println!();
     println!("Daemon mode (for GUI integration):");
     println!("  daemon                Start IPC daemon (requires root)");

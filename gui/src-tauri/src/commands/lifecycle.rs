@@ -74,8 +74,15 @@ impl ConnectionLifecycle {
         Ok(Some(StopOperation {
             lifecycle: self,
             id: id.map(String::from),
-            needs_service_stop: session_matches,
         }))
+    }
+
+    fn stopped(&self, id: Option<&str>) {
+        if let Ok(mut state) = self.state.lock() {
+            if id.is_none() || state.session_id.as_deref() == id {
+                state.session_id = None;
+            }
+        }
     }
 }
 
@@ -101,8 +108,8 @@ impl ConnectAttempt<'_> {
         }
     }
 
-    /// Commit ownership under the same lock used by cancellation. A cancel
-    /// either prevents acceptance or sees this ID as the active session.
+    /// The service has accepted Start. Retain ownership even if cancellation
+    /// won the race, until a Stop succeeds; its waiting caller may need to retry.
     pub(super) fn accept(&mut self) -> Result<(), String> {
         let mut state = self.lifecycle.state.lock().map_err(|e| e.to_string())?;
         let pending = state
@@ -110,13 +117,18 @@ impl ConnectAttempt<'_> {
             .as_ref()
             .filter(|pending| pending.id == self.id)
             .ok_or("Connection attempt cancelled")?;
-        if *pending.cancel.borrow() {
-            return Err("Connection attempt cancelled".into());
-        }
+        let cancelled = *pending.cancel.borrow();
         state.pending = None;
         state.session_id = Some(self.id.clone());
         self.finished = true;
+        if cancelled {
+            return Err("Connection attempt cancelled".into());
+        }
         Ok(())
+    }
+
+    pub(super) fn stopped(&self) {
+        self.lifecycle.stopped(Some(&self.id));
     }
 }
 
@@ -139,16 +151,18 @@ impl Drop for ConnectAttempt<'_> {
 pub(super) struct StopOperation<'a> {
     lifecycle: &'a ConnectionLifecycle,
     id: Option<String>,
-    pub(super) needs_service_stop: bool,
 }
 
 impl StopOperation<'_> {
+    /// Check after acquiring the operation lock: the pending Start may have
+    /// been accepted, and its compensating Stop may have failed while we waited.
+    pub(super) fn needs_service_stop(&self) -> Result<bool, String> {
+        let state = self.lifecycle.state.lock().map_err(|e| e.to_string())?;
+        Ok(self.id.is_none() || state.session_id == self.id)
+    }
+
     pub(super) fn completed(&self) {
-        if let Ok(mut state) = self.lifecycle.state.lock() {
-            if self.id.is_none() || state.session_id == self.id {
-                state.session_id = None;
-            }
-        }
+        self.lifecycle.stopped(self.id.as_deref());
     }
 }
 

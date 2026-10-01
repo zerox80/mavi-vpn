@@ -149,7 +149,7 @@ async fn dispatch_request_with_hooks(
     req: IpcRequest,
     state: &Arc<Mutex<DaemonState>>,
     spawn_vpn_session: bool,
-    cleanup_stale_network_state: fn(),
+    cleanup_stale_network_state: fn() -> Result<()>,
 ) -> IpcResponse {
     let mut guard = state.lock().await;
     match req {
@@ -219,8 +219,10 @@ async fn dispatch_request_with_hooks(
             }
             guard.active_config = None;
             drop(guard);
-            cleanup_stale_network_state();
-            IpcResponse::Ok
+            match cleanup_stale_network_state() {
+                Ok(()) => IpcResponse::Ok,
+                Err(error) => IpcResponse::Error(format!("Network repair incomplete: {error:#}")),
+            }
         }
         IpcRequest::Start(config) => {
             info!("Handling Start request for endpoint: {}", config.endpoint);
@@ -272,7 +274,9 @@ async fn dispatch_request_with_hooks(
                                 }
                             }
                         }
-                        cleanup_stale_network_state();
+                        if let Err(error) = cleanup_stale_network_state() {
+                            warn!("Network cleanup incomplete: {error:#}");
+                        }
                         flag.store(false, Ordering::SeqCst);
                         connected.store(false, Ordering::SeqCst);
                         stopping.store(false, Ordering::SeqCst);
@@ -302,5 +306,7 @@ async fn dispatch_request_with_hooks(
 
 #[cfg(test)]
 mod ipc_limit_tests;
+#[cfg(test)]
+mod repair_tests;
 #[cfg(test)]
 mod tests;

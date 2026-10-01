@@ -21,17 +21,30 @@ pub(super) fn install(
         } else {
             // A colliding unicast route must never be treated as a working
             // leak-prevention block. Reuse only an actual unreachable route.
-            let output = runner.output("ip", &["-j", "-6", "route", "show", "exact", prefix])?;
+            // Numeric output avoids local rt_protos aliases hiding our marker.
+            let output = runner.output(
+                "ip",
+                &[
+                    "-j", "-N", "-details", "-6", "route", "show", "exact", prefix,
+                ],
+            )?;
             let routes: Vec<serde_json::Value> = serde_json::from_str(&output)?;
             let at_metric: Vec<_> = routes
                 .iter()
                 .filter(|route| route["metric"].as_u64() == Some(1))
                 .collect();
             anyhow::ensure!(
-                !at_metric.is_empty()
-                    && at_metric.iter().all(|route| route["type"] == "unreachable"),
+                !at_metric.is_empty() && at_metric.iter().all(|route| route["type"] == "7"),
                 "Existing IPv6 route {prefix} does not block traffic"
             );
+            if at_metric
+                .iter()
+                .any(|route| route["protocol"] == PROTOCOL && route["dev"] == "lo")
+            {
+                // A previous Mavi process may have crashed. The direct CLI has
+                // no daemon cleanup after disconnect, so adopt our marked blocks.
+                owned.push(prefix);
+            }
         }
     }
     Ok(())
@@ -73,7 +86,7 @@ mod tests {
             ]
             .into(),
             outputs: [Ok(
-                r#"[{"dst":"::/1","type":"unreachable","metric":1}]"#.into()
+                r#"[{"dst":"::/1","type":"7","protocol":"99","dev":"lo","metric":1}]"#.into(),
             )]
             .into(),
             ..RecordingRunner::default()
@@ -113,5 +126,33 @@ mod tests {
         assert_eq!(owned, ["::/1"]);
         remove(&mut runner, &owned);
         assert_eq!(runner.calls[2].1, args("del", "::/1"));
+    }
+
+    #[test]
+    fn marked_blocks_from_a_crashed_session_are_cleaned_on_disconnect_and_rollback() {
+        for fail_second in [false, true] {
+            let mut runner = RecordingRunner {
+                outcomes: [
+                    Ok(CommandOutcome::AlreadyExists),
+                    if fail_second {
+                        Err(anyhow::anyhow!("route denied"))
+                    } else {
+                        Ok(CommandOutcome::AlreadyExists)
+                    },
+                ].into(),
+                outputs: PREFIXES.map(|prefix| Ok(format!(
+                    r#"[{{"dst":"{prefix}","type":"7","protocol":"242","dev":"lo","metric":1}}]"#
+                ))).into(),
+                ..RecordingRunner::default()
+            };
+            let mut owned = Vec::new();
+            assert_eq!(install(&mut runner, &mut owned).is_err(), fail_second);
+            assert_eq!(owned, PREFIXES[..if fail_second { 1 } else { 2 }]);
+            let setup_calls = runner.calls.len();
+            remove(&mut runner, &owned);
+            for (call, prefix) in runner.calls[setup_calls..].iter().zip(owned) {
+                assert_eq!(call.1, args("del", prefix));
+            }
+        }
     }
 }

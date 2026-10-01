@@ -10,7 +10,9 @@ use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-fn no_cleanup() {}
+fn no_cleanup() -> Result<()> {
+    Ok(())
+}
 
 fn test_state() -> Arc<Mutex<DaemonState>> {
     Arc::new(Mutex::new(DaemonState::new()))

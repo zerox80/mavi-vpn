@@ -262,6 +262,30 @@ Auf **Wayland/Fedora** wird `xdg-open` direkt aufgerufen – funktioniert mit GN
 
 ## Debugging
 
+### IPv6 nach einem Upgrade reparieren
+
+`mavi-vpn repair` (oder die Netzwerkreparatur in der GUI) entfernt markierte
+Mavi-Routen und stellt DNS wieder her. Aeltere Versionen hinterliessen bei
+einem Absturz unmarkierte IPv6-Sperren. Falls solche Routen noch existieren,
+meldet die Reparatur dies mit einem Hinweis auf den folgenden Befehl:
+
+```bash
+# Zuerst alle Mavi-Verbindungen beenden (auch direkte CLI-Sitzungen).
+mavi-vpn stop
+# Warten, bis das Interface mavi0 verschwunden ist, dann als Root ausfuehren:
+sudo mavi-vpn repair --legacy-ipv6
+```
+
+Dieser eigenstaendige Befehl benoetigt keinen laufenden Daemon. Er entfernt
+ausschliesslich `unreachable ::/1` und `unreachable 8000::/1` aus Tabelle `main`
+mit `dev lo`, `proto boot` und Metrik `1024`, den Defaults alter Mavi-Versionen.
+Identische manuell konfigurierte Routen sind davon nicht unterscheidbar und
+werden ebenfalls entfernt. Den Befehl daher nur aufrufen, wenn diese Sperren
+von der alten Mavi-Installation stammen. Die normale Bereinigung erhaelt sie.
+Solange `mavi0` existiert, wird die Legacy-Reparatur verweigert.
+
+### Diagnosebefehle
+
 ```bash
 # Detaillierte Logs
 RUST_LOG=debug sudo mavi-vpn

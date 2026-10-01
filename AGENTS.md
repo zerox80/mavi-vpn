@@ -8,6 +8,27 @@ for censorship resistance. It targets a Linux server plus Windows, Linux, and
 Android clients, with an optional cross-platform Tauri GUI. `README.md` and `CODEWIKI.md` cover
 features and deep internals; this file covers the things that bite you when building and editing.
 
+## Commit identity and privacy (mandatory)
+
+Every commit created on behalf of this repository owner must use **`zerox80`** for both
+the author and committer name, with **`115537871+zerox80@users.noreply.github.com`** as
+both email addresses. Never use the account holder's real first or last name, a personal
+email address, or a GitHub account display name in commit metadata or attribution trailers.
+This requirement applies to local agents, Codex Cloud, amendments, and cherry-picks.
+
+Before creating or amending commits, configure the repository explicitly:
+
+```bash
+git config --local user.name zerox80
+git config --local user.email 115537871+zerox80@users.noreply.github.com
+```
+
+Check the effective author and committer identities before committing. `GIT_AUTHOR_*`
+and `GIT_COMMITTER_*` environment variables override Git configuration; if necessary,
+set them explicitly to the public identity above. An amendment or cherry-pick may preserve
+the original author, so verify both identities in every newly created commit before pushing
+and correct any mismatch. Do not push a commit containing a private identity.
+
 ## Crate name ≠ directory name
 
 Cargo `-p` flags use the package name, which often differs from the folder. Get this wrong and you'll

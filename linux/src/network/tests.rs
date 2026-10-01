@@ -35,17 +35,14 @@ fn interface_and_routes_build_ipv4_route_exception() {
     apply_interface_and_routes(
         &mut runner,
         &mut Vec::new(),
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
         Ipv4Addr::new(10, 8, 0, 1),
         1280,
-        "203.0.113.10",
+        endpoint_route("203.0.113.10", Some("192.0.2.1"), Some("eth0"), None, None),
         None,
-        None,
-        None,
-        Some("192.0.2.1"),
-        Some("eth0"),
         None,
         None,
     )
@@ -78,29 +75,46 @@ fn interface_and_routes_block_ipv6_without_vpn_assignment() {
     apply_interface_and_routes(
         &mut runner,
         &mut Vec::new(),
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
         Ipv4Addr::new(10, 8, 0, 1),
         1280,
-        "203.0.113.10",
+        endpoint_route("203.0.113.10", Some("192.0.2.1"), Some("eth0"), None, None),
         None,
-        None,
-        None,
-        Some("192.0.2.1"),
-        Some("eth0"),
         None,
         None,
     )
     .unwrap();
-    assert!(runner
-        .calls
-        .iter()
-        .any(|(_, args)| args == &["-6", "route", "add", "unreachable", "::/1"]));
-    assert!(runner
-        .calls
-        .iter()
-        .any(|(_, args)| args == &["-6", "route", "add", "unreachable", "8000::/1"]));
+    assert!(runner.calls.iter().any(|(_, args)| args
+        == &[
+            "-6",
+            "route",
+            "add",
+            "unreachable",
+            "::/1",
+            "dev",
+            "lo",
+            "proto",
+            "242",
+            "metric",
+            "1"
+        ]));
+    assert!(runner.calls.iter().any(|(_, args)| args
+        == &[
+            "-6",
+            "route",
+            "add",
+            "unreachable",
+            "8000::/1",
+            "dev",
+            "lo",
+            "proto",
+            "242",
+            "metric",
+            "1"
+        ]));
 }
 
 #[test]
@@ -109,19 +123,16 @@ fn interface_and_routes_build_ipv6_address_and_exception() {
     apply_interface_and_routes(
         &mut runner,
         &mut Vec::new(),
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
         Ipv4Addr::new(10, 8, 0, 1),
         1340,
-        "2001:db8::10",
+        endpoint_route("2001:db8::10", None, None, Some("fe80::1"), Some("eth0")),
         Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)),
         Some(64),
         Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)),
-        None,
-        None,
-        Some("fe80::1"),
-        Some("eth0"),
     )
     .unwrap();
     assert!(runner
@@ -168,19 +179,16 @@ fn interface_and_routes_fails_when_ipv6_split_route_fails() {
     let err = apply_interface_and_routes(
         &mut runner,
         &mut Vec::new(),
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
         Ipv4Addr::new(10, 8, 0, 1),
         1340,
-        "2001:db8::10",
+        endpoint_route("2001:db8::10", None, None, Some("fe80::1"), Some("eth0")),
         Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)),
         Some(64),
         Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)),
-        None,
-        None,
-        Some("fe80::1"),
-        Some("eth0"),
     )
     .unwrap_err();
     assert!(err
@@ -192,27 +200,36 @@ fn interface_and_routes_fails_when_ipv6_split_route_fails() {
 fn interface_and_routes_fails_when_ipv6_block_route_fails() {
     let mut runner = RecordingRunner {
         fail_on_args: Some(
-            vec!["-6", "route", "add", "unreachable", "::/1"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            vec![
+                "-6",
+                "route",
+                "add",
+                "unreachable",
+                "::/1",
+                "dev",
+                "lo",
+                "proto",
+                "242",
+                "metric",
+                "1",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
         ),
         ..RecordingRunner::default()
     };
     let err = apply_interface_and_routes(
         &mut runner,
         &mut Vec::new(),
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
         Ipv4Addr::new(10, 8, 0, 1),
         1280,
-        "203.0.113.10",
+        endpoint_route("203.0.113.10", Some("192.0.2.1"), Some("eth0"), None, None),
         None,
-        None,
-        None,
-        Some("192.0.2.1"),
-        Some("eth0"),
         None,
         None,
     )
@@ -225,46 +242,9 @@ fn interface_and_routes_fails_when_ipv6_block_route_fails() {
 #[test]
 fn invalid_endpoint_fails_before_split_routes_are_installed() {
     let mut runner = RecordingRunner::default();
-    let err = add_endpoint_route_exception(
-        &mut runner,
-        "vpn.example.com",
-        Some("192.0.2.1"),
-        Some("eth0"),
-        Some("fe80::1"),
-        Some("eth0"),
-    )
-    .unwrap_err();
+    let err = resolve_endpoint_route(&mut runner, "vpn.example.com").unwrap_err();
     assert!(runner.calls.is_empty());
     assert!(err.to_string().contains("Could not parse VPN endpoint IP"));
-}
-
-#[test]
-fn interface_and_routes_requires_a_physical_interface_before_split_routes() {
-    let mut runner = RecordingRunner::default();
-    let err = apply_interface_and_routes(
-        &mut runner,
-        &mut Vec::new(),
-        "mavi0",
-        Ipv4Addr::new(10, 8, 0, 2),
-        24,
-        Ipv4Addr::new(10, 8, 0, 1),
-        1280,
-        "203.0.113.10",
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("No physical interface found for host route exception"));
-    assert!(!runner.calls.iter().any(|(_, args)| args
-        .iter()
-        .any(|arg| arg == "0.0.0.0/1" || arg == "128.0.0.0/1")));
 }
 
 #[test]
@@ -274,19 +254,16 @@ fn gatewayless_default_routes_allow_tunnel_setup() {
         apply_interface_and_routes(
             &mut runner,
             &mut Vec::new(),
+            &mut Vec::new(),
             "mavi0",
             Ipv4Addr::new(10, 8, 0, 2),
             24,
             Ipv4Addr::new(10, 8, 0, 1),
             1280,
-            endpoint,
+            endpoint_route(endpoint, None, Some("ppp0"), None, Some("ppp0")),
             Some("fd00::2".parse().unwrap()),
             Some(64),
             Some("fd00::1".parse().unwrap()),
-            None,
-            Some("ppp0"),
-            None,
-            Some("ppp0"),
         )
         .unwrap();
         let exception = runner
@@ -340,19 +317,22 @@ fn endpoint_cleanup_preserves_existing_routes_on_success_and_rollback() {
                     let result = apply_interface_and_routes(
                         &mut runner,
                         &mut owned_routes,
+                        &mut Vec::new(),
                         "mavi0",
                         Ipv4Addr::new(10, 8, 0, 2),
                         24,
                         Ipv4Addr::new(10, 8, 0, 1),
                         1280,
-                        endpoint,
+                        endpoint_route(
+                            endpoint,
+                            (!gatewayless).then_some("192.0.2.1"),
+                            Some("ppp0"),
+                            (!gatewayless).then_some("fe80::1"),
+                            Some("ppp0"),
+                        ),
                         Some("fd00::2".parse().unwrap()),
                         Some(64),
                         Some("fd00::1".parse().unwrap()),
-                        (!gatewayless).then_some("192.0.2.1"),
-                        Some("ppp0"),
-                        (!gatewayless).then_some("fe80::1"),
-                        Some("ppp0"),
                     );
                     assert_eq!(result.is_err(), fail_after_exception);
                     assert_eq!(owned_routes.len(), usize::from(!existing));
@@ -385,17 +365,14 @@ fn failure_before_endpoint_setup_has_no_host_routes_to_clean_up() {
     assert!(apply_interface_and_routes(
         &mut runner,
         &mut owned_routes,
+        &mut Vec::new(),
         "mavi0",
         Ipv4Addr::new(10, 8, 0, 2),
         24,
         Ipv4Addr::new(10, 8, 0, 1),
         1280,
-        "203.0.113.10",
+        endpoint_route("203.0.113.10", None, Some("ppp0"), None, None),
         None,
-        None,
-        None,
-        None,
-        Some("ppp0"),
         None,
         None,
     )
@@ -404,4 +381,24 @@ fn failure_before_endpoint_setup_has_no_host_routes_to_clean_up() {
     let setup_calls = runner.calls.len();
     routes::remove_host_route_exceptions(&mut runner, &owned_routes);
     assert_eq!(runner.calls.len(), setup_calls);
+}
+
+fn endpoint_route(
+    endpoint: &str,
+    gateway_v4: Option<&str>,
+    device_v4: Option<&str>,
+    gateway_v6: Option<&str>,
+    device_v6: Option<&str>,
+) -> routes::HostRoute {
+    let ip: std::net::IpAddr = endpoint.parse().unwrap();
+    let (gateway, device) = if ip.is_ipv4() {
+        (gateway_v4, device_v4)
+    } else {
+        (gateway_v6, device_v6)
+    };
+    routes::HostRoute {
+        ip,
+        gateway: gateway.map(String::from),
+        device: device.unwrap().into(),
+    }
 }

@@ -1,60 +1,47 @@
 use super::command::{CommandOutcome, CommandRunner};
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr};
-use std::process::Command;
-use tracing::{info, warn};
 
 /// A host route newly installed by this session, with its cleanup selectors.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct HostRoute {
-    ip: IpAddr,
-    gateway: Option<String>,
-    device: String,
+    pub(super) ip: IpAddr,
+    pub(super) gateway: Option<String>,
+    pub(super) device: String,
 }
 
-/// Detects the current physical IPv4 default gateway and interface.
-pub(super) fn detect_physical_gateway() -> (Option<String>, Option<String>) {
-    detect_physical_gateway_for(&["route", "show", "default"], "IPv4")
+#[derive(Deserialize)]
+struct RouteLookup {
+    dev: String,
+    gateway: Option<IpAddr>,
 }
 
-/// Detects the current physical IPv6 default gateway and interface.
-pub(super) fn detect_physical_gateway_v6() -> (Option<String>, Option<String>) {
-    detect_physical_gateway_for(&["-6", "route", "show", "default"], "IPv6")
-}
-
-fn detect_physical_gateway_for(
-    ip_args: &[&str],
-    family_label: &str,
-) -> (Option<String>, Option<String>) {
-    let output = Command::new("ip").args(ip_args).output();
-
-    if let Ok(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Parse first default route only: "default via 192.168.1.1 dev eth0 ..."
-        let first_line = stdout.lines().next().unwrap_or("");
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        let gateway = parts
-            .iter()
-            .position(|&p| p == "via")
-            .and_then(|i| parts.get(i + 1))
-            .map(|s| s.to_string());
-        let device = parts
-            .iter()
-            .position(|&p| p == "dev")
-            .and_then(|i| parts.get(i + 1))
-            .map(|s| s.to_string());
-
-        if let (Some(ref gw), Some(ref dev)) = (&gateway, &device) {
-            info!(
-                "Detected physical {} gateway: {} via {}",
-                family_label, gw, dev
-            );
-        }
-        (gateway, device)
-    } else {
-        warn!("Could not detect physical {} gateway", family_label);
-        (None, None)
-    }
+/// Capture the kernel's selected path to this destination before adding VPN
+/// addresses or split routes, including connected and more-specific routes.
+pub(super) fn resolve_host_route(runner: &mut impl CommandRunner, ip: IpAddr) -> Result<HostRoute> {
+    let family = if ip.is_ipv4() { "-4" } else { "-6" };
+    let destination = ip.to_string();
+    let output = runner
+        .output("ip", &["-j", family, "route", "get", &destination])
+        .with_context(|| format!("Could not determine pre-VPN route to {ip}"))?;
+    let route: RouteLookup = serde_json::from_str::<Vec<RouteLookup>>(&output)?
+        .into_iter()
+        .next()
+        .context("No route returned for host exception")?;
+    anyhow::ensure!(
+        !route.dev.is_empty() && route.dev != "mavi0",
+        "No physical interface found for host route exception to {ip}"
+    );
+    anyhow::ensure!(
+        route.gateway.is_none_or(|gw| gw.is_ipv4() == ip.is_ipv4()),
+        "Gateway address family does not match {ip}"
+    );
+    Ok(HostRoute {
+        ip,
+        gateway: route.gateway.map(|gw| gw.to_string()),
+        device: route.dev,
+    })
 }
 
 /// Parses an endpoint IP string that may be plain (`1.2.3.4`, `2606:4700::1`)
@@ -74,33 +61,18 @@ pub(super) fn parse_endpoint_ip(s: &str) -> Result<IpAddr> {
 }
 
 /// Adds a host route (`/32` for IPv4, `/128` for IPv6) for `ip` via the
-/// physical (non-VPN) gateway/device, so traffic to it bypasses the tunnel.
+/// captured pre-VPN gateway/device, so traffic to it bypasses the tunnel.
 /// Shared by the VPN endpoint's own route exception (preventing a routing
 /// loop) and each resolved split-tunnel whitelist domain IP.
 pub(super) fn add_host_route_exception<R: CommandRunner>(
     runner: &mut R,
-    ip: IpAddr,
-    physical_gateway: Option<&str>,
-    physical_device: Option<&str>,
-    physical_gateway_v6: Option<&str>,
-    physical_device_v6: Option<&str>,
+    route: HostRoute,
 ) -> Result<Option<HostRoute>> {
-    let (gw, dev) = match ip {
-        IpAddr::V4(_) => (physical_gateway, physical_device),
-        IpAddr::V6(_) => (physical_gateway_v6, physical_device_v6),
-    };
-    let dev = dev.ok_or_else(|| {
-        anyhow::anyhow!("No physical interface found for host route exception to {ip}")
-    })?;
-    let args = host_route_args(ip, "add", gw, dev);
+    let args = host_route_args(route.ip, "add", route.gateway.as_deref(), &route.device);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match runner.run_with_outcome("ip", &args)? {
         CommandOutcome::AlreadyExists => Ok(None),
-        CommandOutcome::Applied => Ok(Some(HostRoute {
-            ip,
-            gateway: gw.map(str::to_string),
-            device: dev.to_string(),
-        })),
+        CommandOutcome::Applied => Ok(Some(route)),
     }
 }
 
@@ -149,6 +121,72 @@ mod tests {
     use std::net::Ipv6Addr;
 
     #[test]
+    fn host_exceptions_preserve_the_selected_path_for_each_destination() {
+        use super::super::command::test_support::RecordingRunner;
+        for (ip, lookup, expected) in [
+            (
+                "192.168.20.5",
+                r#"[{"dst":"192.168.20.5","dev":"eth1"}]"#,
+                vec!["route", "add", "192.168.20.5/32", "dev", "eth1"],
+            ),
+            (
+                "203.0.113.10",
+                r#"[{"dev":"eth1","gateway":"192.0.2.99"}]"#,
+                vec![
+                    "route",
+                    "add",
+                    "203.0.113.10/32",
+                    "via",
+                    "192.0.2.99",
+                    "dev",
+                    "eth1",
+                ],
+            ),
+            (
+                "2001:db8::10",
+                r#"[{"dev":"eth1","gateway":"fe80::99"}]"#,
+                vec![
+                    "-6",
+                    "route",
+                    "add",
+                    "2001:db8::10/128",
+                    "via",
+                    "fe80::99",
+                    "dev",
+                    "eth1",
+                ],
+            ),
+        ] {
+            let mut runner = RecordingRunner {
+                outputs: [Ok(lookup.into())].into(),
+                ..RecordingRunner::default()
+            };
+            let route = resolve_host_route(&mut runner, ip.parse().unwrap()).unwrap();
+            add_host_route_exception(&mut runner, route).unwrap();
+            assert_eq!(runner.calls[0].1.last().unwrap(), ip);
+            assert_eq!(runner.calls[1].1, expected);
+        }
+    }
+
+    #[test]
+    fn unavailable_or_vpn_routes_are_rejected_without_installing_an_exception() {
+        use super::super::command::test_support::RecordingRunner;
+        for output in [
+            "[]",
+            r#"[{"dev":"mavi0"}]"#,
+            r#"[{"dev":""}]"#,
+            r#"[{"dev":"eth0","gateway":"fe80::1"}]"#,
+        ] {
+            let mut runner = RecordingRunner {
+                outputs: [Ok(output.into())].into(),
+                ..RecordingRunner::default()
+            };
+            assert!(resolve_host_route(&mut runner, "203.0.113.10".parse().unwrap()).is_err());
+            assert_eq!(runner.calls.len(), 1);
+        }
+    }
+
+    #[test]
     fn gatewayless_host_routes_use_the_physical_interface() {
         use super::super::command::test_support::RecordingRunner;
 
@@ -165,11 +203,11 @@ mod tests {
             let mut runner = RecordingRunner::default();
             add_host_route_exception(
                 &mut runner,
-                ip.parse().unwrap(),
-                None,
-                Some("ppp0"),
-                None,
-                Some("ppp0"),
+                HostRoute {
+                    ip: ip.parse().unwrap(),
+                    gateway: None,
+                    device: "ppp0".into(),
+                },
             )
             .unwrap();
             assert_eq!(

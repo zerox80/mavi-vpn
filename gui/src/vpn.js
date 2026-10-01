@@ -13,7 +13,7 @@ export function activeConn() {
 }
 
 export async function toggleConnection() {
-  if (state.hero === 'disconnecting') return;
+  if (state.disconnectPending || state.hero === 'disconnecting') return;
   if (
     state.hero === 'connecting' ||
     state.vpnState === 'Starting' ||
@@ -26,9 +26,7 @@ export async function toggleConnection() {
 }
 
 export async function connect() {
-  state.disconnecting = false;
-  state.connectAttempt += 1;
-  const attempt = state.connectAttempt;
+  if (state.pendingConnect || state.disconnectPending) return;
   const conn = activeConn();
   if (!conn) {
     showToast('Select a saved connection first, or add one.', 'error');
@@ -41,6 +39,13 @@ export async function connect() {
     return;
   }
 
+  state.disconnecting = false;
+  state.connectAttempt += 1;
+  const attempt = state.connectAttempt;
+  const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+    byte => byte.toString(16).padStart(2, '0')).join('');
+  state.connectRequestId = requestId;
+  state.pendingConnect = true;
   state.vpnState = 'Starting';
   setHero('connecting');
   try {
@@ -50,34 +55,43 @@ export async function connect() {
     // Manual connects reuse a stored refresh token when available, so the user
     // does not have to log in every time. The backend only falls back to a
     // browser login when there is no refresh token or it has been rejected.
-    await invoke('vpn_connect', { config, connectionId: conn.id, forceLogin: false });
-    if (isStaleConnectAttempt(attempt)) {
-      await invoke('vpn_disconnect').catch(() => {});
-      return;
-    }
+    await invoke('vpn_connect', { config, connectionId: conn.id, requestId, forceLogin: false });
+    if (isStaleConnectAttempt(attempt)) return;
+    state.pendingConnect = false;
     // Immediately fetch the real status instead of waiting up to 2s for
     // the next poller tick. This prevents the UI from showing "Connecting..."
     // when the service has already transitioned to Connected (or Failed).
     await refreshStatus();
   } catch (e) {
     if (isStaleConnectAttempt(attempt)) return;
+    state.pendingConnect = false;
+    state.connectRequestId = null;
     showToast(friendlyError(e), 'error');
     setHero('off');
+  } finally {
+    if (state.connectAttempt === attempt) state.pendingConnect = false;
   }
 }
 
 export async function disconnect() {
+  if (state.disconnectPending) return;
+  const requestId = state.connectRequestId;
   state.connectAttempt += 1;
+  state.pendingConnect = false;
+  state.disconnectPending = true;
   state.disconnecting = true;
   state.sessionStart = null;
   setHero('disconnecting');
   try {
-    await invoke('vpn_disconnect');
+    if (requestId) await invoke('vpn_disconnect', { requestId });
+    else await invoke('vpn_disconnect');
+    state.connectRequestId = null;
     await waitForStopped();
   } catch (e) {
     state.disconnecting = false;
     showToast(friendlyError(e), 'error');
   } finally {
+    state.disconnectPending = false;
     await refreshStatus();
   }
 }
@@ -119,7 +133,7 @@ export function applyStatus(status) {
 
   $('ip-readout').textContent = status.assigned_ip || '—';
 
-  if (!state.serviceAvailable) {
+  if (!state.serviceAvailable && !state.pendingConnect && !state.disconnectPending) {
     state.disconnecting = false;
     setHero('off');
     btn.disabled = true;
@@ -129,9 +143,11 @@ export function applyStatus(status) {
     return;
   }
 
-  const nextHero = heroFromVpnStatus(status, state.hero, state.disconnecting);
+  const nextHero = state.disconnectPending ? 'disconnecting'
+    : state.pendingConnect ? 'connecting'
+      : heroFromVpnStatus(status, state.hero, state.disconnecting);
 
-  if (state.vpnState === 'Failed') {
+  if (state.vpnState === 'Failed' && !state.pendingConnect && !state.disconnectPending) {
     state.disconnecting = false;
     setHero('off');
     state.sessionStart = null;
@@ -247,7 +263,7 @@ export function applyHeroForSelection() {
   if (btn) {
     btn.disabled =
       state.hero === 'disconnecting' ||
-      (!state.running && !state.serviceAvailable) ||
+      (!state.running && !state.serviceAvailable && !state.pendingConnect) ||
       (state.hero === 'off' && !conn);
   }
 }

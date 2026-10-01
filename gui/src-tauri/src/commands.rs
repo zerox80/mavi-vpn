@@ -1,4 +1,5 @@
 mod keycloak;
+mod lifecycle;
 
 use crate::ipc::send_ipc_request;
 use crate::storage::{load_config_from_dir, load_prefs_from_dir, save_config_to_dir};
@@ -9,6 +10,7 @@ use keycloak::start_service_refresh_token_sync;
 use keycloak::start_token_refresh_ticker;
 pub(crate) use keycloak::TokenRefreshHandle;
 use keycloak::{prepare_keycloak_config, stop_token_refresh_ticker};
+pub(crate) use lifecycle::ConnectionLifecycle;
 #[cfg(target_os = "windows")]
 use shared::ipc::KeycloakRuntimeAuth;
 use shared::ipc::{Config, IpcRequest, IpcResponse, VpnState};
@@ -30,14 +32,24 @@ pub(crate) async fn vpn_connect(
     app: AppHandle,
     mut config: Config,
     connection_id: String,
+    request_id: String,
     // `true` for a user-initiated (manual) connect: forces a fresh interactive
     // Keycloak login. `false` for an automatic/programmatic connect: a stored
     // refresh token is used silently when available, so auto-connect does not
     // pop a browser. Defaults to `false` when the caller omits it.
     force_login: Option<bool>,
 ) -> Result<String, String> {
+    let lifecycle = app.state::<ConnectionLifecycle>();
+    let mut attempt = lifecycle.begin(request_id)?;
+    let _operation = lifecycle.operation.lock().await;
     let force_login = force_login.unwrap_or(false);
-    let kc_session = prepare_keycloak_config(&mut config, &connection_id, force_login).await?;
+    let kc_session = attempt
+        .prepare(prepare_keycloak_config(
+            &mut config,
+            &connection_id,
+            force_login,
+        ))
+        .await?;
     config.normalize_transport();
     let endpoint = config.endpoint.clone();
     let keycloak_enabled = kc_session.is_some();
@@ -90,6 +102,16 @@ pub(crate) async fn vpn_connect(
 
     match response {
         IpcResponse::Ok => {
+            if let Err(error) = attempt.accept() {
+                // Start may already have reached the service. Finish its stop
+                // while holding the operation lock, before any new start.
+                stop_token_refresh_ticker(&app);
+                match send_ipc_request(&IpcRequest::Stop).await? {
+                    IpcResponse::Ok => return Err(error),
+                    IpcResponse::Error(stop_error) => return Err(stop_error),
+                    _ => return Err("Unexpected response to cancelled start cleanup".into()),
+                }
+            }
             info!(
                 connection_id = %connection_id,
                 endpoint = %endpoint,
@@ -125,8 +147,21 @@ pub(crate) async fn vpn_connect(
 }
 
 #[tauri::command]
-pub(crate) async fn vpn_disconnect(app: AppHandle) -> Result<String, String> {
+pub(crate) async fn vpn_disconnect(
+    app: AppHandle,
+    request_id: Option<String>,
+) -> Result<String, String> {
     info!("VPN disconnect requested");
+    let lifecycle = app.state::<ConnectionLifecycle>();
+    let Some(stop) = lifecycle.stop(request_id.as_deref())? else {
+        return Ok("Disconnected".into());
+    };
+    let _operation = lifecycle.operation.lock().await;
+    if !stop.needs_service_stop {
+        // Cancelling a pre-IPC login requires no running service. Acquiring
+        // the lock above waits for the OAuth listener to be dropped.
+        return Ok("Disconnected".into());
+    }
     stop_token_refresh_ticker(&app);
     let response = match send_ipc_request(&IpcRequest::Stop).await {
         Ok(response) => response,
@@ -138,6 +173,7 @@ pub(crate) async fn vpn_disconnect(app: AppHandle) -> Result<String, String> {
 
     match response {
         IpcResponse::Ok => {
+            stop.completed();
             info!("VPN stop accepted by service");
             Ok("Disconnected".into())
         }

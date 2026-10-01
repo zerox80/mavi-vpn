@@ -60,18 +60,16 @@ fn add_host_route_exception_for_ip_with_runner(
     host_ip: IpAddr,
     persist: bool,
 ) -> Result<Option<HostRoute>> {
-    let (prefix, default_prefix, on_link) = match host_ip {
-        IpAddr::V4(_) => (format!("{host_ip}/32"), "0.0.0.0/0", "0.0.0.0"),
-        IpAddr::V6(_) => (format!("{host_ip}/128"), "::/0", "::"),
+    let (prefix, on_link) = match host_ip {
+        IpAddr::V4(_) => (format!("{host_ip}/32"), "0.0.0.0"),
+        IpAddr::V6(_) => (format!("{host_ip}/128"), "::"),
     };
 
     let script = format!(
         "$ErrorActionPreference = 'Stop'; \
-         $gw = Get-NetRoute -DestinationPrefix '{default_prefix}' | Sort-Object RouteMetric | ForEach-Object {{ \
-             $iface = Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue; \
-             if ($iface -and $iface.Status -eq 'Up' -and $iface.Name -notlike 'MaviVPN*' -and $iface.InterfaceDescription -notlike '*WireGuard*') {{ $_ }} \
-         }} | Select-Object -First 1; \
-         if ($gw) {{ \
+         $gw = Find-NetRoute -RemoteIPAddress '{host_ip}' | Where-Object {{ $_.PSObject.Properties['DestinationPrefix'] }} | Select-Object -First 1; \
+         $iface = if ($gw) {{ Get-NetAdapter -InterfaceIndex $gw.InterfaceIndex -ErrorAction SilentlyContinue }}; \
+         if ($gw -and $iface -and $iface.Status -eq 'Up' -and $iface.Name -notlike 'MaviVPN*' -and $iface.InterfaceDescription -notlike '*WireGuard*') {{ \
              $nextHop = if ($gw.NextHop) {{ [string]$gw.NextHop }} else {{ '{on_link}' }}; \
              $args = @{{ \
                  DestinationPrefix = '{prefix}'; \
@@ -85,7 +83,7 @@ fn add_host_route_exception_for_ip_with_runner(
              $created = -not [bool]$existing; \
              if ($created) {{ New-NetRoute @args | Out-Null }}; \
              [pscustomobject]@{{ destination = '{host_ip}'; interface_index = [uint32]$gw.InterfaceIndex; next_hop = $nextHop; created = $created }} | ConvertTo-Json -Compress \
-         }} else {{ throw 'No physical gateway for {default_prefix}' }}"
+         }} else {{ throw 'No physical route to {host_ip}' }}"
     );
 
     let outcome =
@@ -199,7 +197,7 @@ mod tests {
         };
         assert!(label.contains("203.0.113.10/32"));
         assert!(script.contains("DestinationPrefix = '203.0.113.10/32'"));
-        assert!(script.contains("Get-NetRoute -DestinationPrefix '0.0.0.0/0'"));
+        assert!(script.contains("Find-NetRoute -RemoteIPAddress '203.0.113.10'"));
         assert!(script.contains("New-NetRoute @args"));
     }
 
@@ -219,7 +217,7 @@ mod tests {
             panic!("expected PowerShell command");
         };
         assert!(script.contains("DestinationPrefix = '2001:db8::10/128'"));
-        assert!(script.contains("Get-NetRoute -DestinationPrefix '::/0'"));
+        assert!(script.contains("Find-NetRoute -RemoteIPAddress '2001:db8::10'"));
     }
 
     #[test]
@@ -280,9 +278,12 @@ mod tests {
         for (ip, next_hop, foreign_hop, default_prefix) in [
             ("203.0.113.10", "192.0.2.1", "192.0.2.99", "0.0.0.0/0"),
             ("2001:db8::10", "fe80::1", "fe80::99", "::/0"),
+            ("192.168.20.5", "0.0.0.0", "192.0.2.99", "0.0.0.0/0"),
+            ("2001:db8::10", "::", "fe80::99", "::/0"),
         ] {
             for existing in [false, true] {
-                let runner = RecordingRunner::with_stdout(&result_record(ip, !existing));
+                let record = serde_json::json!({"destination": ip, "interface_index": 7, "next_hop": next_hop, "created": !existing}).to_string();
+                let runner = RecordingRunner::with_stdout(&record);
                 let route = add_host_route_exception_for_ip_with_runner(
                     &runner,
                     ip.parse().unwrap(),

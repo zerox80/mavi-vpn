@@ -18,17 +18,28 @@ use wintun::Adapter;
 
 pub struct SessionRouteGuard {
     host_routes: Vec<HostRoute>,
+    cleanup_on_drop: bool,
 }
 
 impl SessionRouteGuard {
     pub const fn new(host_routes: Vec<HostRoute>) -> Self {
-        Self { host_routes }
+        Self {
+            host_routes,
+            cleanup_on_drop: true,
+        }
+    }
+
+    fn into_host_routes(mut self) -> Vec<HostRoute> {
+        self.cleanup_on_drop = false;
+        std::mem::take(&mut self.host_routes)
     }
 }
 
 impl Drop for SessionRouteGuard {
     fn drop(&mut self) {
-        cleanup_routes(&self.host_routes);
+        if self.cleanup_on_drop {
+            cleanup_routes(&self.host_routes);
+        }
     }
 }
 
@@ -107,6 +118,17 @@ pub fn set_adapter_network_config(
         adapter_name, adapter_index, ip, gateway, dns
     );
 
+    // Preserve the selected pre-VPN path before even adding tunnel addresses:
+    // their connected prefixes could otherwise change Find-NetRoute's result.
+    let endpoint_route = add_host_route_exception_fixed(endpoint)
+        .context("Failed to install host route exception for VPN endpoint")?;
+    let mut route_guard = SessionRouteGuard::new(endpoint_route.into_iter().collect());
+    for ip in whitelist_ips {
+        if let Ok(Some(route)) = add_host_route_exception_for_ip(ip) {
+            route_guard.host_routes.push(route);
+        }
+    }
+
     let _ = powershell_configure_interface_aggressive(adapter_index);
 
     if let (Some(ipv6), Some(plen)) = (assigned_ipv6, netmask_v6) {
@@ -140,26 +162,8 @@ pub fn set_adapter_network_config(
     win32_set_mtu(adapter_index, u32::from(tun_mtu), AF_INET6 as _);
 
     let route_started = Instant::now();
-    let endpoint_route = add_host_route_exception_fixed(endpoint)
-        .context("Failed to install host route exception for VPN endpoint")?;
-    let mut host_routes: Vec<_> = endpoint_route.into_iter().collect();
-    for ip in whitelist_ips {
-        if let Ok(Some(route)) = add_host_route_exception_for_ip(ip) {
-            host_routes.push(route);
-        }
-    }
-
-    let route_result = (|| -> Result<()> {
-        install_ipv4_split_routes(adapter_index, gateway)?;
-
-        install_ipv6_split_routes(adapter_index)?;
-
-        Ok(())
-    })();
-    if let Err(err) = route_result {
-        cleanup_routes(&host_routes);
-        return Err(err);
-    }
+    install_ipv4_split_routes(adapter_index, gateway)?;
+    install_ipv6_split_routes(adapter_index)?;
 
     info!(
         "Split routes applied in {} ms",
@@ -170,9 +174,9 @@ pub fn set_adapter_network_config(
 
     info!(
         "Network config complete: host route exceptions={}",
-        host_routes.len()
+        route_guard.host_routes.len()
     );
-    Ok(host_routes)
+    Ok(route_guard.into_host_routes())
 }
 
 fn install_ipv4_split_routes(adapter_index: u32, gateway: Ipv4Addr) -> Result<()> {

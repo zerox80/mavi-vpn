@@ -30,6 +30,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(commands::TokenRefreshHandle::default())
+        .manage(commands::ConnectionLifecycle::default())
         .invoke_handler(tauri::generate_handler![
             vpn_connect,
             vpn_disconnect,

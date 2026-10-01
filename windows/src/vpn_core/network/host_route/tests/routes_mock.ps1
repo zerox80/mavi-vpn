@@ -29,7 +29,7 @@ function Get-NetRoute {
     [CmdletBinding()]
     param([string]$DestinationPrefix, [uint32]$InterfaceIndex, [string]$NextHop, [string]$PolicyStore)
     if ($DestinationPrefix -eq $defaultPrefix) {
-        return [pscustomobject]@{ InterfaceIndex=7; NextHop=$script:nextHop; RouteMetric=1 }
+        throw 'Host exception incorrectly queried the default gateway'
     }
     @($script:routes) | Where-Object {
         $_.DestinationPrefix -eq $DestinationPrefix -and
@@ -37,6 +37,15 @@ function Get-NetRoute {
         (-not $NextHop -or $_.NextHop -eq $NextHop) -and
         (-not $PolicyStore -or $_.PolicyStore -eq $PolicyStore)
     }
+}
+function Find-NetRoute {
+    [CmdletBinding()]
+    param([string]$RemoteIPAddress)
+    if ($RemoteIPAddress -ne $targetPrefix.Split('/')[0]) { throw 'Wrong route lookup destination' }
+    # Find-NetRoute also returns the selected local IP. The route must be
+    # selected explicitly, preserving the on-link or specific-route next hop.
+    [pscustomobject]@{ IPAddress='192.0.2.2'; InterfaceIndex=7 }
+    [pscustomobject]@{ DestinationPrefix=$targetPrefix; InterfaceIndex=7; NextHop=$script:nextHop; RouteMetric=1 }
 }
 function Get-NetAdapter {
     [CmdletBinding()]

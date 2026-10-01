@@ -37,28 +37,34 @@ pub(super) fn resolve_whitelist_ips(domains: &[String], ipv6_enabled: bool) -> V
 /// tunnel, mirroring the VPN endpoint's own route exception.
 pub(super) fn add_whitelist_route_exceptions<R: CommandRunner>(
     runner: &mut R,
-    ips: &[IpAddr],
-    physical_gateway: Option<&str>,
-    physical_device: Option<&str>,
-    physical_gateway_v6: Option<&str>,
-    physical_device_v6: Option<&str>,
+    routes: Vec<routes::HostRoute>,
 ) -> Vec<routes::HostRoute> {
     let mut owned_routes = Vec::new();
-    for &ip in ips {
-        match routes::add_host_route_exception(
-            runner,
-            ip,
-            physical_gateway,
-            physical_device,
-            physical_gateway_v6,
-            physical_device_v6,
-        ) {
+    for route in routes {
+        let ip = route.ip;
+        match routes::add_host_route_exception(runner, route) {
             Ok(Some(route)) => owned_routes.push(route),
             Ok(None) => {}
             Err(err) => warn!("Could not install whitelist route exception for {ip}: {err}"),
         }
     }
     owned_routes
+}
+
+/// Resolve each destination while the original routing table is still active.
+pub(super) fn resolve_whitelist_routes(
+    runner: &mut impl CommandRunner,
+    ips: &[IpAddr],
+) -> Vec<routes::HostRoute> {
+    ips.iter()
+        .filter_map(|&ip| match routes::resolve_host_route(runner, ip) {
+            Ok(route) => Some(route),
+            Err(err) => {
+                warn!("Could not determine whitelist route for {ip}: {err}");
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -105,11 +111,13 @@ mod tests {
 
         add_whitelist_route_exceptions(
             &mut runner,
-            &ips,
-            Some("192.0.2.1"),
-            Some("eth0"),
-            None,
-            None,
+            ips.into_iter()
+                .map(|ip| routes::HostRoute {
+                    ip,
+                    gateway: Some("192.0.2.1".into()),
+                    device: "eth0".into(),
+                })
+                .collect(),
         );
 
         assert_eq!(runner.calls.len(), 2);
@@ -136,11 +144,13 @@ mod tests {
             let ips = ips.map(|ip| ip.parse::<IpAddr>().unwrap());
             let owned_routes = add_whitelist_route_exceptions(
                 &mut runner,
-                &ips,
-                None,
-                Some("ppp0"),
-                None,
-                Some("ppp0"),
+                ips.iter()
+                    .map(|&ip| routes::HostRoute {
+                        ip,
+                        gateway: None,
+                        device: "ppp0".into(),
+                    })
+                    .collect(),
             );
             assert_eq!(owned_routes.len(), 1);
             routes::remove_host_route_exceptions(&mut runner, &owned_routes);

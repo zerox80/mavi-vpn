@@ -221,10 +221,15 @@ impl VpnServiceState {
         self.set_current_token(String::new());
     }
 
-    pub fn mark_session_starting(&mut self, config: ipc::Config) {
+    pub fn mark_session_starting(
+        &mut self,
+        config: ipc::Config,
+        keycloak_connection_id: Option<&str>,
+    ) {
         // Cancellation may race with a refresh response already being processed.
         // Fresh runtime handles and a new publication generation reject late
-        // writes while preserving rotations already awaiting storage.
+        // writes. A seeded Keycloak session supersedes queued rotations for
+        // that profile; rotations for other profiles still need storage.
         self.stop_session();
         let pending = self.pending_keycloak_refresh_tokens.clone();
         let generation = {
@@ -232,6 +237,11 @@ impl VpnServiceState {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             tokens.generation += 1;
+            if let Some(connection_id) = keycloak_connection_id {
+                tokens
+                    .updates
+                    .retain(|update| update.connection_id != connection_id);
+            }
             tokens.generation
         };
         *self = Self::new();
@@ -310,7 +320,7 @@ mod tests {
     fn status_snapshot_reports_starting_session() {
         let mut state = VpnServiceState::new();
 
-        state.mark_session_starting(test_config());
+        state.mark_session_starting(test_config(), None);
         let snapshot = state.status_snapshot();
 
         assert!(snapshot.starting);
@@ -336,12 +346,12 @@ mod tests {
     #[test]
     fn late_previous_session_writes_cannot_change_new_session() {
         let mut state = VpnServiceState::new();
-        state.mark_session_starting(test_config());
+        state.mark_session_starting(test_config(), None);
         let old = state.runtime_handles();
         old.finish_session_flags();
         let mut config = test_config();
         config.token = "new-session-token".to_string();
-        state.mark_session_starting(config);
+        state.mark_session_starting(config, None);
         state.vpn_connected.store(true, Ordering::SeqCst);
 
         // A refresh response or final cleanup can already be executing when
@@ -366,14 +376,14 @@ mod tests {
     #[tokio::test]
     async fn restarting_cancels_previous_refresh_task() {
         let mut state = VpnServiceState::new();
-        state.mark_session_starting(test_config());
+        state.mark_session_starting(test_config(), None);
         let (alive, dropped) = tokio::sync::oneshot::channel::<()>();
         state.set_keycloak_refresh_task(tokio::spawn(async move {
             let _alive = alive;
             std::future::pending::<()>().await;
         }));
         state.runtime_handles().finish_session_flags();
-        state.mark_session_starting(test_config());
+        state.mark_session_starting(test_config(), None);
         assert!(
             tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
                 .await

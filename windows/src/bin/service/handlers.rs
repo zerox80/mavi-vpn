@@ -160,7 +160,10 @@ pub fn handle_start_request(
     } else if guard.is_running() || guard.active_task_running() {
         ipc::IpcResponse::Error("VPN is already running".to_string())
     } else {
-        guard.mark_session_starting(config.clone());
+        guard.mark_session_starting(
+            config.clone(),
+            keycloak.as_ref().map(|auth| auth.connection_id.as_str()),
+        );
         let task_runtime = guard.runtime_handles();
 
         let refresh_abort = keycloak.map(|keycloak| {

@@ -25,6 +25,7 @@ mod secure_path;
 #[path = "../../vpn_core/mod.rs"]
 mod vpn_core;
 
+mod caller;
 mod cli;
 mod handlers;
 mod keycloak_refresh;
@@ -104,6 +105,10 @@ pub(crate) fn handle_service_control(
                     | SessionChangeReason::ConsoleConnect
                     | SessionChangeReason::RemoteConnect
                     | SessionChangeReason::SessionUnlock
+                    | SessionChangeReason::SessionLogoff
+                    | SessionChangeReason::ConsoleDisconnect
+                    | SessionChangeReason::RemoteDisconnect
+                    | SessionChangeReason::SessionLock
             ) {
                 info!(
                     "Session change ({:?}) for session {} - queuing IPC token ACL re-harden",

@@ -1,0 +1,13 @@
+# Legacy backend contexts also exclude runtime data and secrets.
+**
+!Cargo.toml
+!src/
+!src/**
+!entrypoint.sh
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/auth_token.txt
+**/mavi-vpn.json

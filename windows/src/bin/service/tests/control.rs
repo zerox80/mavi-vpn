@@ -127,7 +127,7 @@ fn session_unlock_sets_reharden_signal() {
 }
 
 #[test]
-fn session_logoff_does_not_set_reharden_signal() {
+fn session_logoff_sets_reharden_signal() {
     let stop = Arc::new(AtomicBool::new(false));
     let reharden = Arc::new(AtomicBool::new(false));
     let (result, did_stop) = handle_service_control(
@@ -136,12 +136,12 @@ fn session_logoff_does_not_set_reharden_signal() {
         &reharden,
     );
     assert!(matches!(result, ServiceControlHandlerResult::NoError));
-    assert!(!reharden.load(Ordering::SeqCst));
+    assert!(reharden.load(Ordering::SeqCst));
     assert!(!did_stop);
 }
 
 #[test]
-fn session_lock_does_not_set_reharden_signal() {
+fn session_lock_sets_reharden_signal() {
     let stop = Arc::new(AtomicBool::new(false));
     let reharden = Arc::new(AtomicBool::new(false));
     let (result, did_stop) = handle_service_control(
@@ -150,12 +150,12 @@ fn session_lock_does_not_set_reharden_signal() {
         &reharden,
     );
     assert!(matches!(result, ServiceControlHandlerResult::NoError));
-    assert!(!reharden.load(Ordering::SeqCst));
+    assert!(reharden.load(Ordering::SeqCst));
     assert!(!did_stop);
 }
 
 #[test]
-fn console_disconnect_does_not_set_reharden_signal() {
+fn console_disconnect_sets_reharden_signal() {
     let stop = Arc::new(AtomicBool::new(false));
     let reharden = Arc::new(AtomicBool::new(false));
     let (result, did_stop) = handle_service_control(
@@ -164,12 +164,12 @@ fn console_disconnect_does_not_set_reharden_signal() {
         &reharden,
     );
     assert!(matches!(result, ServiceControlHandlerResult::NoError));
-    assert!(!reharden.load(Ordering::SeqCst));
+    assert!(reharden.load(Ordering::SeqCst));
     assert!(!did_stop);
 }
 
 #[test]
-fn remote_disconnect_does_not_set_reharden_signal() {
+fn remote_disconnect_sets_reharden_signal() {
     let stop = Arc::new(AtomicBool::new(false));
     let reharden = Arc::new(AtomicBool::new(false));
     let (result, did_stop) = handle_service_control(
@@ -178,7 +178,7 @@ fn remote_disconnect_does_not_set_reharden_signal() {
         &reharden,
     );
     assert!(matches!(result, ServiceControlHandlerResult::NoError));
-    assert!(!reharden.load(Ordering::SeqCst));
+    assert!(reharden.load(Ordering::SeqCst));
     assert!(!did_stop);
 }
 

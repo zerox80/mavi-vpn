@@ -1491,3 +1491,25 @@ unknown capsules, or client-ignored capabilities. Changes to bincode enum
 layout, required capsule ordering, datagram prefix assumptions, or authentication
 semantics should be treated as protocol migrations and documented with a clear
 compatibility plan.
+
+### Connection resource limits
+
+Each Keycloak subject may hold up to eight concurrent tunnels across raw QUIC,
+HTTP/3, HTTP/2 streams, source addresses, and refreshed tokens. Static-token mode
+uses one aggregate quota for the shared credential. Set
+`VPN_MAX_SESSIONS_PER_PRINCIPAL` (1–1000, default 8) to the intended device count;
+shared-token deployments with more than eight clients must raise this value.
+Leases are returned on disconnect and failed setup.
+
+QUIC address validation (stateless Retry) precedes admission, so spoofed Initial
+packets cannot reserve setup slots. Before authentication, each source may hold
+four setup slots across TCP and QUIC combined. IPv4-mapped addresses are normalized and IPv6 sources are grouped by
+/64. Slots are released at setup completion or timeout. The existing global
+connection limits still apply. Large NAT deployments may need to stagger startup.
+HTTP/3 limits decoded headers to 16 KiB and received setup/control bytes to 64 KiB
+per stream. HTTP/2 clients reject capsules exceeding 64 KiB including their header.
+Cached Keycloak signing keys expire after one hour; authentication then requires
+a successful JWKS refresh, including during a Keycloak outage.
+
+Both Dockerfiles use the repository root as build context. For the secondary
+entry point run `docker build -f backend/Dockerfile .` from the repository root.

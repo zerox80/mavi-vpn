@@ -5,7 +5,7 @@ use crate::ipc::send_ipc_request;
 use crate::storage::{load_config_from_dir, load_prefs_from_dir, save_config_to_dir};
 use crate::storage::{save_prefs_to_dir, Prefs};
 #[cfg(target_os = "windows")]
-use keycloak::start_service_refresh_token_sync;
+pub(crate) use keycloak::start_service_refresh_token_sync;
 #[cfg(not(target_os = "windows"))]
 use keycloak::start_token_refresh_ticker;
 pub(crate) use keycloak::TokenRefreshHandle;
@@ -42,6 +42,12 @@ pub(crate) async fn vpn_connect(
     let lifecycle = app.state::<ConnectionLifecycle>();
     let mut attempt = lifecycle.begin(request_id)?;
     let _operation = lifecycle.operation.lock().await;
+    #[cfg(target_os = "windows")]
+    if config.kc_auth.unwrap_or(false) {
+        attempt
+            .prepare(keycloak::sync_service_refresh_tokens())
+            .await?;
+    }
     let force_login = force_login.unwrap_or(false);
     let kc_session = attempt
         .prepare(prepare_keycloak_config(

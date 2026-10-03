@@ -13,7 +13,11 @@ pub(crate) const RECONNECT_MAX_SECS: u64 = 30;
 /// in [`shared::session_errors`] — previously this list duplicated them and
 /// had drifted (it was missing `unsupported VPN MTU`, so an out-of-range
 /// server MTU retried forever on Windows).
-const WINDOWS_PERMANENT_MARKERS: &[&str] = &["was not applied to adapter", "IPV6_SETUP_FAILED"];
+const WINDOWS_PERMANENT_MARKERS: &[&str] = &[
+    "was not applied to adapter",
+    "IPV6_SETUP_FAILED",
+    "DNS_SETUP_FAILED",
+];
 
 /// Sleeps up to `delay`, but returns as soon as `running` is cleared.
 ///

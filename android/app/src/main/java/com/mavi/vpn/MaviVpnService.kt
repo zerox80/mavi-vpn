@@ -59,8 +59,8 @@ class MaviVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
-        if (action == "CONNECT" || action == null) {
-            val request = resolveVpnStartRequest(intent, prefs)
+        val request = resolveVpnStartRequest(intent, prefs)
+        if (request != null) {
             val hasCredentials = vpnStartHasCredentials(prefs, request.token)
 
             if (request.ip.isNotEmpty() && hasCredentials) {

@@ -174,9 +174,15 @@ pub enum IpcRequest {
         config: Config,
         keycloak: KeycloakRuntimeAuth,
     },
-    /// Atomically fetch and clear the latest rotated refresh token produced by
-    /// the service-side Keycloak refresh task, if any.
+    /// Fetch a rotated refresh token awaiting persistence. Kept under its
+    /// original wire tag, but fetching no longer clears the pending update.
     TakeRefreshTokenUpdate,
+    /// Confirm that this exact update was saved. A stale acknowledgement must
+    /// not clear a newer rotation for the same connection. Append wire variants.
+    AcknowledgeRefreshTokenUpdate {
+        connection_id: String,
+        refresh_token: String,
+    },
 }
 
 impl fmt::Debug for IpcRequest {
@@ -196,6 +202,11 @@ impl fmt::Debug for IpcRequest {
                 .field("keycloak", keycloak)
                 .finish(),
             Self::TakeRefreshTokenUpdate => f.write_str("TakeRefreshTokenUpdate"),
+            Self::AcknowledgeRefreshTokenUpdate { connection_id, .. } => f
+                .debug_struct("AcknowledgeRefreshTokenUpdate")
+                .field("connection_id", connection_id)
+                .field("refresh_token", &"<redacted>")
+                .finish(),
         }
     }
 }

@@ -15,6 +15,7 @@ export const state = {
   // Session wall clock
   sessionStart: null,
   // Saved UI prefs
+  prefsLoaded: false,
   prefs: {
     theme: 'light',
     accent: '#2B44FF',

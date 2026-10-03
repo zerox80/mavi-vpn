@@ -44,11 +44,47 @@ class LinuxInstallerTests(unittest.TestCase):
                      contextlib.redirect_stdout(io.StringIO()):
                     INSTALLER.main()
 
-                self.assertIn(("install", "-m", "755", str(binary), destination), calls)
+                self.assertIn(("install", "-m", "755", "-T", str(binary), destination), calls)
                 self.assertEqual(len(units), 1)
                 self.assertIn(f'ExecStart="{destination}" daemon\n', units[0])
                 self.assertNotIn("ExecStart=/usr/local/bin/mavi-vpn", units[0])
                 self.assertIn(("systemctl", "start", "mavi-vpn"), calls)
+
+    def test_directory_destination_uses_the_installed_executable(self):
+        for name in ["bin", "Mavi VPN bin"]:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / "target/release/mavi-vpn"
+                binary.parent.mkdir(parents=True)
+                binary.write_text("#!/bin/sh\nexit 0\n")
+                service = root / "linux/mavi-vpn.service"
+                service.parent.mkdir()
+                service.write_text((ROOT / "linux/mavi-vpn.service").read_text())
+                destination = root / name
+                destination.mkdir()
+                units = []
+
+                def sudo(*args):
+                    if args[-1] == "/etc/systemd/system/mavi-vpn.service":
+                        units.append(Path(args[-2]).read_text())
+                    elif args[0] in ("mkdir", "install"):
+                        subprocess.run(args, check=True)
+
+                with patch.object(INSTALLER, "ROOT", root), \
+                     patch.object(INSTALLER, "run"), \
+                     patch.object(INSTALLER, "sudo", side_effect=sudo), \
+                     patch.object(INSTALLER, "require_cmd"), \
+                     patch.object(INSTALLER, "configure_ipc_group", return_value="desktop"), \
+                     patch.object(INSTALLER.shutil, "which", return_value="/usr/bin/systemctl"), \
+                     patch.object(INSTALLER, "ask", side_effect=[True, False, False]), \
+                     patch("builtins.input", return_value=str(destination) + "/"), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    INSTALLER.main()
+
+                installed = destination / "mavi-vpn"
+                self.assertEqual(installed.read_text(), binary.read_text())
+                self.assertEqual(len(units), 1)
+                self.assertIn(f'ExecStart="{installed}" daemon\n', units[0])
 
     def test_service_path_escapes_systemd_special_characters(self):
         dest = Path('/opt/Mavi VPN/cash$100%')

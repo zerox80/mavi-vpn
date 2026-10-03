@@ -400,5 +400,6 @@ fn endpoint_route(
         ip,
         gateway: gateway.map(String::from),
         device: device.unwrap().into(),
+        onlink: false,
     }
 }

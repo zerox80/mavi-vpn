@@ -336,3 +336,79 @@ fn legacy_upgrade_repair_is_explicit_and_preserves_other_routes() {
         "eth0"
     );
 }
+
+#[test]
+fn preserves_onlink_gateways_outside_the_interface_prefix() {
+    if !in_namespace(
+        "network::kernel_tests::preserves_onlink_gateways_outside_the_interface_prefix",
+    ) {
+        return;
+    }
+    let mut runner = ProductionCommandRunner;
+    runner.run("ip", &["link", "set", "lo", "up"]).unwrap();
+    runner
+        .run("ip", &["link", "add", "eth1", "type", "dummy"])
+        .unwrap();
+    runner.run("ip", &["link", "set", "eth1", "up"]).unwrap();
+    runner
+        .run("ip", &["addr", "add", "192.0.2.2/32", "dev", "eth1"])
+        .unwrap();
+    runner
+        .run(
+            "ip",
+            &[
+                "-6",
+                "addr",
+                "add",
+                "2001:db8::2/128",
+                "dev",
+                "eth1",
+                "nodad",
+            ],
+        )
+        .unwrap();
+
+    for (family, prefix, destination, gateway) in [
+        ("-4", "203.0.113.0/24", "203.0.113.10", "198.51.100.1"),
+        (
+            "-6",
+            "2001:db8:30::/64",
+            "2001:db8:30::10",
+            "2001:db8:99::1",
+        ),
+    ] {
+        runner
+            .run(
+                "ip",
+                &[
+                    family, "route", "add", prefix, "via", gateway, "dev", "eth1", "onlink",
+                ],
+            )
+            .unwrap();
+        let before = runner
+            .output("ip", &["-j", family, "route", "show"])
+            .unwrap();
+        let route = routes::resolve_host_route(&mut runner, destination.parse().unwrap()).unwrap();
+        assert_eq!(route.gateway.as_deref(), Some(gateway));
+        let owned = routes::add_host_route_exception(&mut runner, route)
+            .unwrap()
+            .unwrap();
+        let output = runner
+            .output(
+                "ip",
+                &["-j", family, "route", "get", "fibmatch", destination],
+            )
+            .unwrap();
+        let selected: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+        assert_eq!(selected[0]["gateway"], gateway);
+        assert_eq!(selected[0]["dev"], "eth1");
+        assert_eq!(selected[0]["flags"], serde_json::json!(["onlink"]));
+        routes::remove_host_route_exceptions(&mut runner, &[owned]);
+        assert_eq!(
+            runner
+                .output("ip", &["-j", family, "route", "show"])
+                .unwrap(),
+            before
+        );
+    }
+}

@@ -9,12 +9,29 @@ pub(super) struct HostRoute {
     pub(super) ip: IpAddr,
     pub(super) gateway: Option<String>,
     pub(super) device: String,
+    pub(super) onlink: bool,
 }
 
 #[derive(Deserialize)]
 struct RouteLookup {
     dev: String,
     gateway: Option<IpAddr>,
+}
+
+#[derive(Deserialize)]
+struct FibNextHop {
+    dev: Option<String>,
+    gateway: Option<IpAddr>,
+    #[serde(default)]
+    flags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct FibRoute {
+    #[serde(flatten)]
+    path: FibNextHop,
+    #[serde(default)]
+    nexthops: Vec<FibNextHop>,
 }
 
 /// Capture the kernel's selected path to this destination before adding VPN
@@ -37,10 +54,32 @@ pub(super) fn resolve_host_route(runner: &mut impl CommandRunner, ip: IpAddr) ->
         route.gateway.is_none_or(|gw| gw.is_ipv4() == ip.is_ipv4()),
         "Gateway address family does not match {ip}"
     );
+    // A resolved route hides the original onlink flag. Inspect the FIB too,
+    // retaining the selected nexthop when the original route is multipath.
+    let onlink = if route.gateway.is_some() {
+        let output = runner
+            .output(
+                "ip",
+                &["-j", family, "route", "get", "fibmatch", &destination],
+            )
+            .with_context(|| format!("Could not inspect pre-VPN route flags for {ip}"))?;
+        let fib_routes: Vec<FibRoute> = serde_json::from_str(&output)?;
+        fib_routes
+            .iter()
+            .flat_map(|fib| std::iter::once(&fib.path).chain(&fib.nexthops))
+            .any(|path| {
+                path.dev.as_deref() == Some(route.dev.as_str())
+                    && path.gateway == route.gateway
+                    && path.flags.iter().any(|flag| flag == "onlink")
+            })
+    } else {
+        false
+    };
     Ok(HostRoute {
         ip,
         gateway: route.gateway.map(|gw| gw.to_string()),
         device: route.dev,
+        onlink,
     })
 }
 
@@ -68,7 +107,13 @@ pub(super) fn add_host_route_exception<R: CommandRunner>(
     runner: &mut R,
     route: HostRoute,
 ) -> Result<Option<HostRoute>> {
-    let args = host_route_args(route.ip, "add", route.gateway.as_deref(), &route.device);
+    let args = host_route_args(
+        route.ip,
+        "add",
+        route.gateway.as_deref(),
+        &route.device,
+        route.onlink,
+    );
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match runner.run_with_outcome("ip", &args)? {
         CommandOutcome::AlreadyExists => Ok(None),
@@ -76,7 +121,13 @@ pub(super) fn add_host_route_exception<R: CommandRunner>(
     }
 }
 
-fn host_route_args(ip: IpAddr, action: &str, gateway: Option<&str>, device: &str) -> Vec<String> {
+fn host_route_args(
+    ip: IpAddr,
+    action: &str,
+    gateway: Option<&str>,
+    device: &str,
+    onlink: bool,
+) -> Vec<String> {
     let mut args = Vec::new();
     if ip.is_ipv6() {
         args.push("-6".to_string());
@@ -90,6 +141,9 @@ fn host_route_args(ip: IpAddr, action: &str, gateway: Option<&str>, device: &str
         args.extend(["via".to_string(), gw.to_string()]);
     }
     args.extend(["dev".to_string(), device.to_string()]);
+    if action == "add" && onlink && gateway.is_some() {
+        args.push("onlink".to_string());
+    }
     args
 }
 
@@ -99,7 +153,13 @@ pub(super) fn remove_host_route_exceptions(
     owned_routes: &[HostRoute],
 ) {
     for route in owned_routes {
-        let args = host_route_args(route.ip, "del", route.gateway.as_deref(), &route.device);
+        let args = host_route_args(
+            route.ip,
+            "del",
+            route.gateway.as_deref(),
+            &route.device,
+            route.onlink,
+        );
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let _ = runner.run("ip", &args);
     }
@@ -158,13 +218,50 @@ mod tests {
             ),
         ] {
             let mut runner = RecordingRunner {
-                outputs: [Ok(lookup.into())].into(),
+                outputs: [Ok(lookup.into()), Ok(lookup.into())].into(),
                 ..RecordingRunner::default()
             };
             let route = resolve_host_route(&mut runner, ip.parse().unwrap()).unwrap();
             add_host_route_exception(&mut runner, route).unwrap();
             assert_eq!(runner.calls[0].1.last().unwrap(), ip);
-            assert_eq!(runner.calls[1].1, expected);
+            assert_eq!(runner.calls.last().unwrap().1, expected);
+        }
+    }
+
+    #[test]
+    fn multipath_lookup_uses_only_the_selected_nexthops_onlink_flag() {
+        use super::super::command::test_support::RecordingRunner;
+        let fib = r#"[{"flags":[],"nexthops":[
+            {"dev":"eth0","gateway":"192.0.2.1","flags":[]},
+            {"dev":"eth1","gateway":"198.51.100.1","flags":["onlink"]}
+        ]}]"#;
+        for (lookup, expected_onlink) in [
+            (r#"[{"dev":"eth0","gateway":"192.0.2.1"}]"#, false),
+            (r#"[{"dev":"eth1","gateway":"198.51.100.1"}]"#, true),
+        ] {
+            let mut runner = RecordingRunner {
+                outputs: [Ok(lookup.into()), Ok(fib.into())].into(),
+                ..RecordingRunner::default()
+            };
+            let route = resolve_host_route(&mut runner, "203.0.113.10".parse().unwrap()).unwrap();
+            assert_eq!(route.onlink, expected_onlink);
+            let owned = add_host_route_exception(&mut runner, route)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                runner
+                    .calls
+                    .last()
+                    .unwrap()
+                    .1
+                    .iter()
+                    .any(|arg| arg == "onlink"),
+                expected_onlink
+            );
+            remove_host_route_exceptions(&mut runner, &[owned]);
+            let cleanup = &runner.calls.last().unwrap().1;
+            assert!(cleanup.iter().any(|arg| arg == "del"));
+            assert!(!cleanup.iter().any(|arg| arg == "onlink"));
         }
     }
 
@@ -207,6 +304,7 @@ mod tests {
                     ip: ip.parse().unwrap(),
                     gateway: None,
                     device: "ppp0".into(),
+                    onlink: false,
                 },
             )
             .unwrap();
@@ -223,11 +321,11 @@ mod tests {
     #[test]
     fn gatewayless_cleanup_keeps_the_original_interface_selector() {
         assert_eq!(
-            host_route_args("203.0.113.10".parse().unwrap(), "del", None, "ppp0"),
+            host_route_args("203.0.113.10".parse().unwrap(), "del", None, "ppp0", false),
             ["route", "del", "203.0.113.10/32", "dev", "ppp0"]
         );
         assert_eq!(
-            host_route_args("2001:db8::10".parse().unwrap(), "del", None, "ppp0"),
+            host_route_args("2001:db8::10".parse().unwrap(), "del", None, "ppp0", false),
             ["-6", "route", "del", "2001:db8::10/128", "dev", "ppp0"]
         );
     }

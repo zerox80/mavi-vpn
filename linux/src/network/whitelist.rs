@@ -116,6 +116,7 @@ mod tests {
                     ip,
                     gateway: Some("192.0.2.1".into()),
                     device: "eth0".into(),
+                    onlink: false,
                 })
                 .collect(),
         );
@@ -149,6 +150,7 @@ mod tests {
                         ip,
                         gateway: None,
                         device: "ppp0".into(),
+                        onlink: false,
                     })
                     .collect(),
             );

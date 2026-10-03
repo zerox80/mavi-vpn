@@ -153,11 +153,13 @@ def main():
     default_dest = "/usr/local/bin/mavi-vpn"
     raw = input(c("1;37", f"  ? Install to [{default_dest}]: ")).strip()
     dest = (Path(raw) if raw else Path(default_dest)).expanduser().absolute()
+    if dest.is_dir():
+        dest = dest / binary.name
 
     # Via sudo, not a plain mkdir: dest may be a custom path under a
     # root-owned directory the current user can't create on their own.
     sudo("mkdir", "-p", str(dest.parent))
-    sudo("install", "-m", "755", str(binary), str(dest))
+    sudo("install", "-m", "755", "-T", str(binary), str(dest))
     ok(f"Binary installed to {dest}")
 
     configured_user = configure_ipc_group()

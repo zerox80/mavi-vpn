@@ -73,7 +73,7 @@ fun VpnScreen(
 
         val prefs = com.mavi.vpn.data.PrefsManager(viewModel.getApplication())
         while (true) {
-            val freshToken = prefs.savedToken
+            val freshToken = prefs.keycloak.snapshot().tokens?.accessToken.orEmpty()
             if (freshToken != viewModel.authToken.value) {
                 viewModel.authToken.value = freshToken
             }

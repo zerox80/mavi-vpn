@@ -1,6 +1,9 @@
 use crate::ipc::send_ipc_request;
 use crate::oauth;
-use crate::secret_store::{connection_refresh_token_account, KeyringSecretStore, SecretStore};
+use crate::secret_store::{
+    connection_refresh_token_account, keycloak_base_url, keycloak_credential_id,
+    KeyringSecretStore, SecretStore,
+};
 #[cfg(target_os = "windows")]
 use shared::ipc::IpcResponse;
 use shared::ipc::{Config, IpcRequest};
@@ -35,6 +38,7 @@ pub(super) struct KeycloakSession {
     pub(super) kc_url: String,
     pub(super) realm: String,
     pub(super) client_id: String,
+    /// Opaque authority-scoped credential identity, including the profile ID.
     pub(super) connection_id: String,
     pub(super) access_token: String,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -71,6 +75,7 @@ pub(super) async fn prepare_keycloak_config(
         warn!(connection_id = %connection_id, "Keycloak URL missing");
         return Err("Keycloak URL is not configured.".into());
     }
+    let kc_url = keycloak_base_url(&kc_url)?;
 
     info!(
         connection_id = %connection_id,
@@ -82,7 +87,11 @@ pub(super) async fn prepare_keycloak_config(
     );
 
     let store = KeyringSecretStore;
-    let refresh_account = connection_refresh_token_account(connection_id);
+    let credential_id = keycloak_credential_id(connection_id, &kc_url, &realm, &client_id)?;
+    let refresh_account = connection_refresh_token_account(&credential_id);
+    // Unbound legacy tokens require one fresh login. Never infer their issuer
+    // from today's editable profile.
+    store.delete_secret(&connection_refresh_token_account(connection_id))?;
 
     // Automatic (non-manual) connect: silently refresh using a stored refresh
     // token if we have one, so auto-connect does not pop a browser. A manual
@@ -111,7 +120,7 @@ pub(super) async fn prepare_keycloak_config(
                         kc_url,
                         realm,
                         client_id,
-                        connection_id: connection_id.to_string(),
+                        connection_id: credential_id,
                         access_token: tokens.access_token,
                         refresh_token: active_refresh_token,
                     }));
@@ -155,7 +164,7 @@ pub(super) async fn prepare_keycloak_config(
         kc_url,
         realm,
         client_id,
-        connection_id: connection_id.to_string(),
+        connection_id: credential_id,
         access_token: tokens.access_token,
         refresh_token: active_refresh_token,
     }))

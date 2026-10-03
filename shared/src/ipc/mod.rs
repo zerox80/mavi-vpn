@@ -17,6 +17,8 @@ use std::fmt;
 
 mod transport;
 #[cfg(windows)]
+pub mod windows_server;
+#[cfg(windows)]
 pub use transport::ipc_pipe_name;
 #[cfg(unix)]
 pub use transport::ipc_socket_path;

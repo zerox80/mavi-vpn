@@ -20,7 +20,8 @@ internal fun whitelistDomainsFromConfig(config: JSONObject): List<String> {
 
     return buildList {
         for (i in 0 until value.length()) {
-            val domain = value.optString(i, "").trim().trimEnd('.')
+            // Preserve the representation for the numeric-only exclusion parser.
+            val domain = value.opt(i) as? String ?: continue
             if (domain.isNotEmpty()) {
                 add(domain)
             }

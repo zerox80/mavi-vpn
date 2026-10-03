@@ -18,6 +18,7 @@ mod routing;
 mod server;
 mod state;
 mod utils;
+mod whitelist;
 
 use crate::handlers::connection::handle_connection;
 use crate::network::tun::create_tun_device;
@@ -102,7 +103,8 @@ async fn main() -> Result<()> {
     // Install the cryptographic provider (aws-lc-rs for better performance)
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let (config, mtu_setting) = config::load();
+    let (mut config, mtu_setting) = config::load();
+    config.whitelist_domains = whitelist::resolve(&config.whitelist_domains).await?;
 
     let quic_payload_mtu = config.mtu + shared::QUIC_OVERHEAD_BYTES;
     let wire_overhead_ipv4 = 20u16 + 8; // IP + UDP

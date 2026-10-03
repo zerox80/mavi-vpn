@@ -1,31 +1,19 @@
-//! Split-tunnel domain allow-list (`ControlMessage::Config::whitelist_domains`).
-//!
-//! Resolves each server-supplied domain so `session.rs` can install a host
-//! route exception for it via [`super::host_route::add_host_route_exception_for_ip`]
-//! — the same mechanism already used to keep the VPN's own control
-//! connection out of the tunnel. Domains are resolved once, at connect time,
-//! before this adapter's DNS server or the split default routes are
-//! installed, matching the Android `VpnRouteUtils` reference implementation.
+//! IP route exceptions supplied by the pinned, authenticated VPN server.
+//! The server resolves configured names; legacy unresolved names stay tunneled.
+//! Capture physical next hops before installing tunnel routes.
 
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::IpAddr;
 use tracing::warn;
 
-pub(super) fn resolve_whitelist_ips(domains: &[String], ipv6_enabled: bool) -> Vec<IpAddr> {
-    let mut ips: Vec<IpAddr> = Vec::new();
-    for domain in domains {
-        match (domain.as_str(), 0u16).to_socket_addrs() {
-            Ok(addrs) => {
-                for addr in addrs {
-                    let ip = addr.ip();
-                    if (ip.is_ipv4() || ipv6_enabled) && !ips.contains(&ip) {
-                        ips.push(ip);
-                    }
-                }
-            }
-            Err(e) => warn!("Failed to resolve whitelist domain '{domain}': {e}"),
+pub(super) fn resolve_whitelist_ips(entries: &[String], ipv6_enabled: bool) -> Vec<IpAddr> {
+    for entry in entries {
+        if entry.parse::<IpAddr>().is_err() {
+            warn!(
+                "Ignoring non-numeric whitelist entry '{entry}'; update the server to resolve it"
+            );
         }
     }
-    ips
+    shared::split_tunnel::parse_whitelist_ips(entries, ipv6_enabled)
 }
 
 #[cfg(test)]
@@ -35,8 +23,7 @@ mod tests {
 
     #[test]
     fn resolve_whitelist_ips_accepts_ip_literals_without_dns() {
-        // IP literals resolve locally (no network I/O) per `ToSocketAddrs`,
-        // so this stays deterministic in a sandboxed/offline test run.
+        // Literal parsing never consults the client's network resolver.
         let domains = vec!["203.0.113.10".to_string(), "2001:db8::1".to_string()];
 
         let v4_only = resolve_whitelist_ips(&domains, false);

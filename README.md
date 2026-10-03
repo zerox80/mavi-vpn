@@ -391,7 +391,7 @@ be listed under the service's `environment` mapping to reach the container.
 | `VPN_MSS_CLAMPING` | `false` | TCP MSS rewriting via iptables mangle; Compose defaults to `true`, but the source `.env.example` sets `false` |
 | `VPN_ALLOW_CLIENT_TO_CLIENT` | `false` | Allow VPN clients to reach each other (blocked by default) |
 | `VPN_TUN_DEVICE` | *(automatic; `mavi0` in Docker)* | Optional server TUN device name |
-| `VPN_WHITELIST_DOMAINS` | *(empty)* | Comma-separated client-side split-tunnel domain allow-list |
+| `VPN_WHITELIST_DOMAINS` | *(empty)* | Comma-separated split-tunnel domains/IPs, resolved by the server at startup (see below) |
 | `VPN_CERT` | `data/cert.pem` | TLS certificate path |
 | `VPN_KEY` | `data/key.pem` | TLS private key path |
 | `VPN_ECH_PUBLIC_NAME` | `cloudflare-ech.com` | ECH cover SNI domain |
@@ -405,6 +405,20 @@ be listed under the service's `environment` mapping to reach the container.
 | `VPN_KEYCLOAK_REQUIRED_SCOPE` | — | Optional fail-closed: accepted JWTs must carry this OAuth scope |
 
 > **Token lifetimes:** The auto-imported realm pre-configures Access Token Lifespan = 10 min, SSO Session Idle = 1 h, SSO Session Max = 24 h — matching the client's 300 s refresh skew to avoid mid-session disconnects. For existing deployments or to customize, see `docs/INSTALLATION.md` Step 4.
+
+Split-tunnel exceptions use addresses resolved by the VPN server, delivered over
+the authenticated configuration channel. Clients accept only literal IPs; local
+DNS never authorizes an exception. Restart the server to refresh domain addresses.
+Resolution has a five-second total budget, with up to 128 entries and 256 addresses;
+oversized lists fail startup, while unresolved names stay tunneled with a warning.
+DNS views that differ between server and client may require operator-supplied IPs.
+Updated clients keep hostname-only exceptions from older servers inside the VPN;
+the existing configuration wire format is unchanged.
+
+The GUI and Android bind saved OAuth sessions to the Keycloak server URL (including
+its path and port), realm and client ID. Changing these coordinates requires a
+new login. Existing unbound refresh tokens also require one new login after
+upgrading; subsequent refreshes remain automatic.
 
 ## Testing
 

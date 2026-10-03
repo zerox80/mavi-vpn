@@ -17,18 +17,9 @@ import java.security.SecureRandom
  * HTTP calls live in [KeycloakOAuthClient].
  */
 object OAuthHelper {
-    // @Volatile ensures cross-thread visibility; synchronized(OAuthHelper) ensures atomicity
-    // of combined read+clear operations to prevent CSRF state corruption under parallel flows.
-    @Volatile
-    private var codeVerifier: String? = null
-
-    @Volatile
-    private var oauthState: String? = null
-
     fun oauthRedirectUri(): String = BuildConfig.OAUTH_REDIRECT_URI
 
-    fun validateAuthConfiguration(kcUrl: String): String? =
-        validateKeycloakUrl(kcUrl) ?: validateOAuthRedirectUri()
+    fun validateAuthConfiguration(kcUrl: String): String? = validateKeycloakUrl(kcUrl) ?: validateOAuthRedirectUri()
 
     fun normalizeKeycloakBaseUrl(kcUrl: String): String = OAuthConfiguration.normalizeKeycloakBaseUrl(kcUrl)
 
@@ -46,10 +37,7 @@ object OAuthHelper {
         return Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
     }
 
-    fun generatePKCE(): String {
-        val verifier = generateRandomBase64()
-        codeVerifier = verifier
-
+    private fun generatePKCE(verifier: String): String {
         val bytes = verifier.toByteArray(Charsets.US_ASCII)
         val md = MessageDigest.getInstance("SHA-256")
         val digest = md.digest(bytes)
@@ -70,25 +58,16 @@ object OAuthHelper {
             return false
         }
 
-        val challenge: String
-        val state: String
-        val verifier: String
-        // Generate PKCE challenge and state atomically so a concurrent startAuth() call
-        // cannot overwrite codeVerifier between generatePKCE() and the oauthState assignment.
-        synchronized(OAuthHelper) {
-            challenge = generatePKCE()
-            state = generateRandomBase64()
-            verifier = codeVerifier.orEmpty()
-            oauthState = state
-        }
-        PrefsManager(context.applicationContext).also { prefs ->
-            prefs.savedOauthCodeVerifier = verifier
-            prefs.savedOauthState = state
-        }
+        val authority = KeycloakAuthority.from(keycloakBaseUrl, realm, clientId) ?: return false
+        val verifier = generateRandomBase64()
+        val challenge = generatePKCE(verifier)
+        val state = generateRandomBase64()
+        val prefs = PrefsManager(context.applicationContext)
+        if (!prefs.keycloak.beginLogin(authority, state, verifier)) return false
 
         val url =
             Uri
-                .parse(keycloakBaseUrl)
+                .parse(authority.baseUrl)
                 .buildUpon()
                 .appendPath("realms")
                 .appendPath(realm)
@@ -146,40 +125,11 @@ object OAuthHelper {
         context: Context,
         code: String,
         returnedState: String?,
-        kcUrl: String,
-        realm: String,
-        clientId: String,
     ): OAuthTokens? =
         withContext(Dispatchers.IO) {
-            // Read and clear state atomically to prevent a second concurrent call from
-            // consuming the same verifier (replay) or seeing a partially-overwritten state.
-            val expectedState: String?
-            val verifier: String?
-            synchronized(OAuthHelper) {
-                val prefs = PrefsManager(context.applicationContext)
-                val persistedState = prefs.savedOauthState
-                val persistedVerifier = prefs.savedOauthCodeVerifier
-                expectedState = if (persistedState.isNotBlank()) persistedState else oauthState
-                verifier = if (persistedVerifier.isNotBlank()) persistedVerifier else codeVerifier
-                prefs.savedOauthState = ""
-                prefs.savedOauthCodeVerifier = ""
-                oauthState = null
-                codeVerifier = null
-            }
-
-            val stateMatches =
-                expectedState != null &&
-                    returnedState != null &&
-                    MessageDigest.isEqual(
-                        returnedState.toByteArray(Charsets.UTF_8),
-                        expectedState.toByteArray(Charsets.UTF_8),
-                    )
-            if (!stateMatches) {
-                Log.e("OAuthHelper", "OAuth state mismatch; possible CSRF. Aborting token exchange.")
-                return@withContext null
-            }
-
-            verifier ?: return@withContext null
+            val prefs = PrefsManager(context.applicationContext)
+            val pending = prefs.keycloak.consumeLogin(returnedState) ?: return@withContext null
+            val authority = pending.snapshot.authority ?: return@withContext null
 
             val redirectUri = oauthRedirectUri()
             val redirectError = validateOAuthRedirectUri(redirectUri)
@@ -187,17 +137,16 @@ object OAuthHelper {
                 Log.e("OAuthHelper", redirectError)
                 return@withContext null
             }
-            val keycloakBaseUrl =
-                OAuthConfiguration.validatedKeycloakBaseUrl(kcUrl) ?: return@withContext null
-
-            KeycloakOAuthClient.exchangeAuthorizationCode(
-                keycloakBaseUrl = keycloakBaseUrl,
-                realm = realm,
-                clientId = clientId,
-                code = code,
-                redirectUri = redirectUri,
-                verifier = verifier,
-            )
+            val tokens =
+                KeycloakOAuthClient.exchangeAuthorizationCode(
+                    keycloakBaseUrl = authority.baseUrl,
+                    realm = authority.realm,
+                    clientId = authority.clientId,
+                    code = code,
+                    redirectUri = redirectUri,
+                    verifier = pending.verifier,
+                ) ?: return@withContext null
+            if (prefs.keycloak.replace(pending.snapshot, tokens, invalid = false)) tokens else null
         }
 
     suspend fun refreshToken(

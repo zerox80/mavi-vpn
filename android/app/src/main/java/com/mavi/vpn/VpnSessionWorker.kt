@@ -239,7 +239,7 @@ internal class VpnSessionWorker(
         if (!prefs.savedUseKeycloak || !isAuthFailure(initError)) {
             return null
         }
-        if (prefs.savedRefreshToken.isBlank() || forcedRefreshCount >= 1) {
+        if (prefs.keycloak.snapshot().tokens?.refreshToken.isNullOrBlank() || forcedRefreshCount >= 1) {
             Log.e("MaviVPN", "Server rejected token after forced refresh.")
             return null
         }

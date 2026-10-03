@@ -90,7 +90,10 @@ fn connect_ip_request_requires_method_path_protocol_and_capsule_header() {
 #[test]
 fn connect_ip_capsules_include_ipv4_only_assign_route_and_config() {
     let state = AppState::new("10.8.0.0/24").unwrap();
-    let config = test_config(&["--whitelist-domains", "one.test,two.test"]);
+    let config = test_config(&[
+        "--whitelist-domains",
+        "192.0.2.10,192.0.2.11,unresolved.test",
+    ]);
     let capsules = collect_capsules(
         &build_connect_ip_capsules(
             &state,
@@ -132,7 +135,7 @@ fn connect_ip_capsules_include_ipv4_only_assign_route_and_config() {
             assert!(assigned_ipv6.is_none());
             assert_eq!(
                 whitelist_domains,
-                Some(vec!["one.test".to_string(), "two.test".to_string()])
+                Some(vec!["192.0.2.10".to_string(), "192.0.2.11".to_string()])
             );
         }
         other => panic!("expected Config, got {other:?}"),

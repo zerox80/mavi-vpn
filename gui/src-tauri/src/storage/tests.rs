@@ -205,3 +205,33 @@ fn save_config_deletes_empty_token_secret() {
         .deleted()
         .contains(&legacy_config_token_account().to_string()));
 }
+
+#[test]
+fn save_prefs_keeps_unchanged_authority_and_deletes_changed_or_removed_refresh_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemorySecretStore::default();
+    let mut prefs = Prefs {
+        connections: vec![SavedConn {
+            id: "one".into(),
+            kc_auth: Some(true),
+            kc_url: Some("https://auth.example.com/auth".into()),
+            ..SavedConn::default()
+        }],
+        ..Prefs::default()
+    };
+    save_prefs_to_dir_with_store(dir.path(), &mut prefs, &store).unwrap();
+    let first = prefs.connections[0].refresh_account().unwrap();
+    store.set_secret(&first, "first-refresh").unwrap();
+    prefs.connections[0].label = "Renamed".into();
+    save_prefs_to_dir_with_store(dir.path(), &mut prefs, &store).unwrap();
+    assert_eq!(store.secret(&first).as_deref(), Some("first-refresh"));
+
+    prefs.connections[0].kc_realm = Some("second-realm".into());
+    save_prefs_to_dir_with_store(dir.path(), &mut prefs, &store).unwrap();
+    assert!(store.secret(&first).is_none());
+    let second = prefs.connections[0].refresh_account().unwrap();
+    store.set_secret(&second, "second-refresh").unwrap();
+    prefs.connections.clear();
+    save_prefs_to_dir_with_store(dir.path(), &mut prefs, &store).unwrap();
+    assert!(store.secret(&second).is_none());
+}

@@ -20,43 +20,25 @@ sealed class TokenAcquireResult {
 }
 
 interface KeycloakTokenStore {
-    var accessToken: String
-    var refreshToken: String
-    var sessionInvalid: Boolean
-    val keycloakUrl: String
-    val realm: String
-    val clientId: String
+    fun snapshot(): KeycloakTokenSnapshot
+
+    fun replace(
+        expected: KeycloakTokenSnapshot,
+        tokens: OAuthTokens?,
+        invalid: Boolean,
+    ): Boolean
 }
 
 class PrefsKeycloakTokenStore(
     private val prefs: PrefsManager,
 ) : KeycloakTokenStore {
-    override var accessToken: String
-        get() = prefs.savedToken
-        set(value) {
-            prefs.savedToken = value
-        }
+    override fun snapshot(): KeycloakTokenSnapshot = prefs.keycloak.snapshot()
 
-    override var refreshToken: String
-        get() = prefs.savedRefreshToken
-        set(value) {
-            prefs.savedRefreshToken = value
-        }
-
-    override var sessionInvalid: Boolean
-        get() = prefs.savedKeycloakSessionInvalid
-        set(value) {
-            prefs.savedKeycloakSessionInvalid = value
-        }
-
-    override val keycloakUrl: String
-        get() = prefs.savedKcUrl
-
-    override val realm: String
-        get() = prefs.savedKcRealm
-
-    override val clientId: String
-        get() = prefs.savedKcClientId
+    override fun replace(
+        expected: KeycloakTokenSnapshot,
+        tokens: OAuthTokens?,
+        invalid: Boolean,
+    ): Boolean = prefs.keycloak.replace(expected, tokens, invalid)
 }
 
 class KeycloakTokenManager(
@@ -72,54 +54,57 @@ class KeycloakTokenManager(
 
     suspend fun getUsableAccessToken(skewSeconds: Long = 60): TokenAcquireResult {
         return refreshMutex.withLock {
-            val currentAccessToken = store.accessToken
+            val snapshot = store.snapshot()
+            val currentAccessToken = snapshot.tokens?.accessToken.orEmpty()
             if (OAuthHelper.isAccessTokenUsable(currentAccessToken, skewSeconds)) {
-                store.sessionInvalid = false
+                if (!store.replace(snapshot, snapshot.tokens, invalid = false)) {
+                    return@withLock sessionChanged()
+                }
                 return@withLock TokenAcquireResult.Usable(currentAccessToken, refreshed = false)
             }
 
-            refreshLocked()
+            refreshLocked(snapshot)
         }
     }
 
     suspend fun refreshAccessToken(): TokenAcquireResult =
         refreshMutex.withLock {
-            refreshLocked()
+            refreshLocked(store.snapshot())
         }
 
-    private suspend fun refreshLocked(): TokenAcquireResult {
-        val currentRefreshToken = store.refreshToken
+    private fun sessionChanged(): TokenAcquireResult.NeedsLogin =
+        TokenAcquireResult.NeedsLogin("Keycloak configuration or login changed; reconnect")
+
+    private suspend fun refreshLocked(snapshot: KeycloakTokenSnapshot): TokenAcquireResult {
+        val authority =
+            snapshot.authority
+                ?: return TokenAcquireResult.NeedsLogin("Keycloak configuration is incomplete")
+        val currentRefreshToken = snapshot.tokens?.refreshToken.orEmpty()
         if (currentRefreshToken.isBlank()) {
             return TokenAcquireResult.NeedsLogin("No refresh token available")
         }
 
-        if (store.keycloakUrl.isBlank() || store.realm.isBlank() || store.clientId.isBlank()) {
-            return TokenAcquireResult.NeedsLogin("Keycloak configuration is incomplete")
-        }
-
+        // Both the secret and endpoint come from one immutable snapshot. A
+        // settings edit during I/O cannot redirect a token or adopt its result.
         return when (
             val refreshed =
                 refresher(
-                currentRefreshToken,
-                store.keycloakUrl,
-                store.realm,
-                store.clientId,
-            )
+                    currentRefreshToken,
+                    authority.baseUrl,
+                    authority.realm,
+                    authority.clientId,
+                )
         ) {
             is RefreshResult.Success -> {
-                store.accessToken = refreshed.tokens.accessToken
-                store.refreshToken = refreshed.tokens.refreshToken
-                store.sessionInvalid = false
+                if (!store.replace(snapshot, refreshed.tokens, invalid = false)) return sessionChanged()
                 TokenAcquireResult.Usable(refreshed.tokens.accessToken, refreshed = true)
             }
             is RefreshResult.NetworkError -> {
-                store.sessionInvalid = false
+                if (!store.replace(snapshot, snapshot.tokens, invalid = false)) return sessionChanged()
                 TokenAcquireResult.TemporaryFailure(refreshed.error)
             }
             is RefreshResult.Error -> {
-                store.accessToken = ""
-                store.refreshToken = ""
-                store.sessionInvalid = true
+                if (!store.replace(snapshot, null, invalid = true)) return sessionChanged()
                 TokenAcquireResult.NeedsLogin(refreshed.message)
             }
         }

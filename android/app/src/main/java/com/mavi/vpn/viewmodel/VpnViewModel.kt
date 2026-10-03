@@ -3,12 +3,10 @@ package com.mavi.vpn.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.mavi.vpn.MaviVpnService
-import com.mavi.vpn.OAuthTokens
 import com.mavi.vpn.data.PrefsManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 
 class VpnViewModel(
     application: Application,
@@ -18,26 +16,39 @@ class VpnViewModel(
     // UI State
     var serverIp = MutableStateFlow(prefs.savedIp)
     var serverPort = MutableStateFlow(prefs.savedPort)
+
     // In normal mode the credential is a user-entered preshared key; in Keycloak
     // mode it is the OAuth access token. They must live in separate slots so a
     // Keycloak login never overwrites the preshared key (and vice versa).
     // Historically both shared `savedToken`, which left a stale Keycloak token in
     // the preshared field after switching back to normal mode and broke Connect
     // until the app was reinstalled.
-    var authToken = MutableStateFlow(if (prefs.savedUseKeycloak) prefs.savedToken else "")
-    var presharedKey = MutableStateFlow(
-        run {
-            val stored = prefs.savedPresharedKey
-            when {
-                stored.isNotEmpty() -> stored
-                // Migrate older installs that kept the preshared key in
-                // `savedToken`. Skip when a Keycloak refresh token exists, because
-                // then `savedToken` holds a leftover access token, not a key.
-                !prefs.savedUseKeycloak && prefs.savedRefreshToken.isBlank() -> prefs.savedToken
-                else -> ""
-            }
-        },
-    )
+    var authToken =
+        MutableStateFlow(
+            if (prefs.savedUseKeycloak) {
+                prefs.keycloak
+                    .snapshot()
+                    .tokens
+                    ?.accessToken
+                    .orEmpty()
+            } else {
+                ""
+            },
+        )
+    var presharedKey =
+        MutableStateFlow(
+            run {
+                val stored = prefs.savedPresharedKey
+                when {
+                    stored.isNotEmpty() -> stored
+                    // Migrate older installs that kept the preshared key in
+                    // `savedToken`. Skip when a Keycloak refresh token exists, because
+                    // then `savedToken` holds a leftover access token, not a key.
+                    !prefs.savedUseKeycloak && prefs.savedRefreshToken.isBlank() -> prefs.savedToken
+                    else -> ""
+                }
+            },
+        )
     var certPin = MutableStateFlow(prefs.savedPin)
     var echConfig = MutableStateFlow(prefs.savedEchConfig)
 
@@ -80,25 +91,26 @@ class VpnViewModel(
 
     fun clearAuthToken() {
         authToken.value = ""
-        prefs.savedToken = ""
-        prefs.savedRefreshToken = ""
-        prefs.savedKeycloakSessionInvalid = false
+        prefs.keycloak.clear()
     }
 
-    fun saveOAuthTokens(tokens: OAuthTokens) {
-        authToken.value = tokens.accessToken
-        prefs.savedToken = tokens.accessToken
-        prefs.savedRefreshToken = tokens.refreshToken
-        prefs.savedKeycloakSessionInvalid = false
+    fun reloadOAuthTokens() {
+        authToken.value =
+            prefs.keycloak
+                .snapshot()
+                .tokens
+                ?.accessToken
+                .orEmpty()
     }
 
-    fun hasSavedKeycloakRefreshToken(): Boolean {
-        return prefs.savedRefreshToken.isNotBlank()
-    }
+    fun hasSavedKeycloakRefreshToken(): Boolean =
+        !prefs.keycloak
+            .snapshot()
+            .tokens
+            ?.refreshToken
+            .isNullOrBlank()
 
-    fun isSavedKeycloakSessionInvalid(): Boolean {
-        return prefs.savedKeycloakSessionInvalid
-    }
+    fun isSavedKeycloakSessionInvalid(): Boolean = prefs.savedKeycloakSessionInvalid
 
     fun saveServerDetails() {
         prefs.savedIp = serverIp.value
@@ -112,7 +124,7 @@ class VpnViewModel(
         if (enabled == useKeycloak.value) return
         if (enabled) {
             // Persist the preshared key before switching so a later Keycloak login
-            // (which writes savedToken/savedRefreshToken) cannot clobber it.
+            // cannot clobber it.
             prefs.savedPresharedKey = presharedKey.value
         } else if (!isConnected.value) {
             // Leaving Keycloak mode: drop the OAuth session so a stale access or
@@ -128,9 +140,8 @@ class VpnViewModel(
     }
 
     fun saveKeycloakDetails() {
-        prefs.savedKcUrl = kcUrl.value
-        prefs.savedKcRealm = kcRealm.value
-        prefs.savedKcClientId = kcClientId.value
+        prefs.keycloak.updateAuthority(kcUrl.value, kcRealm.value, kcClientId.value)
+        reloadOAuthTokens()
         prefs.savedUseKeycloak = useKeycloak.value
     }
 
@@ -160,7 +171,10 @@ class VpnViewModel(
         prefs.savedVpnMtu = vpnMtuValue
     }
 
-    fun saveSplitTunneling(mode: String, packages: String) {
+    fun saveSplitTunneling(
+        mode: String,
+        packages: String,
+    ) {
         splitMode.value = mode
         splitPackages.value = packages
         prefs.savedSplitMode = mode

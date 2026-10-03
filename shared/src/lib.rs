@@ -17,6 +17,7 @@ pub mod kc_oauth;
 pub mod masque;
 pub mod mtu;
 pub mod session_errors;
+pub mod split_tunnel;
 
 pub use endpoint::{
     endpoint_host, endpoint_host_is_explicit_ipv6, resolve_server_name, split_endpoint,
@@ -142,8 +143,8 @@ pub enum ControlMessage {
         gateway_v6: Option<Ipv6Addr>,
         /// IPv6 DNS server the client should use while connected.
         dns_server_v6: Option<Ipv6Addr>,
-        /// Optional list of domain names that should bypass the VPN tunnel
-        /// (split-tunnelling allow-list). An empty list means route all DNS through VPN.
+        /// Server-resolved IP literals that may bypass the VPN. The historical
+        /// field name and wire position are retained; clients must not resolve names.
         whitelist_domains: Option<Vec<String>>,
     },
 

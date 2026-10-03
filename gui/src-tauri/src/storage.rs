@@ -1,6 +1,6 @@
 use crate::secret_store::{
-    connection_refresh_token_account, connection_token_account, legacy_config_token_account,
-    KeyringSecretStore, SecretStore,
+    connection_refresh_token_account, connection_token_account, keycloak_credential_id,
+    legacy_config_token_account, KeyringSecretStore, SecretStore,
 };
 use serde::Deserialize;
 use shared::ipc::Config;
@@ -39,6 +39,20 @@ struct SavedConn {
 }
 
 impl SavedConn {
+    fn refresh_account(&self) -> Option<String> {
+        if !self.kc_auth.unwrap_or(false) {
+            return None;
+        }
+        keycloak_credential_id(
+            &self.id,
+            self.kc_url.as_deref().unwrap_or(""),
+            self.kc_realm.as_deref().unwrap_or("mavi-vpn"),
+            self.kc_client_id.as_deref().unwrap_or("mavi-client"),
+        )
+        .ok()
+        .map(|id| connection_refresh_token_account(&id))
+    }
+
     fn normalize_transport(&mut self) -> bool {
         let old = (
             self.http2_framing,
@@ -243,6 +257,12 @@ fn save_prefs_to_dir_with_store(
     }
 
     for old in previous.connections {
+        if let Some(account) = old.refresh_account() {
+            let current = redacted.connections.iter().find(|conn| conn.id == old.id);
+            if current.and_then(SavedConn::refresh_account).as_ref() != Some(&account) {
+                store.delete_secret(&account)?;
+            }
+        }
         if !current_ids.contains(&old.id) {
             store.delete_secret(&connection_token_account(&old.id))?;
             store.delete_secret(&connection_refresh_token_account(&old.id))?;

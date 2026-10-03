@@ -16,7 +16,7 @@ fn test_config() -> Config {
         "--dns-v6",
         "2001:4860:4860::8888",
         "--whitelist-domains",
-        "example.com,internal.test",
+        "192.0.2.10,192.0.2.11,unresolved.test",
         "--mtu",
         "1340",
     ])
@@ -194,7 +194,7 @@ fn config_message_omits_ipv6_when_disabled() {
             assert!(dns_server_v6.is_none());
             assert_eq!(
                 whitelist_domains,
-                Some(vec!["example.com".to_string(), "internal.test".to_string()])
+                Some(vec!["192.0.2.10".to_string(), "192.0.2.11".to_string()])
             );
         }
         other => panic!("expected Config, got {other:?}"),

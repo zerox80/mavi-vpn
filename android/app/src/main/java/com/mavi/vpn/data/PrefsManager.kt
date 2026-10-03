@@ -7,14 +7,14 @@ private const val DEFAULT_VPN_MTU = 0
 private const val MIN_VPN_MTU = 1280
 private const val MAX_VPN_MTU = 1360
 
-internal fun sanitizeVpnMtu(value: Int): Int =
-    if (value == DEFAULT_VPN_MTU || value in MIN_VPN_MTU..MAX_VPN_MTU) value else DEFAULT_VPN_MTU
+internal fun sanitizeVpnMtu(value: Int): Int = if (value == DEFAULT_VPN_MTU || value in MIN_VPN_MTU..MAX_VPN_MTU) value else DEFAULT_VPN_MTU
 
 class PrefsManager(
     context: Context,
 ) {
     private val prefs: SharedPreferences = context.getSharedPreferences("MaviVPN", Context.MODE_PRIVATE)
     private val secrets = SecureStringPreferences(prefs)
+    internal val keycloak = KeycloakSessionPreferences(prefs, secrets)
 
     var savedIp: String
         get() = prefs.getString("saved_ip", "") ?: ""
@@ -24,13 +24,12 @@ class PrefsManager(
         get() = prefs.getString("saved_port", "10443") ?: "10443"
         set(value) = prefs.edit().putString("saved_port", value).apply()
 
-    var savedToken: String
+    // Read-only legacy values, used only for preshared-key migration.
+    val savedToken: String
         get() = secrets.getString("saved_token")
-        set(value) = secrets.setString("saved_token", value)
 
-    var savedRefreshToken: String
+    val savedRefreshToken: String
         get() = secrets.getString("saved_refresh_token")
-        set(value) = secrets.setString("saved_refresh_token", value)
 
     var savedKeycloakSessionInvalid: Boolean
         get() = prefs.getBoolean("saved_keycloak_session_invalid", false)
@@ -68,17 +67,14 @@ class PrefsManager(
         get() = prefs.getBoolean("saved_use_keycloak", false)
         set(value) = prefs.edit().putBoolean("saved_use_keycloak", value).apply()
 
-    var savedKcUrl: String
+    val savedKcUrl: String
         get() = prefs.getString("saved_kc_url", "") ?: ""
-        set(value) = prefs.edit().putString("saved_kc_url", value).apply()
 
-    var savedKcRealm: String
+    val savedKcRealm: String
         get() = prefs.getString("saved_kc_realm", "mavi-vpn") ?: "mavi-vpn"
-        set(value) = prefs.edit().putString("saved_kc_realm", value).apply()
 
-    var savedKcClientId: String
+    val savedKcClientId: String
         get() = prefs.getString("saved_kc_client_id", "mavi-client") ?: "mavi-client"
-        set(value) = prefs.edit().putString("saved_kc_client_id", value).apply()
 
     var savedPresharedKey: String
         get() = secrets.getString("saved_preshared_key")
@@ -87,14 +83,6 @@ class PrefsManager(
     var savedVpnMtu: Int
         get() = sanitizeVpnMtu(prefs.getInt("saved_vpn_mtu", DEFAULT_VPN_MTU))
         set(value) = prefs.edit().putInt("saved_vpn_mtu", sanitizeVpnMtu(value)).apply()
-
-    var savedOauthCodeVerifier: String
-        get() = prefs.getString("saved_oauth_code_verifier", "") ?: ""
-        set(value) = prefs.edit().putString("saved_oauth_code_verifier", value).apply()
-
-    var savedOauthState: String
-        get() = prefs.getString("saved_oauth_state", "") ?: ""
-        set(value) = prefs.edit().putString("saved_oauth_state", value).apply()
 
     var tempSplitMode: String
         get() = prefs.getString("temp_split_mode", "exclude") ?: "exclude"

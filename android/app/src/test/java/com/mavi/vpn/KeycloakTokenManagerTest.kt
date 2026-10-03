@@ -165,7 +165,7 @@ class KeycloakTokenManagerTest {
     fun whitelistDomainsAreParsedFromBackendConfig() {
         val config = JSONObject("""{"whitelist_domains":["one.test","two.test.","one.test",""]}""")
 
-        assertEquals(listOf("one.test", "two.test"), whitelistDomainsFromConfig(config))
+        assertEquals(listOf("one.test", "two.test."), whitelistDomainsFromConfig(config))
     }
 
     @Test
@@ -278,13 +278,29 @@ class KeycloakTokenManagerTest {
     }
 
     private class FakeTokenStore(
-        override var accessToken: String,
-        override var refreshToken: String,
-        override var sessionInvalid: Boolean = false,
-        override val keycloakUrl: String = "https://auth.example.com",
-        override val realm: String = "mavi-vpn",
-        override val clientId: String = "mavi-client",
-    ) : KeycloakTokenStore
+        var accessToken: String,
+        var refreshToken: String,
+        var sessionInvalid: Boolean = false,
+    ) : KeycloakTokenStore {
+        override fun snapshot(): KeycloakTokenSnapshot =
+            KeycloakTokenSnapshot(
+                KeycloakAuthority.from("https://auth.example.com", "mavi-vpn", "mavi-client"),
+                "test-login",
+                OAuthTokens(accessToken, refreshToken),
+            )
+
+        override fun replace(
+            expected: KeycloakTokenSnapshot,
+            tokens: OAuthTokens?,
+            invalid: Boolean,
+        ): Boolean {
+            if (snapshot() != expected) return false
+            accessToken = tokens?.accessToken.orEmpty()
+            refreshToken = tokens?.refreshToken.orEmpty()
+            sessionInvalid = invalid
+            return true
+        }
+    }
 
     private fun jwt(exp: Long): String {
         val header = encode("""{"alg":"RS256"}""")
@@ -293,7 +309,8 @@ class KeycloakTokenManagerTest {
     }
 
     private fun encode(json: String): String =
-        Base64.getUrlEncoder()
+        Base64
+            .getUrlEncoder()
             .withoutPadding()
             .encodeToString(json.toByteArray(Charsets.UTF_8))
 

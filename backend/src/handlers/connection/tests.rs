@@ -254,3 +254,26 @@ fn config_message_uses_configured_ipv6_prefix() {
         other => panic!("expected Config, got {other:?}"),
     }
 }
+
+#[test]
+fn embedded_string_lengths_are_bounded_even_for_unexpected_variants() {
+    for message in [
+        ControlMessage::Auth {
+            token: String::new(),
+        },
+        ControlMessage::Reauth {
+            token: String::new(),
+        },
+        ControlMessage::Error {
+            message: String::new(),
+        },
+    ] {
+        for len in [65_537_u64, u32::MAX as u64, u64::MAX] {
+            let mut wire = encode_message(&message);
+            assert_eq!(wire.pop(), Some(0));
+            wire.extend(bincode::serde::encode_to_vec(len, bincode::config::standard()).unwrap());
+            assert!(decode_raw_auth_payload(&wire).is_err());
+            assert!(decode_reauth_payload(&wire).is_err());
+        }
+    }
+}

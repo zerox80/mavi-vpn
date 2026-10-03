@@ -16,6 +16,9 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+mod decoder;
+pub use decoder::{CapsuleDecoder, CapsuleTooLarge};
+
 /// RFC 9484 – `ADDRESS_ASSIGN` (IP address(es) assigned to the client).
 pub const CAPSULE_ADDRESS_ASSIGN: u64 = 0x01;
 /// RFC 9484 – `ADDRESS_REQUEST` (client → server request for addresses).

@@ -102,6 +102,7 @@ pub struct VpnServiceState {
     pub vpn_task: Option<tokio::task::JoinHandle<()>>,
     pub keycloak_refresh_task: Option<tokio::task::JoinHandle<()>>,
     pub active_config: Option<ipc::Config>,
+    pub session_owner: Option<super::caller::SessionOwner>,
 }
 
 impl VpnServiceState {
@@ -118,6 +119,7 @@ impl VpnServiceState {
             vpn_task: None,
             keycloak_refresh_task: None,
             active_config: None,
+            session_owner: None,
         }
     }
 
@@ -196,6 +198,7 @@ impl VpnServiceState {
             task.abort();
         }
         self.active_config = None;
+        self.session_owner = None;
         self.clear_last_error();
         self.clear_assigned_ip();
         self.clear_pending_keycloak_refresh_token();

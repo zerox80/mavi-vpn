@@ -145,9 +145,12 @@ fn drain_mavi_config_capsule(capsule_buf: &mut Vec<u8>) -> Result<Option<Control
         let (ctype, payload, consumed) = (parts.0, parts.1.to_vec(), parts.2);
         capsule_buf.drain(..consumed);
         if ctype == CAPSULE_MAVI_CONFIG {
-            return bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-                .map(|(v, _)| Some(v))
-                .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {e}"));
+            return bincode::serde::decode_from_slice(
+                &payload,
+                bincode::config::standard().with_limit::<65_536>(),
+            )
+            .map(|(v, _)| Some(v))
+            .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {e}"));
         }
     }
     Ok(None)

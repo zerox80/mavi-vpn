@@ -107,3 +107,9 @@ fn fatal_errors_are_negative() {
     assert!(INIT_FATAL_CERT < 0);
     assert!(INIT_FATAL_CONFIG < 0);
 }
+
+#[test]
+fn live_session_supports_shared_access_from_control_threads() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<VpnSession>();
+}

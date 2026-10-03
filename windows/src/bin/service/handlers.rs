@@ -5,6 +5,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
+use super::caller::Caller;
 use super::keycloak_refresh;
 use super::state::VpnServiceState;
 use super::utils::{classify_status, run_network_repair_cleanup};
@@ -29,7 +30,7 @@ fn client_process_id(pipe: &NamedPipeServer) -> Option<u32> {
 }
 
 pub async fn handle_ipc_client(
-    socket: NamedPipeServer,
+    mut socket: NamedPipeServer,
     state: Arc<Mutex<VpnServiceState>>,
     auth_token: Arc<String>,
 ) -> anyhow::Result<()> {
@@ -37,27 +38,35 @@ pub async fn handle_ipc_client(
         .map(|pid| format!("pid={pid}"))
         .unwrap_or_else(|| "<unknown>".to_string());
     info!("Client connected to Local IPC: {}", peer);
-    let (mut rx, mut tx) = tokio::io::split(socket);
 
     let req_msg = tokio::time::timeout(IPC_REQUEST_TIMEOUT, async {
         let mut len_buf = [0u8; 4];
-        rx.read_exact(&mut len_buf).await?;
+        socket.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         if len > 65536 {
             anyhow::bail!("IPC request too large: {len} bytes");
         }
         let mut buf = vec![0u8; len];
-        rx.read_exact(&mut buf).await?;
-        let (msg, _): (ipc::SecureIpcRequest, _) =
-            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-                .map_err(|e| anyhow::anyhow!("IPC decode error: {e}"))?;
+        socket.read_exact(&mut buf).await?;
+        let (msg, _): (ipc::SecureIpcRequest, _) = bincode::serde::decode_from_slice(
+            &buf,
+            bincode::config::standard().with_limit::<65_536>(),
+        )
+        .map_err(|e| anyhow::anyhow!("IPC decode error: {e}"))?;
         Ok::<_, anyhow::Error>(msg)
     })
     .await
     .map_err(|_| anyhow::anyhow!("IPC request timeout from {peer}"))??;
 
+    let caller = Caller::from_pipe(&socket)?;
     let resp = if constant_time_eq(req_msg.auth_token.as_bytes(), auth_token.as_bytes()) {
-        dispatch_request(req_msg.request, &state).await
+        dispatch_as(
+            req_msg.request,
+            &state,
+            &caller,
+            super::utils::active_console_user,
+        )
+        .await
     } else {
         error!(
             "Rejecting IPC request from {} due to invalid auth token",
@@ -71,8 +80,8 @@ pub async fn handle_ipc_client(
 
     tokio::time::timeout(IPC_REQUEST_TIMEOUT, async {
         #[allow(clippy::cast_possible_truncation)]
-        tx.write_u32_le(resp_buf.len() as u32).await?;
-        tx.write_all(&resp_buf).await?;
+        socket.write_u32_le(resp_buf.len() as u32).await?;
+        socket.write_all(&resp_buf).await?;
         Ok::<_, std::io::Error>(())
     })
     .await
@@ -81,11 +90,25 @@ pub async fn handle_ipc_client(
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn dispatch_request(
     req: ipc::IpcRequest,
     state: &Arc<Mutex<VpnServiceState>>,
 ) -> ipc::IpcResponse {
+    dispatch_as(req, state, &Caller::test_admin(), || None).await
+}
+
+async fn dispatch_as(
+    req: ipc::IpcRequest,
+    state: &Arc<Mutex<VpnServiceState>>,
+    caller: &Caller,
+    console: impl FnOnce() -> Option<(String, u32)>,
+) -> ipc::IpcResponse {
     let mut guard = state.lock().await;
+    // Query after the await: queued requests may span logoff or fast switching.
+    if !caller.authorized(console().as_ref()) {
+        return ipc::IpcResponse::Error("Unauthorized: inactive IPC caller".into());
+    }
     match req {
         ipc::IpcRequest::Status => {
             let snapshot = guard.status_snapshot();
@@ -116,11 +139,18 @@ pub async fn dispatch_request(
             run_network_repair_cleanup();
             ipc::IpcResponse::Ok
         }
-        ipc::IpcRequest::Start(config) => handle_start_request(config, None, &mut guard),
+        ipc::IpcRequest::Start(config) => start_for_caller(config, None, &mut guard, caller),
         ipc::IpcRequest::StartWithKeycloak { config, keycloak } => {
-            handle_start_request(config, Some(keycloak), &mut guard)
+            start_for_caller(config, Some(keycloak), &mut guard, caller)
         }
         ipc::IpcRequest::UpdateToken { token } => {
+            if guard
+                .session_owner
+                .as_ref()
+                .is_some_and(|owner| owner != &caller.owner)
+            {
+                return ipc::IpcResponse::Error("Unauthorized: different VPN session owner".into());
+            }
             // Non-Windows clients refresh Keycloak outside the service and push
             // only the fresh access token here. Windows service-side refresh is
             // seeded by StartWithKeycloak and keeps the refresh token in RAM for
@@ -130,6 +160,9 @@ pub async fn dispatch_request(
             ipc::IpcResponse::Ok
         }
         ipc::IpcRequest::TakeRefreshTokenUpdate => {
+            if guard.session_owner.as_ref() != Some(&caller.owner) {
+                return ipc::IpcResponse::Error("Unauthorized: different VPN session owner".into());
+            }
             match guard.take_pending_keycloak_refresh_token() {
                 Some(update) => ipc::IpcResponse::RefreshTokenUpdate {
                     connection_id: Some(update.connection_id),
@@ -142,6 +175,19 @@ pub async fn dispatch_request(
             }
         }
     }
+}
+
+fn start_for_caller(
+    config: ipc::Config,
+    keycloak: Option<ipc::KeycloakRuntimeAuth>,
+    guard: &mut VpnServiceState,
+    caller: &Caller,
+) -> ipc::IpcResponse {
+    let response = handle_start_request(config, keycloak, guard);
+    if matches!(response, ipc::IpcResponse::Ok) {
+        guard.session_owner = Some(caller.owner.clone());
+    }
+    response
 }
 
 pub fn handle_start_request(
@@ -197,3 +243,7 @@ pub fn handle_start_request(
         ipc::IpcResponse::Ok
     }
 }
+
+#[cfg(test)]
+#[path = "caller_tests.rs"]
+mod caller_tests;

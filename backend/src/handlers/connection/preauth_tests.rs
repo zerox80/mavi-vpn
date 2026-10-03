@@ -81,7 +81,12 @@ async fn connect_with_transport(
         let slots = slots.clone();
         let pending = pending.clone();
         tokio::spawn(async move {
-            let incoming = server.accept().await.unwrap();
+            let incoming = loop {
+                let incoming = server.accept().await.unwrap();
+                if let Some(incoming) = crate::server::quic::validate_incoming_source(incoming) {
+                    break incoming;
+                }
+            };
             let _permit = slots.try_acquire_owned().unwrap();
             let pending_permit = pending.try_acquire_owned().unwrap();
             handle_connection(incoming, state, config, tx_tun, None, false, pending_permit).await
@@ -343,3 +348,6 @@ async fn forward_packet(test: &mut TestConnection, assigned_ip: std::net::Ipv4Ad
         packet
     );
 }
+
+#[path = "preauth_security_tests.rs"]
+mod security_tests;

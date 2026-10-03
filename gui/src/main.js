@@ -33,20 +33,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   wireThemeToggle();
   wireShortcuts();
 
-  // Load UI prefs (connections, theme) — tolerate missing backend
+  // Keep persistence disabled until saved profiles and their secrets are loaded.
   try {
     const prefs = await invoke('load_prefs');
-    if (prefs) state.prefs = normalizePrefs(prefs);
+    if (!prefs) throw new Error('Preferences were not returned by the backend.');
+    state.prefs = normalizePrefs(prefs);
+    state.prefsLoaded = true;
   } catch (e) {
     console.warn('load_prefs failed:', e);
+    showToast('Saved profiles could not be loaded. Saving is disabled; restart to retry.', 'error');
   }
 
   // One-time migration from the old editable runtime config into saved connections.
-  try {
-    const config = await invoke('load_config');
-    await migrateLegacyConfig(config);
-  } catch (e) {
-    console.warn('legacy config migration skipped:', e);
+  if (state.prefsLoaded) {
+    try {
+      const config = await invoke('load_config');
+      await migrateLegacyConfig(config);
+    } catch (e) {
+      console.warn('legacy config migration skipped:', e);
+    }
   }
 
   applyTheme(state.prefs.theme);

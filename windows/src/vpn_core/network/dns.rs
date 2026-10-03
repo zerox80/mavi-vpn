@@ -1,4 +1,5 @@
 use super::command_runner::{CommandRunner, SystemCommandRunner};
+use anyhow::Result;
 use std::net::Ipv4Addr;
 
 /// Secondary adapter-level resolver, used only if both the NRPT policy and
@@ -10,13 +11,17 @@ const SECONDARY_FALLBACK_DNS: &str = "8.8.8.8";
 /// must be the server-assigned resolver so the two layers agree: if NRPT ever
 /// fails to apply, queries still go to the VPN's real DNS instead of a
 /// different, possibly locally-censored or -monitored resolver.
-pub(super) fn configure_dns(adapter_name: &str, dns_v4: Ipv4Addr) {
-    configure_dns_with_runner(&SystemCommandRunner, adapter_name, dns_v4);
+pub(super) fn configure_dns(adapter_name: &str, dns_v4: Ipv4Addr) -> Result<()> {
+    configure_dns_with_runner(&SystemCommandRunner, adapter_name, dns_v4)
 }
 
-fn configure_dns_with_runner(runner: &dyn CommandRunner, adapter_name: &str, dns_v4: Ipv4Addr) {
+fn configure_dns_with_runner(
+    runner: &dyn CommandRunner,
+    adapter_name: &str,
+    dns_v4: Ipv4Addr,
+) -> Result<()> {
     let primary = dns_v4.to_string();
-    runner.run_cmd(
+    if !runner.run_cmd(
         "netsh",
         &[
             "interface",
@@ -29,8 +34,10 @@ fn configure_dns_with_runner(runner: &dyn CommandRunner, adapter_name: &str, dns
             "primary",
             "validate=no",
         ],
-    );
-    runner.run_cmd(
+    ) {
+        anyhow::bail!("DNS_SETUP_FAILED: Failed to set VPN adapter DNS server");
+    }
+    if !runner.run_cmd(
         "netsh",
         &[
             "interface",
@@ -42,7 +49,10 @@ fn configure_dns_with_runner(runner: &dyn CommandRunner, adapter_name: &str, dns
             "index=2",
             "validate=no",
         ],
-    );
+    ) {
+        anyhow::bail!("DNS_SETUP_FAILED: Failed to set VPN adapter fallback DNS server");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -56,7 +66,7 @@ mod tests {
     fn dns_configuration_uses_expected_netsh_commands() {
         let runner = RecordingRunner::new(true);
 
-        configure_dns_with_runner(&runner, "MaviVPN", Ipv4Addr::new(10, 8, 0, 1));
+        configure_dns_with_runner(&runner, "MaviVPN", Ipv4Addr::new(10, 8, 0, 1)).unwrap();
 
         assert_eq!(
             runner.commands(),
@@ -96,5 +106,17 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn dns_command_failures_abort_setup() {
+        for results in [vec![false], vec![true, false]] {
+            let count = results.len();
+            let runner = RecordingRunner::with_results(results);
+            let error = configure_dns_with_runner(&runner, "MaviVPN", Ipv4Addr::new(10, 8, 0, 1))
+                .unwrap_err();
+            assert!(error.to_string().starts_with("DNS_SETUP_FAILED:"));
+            assert_eq!(runner.commands().len(), count);
+        }
     }
 }

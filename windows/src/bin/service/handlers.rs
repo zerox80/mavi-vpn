@@ -123,23 +123,28 @@ pub async fn dispatch_request(
         ipc::IpcRequest::UpdateToken { token } => {
             // Non-Windows clients refresh Keycloak outside the service and push
             // only the fresh access token here. Windows service-side refresh is
-            // seeded by StartWithKeycloak and keeps the refresh token in RAM for
-            // the active session only.
+            // seeded by StartWithKeycloak. Rotations stay in RAM until a client
+            // confirms persistence, including after the session stops.
             // Harmless when no session is active - the next Start overwrites it.
             guard.set_current_token(token);
             ipc::IpcResponse::Ok
         }
-        ipc::IpcRequest::TakeRefreshTokenUpdate => {
-            match guard.take_pending_keycloak_refresh_token() {
-                Some(update) => ipc::IpcResponse::RefreshTokenUpdate {
-                    connection_id: Some(update.connection_id),
-                    refresh_token: Some(update.refresh_token),
-                },
-                None => ipc::IpcResponse::RefreshTokenUpdate {
-                    connection_id: None,
-                    refresh_token: None,
-                },
-            }
+        ipc::IpcRequest::TakeRefreshTokenUpdate => match guard.pending_keycloak_refresh_token() {
+            Some(update) => ipc::IpcResponse::RefreshTokenUpdate {
+                connection_id: Some(update.connection_id),
+                refresh_token: Some(update.refresh_token),
+            },
+            None => ipc::IpcResponse::RefreshTokenUpdate {
+                connection_id: None,
+                refresh_token: None,
+            },
+        },
+        ipc::IpcRequest::AcknowledgeRefreshTokenUpdate {
+            connection_id,
+            refresh_token,
+        } => {
+            guard.acknowledge_keycloak_refresh_token(&connection_id, &refresh_token);
+            ipc::IpcResponse::Ok
         }
     }
 }

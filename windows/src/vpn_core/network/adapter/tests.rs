@@ -1,4 +1,56 @@
 use super::*;
+use crate::vpn_core::network::command_runner::test_support::RecordingRunner;
+
+#[test]
+fn dns_priority_and_nrpt_failures_are_permanent_setup_errors() {
+    use crate::vpn_core::reconnect::{compute_reconnect_delay, ReconnectDecision};
+    for results in [vec![false], vec![true, false], vec![true, true, false]] {
+        let count = results.len();
+        let runner = RecordingRunner::with_results(results);
+        let error = configure_vpn_dns_preference_with_runner(
+            &runner,
+            7,
+            Ipv4Addr::new(10, 8, 0, 1),
+            Some("fd00::1".parse().unwrap()),
+        )
+        .unwrap_err();
+        assert_eq!(runner.commands().len(), count);
+        assert!(matches!(
+            compute_reconnect_delay(Err(error), Duration::from_secs(1)),
+            ReconnectDecision::PermanentFailure { .. }
+        ));
+    }
+}
+
+#[test]
+fn nrpt_setup_propagates_powershell_errors_and_supports_both_dns_families() {
+    use std::process::Command;
+    for fail_step in ["", "get", "remove", "add", "clear"] {
+        for dns_v6 in [None, Some("fd00::1".parse().unwrap())] {
+            let script = include_str!("tests/nrpt_setup_mock.ps1")
+                .replace("# FAIL_STEP", &format!("$global:failStep = '{fail_step}'"))
+                .replace(
+                    "# SETUP_SCRIPT",
+                    &nrpt_setup_script(Ipv4Addr::new(10, 8, 0, 1), dns_v6),
+                );
+            let output = Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                fail_step.is_empty(),
+                "step={fail_step}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if fail_step.is_empty() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(stdout.contains("10.8.0.1"));
+                assert_eq!(stdout.contains("fd00::1"), dns_v6.is_some());
+            }
+        }
+    }
+}
 
 #[test]
 fn nrpt_cleanup_preserves_foreign_rules_and_removes_owned_rules() {

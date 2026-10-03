@@ -44,6 +44,8 @@ pub fn run() {
         .setup(|app| {
             setup_tray(app)?;
             start_status_poller(app.handle().clone());
+            #[cfg(target_os = "windows")]
+            commands::start_service_refresh_token_sync(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

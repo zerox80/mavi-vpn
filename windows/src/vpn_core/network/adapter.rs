@@ -8,7 +8,8 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     MIB_IPINTERFACE_ROW,
 };
 
-use super::utils::{run_cmd, run_powershell_cmd};
+use super::command_runner::{CommandRunner, SystemCommandRunner};
+use super::utils::run_powershell_cmd;
 
 pub fn wait_for_adapter_alias(adapter_index: u32, requested_name: &str) -> Result<String> {
     let started = Instant::now();
@@ -74,9 +75,18 @@ pub fn configure_vpn_dns_preference(
     adapter_index: u32,
     dns_v4: Ipv4Addr,
     dns_v6: Option<Ipv6Addr>,
-) {
+) -> Result<()> {
+    configure_vpn_dns_preference_with_runner(&SystemCommandRunner, adapter_index, dns_v4, dns_v6)
+}
+
+fn configure_vpn_dns_preference_with_runner(
+    runner: &dyn CommandRunner,
+    adapter_index: u32,
+    dns_v4: Ipv4Addr,
+    dns_v6: Option<Ipv6Addr>,
+) -> Result<()> {
     // 1. Force the interface metric to 1 (highest priority) for both IPv4 and IPv6
-    run_cmd(
+    if !runner.run_cmd(
         "netsh",
         &[
             "interface",
@@ -86,8 +96,10 @@ pub fn configure_vpn_dns_preference(
             &adapter_index.to_string(),
             "metric=1",
         ],
-    );
-    run_cmd(
+    ) {
+        anyhow::bail!("DNS_SETUP_FAILED: Failed to set IPv4 DNS interface priority");
+    }
+    if !runner.run_cmd(
         "netsh",
         &[
             "interface",
@@ -97,30 +109,36 @@ pub fn configure_vpn_dns_preference(
             &adapter_index.to_string(),
             "metric=1",
         ],
-    );
+    ) {
+        anyhow::bail!("DNS_SETUP_FAILED: Failed to set IPv6 DNS interface priority");
+    }
 
     // 2. Add an NRPT rule to force all DNS queries through the VPN adapter's DNS
     // This is more effective than just metrics on modern Windows 10/11
-    let dns_v4_str = dns_v4.to_string();
-    let dns_v6_str = dns_v6.map(|v| v.to_string()).unwrap_or_default();
-    let nrpt_script = if dns_v6.is_some() {
-        format!(
-            "$ErrorActionPreference = 'SilentlyContinue'; \
-             Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
-                 Where-Object {{ $_.Comment -eq 'MaviVPN' -or $_.DisplayName -eq 'MaviVPN DNS Force' }} | \
-                 Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
-             Add-DnsClientNrptRule -Namespace '.' -NameServers '{dns_v4_str}','{dns_v6_str}' -Comment 'MaviVPN' -DisplayName 'MaviVPN DNS Force';"
-        )
-    } else {
-        format!(
-            "$ErrorActionPreference = 'SilentlyContinue'; \
-             Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
-                 Where-Object {{ $_.Comment -eq 'MaviVPN' -or $_.DisplayName -eq 'MaviVPN DNS Force' }} | \
-                 Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
-             Add-DnsClientNrptRule -Namespace '.' -NameServers '{dns_v4_str}' -Comment 'MaviVPN' -DisplayName 'MaviVPN DNS Force';"
-        )
+    if !runner
+        .run_powershell_cmd_result("NRPT DNS Rule", &nrpt_setup_script(dns_v4, dns_v6))
+        .is_success()
+    {
+        anyhow::bail!("DNS_SETUP_FAILED: Failed to install NRPT DNS isolation rule");
+    }
+    Ok(())
+}
+
+fn nrpt_setup_script(dns_v4: Ipv4Addr, dns_v6: Option<Ipv6Addr>) -> String {
+    let servers = match dns_v6 {
+        Some(v6) => format!("'{dns_v4}','{v6}'"),
+        None => format!("'{dns_v4}'"),
     };
-    run_powershell_cmd("NRPT DNS Rule", &nrpt_script);
+    format!(
+        "$ErrorActionPreference = 'Stop'; \
+         try {{ \
+             Get-DnsClientNrptRule -ErrorAction Stop | \
+                 Where-Object {{ $_.Comment -eq 'MaviVPN' -or $_.DisplayName -eq 'MaviVPN DNS Force' }} | \
+                 Remove-DnsClientNrptRule -Force -ErrorAction Stop; \
+             Add-DnsClientNrptRule -Namespace '.' -NameServers {servers} -Comment 'MaviVPN' -DisplayName 'MaviVPN DNS Force' -ErrorAction Stop; \
+             Clear-DnsClientCache -ErrorAction Stop; \
+         }} catch {{ Write-Error $_ -ErrorAction Continue; exit 1; }}"
+    )
 }
 
 pub fn remove_nrpt_dns_rule() {

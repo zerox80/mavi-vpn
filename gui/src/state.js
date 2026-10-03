@@ -3,6 +3,9 @@ export const state = {
   hero: 'off',
   disconnecting: false,
   connectAttempt: 0,
+  connectRequestId: null,
+  pendingConnect: false,
+  disconnectPending: false,
   // From vpn_status
   serviceAvailable: false,
   running: false,

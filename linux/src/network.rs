@@ -10,6 +10,8 @@ use tracing::info;
 
 mod command;
 mod dns;
+mod ipv6_block;
+mod legacy_ipv6;
 mod routes;
 mod whitelist;
 
@@ -20,10 +22,6 @@ pub struct NetworkConfig {
     pub tun_name: String,
     pub endpoint_ip: String,
     pub gateway_v4: Ipv4Addr,
-    pub physical_gateway: Option<String>,
-    pub physical_device: Option<String>,
-    pub physical_gateway_v6: Option<String>,
-    pub physical_device_v6: Option<String>,
     pub dns_backup: Option<Vec<u8>>,
     pub has_ipv6: bool,
     pub gateway_v6: Option<Ipv6Addr>,
@@ -35,6 +33,7 @@ pub struct NetworkConfig {
     pub whitelist_ips: Vec<IpAddr>,
     /// Only newly installed exceptions belong to this session's cleanup.
     owned_host_routes: Vec<routes::HostRoute>,
+    owned_ipv6_blocks: Vec<&'static str>,
 }
 
 impl NetworkConfig {
@@ -63,18 +62,16 @@ impl NetworkConfig {
         // resolver.
         let whitelist_ips = whitelist::resolve_whitelist_ips(whitelist_domains, has_ipv6);
 
-        // 5. Detect the physical gateway and device (before we add VPN routes)
-        let (physical_gateway, physical_device) = routes::detect_physical_gateway();
-        let (physical_gateway_v6, physical_device_v6) = routes::detect_physical_gateway_v6();
+        // Capture all destination-specific paths before changing addresses or
+        // routes; looking up whitelist paths after split routes would use mavi0.
+        let mut runner = command::ProductionCommandRunner;
+        let endpoint_route = resolve_endpoint_route(&mut runner, endpoint_ip)?;
+        let whitelist_routes = whitelist::resolve_whitelist_routes(&mut runner, &whitelist_ips);
 
         let mut network = Self {
             tun_name: tun_name.to_string(),
             endpoint_ip: endpoint_ip.to_string(),
             gateway_v4: gateway,
-            physical_gateway,
-            physical_device,
-            physical_gateway_v6,
-            physical_device_v6,
             dns_backup: None,
             has_ipv6,
             gateway_v6,
@@ -82,28 +79,25 @@ impl NetworkConfig {
             dns_configured: false,
             whitelist_ips,
             owned_host_routes: Vec::new(),
+            owned_ipv6_blocks: Vec::new(),
         };
 
         // Add the endpoint exception before installing split-default routes.
         // If any setup step fails, immediately roll back every change already
         // made instead of leaving a half-configured tunnel behind.
-        let mut runner = command::ProductionCommandRunner;
         if let Err(err) = apply_interface_and_routes(
             &mut runner,
             &mut network.owned_host_routes,
+            &mut network.owned_ipv6_blocks,
             tun_name,
             assigned_ip,
             prefix_len,
             gateway,
             mtu,
-            &network.endpoint_ip,
+            endpoint_route,
             assigned_ipv6,
             netmask_v6,
             gateway_v6,
-            network.physical_gateway.as_deref(),
-            network.physical_device.as_deref(),
-            network.physical_gateway_v6.as_deref(),
-            network.physical_device_v6.as_deref(),
         ) {
             network.cleanup();
             return Err(err);
@@ -114,11 +108,7 @@ impl NetworkConfig {
             .owned_host_routes
             .extend(whitelist::add_whitelist_route_exceptions(
                 &mut runner,
-                &network.whitelist_ips,
-                network.physical_gateway.as_deref(),
-                network.physical_device.as_deref(),
-                network.physical_gateway_v6.as_deref(),
-                network.physical_device_v6.as_deref(),
+                whitelist_routes,
             ));
 
         let (dns_backup, used_resolvconf) = match dns::configure_dns(tun_name, dns, dns_v6) {
@@ -199,10 +189,11 @@ impl NetworkConfig {
                     &gateway_v6,
                 ],
             );
-        } else {
-            let _ = run_cmd("ip", &["-6", "route", "del", "unreachable", "::/1"]);
-            let _ = run_cmd("ip", &["-6", "route", "del", "unreachable", "8000::/1"]);
         }
+        ipv6_block::remove(
+            &mut command::ProductionCommandRunner,
+            &self.owned_ipv6_blocks,
+        );
 
         routes::remove_host_route_exceptions(
             &mut command::ProductionCommandRunner,
@@ -225,19 +216,16 @@ impl NetworkConfig {
 fn apply_interface_and_routes<R: CommandRunner>(
     runner: &mut R,
     owned_host_routes: &mut Vec<routes::HostRoute>,
+    owned_ipv6_blocks: &mut Vec<&'static str>,
     tun_name: &str,
     assigned_ip: Ipv4Addr,
     prefix_len: u8,
     gateway: Ipv4Addr,
     mtu: u16,
-    endpoint_ip: &str,
+    endpoint_route: routes::HostRoute,
     assigned_ipv6: Option<Ipv6Addr>,
     netmask_v6: Option<u8>,
     gateway_v6: Option<Ipv6Addr>,
-    physical_gateway: Option<&str>,
-    physical_device: Option<&str>,
-    physical_gateway_v6: Option<&str>,
-    physical_device_v6: Option<&str>,
 ) -> Result<()> {
     runner.run("ip", &["link", "set", tun_name, "up"])?;
 
@@ -254,14 +242,7 @@ fn apply_interface_and_routes<R: CommandRunner>(
         runner.run("ip", &["-6", "addr", "add", &assigned_v6, "dev", tun_name])?;
     }
 
-    if let Some(route) = add_endpoint_route_exception(
-        runner,
-        endpoint_ip,
-        physical_gateway,
-        physical_device,
-        physical_gateway_v6,
-        physical_device_v6,
-    )? {
+    if let Some(route) = routes::add_host_route_exception(runner, endpoint_route)? {
         // Record ownership before any later setup step can fail and roll back.
         owned_host_routes.push(route);
     }
@@ -309,49 +290,27 @@ fn apply_interface_and_routes<R: CommandRunner>(
             )
             .context("Failed to install IPv6 split route 8000::/1")?;
     } else {
-        runner
-            .run("ip", &["-6", "route", "add", "unreachable", "::/1"])
-            .context("Failed to install IPv6 leak-prevention route ::/1")?;
-        runner
-            .run("ip", &["-6", "route", "add", "unreachable", "8000::/1"])
-            .context("Failed to install IPv6 leak-prevention route 8000::/1")?;
+        ipv6_block::install(runner, owned_ipv6_blocks)?;
     }
 
     Ok(())
 }
 
-fn add_endpoint_route_exception<R: CommandRunner>(
-    runner: &mut R,
+fn resolve_endpoint_route(
+    runner: &mut impl CommandRunner,
     endpoint_ip: &str,
-    physical_gateway: Option<&str>,
-    physical_device: Option<&str>,
-    physical_gateway_v6: Option<&str>,
-    physical_device_v6: Option<&str>,
-) -> Result<Option<routes::HostRoute>> {
-    let ip = routes::parse_endpoint_ip(endpoint_ip)
+) -> Result<routes::HostRoute> {
+    let endpoint = routes::parse_endpoint_ip(endpoint_ip)
         .with_context(|| format!("Could not parse VPN endpoint IP {endpoint_ip:?}"))?;
-    routes::add_host_route_exception(
-        runner,
-        ip,
-        physical_gateway,
-        physical_device,
-        physical_gateway_v6,
-        physical_device_v6,
-    )
+    routes::resolve_host_route(runner, endpoint)
 }
 
 /// Best-effort cleanup for daemon repair requests and stale state after crashes.
 /// This intentionally tolerates missing routes or DNS backups.
-pub fn cleanup_stale_network_state() {
+pub fn cleanup_stale_network_state() -> Result<()> {
     info!("Cleaning stale MaviVPN network state...");
 
-    let _ = run_cmd("ip", &["route", "del", "0.0.0.0/1", "dev", "mavi0"]);
-    let _ = run_cmd("ip", &["route", "del", "128.0.0.0/1", "dev", "mavi0"]);
-    let _ = run_cmd("ip", &["-6", "route", "del", "::/1", "dev", "mavi0"]);
-    let _ = run_cmd("ip", &["-6", "route", "del", "8000::/1", "dev", "mavi0"]);
-    let _ = run_cmd("ip", &["-6", "route", "del", "unreachable", "::/1"]);
-    let _ = run_cmd("ip", &["-6", "route", "del", "unreachable", "8000::/1"]);
-    let _ = run_cmd("ip", &["link", "set", "mavi0", "down"]);
+    cleanup_stale_routes(&mut command::ProductionCommandRunner, "mavi0");
 
     let current = std::fs::read(dns::RESOLV_CONF_PATH).ok();
     let mavi_owned = current
@@ -361,9 +320,35 @@ pub fn cleanup_stale_network_state() {
         dns::restore_dns(&None, false);
     }
 
+    legacy_ipv6::check(&mut command::ProductionCommandRunner)?;
     info!("Stale MaviVPN network cleanup complete.");
+    Ok(())
+}
+
+/// Operator-approved migration for unmarked blocks from older releases.
+pub fn repair_legacy_ipv6_blocks() -> Result<usize> {
+    legacy_ipv6::repair(&mut command::ProductionCommandRunner)
+}
+
+fn cleanup_stale_routes(runner: &mut impl CommandRunner, tun_name: &str) {
+    let _ = runner.run("ip", &["route", "del", "0.0.0.0/1", "dev", tun_name]);
+    let _ = runner.run("ip", &["route", "del", "128.0.0.0/1", "dev", tun_name]);
+    let _ = runner.run(
+        "ip",
+        &["-6", "route", "del", "unicast", "::/1", "dev", tun_name],
+    );
+    let _ = runner.run(
+        "ip",
+        &["-6", "route", "del", "unicast", "8000::/1", "dev", tun_name],
+    );
+    ipv6_block::remove(runner, &ipv6_block::PREFIXES);
+    let _ = runner.run("ip", &["link", "set", tun_name, "down"]);
 }
 
 #[cfg(test)]
 #[path = "network/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "network/kernel_tests.rs"]
+mod kernel_tests;

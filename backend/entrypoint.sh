@@ -21,8 +21,8 @@ if [ ! -c /dev/net/tun ]; then
 fi
 
 # Detect the default gateway interface
-# This gets the route to Google DNS, extracts the device name (5th column)
-DEFAULT_IFACE=$(ip route get 8.8.8.8 | awk -- '{print $5}')
+# Route output has no fixed columns (on-link/PPP routes omit "via").
+DEFAULT_IFACE=$(ip route get 8.8.8.8 | awk -- '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
 
 if [ -z "$DEFAULT_IFACE" ]; then
     echo "Error: Could not detect default interface. Fallback to eth0."

@@ -16,6 +16,7 @@ import os
 import sys
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,21 @@ def configure_ipc_group():
     ok(f"User '{target_user}' added to '{CONTROL_GROUP}'")
     return target_user
 
+def render_service_unit(template, dest):
+    """Use the selected executable path with systemd's quoting rules."""
+    path = str(dest)
+    if not dest.is_absolute() or any(ord(ch) < 32 or ord(ch) == 127 or ch in "\"'\\" for ch in path):
+        raise ValueError("The service executable path must be absolute and contain no quotes, backslashes or control characters")
+    # Executable paths use specifier expansion, but no environment-variable
+    # expansion: escape '%' while preserving literal '$' characters.
+    escaped = path.replace("%", "%%")
+    lines = template.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("ExecStart=")]
+    if len(starts) != 1:
+        raise ValueError("Expected exactly one ExecStart in the service template")
+    lines[starts[0]] = f'ExecStart="{escaped}" daemon'
+    return "\n".join(lines) + "\n"
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -136,12 +152,14 @@ def main():
     step("Installing binary")
     default_dest = "/usr/local/bin/mavi-vpn"
     raw = input(c("1;37", f"  ? Install to [{default_dest}]: ")).strip()
-    dest = Path(raw) if raw else Path(default_dest)
+    dest = (Path(raw) if raw else Path(default_dest)).expanduser().absolute()
+    if dest.is_dir():
+        dest = dest / binary.name
 
     # Via sudo, not a plain mkdir: dest may be a custom path under a
     # root-owned directory the current user can't create on their own.
     sudo("mkdir", "-p", str(dest.parent))
-    sudo("install", "-m", "755", str(binary), str(dest))
+    sudo("install", "-m", "755", "-T", str(binary), str(dest))
     ok(f"Binary installed to {dest}")
 
     configured_user = configure_ipc_group()
@@ -160,7 +178,15 @@ def main():
             if not service_src.exists():
                 warn(f"Service file not found: {service_src} – skipping.")
             else:
-                sudo("cp", str(service_src), "/etc/systemd/system/mavi-vpn.service")
+                try:
+                    unit = render_service_unit(service_src.read_text(encoding="utf-8"), dest)
+                except ValueError as error:
+                    err(str(error))
+                    sys.exit(1)
+                with tempfile.TemporaryDirectory(prefix="mavi-vpn-service-") as directory:
+                    rendered = Path(directory) / "mavi-vpn.service"
+                    rendered.write_text(unit, encoding="utf-8")
+                    sudo("install", "-m", "644", str(rendered), "/etc/systemd/system/mavi-vpn.service")
                 sudo("systemctl", "daemon-reload")
                 ok("systemd service installed")
 

@@ -55,6 +55,9 @@ describe('vpn workflows', () => {
     state.hero = 'off';
     state.disconnecting = false;
     state.connectAttempt = 0;
+    state.connectRequestId = null;
+    state.pendingConnect = false;
+    state.disconnectPending = false;
     state.running = false;
     state.serviceAvailable = true;
     state.vpnState = 'Stopped';
@@ -204,7 +207,7 @@ describe('vpn workflows', () => {
       .mockResolvedValueOnce({ service_available: true, running: false, state: 'Stopped' })
       .mockResolvedValueOnce({ service_available: true, running: false, state: 'Stopped' });
     await toggleConnection();
-    expect(invoke).toHaveBeenCalledWith('vpn_disconnect');
+    expect(invoke).toHaveBeenCalledWith('vpn_disconnect', { requestId: expect.any(String) });
   });
 
   it('wireHero connects the button to toggleConnection', () => {

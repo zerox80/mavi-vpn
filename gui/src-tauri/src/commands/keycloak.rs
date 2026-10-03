@@ -5,7 +5,9 @@ use shared::ipc::{Config, IpcRequest};
 use shared::kc_oauth::{self, RefreshOutcome};
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager};
+#[cfg(not(target_os = "windows"))]
+use tauri::Emitter;
+use tauri::{AppHandle, Manager};
 use tracing::{debug, info, warn};
 
 #[cfg(not(target_os = "windows"))]

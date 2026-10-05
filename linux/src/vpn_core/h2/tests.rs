@@ -94,3 +94,87 @@ async fn cancelled_handshake_closes_the_connection_before_config_arrives() {
     .await
     .expect("cancelling setup must release the HTTP/2 driver");
 }
+
+async fn capsule_peer(io: DuplexStream, chunks: Vec<Bytes>) {
+    let mut builder = h2::server::Builder::new();
+    builder.enable_connect_protocol();
+    let mut connection = builder.handshake::<_, Bytes>(io).await.unwrap();
+    let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+    let response = http::Response::builder()
+        .header("capsule-protocol", "?1")
+        .body(())
+        .unwrap();
+    let mut stream = respond.send_response(response, false).unwrap();
+    for chunk in chunks {
+        if stream.send_data(chunk, false).is_err() {
+            break;
+        }
+    }
+    let _ = connection.accept().await;
+    drop((request, stream));
+}
+
+#[tokio::test]
+async fn oversized_config_is_rejected_from_its_fragmented_header() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (client, server) = tokio::io::duplex(65536);
+        let mut header = Vec::new();
+        masque::write_varint(CAPSULE_MAVI_CONFIG, &mut header);
+        masque::write_varint(1 << 40, &mut header);
+        let peer = tokio::spawn(capsule_peer(
+            server,
+            header.into_iter().map(|b| Bytes::from(vec![b])).collect(),
+        ));
+        let result = establish_h2(client, "127.0.0.1:443".parse().unwrap(), "test".into()).await;
+        assert!(result.err().unwrap().to_string().contains("exceeds limit"));
+        peer.await.unwrap();
+    })
+    .await
+    .expect("reject the header without waiting for its payload");
+}
+
+#[tokio::test]
+async fn config_preserves_following_packets_and_oversized_data_is_never_delivered() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (client, server) = tokio::io::duplex(65536);
+        let mut bytes = config_capsule().to_vec();
+        bytes.extend(masque::encode_connect_ip_datagram_capsule(b"valid-packet"));
+        bytes.extend(masque::encode_connect_ip_datagram_capsule(&vec![
+            0x45;
+            masque::MAX_CAPSULE_BUF
+                + 1
+        ]));
+        let peer = tokio::spawn(capsule_peer(server, vec![bytes.into()]));
+        let (session, _) = establish_h2(client, "127.0.0.1:443".parse().unwrap(), "test".into())
+            .await
+            .unwrap();
+        assert_eq!(session.recv_packet().await.unwrap(), b"valid-packet"[..]);
+        assert!(session.recv_packet().await.is_err());
+        drop(session);
+        peer.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn unknown_capsule_payload_starting_with_html_is_ignored() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (client, server) = tokio::io::duplex(65536);
+        let peer = tokio::spawn(capsule_peer(
+            server,
+            vec![
+                Bytes::from_static(&[7, 5]),
+                Bytes::from_static(b"<html"),
+                config_capsule(),
+            ],
+        ));
+        let (session, _) = establish_h2(client, "127.0.0.1:443".parse().unwrap(), "test".into())
+            .await
+            .unwrap();
+        drop(session);
+        peer.await.unwrap();
+    })
+    .await
+    .unwrap();
+}

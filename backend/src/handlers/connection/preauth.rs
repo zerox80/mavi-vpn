@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::{future::Future, sync::Arc};
-use tokio::sync::{Notify, OwnedSemaphorePermit};
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 /// Keep the original deadline and pending permit until config delivery succeeds.
@@ -8,7 +8,7 @@ use tokio::time::Instant;
 pub(super) async fn until_ready(
     connection: &quinn::Connection,
     deadline: Instant,
-    pending_permit: OwnedSemaphorePermit,
+    pending_permit: impl Send,
     setup_complete: Arc<Notify>,
     handler: impl Future<Output = Result<()>>,
 ) -> Result<()> {

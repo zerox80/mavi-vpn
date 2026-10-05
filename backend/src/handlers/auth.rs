@@ -83,7 +83,12 @@ pub async fn authenticate_client(
         None
     };
 
-    let (ip4, ip6) = state.assign_ip_pair()?;
+    let principal = session_auth.as_ref().map_or_else(
+        || "static-token".to_owned(),
+        |auth| format!("keycloak:{}", auth.sub),
+    );
+    let (ip4, ip6) =
+        state.assign_principal_ip_pair(principal, config.max_sessions_per_principal as usize)?;
     state.auth_rate_limiter.record_success(remote_addr);
     Ok((ip4, ip6, session_auth))
 }
@@ -365,3 +370,7 @@ mod tests {
         assert!(result.is_ok(), "a different IP must not be affected");
     }
 }
+
+#[cfg(test)]
+#[path = "auth_quota_tests.rs"]
+mod quota_tests;

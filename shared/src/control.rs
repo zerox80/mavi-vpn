@@ -50,7 +50,7 @@ pub fn encode_control_message(msg: &ControlMessage) -> Result<Vec<u8>, ControlSt
 /// camouflage-HTML detection via [`crate::looks_like_html_response`]) read the
 /// frame with [`read_control_frame`] and decode afterwards.
 pub fn decode_control_message(buf: &[u8]) -> Result<ControlMessage, ControlStreamError> {
-    bincode::serde::decode_from_slice(buf, bincode::config::standard())
+    bincode::serde::decode_from_slice(buf, bincode::config::standard().with_limit::<65_536>())
         .map(|(msg, _)| msg)
         .map_err(ControlStreamError::Decode)
 }

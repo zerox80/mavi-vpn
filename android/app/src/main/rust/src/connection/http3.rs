@@ -111,9 +111,11 @@ pub(super) async fn connect_and_handshake(
             capsule_buf.drain(..consumed);
 
             if ctype == CAPSULE_MAVI_CONFIG {
-                let (cfg, _): (ControlMessage, _) =
-                    bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-                        .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {e}"))?;
+                let (cfg, _): (ControlMessage, _) = bincode::serde::decode_from_slice(
+                    &payload,
+                    bincode::config::standard().with_limit::<65_536>(),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to decode MAVI_CONFIG: {e}"))?;
                 config = Some(cfg);
                 break 'read;
             }

@@ -184,9 +184,10 @@ pub(crate) fn record_reauth_result(state: &AppState, remote_ip: IpAddr, accepted
 /// Decodes a length-checked reauth payload into the carried token, rejecting any
 /// other control message.
 pub(crate) fn decode_reauth_payload(buf: &[u8]) -> Result<String> {
-    let msg: ControlMessage = bincode::serde::decode_from_slice(buf, bincode::config::standard())
-        .map(|(v, _)| v)
-        .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
+    let msg: ControlMessage =
+        bincode::serde::decode_from_slice(buf, bincode::config::standard().with_limit::<65_536>())
+            .map(|(v, _)| v)
+            .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
     match msg {
         ControlMessage::Reauth { token } => Ok(token),
         _ => anyhow::bail!("Protocol error: Expected Reauth"),

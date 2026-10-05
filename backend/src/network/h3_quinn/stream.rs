@@ -102,6 +102,7 @@ pub struct RecvStream {
     stream: Option<quinn::RecvStream>,
     read_chunk_fut: ReadChunkFuture,
     pending_stop: Option<VarInt>,
+    received_bytes: usize,
 }
 
 type ReadChunkFuture = ReusableBoxFuture<
@@ -121,6 +122,7 @@ impl RecvStream {
             // Should only allocate once the first time it's used
             read_chunk_fut: ReusableBoxFuture::new(async { unreachable!() }),
             pending_stop: None,
+            received_bytes: 0,
         }
     }
 }
@@ -135,7 +137,7 @@ impl quic::RecvStream for RecvStream {
     ) -> Poll<Result<Option<Self::Buf>, StreamErrorIncoming>> {
         if let Some(mut stream) = self.stream.take() {
             self.read_chunk_fut.set(async move {
-                let chunk = stream.read_chunk(usize::MAX, true).await;
+                let chunk = stream.read_chunk(16_384, true).await;
                 (stream, chunk)
             });
         }
@@ -145,9 +147,18 @@ impl quic::RecvStream for RecvStream {
             let _ = stream.stop(error_code);
         }
         self.stream = Some(stream);
-        Poll::Ready(Ok(chunk
-            .map_err(convert_read_error_to_stream_error)?
-            .map(|c| c.bytes)))
+        let chunk = chunk.map_err(convert_read_error_to_stream_error)?;
+        // h3 buffers encoded HEADERS before applying its decoded field limit.
+        // These streams carry setup/control only; VPN traffic uses datagrams.
+        if let Some(ref chunk) = chunk {
+            self.received_bytes = self.received_bytes.saturating_add(chunk.bytes.len());
+            if self.received_bytes > 65_536 {
+                let error_code = u64::from(h3::error::Code::H3_EXCESSIVE_LOAD);
+                self.stop_sending(error_code);
+                return Poll::Ready(Err(StreamErrorIncoming::StreamTerminated { error_code }));
+            }
+        }
+        Poll::Ready(Ok(chunk.map(|c| c.bytes)))
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]

@@ -2,13 +2,32 @@ mod control;
 mod refresh;
 mod status;
 
-use crate::handlers::{dispatch_request, handle_start_request};
+use crate::handlers::{
+    dispatch_request as dispatch_for_caller, handle_start_request as start_for_caller,
+};
 use crate::ipc;
 use crate::state::VpnServiceState;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+const TEST_USER_SID: &str = "S-1-5-21-1000";
+
+async fn dispatch_request(
+    req: ipc::IpcRequest,
+    state: &Arc<Mutex<VpnServiceState>>,
+) -> ipc::IpcResponse {
+    dispatch_for_caller(req, state, TEST_USER_SID).await
+}
+
+fn handle_start_request(
+    config: ipc::Config,
+    keycloak: Option<ipc::KeycloakRuntimeAuth>,
+    state: &mut VpnServiceState,
+) -> ipc::IpcResponse {
+    start_for_caller(config, keycloak, state, TEST_USER_SID)
+}
 
 fn test_config() -> ipc::Config {
     ipc::Config {

@@ -37,6 +37,11 @@ fn configure_dns_with_runner(
     ) {
         anyhow::bail!("DNS_SETUP_FAILED: Failed to set VPN adapter DNS server");
     }
+    // Netsh rejects a DNS address already in the list. A server may assign
+    // the fallback itself, in which case the primary entry is sufficient.
+    if primary == SECONDARY_FALLBACK_DNS {
+        return Ok(());
+    }
     if !runner.run_cmd(
         "netsh",
         &[
@@ -117,6 +122,23 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().starts_with("DNS_SETUP_FAILED:"));
             assert_eq!(runner.commands().len(), count);
+        }
+    }
+
+    #[test]
+    fn primary_fallback_address_is_set_once_and_primary_errors_still_abort() {
+        for succeeds in [true, false] {
+            let runner = RecordingRunner::with_results(vec![succeeds]);
+            let result = configure_dns_with_runner(&runner, "MaviVPN", Ipv4Addr::new(8, 8, 8, 8));
+            assert_eq!(result.is_ok(), succeeds);
+            let commands = runner.commands();
+            assert_eq!(commands.len(), 1);
+            let RecordedCommand::Cmd { program, args } = &commands[0] else {
+                panic!("Expected primary DNS netsh command");
+            };
+            assert_eq!(program, "netsh");
+            assert_eq!(args[2], "set");
+            assert_eq!(args[6], SECONDARY_FALLBACK_DNS);
         }
     }
 }

@@ -25,6 +25,7 @@ mod secure_path;
 #[path = "../../vpn_core/mod.rs"]
 mod vpn_core;
 
+mod caller_identity;
 mod cli;
 mod handlers;
 mod keycloak_refresh;

@@ -5,6 +5,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
+use super::caller_identity::client_user_sid;
 use super::keycloak_refresh;
 use super::state::VpnServiceState;
 use super::utils::{classify_status, run_network_repair_cleanup};
@@ -12,6 +13,15 @@ use crate::ipc;
 use crate::vpn_core;
 
 pub const IPC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn requires_caller_identity(request: &ipc::IpcRequest) -> bool {
+    matches!(
+        request,
+        ipc::IpcRequest::StartWithKeycloak { .. }
+            | ipc::IpcRequest::TakeRefreshTokenUpdate
+            | ipc::IpcRequest::AcknowledgeRefreshTokenUpdate { .. }
+    )
+}
 
 /// Named pipes have no peer address; the client's process ID (from
 /// `GetNamedPipeClientProcessId`) is used in logs instead — strictly more
@@ -29,7 +39,7 @@ fn client_process_id(pipe: &NamedPipeServer) -> Option<u32> {
 }
 
 pub async fn handle_ipc_client(
-    socket: NamedPipeServer,
+    mut socket: NamedPipeServer,
     state: Arc<Mutex<VpnServiceState>>,
     auth_token: Arc<String>,
 ) -> anyhow::Result<()> {
@@ -37,17 +47,16 @@ pub async fn handle_ipc_client(
         .map(|pid| format!("pid={pid}"))
         .unwrap_or_else(|| "<unknown>".to_string());
     info!("Client connected to Local IPC: {}", peer);
-    let (mut rx, mut tx) = tokio::io::split(socket);
 
     let req_msg = tokio::time::timeout(IPC_REQUEST_TIMEOUT, async {
         let mut len_buf = [0u8; 4];
-        rx.read_exact(&mut len_buf).await?;
+        socket.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         if len > 65536 {
             anyhow::bail!("IPC request too large: {len} bytes");
         }
         let mut buf = vec![0u8; len];
-        rx.read_exact(&mut buf).await?;
+        socket.read_exact(&mut buf).await?;
         let (msg, _): (ipc::SecureIpcRequest, _) =
             bincode::serde::decode_from_slice(&buf, bincode::config::standard())
                 .map_err(|e| anyhow::anyhow!("IPC decode error: {e}"))?;
@@ -57,7 +66,14 @@ pub async fn handle_ipc_client(
     .map_err(|_| anyhow::anyhow!("IPC request timeout from {peer}"))??;
 
     let resp = if constant_time_eq(req_msg.auth_token.as_bytes(), auth_token.as_bytes()) {
-        dispatch_request(req_msg.request, &state).await
+        // Derive identity from the request's pipe security context, never from
+        // a supplied profile ID, the current console user, or the logged PID.
+        let caller_sid = if requires_caller_identity(&req_msg.request) {
+            client_user_sid(&socket)?
+        } else {
+            String::new()
+        };
+        dispatch_request(req_msg.request, &state, &caller_sid).await
     } else {
         error!(
             "Rejecting IPC request from {} due to invalid auth token",
@@ -71,8 +87,8 @@ pub async fn handle_ipc_client(
 
     tokio::time::timeout(IPC_REQUEST_TIMEOUT, async {
         #[allow(clippy::cast_possible_truncation)]
-        tx.write_u32_le(resp_buf.len() as u32).await?;
-        tx.write_all(&resp_buf).await?;
+        socket.write_u32_le(resp_buf.len() as u32).await?;
+        socket.write_all(&resp_buf).await?;
         Ok::<_, std::io::Error>(())
     })
     .await
@@ -84,7 +100,11 @@ pub async fn handle_ipc_client(
 pub async fn dispatch_request(
     req: ipc::IpcRequest,
     state: &Arc<Mutex<VpnServiceState>>,
+    caller_sid: &str,
 ) -> ipc::IpcResponse {
+    if requires_caller_identity(&req) && caller_sid.is_empty() {
+        return ipc::IpcResponse::Error("Unauthorized: Missing IPC caller identity".into());
+    }
     let mut guard = state.lock().await;
     match req {
         ipc::IpcRequest::Status => {
@@ -116,9 +136,11 @@ pub async fn dispatch_request(
             run_network_repair_cleanup();
             ipc::IpcResponse::Ok
         }
-        ipc::IpcRequest::Start(config) => handle_start_request(config, None, &mut guard),
+        ipc::IpcRequest::Start(config) => {
+            handle_start_request(config, None, &mut guard, caller_sid)
+        }
         ipc::IpcRequest::StartWithKeycloak { config, keycloak } => {
-            handle_start_request(config, Some(keycloak), &mut guard)
+            handle_start_request(config, Some(keycloak), &mut guard, caller_sid)
         }
         ipc::IpcRequest::UpdateToken { token } => {
             // Non-Windows clients refresh Keycloak outside the service and push
@@ -129,21 +151,23 @@ pub async fn dispatch_request(
             guard.set_current_token(token);
             ipc::IpcResponse::Ok
         }
-        ipc::IpcRequest::TakeRefreshTokenUpdate => match guard.pending_keycloak_refresh_token() {
-            Some(update) => ipc::IpcResponse::RefreshTokenUpdate {
-                connection_id: Some(update.connection_id),
-                refresh_token: Some(update.refresh_token),
-            },
-            None => ipc::IpcResponse::RefreshTokenUpdate {
-                connection_id: None,
-                refresh_token: None,
-            },
-        },
+        ipc::IpcRequest::TakeRefreshTokenUpdate => {
+            match guard.pending_keycloak_refresh_token(caller_sid) {
+                Some(update) => ipc::IpcResponse::RefreshTokenUpdate {
+                    connection_id: Some(update.connection_id),
+                    refresh_token: Some(update.refresh_token),
+                },
+                None => ipc::IpcResponse::RefreshTokenUpdate {
+                    connection_id: None,
+                    refresh_token: None,
+                },
+            }
+        }
         ipc::IpcRequest::AcknowledgeRefreshTokenUpdate {
             connection_id,
             refresh_token,
         } => {
-            guard.acknowledge_keycloak_refresh_token(&connection_id, &refresh_token);
+            guard.acknowledge_keycloak_refresh_token(caller_sid, &connection_id, &refresh_token);
             ipc::IpcResponse::Ok
         }
     }
@@ -153,7 +177,11 @@ pub fn handle_start_request(
     config: ipc::Config,
     keycloak: Option<ipc::KeycloakRuntimeAuth>,
     guard: &mut VpnServiceState,
+    caller_sid: &str,
 ) -> ipc::IpcResponse {
+    if keycloak.is_some() && caller_sid.is_empty() {
+        return ipc::IpcResponse::Error("Unauthorized: Missing IPC caller identity".into());
+    }
     info!("Handling Start request for endpoint: {}", config.endpoint);
     if guard.is_stopping() {
         ipc::IpcResponse::Error("VPN is stopping; retry shortly".to_string())
@@ -161,6 +189,7 @@ pub fn handle_start_request(
         ipc::IpcResponse::Error("VPN is already running".to_string())
     } else {
         guard.mark_session_starting(
+            caller_sid,
             config.clone(),
             keycloak.as_ref().map(|auth| auth.connection_id.as_str()),
         );

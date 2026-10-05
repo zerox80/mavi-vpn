@@ -33,7 +33,12 @@ impl fmt::Debug for PendingKeycloakRefreshToken {
 #[derive(Default)]
 struct PendingKeycloakRefreshTokens {
     generation: u64,
-    updates: VecDeque<PendingKeycloakRefreshToken>,
+    updates: VecDeque<OwnedKeycloakRefreshToken>,
+}
+
+struct OwnedKeycloakRefreshToken {
+    owner_sid: String,
+    update: PendingKeycloakRefreshToken,
 }
 
 #[derive(Clone)]
@@ -47,6 +52,7 @@ pub struct VpnRuntimeHandles {
     pub token_updated: Arc<Notify>,
     pending_keycloak_refresh_tokens: Arc<StdMutex<PendingKeycloakRefreshTokens>>,
     refresh_token_generation: u64,
+    refresh_token_owner_sid: String,
 }
 
 impl VpnRuntimeHandles {
@@ -89,13 +95,19 @@ impl VpnRuntimeHandles {
 
     pub fn publish_keycloak_refresh_token(&self, update: PendingKeycloakRefreshToken) {
         if let Ok(mut pending) = self.pending_keycloak_refresh_tokens.lock() {
-            if pending.generation == self.refresh_token_generation {
-                // Rotation supersedes the previous token for this profile;
-                // other profiles remain pending across session switches.
-                pending
-                    .updates
-                    .retain(|old| old.connection_id != update.connection_id);
-                pending.updates.push_back(update);
+            if !self.refresh_token_owner_sid.is_empty()
+                && pending.generation == self.refresh_token_generation
+            {
+                // Rotation supersedes this owner's previous token for the
+                // profile; other users' and profiles' updates stay pending.
+                pending.updates.retain(|old| {
+                    old.owner_sid != self.refresh_token_owner_sid
+                        || old.update.connection_id != update.connection_id
+                });
+                pending.updates.push_back(OwnedKeycloakRefreshToken {
+                    owner_sid: self.refresh_token_owner_sid.clone(),
+                    update,
+                });
             }
         }
     }
@@ -115,6 +127,7 @@ pub struct VpnServiceState {
     pub token_updated: Arc<Notify>,
     pending_keycloak_refresh_tokens: Arc<StdMutex<PendingKeycloakRefreshTokens>>,
     refresh_token_generation: u64,
+    refresh_token_owner_sid: String,
     pub vpn_task: Option<tokio::task::JoinHandle<()>>,
     pub keycloak_refresh_task: Option<tokio::task::JoinHandle<()>>,
     pub active_config: Option<ipc::Config>,
@@ -134,6 +147,7 @@ impl VpnServiceState {
                 PendingKeycloakRefreshTokens::default(),
             )),
             refresh_token_generation: 0,
+            refresh_token_owner_sid: String::new(),
             vpn_task: None,
             keycloak_refresh_task: None,
             active_config: None,
@@ -190,6 +204,7 @@ impl VpnServiceState {
             token_updated: self.token_updated.clone(),
             pending_keycloak_refresh_tokens: self.pending_keycloak_refresh_tokens.clone(),
             refresh_token_generation: self.refresh_token_generation,
+            refresh_token_owner_sid: self.refresh_token_owner_sid.clone(),
         }
     }
 
@@ -223,13 +238,14 @@ impl VpnServiceState {
 
     pub fn mark_session_starting(
         &mut self,
+        caller_sid: &str,
         config: ipc::Config,
         keycloak_connection_id: Option<&str>,
     ) {
         // Cancellation may race with a refresh response already being processed.
         // Fresh runtime handles and a new publication generation reject late
         // writes. A seeded Keycloak session supersedes queued rotations for
-        // that profile; rotations for other profiles still need storage.
+        // that owner's profile; other owners and profiles still need storage.
         self.stop_session();
         let pending = self.pending_keycloak_refresh_tokens.clone();
         let generation = {
@@ -238,15 +254,16 @@ impl VpnServiceState {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             tokens.generation += 1;
             if let Some(connection_id) = keycloak_connection_id {
-                tokens
-                    .updates
-                    .retain(|update| update.connection_id != connection_id);
+                tokens.updates.retain(|queued| {
+                    queued.owner_sid != caller_sid || queued.update.connection_id != connection_id
+                });
             }
             tokens.generation
         };
         *self = Self::new();
         self.pending_keycloak_refresh_tokens = pending;
         self.refresh_token_generation = generation;
+        self.refresh_token_owner_sid = caller_sid.to_string();
         self.active_config = Some(config.clone());
         self.vpn_running.store(true, Ordering::SeqCst);
         self.vpn_connected.store(false, Ordering::SeqCst);
@@ -274,17 +291,33 @@ impl VpnServiceState {
         self.token_updated.notify_waiters();
     }
 
-    pub fn pending_keycloak_refresh_token(&self) -> Option<PendingKeycloakRefreshToken> {
+    pub fn pending_keycloak_refresh_token(
+        &self,
+        caller_sid: &str,
+    ) -> Option<PendingKeycloakRefreshToken> {
         self.pending_keycloak_refresh_tokens
             .lock()
             .ok()
-            .and_then(|pending| pending.updates.front().cloned())
+            .and_then(|pending| {
+                pending
+                    .updates
+                    .iter()
+                    .find(|queued| queued.owner_sid == caller_sid)
+                    .map(|queued| queued.update.clone())
+            })
     }
 
-    pub fn acknowledge_keycloak_refresh_token(&self, connection_id: &str, refresh_token: &str) {
+    pub fn acknowledge_keycloak_refresh_token(
+        &self,
+        caller_sid: &str,
+        connection_id: &str,
+        refresh_token: &str,
+    ) {
         if let Ok(mut pending) = self.pending_keycloak_refresh_tokens.lock() {
-            pending.updates.retain(|update| {
-                update.connection_id != connection_id || update.refresh_token != refresh_token
+            pending.updates.retain(|queued| {
+                queued.owner_sid != caller_sid
+                    || queued.update.connection_id != connection_id
+                    || queued.update.refresh_token != refresh_token
             });
         }
     }
@@ -293,6 +326,13 @@ impl VpnServiceState {
 #[cfg(test)]
 #[path = "state_refresh_tests.rs"]
 mod refresh_tests;
+
+#[cfg(test)]
+#[path = "state_owner_tests.rs"]
+mod owner_tests;
+
+#[cfg(test)]
+const TEST_USER_SID: &str = "S-1-5-21-1000";
 
 #[cfg(test)]
 mod tests {
@@ -320,7 +360,7 @@ mod tests {
     fn status_snapshot_reports_starting_session() {
         let mut state = VpnServiceState::new();
 
-        state.mark_session_starting(test_config(), None);
+        state.mark_session_starting(TEST_USER_SID, test_config(), None);
         let snapshot = state.status_snapshot();
 
         assert!(snapshot.starting);
@@ -346,12 +386,12 @@ mod tests {
     #[test]
     fn late_previous_session_writes_cannot_change_new_session() {
         let mut state = VpnServiceState::new();
-        state.mark_session_starting(test_config(), None);
+        state.mark_session_starting(TEST_USER_SID, test_config(), None);
         let old = state.runtime_handles();
         old.finish_session_flags();
         let mut config = test_config();
         config.token = "new-session-token".to_string();
-        state.mark_session_starting(config, None);
+        state.mark_session_starting(TEST_USER_SID, config, None);
         state.vpn_connected.store(true, Ordering::SeqCst);
 
         // A refresh response or final cleanup can already be executing when
@@ -370,20 +410,22 @@ mod tests {
         assert_eq!(*state.current_token.lock().unwrap(), "new-session-token");
         assert!(state.status_snapshot().last_error.is_none());
         assert!(state.status_snapshot().assigned_ip.is_none());
-        assert!(state.pending_keycloak_refresh_token().is_none());
+        assert!(state
+            .pending_keycloak_refresh_token(TEST_USER_SID)
+            .is_none());
     }
 
     #[tokio::test]
     async fn restarting_cancels_previous_refresh_task() {
         let mut state = VpnServiceState::new();
-        state.mark_session_starting(test_config(), None);
+        state.mark_session_starting(TEST_USER_SID, test_config(), None);
         let (alive, dropped) = tokio::sync::oneshot::channel::<()>();
         state.set_keycloak_refresh_task(tokio::spawn(async move {
             let _alive = alive;
             std::future::pending::<()>().await;
         }));
         state.runtime_handles().finish_session_flags();
-        state.mark_session_starting(test_config(), None);
+        state.mark_session_starting(TEST_USER_SID, test_config(), None);
         assert!(
             tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
                 .await

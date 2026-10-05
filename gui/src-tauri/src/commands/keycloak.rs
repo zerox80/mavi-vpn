@@ -10,6 +10,8 @@ use tauri::Emitter;
 use tauri::{AppHandle, Manager};
 use tracing::{debug, info, warn};
 
+#[cfg(any(target_os = "windows", test))]
+mod credential_lock;
 #[cfg(not(target_os = "windows"))]
 mod refresh;
 #[cfg(any(target_os = "windows", test))]
@@ -232,11 +234,16 @@ pub(super) fn stop_token_refresh_ticker(app: &AppHandle) {
 async fn service_refresh_token_sync_loop(app: AppHandle) {
     loop {
         {
-            // Serialize keyring writes with connect/login, so an old queued
-            // update cannot overwrite credentials from a fresh browser login.
+            // Always acquire the process-local operation lock first, then
+            // the user-wide credential lock, just like connect/login.
             let lifecycle = app.state::<super::ConnectionLifecycle>();
             let _operation = lifecycle.operation.lock().await;
-            if let Err(error) = sync_service_refresh_tokens().await {
+            let result = async {
+                let credentials = lock_service_credentials(&app).await?;
+                sync_service_refresh_tokens(&credentials).await
+            }
+            .await;
+            if let Err(error) = result {
                 warn!(error = %error, "Could not save service refresh-token updates; will retry");
             }
         }
@@ -246,7 +253,20 @@ async fn service_refresh_token_sync_loop(app: AppHandle) {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) async fn sync_service_refresh_tokens() -> Result<(), String> {
+pub(super) async fn lock_service_credentials(
+    app: &AppHandle,
+) -> Result<credential_lock::CredentialLock, String> {
+    // Local application data is shared by this Windows user's GUI processes,
+    // including separate desktop sessions, but not by other users.
+    let data_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    credential_lock::CredentialLock::acquire(&data_dir).await
+}
+
+/// Caller must hold both the lifecycle operation and user-wide credential locks.
+#[cfg(target_os = "windows")]
+pub(super) async fn sync_service_refresh_tokens(
+    _credentials: &credential_lock::CredentialLock,
+) -> Result<(), String> {
     while service_sync::sync_refresh_token_update(&KeyringSecretStore, |request| async move {
         send_ipc_request(&request).await
     })

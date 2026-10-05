@@ -42,12 +42,21 @@ pub(crate) async fn vpn_connect(
     let lifecycle = app.state::<ConnectionLifecycle>();
     let mut attempt = lifecycle.begin(request_id)?;
     let _operation = lifecycle.operation.lock().await;
+    // Keep the user-wide guard through draining pending rotations, login and
+    // Start acknowledgement: another GUI must not persist an older token in
+    // between. Waiting for another GUI's login remains cancellable.
     #[cfg(target_os = "windows")]
-    if config.kc_auth.unwrap_or(false) {
-        attempt
-            .prepare(keycloak::sync_service_refresh_tokens())
+    let _credentials = if config.kc_auth.unwrap_or(false) {
+        let credentials = attempt
+            .prepare(keycloak::lock_service_credentials(&app))
             .await?;
-    }
+        attempt
+            .prepare(keycloak::sync_service_refresh_tokens(&credentials))
+            .await?;
+        Some(credentials)
+    } else {
+        None
+    };
     let force_login = force_login.unwrap_or(false);
     let kc_session = attempt
         .prepare(prepare_keycloak_config(

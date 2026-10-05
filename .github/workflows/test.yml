@@ -163,6 +163,19 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - name: Test windows crate
         run: cargo test -p windows-vpn --verbose
+      - name: Setup Node.js for Tauri frontend
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24.15.0
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Build Tauri frontend assets
+        working-directory: gui
+        run: |
+          npm ci
+          npm run build
+      - name: Test GUI backend and credential locking on Windows
+        run: cargo test -p mavi-vpn-gui --locked --verbose
       - name: Test Windows uninstaller ownership
         run: python -m unittest discover -s scripts/tests -p 'test_windows_*.py'
 

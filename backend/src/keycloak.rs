@@ -51,7 +51,9 @@ impl JwksFetcher for DefaultJwksFetcher {
                 .get(url)
                 .send()
                 .await
-                .context("Failed to fetch JWKS")?;
+                .context("Failed to fetch JWKS")?
+                .error_for_status()
+                .context("JWKS endpoint returned an error")?;
             let body = read_capped_jwks_body(res, MAX_JWKS_RESPONSE_BYTES).await?;
             let jwks: JwkSet =
                 serde_json::from_slice(&body).context("Failed to parse JWKS JSON")?;
@@ -217,7 +219,7 @@ impl KeycloakValidator {
                         // Atomic update: JWKS and timestamp written together under a single lock.
                         *self.jwks_cache.write().await = Some((fresh, Instant::now()));
                     }
-                    Err(e) => warn!("JWKS refresh failed: {}. Proceeding with cached keys.", e),
+                    Err(e) => warn!("JWKS refresh failed: {}", e),
                 }
             } else if refresh_needed && !kid_found_after_wait {
                 warn!(
@@ -228,9 +230,14 @@ impl KeycloakValidator {
         }
 
         let cache_guard = self.jwks_cache.read().await;
-        let (jwks, _) = cache_guard
+        let (jwks, fetched_at) = cache_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("JWKS not yet loaded from Keycloak Server"))?;
+
+        // A failed refresh or cooldown must never extend the trust lifetime.
+        if fetched_at.elapsed() >= JWKS_MAX_CACHE_AGE {
+            anyhow::bail!("JWKS cache expired; fresh signing keys are required");
+        }
 
         let jwk = jwks.find(&kid).ok_or_else(|| {
             warn!(

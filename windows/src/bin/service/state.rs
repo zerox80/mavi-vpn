@@ -37,7 +37,7 @@ struct PendingKeycloakRefreshTokens {
 }
 
 struct OwnedKeycloakRefreshToken {
-    owner_sid: String,
+    owner_key: String,
     update: PendingKeycloakRefreshToken,
 }
 
@@ -52,7 +52,7 @@ pub struct VpnRuntimeHandles {
     pub token_updated: Arc<Notify>,
     pending_keycloak_refresh_tokens: Arc<StdMutex<PendingKeycloakRefreshTokens>>,
     refresh_token_generation: u64,
-    refresh_token_owner_sid: String,
+    refresh_token_owner_key: String,
 }
 
 impl VpnRuntimeHandles {
@@ -95,17 +95,17 @@ impl VpnRuntimeHandles {
 
     pub fn publish_keycloak_refresh_token(&self, update: PendingKeycloakRefreshToken) {
         if let Ok(mut pending) = self.pending_keycloak_refresh_tokens.lock() {
-            if !self.refresh_token_owner_sid.is_empty()
+            if !self.refresh_token_owner_key.is_empty()
                 && pending.generation == self.refresh_token_generation
             {
                 // Rotation supersedes this owner's previous token for the
                 // profile; other users' and profiles' updates stay pending.
                 pending.updates.retain(|old| {
-                    old.owner_sid != self.refresh_token_owner_sid
+                    old.owner_key != self.refresh_token_owner_key
                         || old.update.connection_id != update.connection_id
                 });
                 pending.updates.push_back(OwnedKeycloakRefreshToken {
-                    owner_sid: self.refresh_token_owner_sid.clone(),
+                    owner_key: self.refresh_token_owner_key.clone(),
                     update,
                 });
             }
@@ -127,10 +127,11 @@ pub struct VpnServiceState {
     pub token_updated: Arc<Notify>,
     pending_keycloak_refresh_tokens: Arc<StdMutex<PendingKeycloakRefreshTokens>>,
     refresh_token_generation: u64,
-    refresh_token_owner_sid: String,
+    refresh_token_owner_key: String,
     pub vpn_task: Option<tokio::task::JoinHandle<()>>,
     pub keycloak_refresh_task: Option<tokio::task::JoinHandle<()>>,
     pub active_config: Option<ipc::Config>,
+    pub session_owner: Option<super::caller::SessionOwner>,
 }
 
 impl VpnServiceState {
@@ -147,10 +148,11 @@ impl VpnServiceState {
                 PendingKeycloakRefreshTokens::default(),
             )),
             refresh_token_generation: 0,
-            refresh_token_owner_sid: String::new(),
+            refresh_token_owner_key: String::new(),
             vpn_task: None,
             keycloak_refresh_task: None,
             active_config: None,
+            session_owner: None,
         }
     }
 
@@ -204,7 +206,7 @@ impl VpnServiceState {
             token_updated: self.token_updated.clone(),
             pending_keycloak_refresh_tokens: self.pending_keycloak_refresh_tokens.clone(),
             refresh_token_generation: self.refresh_token_generation,
-            refresh_token_owner_sid: self.refresh_token_owner_sid.clone(),
+            refresh_token_owner_key: self.refresh_token_owner_key.clone(),
         }
     }
 
@@ -231,6 +233,7 @@ impl VpnServiceState {
             task.abort();
         }
         self.active_config = None;
+        self.session_owner = None;
         self.clear_last_error();
         self.clear_assigned_ip();
         self.set_current_token(String::new());
@@ -238,7 +241,7 @@ impl VpnServiceState {
 
     pub fn mark_session_starting(
         &mut self,
-        caller_sid: &str,
+        caller_key: &str,
         config: ipc::Config,
         keycloak_connection_id: Option<&str>,
     ) {
@@ -255,7 +258,7 @@ impl VpnServiceState {
             tokens.generation += 1;
             if let Some(connection_id) = keycloak_connection_id {
                 tokens.updates.retain(|queued| {
-                    queued.owner_sid != caller_sid || queued.update.connection_id != connection_id
+                    queued.owner_key != caller_key || queued.update.connection_id != connection_id
                 });
             }
             tokens.generation
@@ -263,7 +266,7 @@ impl VpnServiceState {
         *self = Self::new();
         self.pending_keycloak_refresh_tokens = pending;
         self.refresh_token_generation = generation;
-        self.refresh_token_owner_sid = caller_sid.to_string();
+        self.refresh_token_owner_key = caller_key.to_string();
         self.active_config = Some(config.clone());
         self.vpn_running.store(true, Ordering::SeqCst);
         self.vpn_connected.store(false, Ordering::SeqCst);
@@ -293,7 +296,7 @@ impl VpnServiceState {
 
     pub fn pending_keycloak_refresh_token(
         &self,
-        caller_sid: &str,
+        caller_key: &str,
     ) -> Option<PendingKeycloakRefreshToken> {
         self.pending_keycloak_refresh_tokens
             .lock()
@@ -302,20 +305,20 @@ impl VpnServiceState {
                 pending
                     .updates
                     .iter()
-                    .find(|queued| queued.owner_sid == caller_sid)
+                    .find(|queued| queued.owner_key == caller_key)
                     .map(|queued| queued.update.clone())
             })
     }
 
     pub fn acknowledge_keycloak_refresh_token(
         &self,
-        caller_sid: &str,
+        caller_key: &str,
         connection_id: &str,
         refresh_token: &str,
     ) {
         if let Ok(mut pending) = self.pending_keycloak_refresh_tokens.lock() {
             pending.updates.retain(|queued| {
-                queued.owner_sid != caller_sid
+                queued.owner_key != caller_key
                     || queued.update.connection_id != connection_id
                     || queued.update.refresh_token != refresh_token
             });

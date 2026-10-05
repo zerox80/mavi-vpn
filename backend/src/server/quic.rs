@@ -11,6 +11,18 @@ use anyhow::Context;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::{AsRawFd, RawFd};
 
+/// Require return-routability before reserving per-source or global setup slots.
+/// Spoofed Initial packets receive a stateless Retry rather than occupying a
+/// handshake task under an arbitrary source address.
+pub fn validate_incoming_source(incoming: quinn::Incoming) -> Option<quinn::Incoming> {
+    if incoming.remote_address_validated() {
+        Some(incoming)
+    } else {
+        let _ = incoming.retry();
+        None
+    }
+}
+
 pub fn create_quic_endpoint(
     config: &Config,
     certs: Vec<CertificateDer<'static>>,

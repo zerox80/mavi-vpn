@@ -90,6 +90,7 @@ pub async fn handle_h3_connection(
         Some(pre_uni),
     );
     let mut h3_conn = h3::server::builder()
+        .max_field_section_size(16_384)
         .enable_datagram(true)
         .enable_extended_connect(true)
         .build(h3_conn_wrapper)

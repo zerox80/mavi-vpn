@@ -14,6 +14,12 @@ use tokio::sync::Mutex;
 
 const TEST_USER_SID: &str = "S-1-5-21-1000";
 
+fn test_caller_key(sid: &str) -> String {
+    let mut caller = crate::caller::Caller::test_admin();
+    caller.owner.sid = sid.into();
+    caller.owner.refresh_token_key()
+}
+
 async fn dispatch_request(
     req: ipc::IpcRequest,
     state: &Arc<Mutex<VpnServiceState>>,
@@ -26,10 +32,10 @@ fn handle_start_request(
     keycloak: Option<ipc::KeycloakRuntimeAuth>,
     state: &mut VpnServiceState,
 ) -> ipc::IpcResponse {
-    start_for_caller(config, keycloak, state, TEST_USER_SID)
+    start_for_caller(config, keycloak, state, &test_caller_key(TEST_USER_SID))
 }
 
-fn test_config() -> ipc::Config {
+pub(crate) fn test_config() -> ipc::Config {
     ipc::Config {
         endpoint: "vpn.example.com:4433".to_string(),
         token: "token".to_string(),

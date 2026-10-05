@@ -14,7 +14,11 @@ fn keycloak_auth() -> ipc::KeycloakRuntimeAuth {
 #[tokio::test]
 async fn keycloak_start_does_not_deliver_previous_sessions_rotation() {
     let mut state = VpnServiceState::new();
-    state.mark_session_starting(TEST_USER_SID, test_config(), Some("profile"));
+    state.mark_session_starting(
+        &test_caller_key(TEST_USER_SID),
+        test_config(),
+        Some("profile"),
+    );
     let previous = state.runtime_handles();
     state.stop_session();
     previous.publish_keycloak_refresh_token(PendingKeycloakRefreshToken {
@@ -114,7 +118,7 @@ async fn refresh_dispatch_restricts_fetch_and_ack_to_the_starting_user() {
     assert!(state
         .lock()
         .await
-        .pending_keycloak_refresh_token(TEST_USER_SID)
+        .pending_keycloak_refresh_token(&test_caller_key(TEST_USER_SID))
         .is_none());
 }
 

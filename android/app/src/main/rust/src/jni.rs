@@ -314,7 +314,10 @@ pub extern "system" fn Java_com_mavi_vpn_nativelib_NativeLib_startLoop<'local>(
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let session = unsafe { &mut *(handle as *mut VpnSession) };
+        // Kotlin retains the handle until this loop returns. Runtime::block_on
+        // needs only shared access; stop/updateToken may borrow the same session
+        // concurrently and mutate only its synchronized fields.
+        let session = unsafe { &*(handle as *const VpnSession) };
         let stop_flag = session.stop_flag.clone();
         let conn = session.connection.clone();
         let config = session.config.clone();

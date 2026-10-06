@@ -1,7 +1,10 @@
 mod control;
+mod refresh;
 mod status;
 
-use crate::handlers::{dispatch_request, handle_start_request};
+use crate::handlers::{
+    dispatch_request as dispatch_for_caller, handle_start_request as start_for_caller,
+};
 use crate::ipc;
 use crate::state::VpnServiceState;
 use std::sync::atomic::Ordering;
@@ -9,7 +12,30 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-fn test_config() -> ipc::Config {
+const TEST_USER_SID: &str = "S-1-5-21-1000";
+
+fn test_caller_key(sid: &str) -> String {
+    let mut caller = crate::caller::Caller::test_admin();
+    caller.owner.sid = sid.into();
+    caller.owner.refresh_token_key()
+}
+
+async fn dispatch_request(
+    req: ipc::IpcRequest,
+    state: &Arc<Mutex<VpnServiceState>>,
+) -> ipc::IpcResponse {
+    dispatch_for_caller(req, state, TEST_USER_SID).await
+}
+
+fn handle_start_request(
+    config: ipc::Config,
+    keycloak: Option<ipc::KeycloakRuntimeAuth>,
+    state: &mut VpnServiceState,
+) -> ipc::IpcResponse {
+    start_for_caller(config, keycloak, state, &test_caller_key(TEST_USER_SID))
+}
+
+pub(crate) fn test_config() -> ipc::Config {
     ipc::Config {
         endpoint: "vpn.example.com:4433".to_string(),
         token: "token".to_string(),

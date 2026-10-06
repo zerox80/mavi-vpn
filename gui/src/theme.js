@@ -24,6 +24,10 @@ export function applyTheme(theme) {
 }
 
 export async function savePrefs() {
+  if (!state.prefsLoaded) {
+    console.warn('save_prefs skipped: saved preferences have not been loaded.');
+    return;
+  }
   try {
     await invoke('save_prefs', { prefs: state.prefs });
   } catch (e) {

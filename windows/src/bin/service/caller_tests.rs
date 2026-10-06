@@ -20,6 +20,11 @@ async fn refreshed_token_is_only_delivered_to_its_logon_owner() {
     let bob = user("S-1-5-21-2", 2);
     {
         let mut guard = state.lock().await;
+        guard.mark_session_starting(
+            &alice.owner.refresh_token_key(),
+            crate::tests::test_config(),
+            Some("same-profile-id"),
+        );
         guard.session_owner = Some(alice.owner.clone());
         guard
             .runtime_handles()
@@ -27,6 +32,7 @@ async fn refreshed_token_is_only_delivered_to_its_logon_owner() {
                 connection_id: "same-profile-id".into(),
                 refresh_token: "alice-secret".into(),
             });
+        guard.stop_session();
     }
     for caller in [&bob, &Caller::test_admin()] {
         let response = dispatch_as(
@@ -36,7 +42,24 @@ async fn refreshed_token_is_only_delivered_to_its_logon_owner() {
             || Some((bob.owner.sid.clone(), 2)),
         )
         .await;
-        assert!(matches!(response, ipc::IpcResponse::Error(_)));
+        assert!(matches!(
+            response,
+            ipc::IpcResponse::RefreshTokenUpdate {
+                connection_id: None,
+                refresh_token: None
+            }
+        ));
+        // Even a guessed exact acknowledgement must not retire Alice's token.
+        let _ = dispatch_as(
+            ipc::IpcRequest::AcknowledgeRefreshTokenUpdate {
+                connection_id: "same-profile-id".into(),
+                refresh_token: "alice-secret".into(),
+            },
+            &state,
+            caller,
+            || Some((bob.owner.sid.clone(), 2)),
+        )
+        .await;
     }
     let mut new_logon = user(&alice.owner.sid, 1);
     new_logon.owner.logon_id = (9999, 0);
@@ -48,12 +71,43 @@ async fn refreshed_token_is_only_delivered_to_its_logon_owner() {
             || Some((alice.owner.sid.clone(), 1))
         )
         .await,
-        ipc::IpcResponse::Error(_)
+        ipc::IpcResponse::RefreshTokenUpdate {
+            connection_id: None,
+            refresh_token: None
+        }
     ));
+    let _ = dispatch_as(
+        ipc::IpcRequest::AcknowledgeRefreshTokenUpdate {
+            connection_id: "same-profile-id".into(),
+            refresh_token: "alice-secret".into(),
+        },
+        &state,
+        &new_logon,
+        || Some((alice.owner.sid.clone(), 1)),
+    )
+    .await;
     // Unauthorized reads did not consume the owner's pending secret.
     assert!(
         matches!(dispatch_as(ipc::IpcRequest::TakeRefreshTokenUpdate, &state, &alice, || Some((alice.owner.sid.clone(), 1))).await, ipc::IpcResponse::RefreshTokenUpdate { refresh_token: Some(token), .. } if token == "alice-secret")
     );
+    assert!(matches!(
+        dispatch_as(
+            ipc::IpcRequest::AcknowledgeRefreshTokenUpdate {
+                connection_id: "same-profile-id".into(),
+                refresh_token: "alice-secret".into(),
+            },
+            &state,
+            &alice,
+            || Some((alice.owner.sid.clone(), 1))
+        )
+        .await,
+        ipc::IpcResponse::Ok
+    ));
+    assert!(state
+        .lock()
+        .await
+        .pending_keycloak_refresh_token(&alice.owner.refresh_token_key())
+        .is_none());
 }
 
 #[tokio::test]

@@ -1,17 +1,21 @@
 use crate::ipc::send_ipc_request;
 use crate::oauth;
 use crate::secret_store::{connection_refresh_token_account, KeyringSecretStore, SecretStore};
-#[cfg(target_os = "windows")]
-use shared::ipc::IpcResponse;
 use shared::ipc::{Config, IpcRequest};
 use shared::kc_oauth::{self, RefreshOutcome};
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager};
+#[cfg(not(target_os = "windows"))]
+use tauri::Emitter;
+use tauri::{AppHandle, Manager};
 use tracing::{debug, info, warn};
 
+#[cfg(any(target_os = "windows", test))]
+mod credential_lock;
 #[cfg(not(target_os = "windows"))]
 mod refresh;
+#[cfg(any(target_os = "windows", test))]
+mod service_sync;
 
 /// Refresh the access token this many seconds before its `exp`, leaving headroom
 /// for the refresh round-trip and the reconnect handshake (matches Android's
@@ -23,8 +27,8 @@ const REFRESH_SKEW_SECS: u64 = 300;
 #[cfg(not(target_os = "windows"))]
 const REFRESH_TICK: Duration = Duration::from_secs(30);
 
-/// Tauri-managed handle to the running Keycloak background task, so a new
-/// connect can replace it and a disconnect can abort it.
+/// On Windows the persistence loop lives for the GUI's entire lifetime.
+/// Other platforms replace their access-token ticker on connect/disconnect.
 #[derive(Default)]
 pub(crate) struct TokenRefreshHandle(pub(crate) std::sync::Mutex<Option<JoinHandle<()>>>);
 
@@ -196,20 +200,27 @@ pub(super) fn start_token_refresh_ticker(app: &AppHandle, session: KeycloakSessi
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn start_service_refresh_token_sync(app: &AppHandle) {
-    stop_token_refresh_ticker(app);
-    info!("Starting Windows service refresh-token sync loop");
-    let app_for_task = app.clone();
-    let handle = tauri::async_runtime::spawn(service_refresh_token_sync_loop(app_for_task));
+pub(crate) fn start_service_refresh_token_sync(app: &AppHandle) {
     if let Some(state) = app.try_state::<TokenRefreshHandle>() {
         if let Ok(mut slot) = state.0.lock() {
-            *slot = Some(handle);
+            if slot.is_none() {
+                info!("Starting Windows service refresh-token sync loop");
+                let app_for_task = app.clone();
+                *slot = Some(tauri::async_runtime::spawn(
+                    service_refresh_token_sync_loop(app_for_task),
+                ));
+            }
         }
     }
 }
 
-/// Aborts a running Keycloak background task, if any.
+/// Aborts the non-Windows access-token ticker. Windows keeps syncing pending
+/// refresh tokens for the entire GUI lifetime, including after disconnect.
 pub(super) fn stop_token_refresh_ticker(app: &AppHandle) {
+    // Pending rotations still need saving after Stop or a cancelled Start.
+    if cfg!(target_os = "windows") {
+        return;
+    }
     if let Some(state) = app.try_state::<TokenRefreshHandle>() {
         if let Ok(mut slot) = state.0.lock() {
             if let Some(handle) = slot.take() {
@@ -221,46 +232,47 @@ pub(super) fn stop_token_refresh_ticker(app: &AppHandle) {
 
 #[cfg(target_os = "windows")]
 async fn service_refresh_token_sync_loop(app: AppHandle) {
-    let store = KeyringSecretStore;
-
     loop {
-        match send_ipc_request(&IpcRequest::TakeRefreshTokenUpdate).await {
-            Ok(IpcResponse::RefreshTokenUpdate {
-                connection_id: Some(connection_id),
-                refresh_token: Some(refresh_token),
-            }) if !connection_id.is_empty() && !refresh_token.trim().is_empty() => {
-                let refresh_account = connection_refresh_token_account(&connection_id);
-                if let Err(e) =
-                    persist_refresh_token(&store, &refresh_account, Some(&refresh_token))
-                {
-                    warn!(
-                        connection_id = %connection_id,
-                        error = %e,
-                        "Failed to persist rotated Keycloak refresh token from service"
-                    );
-                    let _ = send_ipc_request(&IpcRequest::Stop).await;
-                    let _ = app.emit(
-                        "kc-needs-login",
-                        format!("Session could not be saved; please log in again. {e}"),
-                    );
-                    break;
-                }
-                info!(
-                    connection_id = %connection_id,
-                    "Persisted rotated Keycloak refresh token from service"
-                );
+        {
+            // Always acquire the process-local operation lock first, then
+            // the user-wide credential lock, just like connect/login.
+            let lifecycle = app.state::<super::ConnectionLifecycle>();
+            let _operation = lifecycle.operation.lock().await;
+            let result = async {
+                let credentials = lock_service_credentials(&app).await?;
+                sync_service_refresh_tokens(&credentials).await
             }
-            Ok(_) => {}
-            Err(error) => {
-                debug!(
-                    error = %error,
-                    "Could not poll service for rotated Keycloak refresh token"
-                );
+            .await;
+            if let Err(error) = result {
+                warn!(error = %error, "Could not save service refresh-token updates; will retry");
             }
         }
 
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
+}
+
+#[cfg(target_os = "windows")]
+pub(super) async fn lock_service_credentials(
+    app: &AppHandle,
+) -> Result<credential_lock::CredentialLock, String> {
+    // Local application data is shared by this Windows user's GUI processes,
+    // including separate desktop sessions, but not by other users.
+    let data_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    credential_lock::CredentialLock::acquire(&data_dir).await
+}
+
+/// Caller must hold both the lifecycle operation and user-wide credential locks.
+#[cfg(target_os = "windows")]
+pub(super) async fn sync_service_refresh_tokens(
+    _credentials: &credential_lock::CredentialLock,
+) -> Result<(), String> {
+    while service_sync::sync_refresh_token_update(&KeyringSecretStore, |request| async move {
+        send_ipc_request(&request).await
+    })
+    .await?
+    {}
+    Ok(())
 }
 
 /// Background loop: while connected, refresh the access token before it expires

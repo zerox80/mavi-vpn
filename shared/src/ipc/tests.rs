@@ -156,6 +156,10 @@ fn test_ipc_request_roundtrip() {
             },
         },
         IpcRequest::TakeRefreshTokenUpdate,
+        IpcRequest::AcknowledgeRefreshTokenUpdate {
+            connection_id: "conn-1".to_string(),
+            refresh_token: "rotated-refresh-secret".to_string(),
+        },
     ];
 
     for req in configs {
@@ -164,6 +168,23 @@ fn test_ipc_request_roundtrip() {
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(req, decoded);
     }
+}
+
+#[test]
+fn refresh_token_acknowledgement_preserves_existing_wire_tags_and_redacts_secrets() {
+    let old = bincode::serde::encode_to_vec(
+        IpcRequest::TakeRefreshTokenUpdate,
+        bincode::config::standard(),
+    )
+    .unwrap();
+    assert_eq!(old, vec![6]);
+    let ack = IpcRequest::AcknowledgeRefreshTokenUpdate {
+        connection_id: "conn-1".into(),
+        refresh_token: "rotated-refresh-secret".into(),
+    };
+    let encoded = bincode::serde::encode_to_vec(&ack, bincode::config::standard()).unwrap();
+    assert_eq!(encoded[0], 7);
+    assert!(!format!("{ack:?}").contains("rotated-refresh-secret"));
 }
 
 #[test]

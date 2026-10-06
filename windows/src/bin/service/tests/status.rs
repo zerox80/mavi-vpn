@@ -2,8 +2,8 @@
 //! to keep each file under the 500-line cap. Reuses the parent's `test_state` /
 //! `test_config` helpers (accessible to this descendant module).
 
+use super::dispatch_request;
 use super::{test_config, test_state};
-use crate::handlers::dispatch_request;
 use crate::ipc;
 use std::sync::atomic::Ordering;
 

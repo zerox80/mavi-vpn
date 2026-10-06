@@ -15,6 +15,7 @@ describe('theme workflows', () => {
       <svg id="theme-icon"></svg>
     `;
     state.prefs.theme = 'light';
+    state.prefsLoaded = true;
   });
 
   afterEach(() => {
@@ -44,6 +45,19 @@ describe('theme workflows', () => {
     await savePrefs();
 
     expect(invoke).toHaveBeenCalledWith('save_prefs', { prefs: state.prefs });
+  });
+
+  it('blocks saves and theme autosaves until preferences load successfully', async () => {
+    state.prefsLoaded = false;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    wireThemeToggle();
+
+    await savePrefs();
+    document.getElementById('theme-toggle').click();
+    await Promise.resolve();
+
+    expect(state.prefs.theme).toBe('dark');
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it('theme toggle flips and persists the theme', async () => {

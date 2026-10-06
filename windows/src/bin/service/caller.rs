@@ -21,6 +21,17 @@ pub struct SessionOwner {
     pub logon_id: (u32, i32),
 }
 
+impl SessionOwner {
+    /// Stable for all GUI processes in this logon, distinct after a new logon
+    /// even if Windows reuses the session number. SIDs never contain colons.
+    pub fn refresh_token_key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.sid, self.session_id, self.logon_id.0, self.logon_id.1
+        )
+    }
+}
+
 pub struct Caller {
     pub owner: SessionOwner,
     pub privileged: bool,
@@ -172,3 +183,7 @@ mod tests {
         assert!(Caller::test_admin().authorized(None));
     }
 }
+
+#[cfg(test)]
+#[path = "caller_pipe_tests.rs"]
+mod pipe_tests;

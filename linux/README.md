@@ -200,6 +200,13 @@ Die Config wird automatisch an folgendem Ort gespeichert (erste gefundene Datei 
 
 Berechtigungen werden automatisch auf `600` gesetzt (nur Eigentümer kann lesen).
 
+Tokens werden nicht in der Datei gespeichert: Preshared Key, Keycloak-Access-Token und
+Refresh-Token landen im OS-Schlüsselbund (Secret Service, z. B. GNOME Keyring / KWallet).
+Ältere Configs mit Klartext-Tokens werden beim nächsten Laden automatisch migriert.
+Ist kein Schlüsselbund erreichbar (z. B. `sudo` ohne User-Session-Bus), bleibt nur ein
+Preshared Key in der `600`-Datei; Keycloak-Tokens werden dann nie auf die Platte geschrieben
+und beim nächsten Start ist ein erneuter Browser-Login nötig.
+
 **Beispiel-Config (`mavi-vpn.json`):**
 ```json
 {

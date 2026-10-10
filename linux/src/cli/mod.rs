@@ -1,4 +1,5 @@
 mod config;
+mod secrets;
 
 use crate::{daemon, vpn_core};
 use anyhow::Result;

@@ -2592,6 +2592,7 @@ dependencies = [
  "h3",
  "h3-quinn",
  "http",
+ "keyring",
  "libc",
  "nix",
  "quinn",

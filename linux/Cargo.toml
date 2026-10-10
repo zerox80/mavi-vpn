@@ -47,6 +47,7 @@ constant_time_eq = "0.6"
 url = "2.5"
 libc = "0.2"
 nix = { version = "0.31", features = ["ioctl", "net", "fs", "user"] }
+keyring = "4.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

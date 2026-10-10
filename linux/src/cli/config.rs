@@ -1,3 +1,4 @@
+use super::secrets::{self, KeyringSecretStore, SecretAccounts, SecretStore};
 use anyhow::Result;
 use shared::ipc::Config;
 use std::io::{self, Write};
@@ -28,27 +29,48 @@ fn default_config_path() -> PathBuf {
     PathBuf::from(CONFIG_FILE)
 }
 
-fn load_config(path: &Path) -> Option<Config> {
+fn load_config(path: &Path, store: &dyn SecretStore) -> Option<Config> {
     if path.exists() {
         let content = std::fs::read_to_string(path).ok()?;
         let mut config: Config = serde_json::from_str(&content).ok()?;
         config.normalize_transport();
+        let accounts = SecretAccounts::for_config(path);
+        if secrets::has_plaintext_secrets(&config) {
+            // Migrate configs written by older versions that kept the tokens in
+            // the JSON file. The in-memory config keeps the values for this run.
+            if let Err(e) = persist_config(&config, path, &accounts, store) {
+                eprintln!(
+                    "Warning: could not remove plaintext credentials from {}: {e:#}",
+                    path.display()
+                );
+            }
+        }
+        secrets::restore_secrets(&mut config, &accounts, store);
         Some(config)
     } else {
         None
     }
 }
 
-fn save_config(config: &Config, path: &Path) -> Result<()> {
+fn save_config(config: &Config, path: &Path, store: &dyn SecretStore) -> Result<()> {
+    persist_config(config, path, &SecretAccounts::for_config(path), store)?;
+    println!("Config saved to {}", path.display());
+    Ok(())
+}
+
+fn persist_config(
+    config: &Config,
+    path: &Path,
+    accounts: &SecretAccounts,
+    store: &dyn SecretStore,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut config = config.clone();
+    let mut config = secrets::strip_secrets(config, accounts, store);
     config.normalize_transport();
     let content = serde_json::to_string_pretty(&config)?;
-    write_config_file(path, content.as_bytes())?;
-    println!("Config saved to {}", path.display());
-    Ok(())
+    write_config_file(path, content.as_bytes())
 }
 
 #[cfg(unix)]
@@ -115,8 +137,9 @@ fn write_config_file(path: &Path, content: &[u8]) -> Result<()> {
 
 pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Config> {
     let config_path = explicit_path.unwrap_or_else(default_config_path);
+    let store = KeyringSecretStore;
 
-    if let Some(mut saved) = load_config(&config_path) {
+    if let Some(mut saved) = load_config(&config_path, &store) {
         println!("Found saved configuration:");
         println!("  Endpoint: {}", saved.endpoint);
         if saved.kc_auth.unwrap_or(false) {
@@ -155,7 +178,14 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
         if input.is_empty() || input == "y" || input == "yes" {
             if saved.kc_auth.unwrap_or(false) {
                 saved = refresh_keycloak_or_login(saved).await?;
-                save_config(&saved, &config_path)?;
+                save_config(&saved, &config_path, &store)?;
+            } else if saved.token.is_empty() {
+                // The keyring entry is gone or unreachable; ask instead of
+                // connecting with an empty preshared key.
+                print!("Preshared Key: ");
+                io::stdout().flush()?;
+                saved.token = read_line()?;
+                save_config(&saved, &config_path, &store)?;
             }
 
             return Ok(saved);
@@ -164,7 +194,7 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
     }
 
     let config = prompt_new_config().await?;
-    save_config(&config, &config_path)?;
+    save_config(&config, &config_path, &store)?;
     Ok(config)
 }
 
@@ -349,49 +379,4 @@ fn read_line() -> Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn save_config_replaces_symlink_without_touching_target() -> Result<()> {
-        use std::os::unix::fs::{symlink, PermissionsExt};
-
-        let temp = tempfile::tempdir()?;
-        let config_path = temp.path().join("mavi-vpn.json");
-        let symlink_target = temp.path().join("target.json");
-        std::fs::write(&symlink_target, "do-not-overwrite")?;
-        symlink(&symlink_target, &config_path)?;
-
-        save_config(&sample_config(), &config_path)?;
-
-        assert!(!std::fs::symlink_metadata(&config_path)?
-            .file_type()
-            .is_symlink());
-        assert_eq!(
-            std::fs::read_to_string(&symlink_target)?,
-            "do-not-overwrite"
-        );
-        let mode = std::fs::metadata(&config_path)?.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        Ok(())
-    }
-
-    fn sample_config() -> Config {
-        Config {
-            endpoint: "vpn.example.com:443".to_string(),
-            token: "access-token".to_string(),
-            cert_pin: "pin".to_string(),
-            censorship_resistant: false,
-            http3_framing: false,
-            kc_auth: Some(true),
-            kc_url: Some("https://auth.example.com".to_string()),
-            kc_realm: Some("mavi-vpn".to_string()),
-            kc_client_id: Some("mavi-client".to_string()),
-            refresh_token: Some("refresh-token".to_string()),
-            ech_config: None,
-            vpn_mtu: None,
-            http2_framing: false,
-        }
-    }
-}
+mod tests;

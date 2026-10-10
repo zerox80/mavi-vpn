@@ -1,11 +1,12 @@
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
 use ipnetwork::{Ipv4Network, Ipv6Network};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+pub mod quota;
 pub mod rate_limit;
 
 /// A channel for sending raw IP packets to the specific task handling a client connection.
@@ -49,6 +50,9 @@ pub struct AppState {
 
     /// Per-source-IP failed-authentication rate limiter. See [`rate_limit`].
     pub auth_rate_limiter: rate_limit::AuthRateLimiter,
+    pub preauth_sources: Arc<quota::Quota<std::net::IpAddr>>,
+    principal_quota: Arc<quota::Quota<String>>,
+    principal_leases: Mutex<HashMap<Ipv4Addr, quota::Permit<String>>>,
 }
 
 impl AppState {
@@ -117,6 +121,9 @@ impl AppState {
             leased_ips: Mutex::new(HashSet::new()),
             leased_ips_v6: Mutex::new(HashSet::new()),
             auth_rate_limiter: rate_limit::AuthRateLimiter::with_defaults(),
+            preauth_sources: quota::Quota::new(),
+            principal_quota: quota::Quota::new(),
+            principal_leases: Mutex::new(HashMap::new()),
         })
     }
 
@@ -190,6 +197,23 @@ impl AppState {
         }
     }
 
+    pub fn assign_principal_ip_pair(
+        &self,
+        principal: String,
+        limit: usize,
+    ) -> Result<(Ipv4Addr, Ipv6Addr)> {
+        let permit = self
+            .principal_quota
+            .try_acquire(principal, limit)
+            .ok_or_else(|| anyhow!("VPN session limit reached for principal"))?;
+        let (ip4, ip6) = self.assign_ip_pair()?;
+        self.principal_leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ip4, permit);
+        Ok((ip4, ip6))
+    }
+
     /// Returns a leased IPv4 address to the pool exactly once. A no-op if the
     /// address is not currently leased (already released).
     fn reclaim_ipv4(&self, ip4: Ipv4Addr) {
@@ -233,6 +257,10 @@ impl AppState {
         // Best-effort routing cleanup; reclaim no longer depends on its result.
         self.peers.remove(&ip4);
         self.peers_v6.remove(&ip6);
+        self.principal_leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&ip4);
         self.reclaim_ipv4(ip4);
         self.reclaim_ipv6(ip6);
     }

@@ -6,7 +6,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 mod console_user;
-pub use console_user::active_console_user_sid;
+pub use console_user::{active_console_user, active_console_user_sid};
 
 #[cfg(not(test))]
 pub fn run_network_repair_cleanup() {

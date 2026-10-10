@@ -4,7 +4,7 @@ use super::cert::PinnedServerVerifier;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use h2::{RecvStream, SendStream};
-use shared::{looks_like_html_response, masque, masque::CAPSULE_MAVI_CONFIG, ControlMessage};
+use shared::{masque, masque::CAPSULE_MAVI_CONFIG, ControlMessage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -220,31 +220,31 @@ async fn establish_h2(
 }
 
 async fn read_config(recv: &mut RecvStream) -> Result<(ControlMessage, Vec<u8>)> {
-    let mut buffer = Vec::new();
+    let mut decoder = masque::CapsuleDecoder::default();
+    let mut response_probe = shared::http2::ResponsePrefixProbe::default();
+    let mut data = Bytes::new();
+    let mut input = data.as_ref();
     loop {
-        while let Some((kind, payload, consumed)) = masque::read_capsule(&buffer) {
+        while let Some((kind, payload)) = decoder.next(&mut input)? {
             if kind == CAPSULE_MAVI_CONFIG {
-                let (config, _) =
-                    bincode::serde::decode_from_slice(payload, bincode::config::standard())
-                        .context("invalid MAVI_CONFIG capsule")?;
-                buffer.drain(..consumed);
-                return Ok((config, buffer));
+                let (config, _) = bincode::serde::decode_from_slice(
+                    payload,
+                    bincode::config::standard().with_limit::<65_536>(),
+                )
+                .context("invalid MAVI_CONFIG capsule")?;
+                return Ok((config, input.to_vec()));
             }
-            buffer.drain(..consumed);
         }
-        if buffer.len() > masque::MAX_CAPSULE_BUF {
-            anyhow::bail!("CONNECT-IP capsule buffer exceeds limit");
-        }
-        let data = tokio::time::timeout(Duration::from_secs(10), recv.data())
+        data = tokio::time::timeout(Duration::from_secs(10), recv.data())
             .await
             .map_err(|_| anyhow::anyhow!("timed out waiting for MAVI_CONFIG capsule"))?
             .ok_or_else(|| anyhow::anyhow!("server closed CONNECT-IP stream before MAVI_CONFIG"))?
             .context("HTTP/2 response body failed")?;
-        buffer.extend_from_slice(&data);
+        input = data.as_ref();
         recv.flow_control()
             .release_capacity(data.len())
             .context("failed to release HTTP/2 receive capacity")?;
-        if looks_like_html_response(&buffer) {
+        if response_probe.is_html(input) {
             anyhow::bail!("AUTH_FAILED: server returned HTML instead of CONNECT-IP capsules");
         }
     }
@@ -270,12 +270,20 @@ async fn send_capsules(mut stream: SendStream<Bytes>, mut capsules: mpsc::Receiv
 
 async fn receive_capsules(
     mut stream: RecvStream,
-    mut buffer: Vec<u8>,
+    buffer: Vec<u8>,
     packets: mpsc::Sender<Bytes>,
     reauth_results: mpsc::Sender<bool>,
 ) {
+    let mut decoder = masque::CapsuleDecoder::default();
+    let mut data = Bytes::from(buffer);
     loop {
-        while let Some((kind, payload, consumed)) = masque::read_capsule(&buffer) {
+        let mut input = data.as_ref();
+        loop {
+            let (kind, payload) = match decoder.next(&mut input) {
+                Ok(Some(capsule)) => capsule,
+                Ok(None) => break,
+                Err(_) => return,
+            };
             if kind == masque::CAPSULE_DATAGRAM {
                 if let Some(packet) = masque::decode_connect_ip_datagram_payload(payload) {
                     if packets.send(Bytes::copy_from_slice(packet)).await.is_err() {
@@ -284,7 +292,10 @@ async fn receive_capsules(
                 }
             } else if kind == masque::CAPSULE_MAVI_REAUTH_RESULT {
                 let Ok((ControlMessage::ReauthResult { accepted }, _)) =
-                    bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                    bincode::serde::decode_from_slice(
+                        payload,
+                        bincode::config::standard().with_limit::<65_536>(),
+                    )
                 else {
                     return;
                 };
@@ -292,14 +303,10 @@ async fn receive_capsules(
                     return;
                 }
             }
-            buffer.drain(..consumed);
-        }
-        if buffer.len() > masque::MAX_CAPSULE_BUF {
-            return;
         }
         match stream.data().await {
-            Some(Ok(data)) => {
-                buffer.extend_from_slice(&data);
+            Some(Ok(next)) => {
+                data = next;
                 if stream.flow_control().release_capacity(data.len()).is_err() {
                     return;
                 }

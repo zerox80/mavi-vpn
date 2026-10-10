@@ -44,6 +44,10 @@ pub struct Config {
     #[arg(long, env = "VPN_AUTH_TOKEN")]
     pub auth_token: Option<String>,
 
+    /// Maximum live tunnels per Keycloak subject (or per shared static token).
+    #[arg(long, env = "VPN_MAX_SESSIONS_PER_PRINCIPAL", default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    pub max_sessions_per_principal: u32,
+
     /// The virtual internal network range managed by the VPN.
     /// Example: `10.8.0.0/24`. All clients will receive IPs from this range.
     #[arg(long, env = "VPN_NETWORK", default_value = "10.8.0.0/24")]

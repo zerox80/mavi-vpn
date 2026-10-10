@@ -246,6 +246,19 @@ async fn main() -> Result<()> {
 
     // Accept incoming connections
     while let Some(conn) = endpoint.accept().await {
+        let Some(conn) = server::quic::validate_incoming_source(conn) else {
+            continue;
+        };
+        let remote_ip = conn.remote_address().ip();
+        if state.auth_rate_limiter.is_blocked(remote_ip) {
+            continue;
+        }
+        let Some(source_permit) = state.preauth_sources.try_acquire(
+            state::quota::source_key(remote_ip),
+            state::quota::MAX_PREAUTH_PER_SOURCE,
+        ) else {
+            continue;
+        };
         let Ok(pending_permit) = pending_semaphore.clone().try_acquire_owned() else {
             warn!("Unauthenticated QUIC connection limit reached, rejecting new connection");
             continue;
@@ -269,7 +282,7 @@ async fn main() -> Result<()> {
                 tx_tun,
                 keycloak,
                 ipv6_enabled,
-                pending_permit,
+                (pending_permit, source_permit),
             )
             .await
             {

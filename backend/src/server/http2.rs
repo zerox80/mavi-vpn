@@ -100,6 +100,15 @@ impl Http2Listener {
                 .accept()
                 .await
                 .context("HTTP/2 TCP accept failed")?;
+            if self.state.auth_rate_limiter.is_blocked(peer_addr.ip()) {
+                continue;
+            }
+            let Some(source_permit) = self.state.preauth_sources.try_acquire(
+                crate::state::quota::source_key(peer_addr.ip()),
+                crate::state::quota::MAX_PREAUTH_PER_SOURCE,
+            ) else {
+                continue;
+            };
             if let Err(error) = tcp_stream.set_nodelay(true) {
                 warn!(%peer_addr, %error, "failed to enable TCP_NODELAY for HTTP/2");
             }
@@ -136,7 +145,7 @@ impl Http2Listener {
                     tx_tun,
                     keycloak,
                     ipv6_enabled,
-                    pending_permit,
+                    (pending_permit, source_permit),
                 )
                 .await
                 {
@@ -181,7 +190,7 @@ async fn serve_connection(
     tx_tun: mpsc::Sender<Bytes>,
     keycloak: Option<Arc<KeycloakValidator>>,
     ipv6_enabled: bool,
-    pending_permit: tokio::sync::OwnedSemaphorePermit,
+    pending_permit: impl Send,
 ) -> Result<()> {
     if tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
         anyhow::bail!("client did not negotiate ALPN h2");
@@ -269,6 +278,11 @@ async fn handle_request(
         }
     };
 
+    let ip_guard = IpGuard {
+        state: state.clone(),
+        ip4: assigned_ip,
+        ip6: assigned_ip6,
+    };
     let capsule_stream =
         match build_connect_ip_capsules(&state, &config, assigned_ip, assigned_ip6, ipv6_enabled) {
             Ok(capsules) => capsules,
@@ -287,11 +301,7 @@ async fn handle_request(
     let tunnel_state = state.clone();
     let tunnel_config = config.clone();
     tokio::spawn(async move {
-        let _ip_guard = IpGuard {
-            state: tunnel_state.clone(),
-            ip4: assigned_ip,
-            ip6: assigned_ip6,
-        };
+        let _ip_guard = ip_guard;
         if let Err(error) = run_http2_tunnel(
             on_upgrade,
             capsule_stream,

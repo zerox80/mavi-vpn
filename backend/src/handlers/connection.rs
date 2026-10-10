@@ -48,9 +48,12 @@ pub(crate) fn validate_raw_auth_len(len: usize) -> Result<()> {
 }
 
 fn decode_raw_auth_payload(buf: &[u8]) -> Result<String> {
-    let msg: ControlMessage = bincode::serde::decode_from_slice(buf, bincode::config::standard())
-        .map(|(v, _)| v)
-        .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
+    let msg: ControlMessage = bincode::serde::decode_from_slice(
+        buf,
+        bincode::config::standard().with_limit::<RAW_AUTH_MAX_BYTES>(),
+    )
+    .map(|(v, _)| v)
+    .map_err(|e| anyhow::anyhow!("Protocol error: {e}"))?;
 
     match msg {
         ControlMessage::Auth { token } => Ok(token),
@@ -255,7 +258,7 @@ pub async fn handle_connection(
     tx_tun: tokio::sync::mpsc::Sender<Bytes>,
     keycloak: Option<Arc<KeycloakValidator>>,
     ipv6_enabled: bool,
-    pending_permit: tokio::sync::OwnedSemaphorePermit,
+    pending_permit: impl Send,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + PREAUTH_PHASE_TIMEOUT;
     // Dropping Quinn's owned Incoming/Connecting on timeout closes its last

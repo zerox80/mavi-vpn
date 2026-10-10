@@ -291,6 +291,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identifies_the_effective_sender_after_reading_the_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let name = unique_test_pipe_name();
+        let mut server =
+            create_pipe_instance_at(&name, true, TEST_SDDL_EVERYONE_FULL_CONTROL).unwrap();
+        let mut client = tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(&name)
+            .unwrap();
+        server.connect().await.unwrap();
+        client.write_all(b"request").await.unwrap();
+        let mut bytes = [0; 7];
+        server.read_exact(&mut bytes).await.unwrap();
+        let caller = crate::caller::Caller::from_pipe(&server).unwrap();
+        assert!(caller.owner.sid.starts_with("S-1-"));
+        assert_ne!(caller.owner.logon_id, (0, 0));
+    }
+
+    #[tokio::test]
     async fn waiting_pipe_accepts_clients_after_acl_refresh() {
         let name = unique_test_pipe_name();
         let server = create_pipe_instance_at(&name, true, TEST_SDDL_EVERYONE_FULL_CONTROL)

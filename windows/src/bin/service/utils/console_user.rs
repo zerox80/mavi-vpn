@@ -24,6 +24,10 @@ impl Drop for WtsBuffer {
 /// Query each time so logoff and fast user switching cannot leave a cached SID
 /// authorized on newly created pipes. Fail closed if no console user is known.
 pub fn active_console_user_sid() -> Option<String> {
+    active_console_user().map(|(sid, _)| sid)
+}
+
+pub fn active_console_user() -> Option<(String, u32)> {
     // SAFETY: this query takes no pointers and has no preconditions.
     let session = unsafe { WTSGetActiveConsoleSessionId() };
     if session == u32::MAX {
@@ -34,7 +38,7 @@ pub fn active_console_user_sid() -> Option<String> {
     let account = qualified_account(&domain, &user)?;
     let sid = account_sid(&account)?;
     // A console switch while resolving the account must not authorize the old user.
-    (unsafe { WTSGetActiveConsoleSessionId() } == session).then_some(sid)
+    (unsafe { WTSGetActiveConsoleSessionId() } == session).then_some((sid, session))
 }
 
 fn session_string(session: u32, class: WTS_INFO_CLASS) -> Option<String> {

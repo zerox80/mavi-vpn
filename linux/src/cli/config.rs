@@ -122,9 +122,14 @@ pub async fn load_or_prompt_config(explicit_path: Option<PathBuf>) -> Result<Con
         if saved.kc_auth.unwrap_or(false) {
             println!("  Auth: Keycloak (SSO)");
         } else {
+            // Never echo any part of the secret; scrollback and logs outlive the session.
             println!(
-                "  Token: {}...",
-                saved.token.chars().take(8).collect::<String>()
+                "  Auth: Preshared key ({})",
+                if saved.token.is_empty() {
+                    "not set"
+                } else {
+                    "stored"
+                }
             );
         }
         println!(

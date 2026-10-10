@@ -366,3 +366,31 @@ fn test_tun_device_path() {
     ]);
     assert_eq!(config.tun_device_path.as_deref(), Some("tun1"));
 }
+
+#[test]
+fn static_auth_rejects_placeholder_and_blank_tokens() {
+    for token in [
+        "change_me",
+        "change-me",
+        "changeme",
+        "CHANGE_ME",
+        " changeme ",
+        "   ",
+    ] {
+        let config = Config::parse_from(["mavi-vpn", "--auth-token", token]);
+        assert!(config.validate().is_err(), "{token:?} must be rejected");
+    }
+}
+
+#[test]
+fn placeholder_token_is_ignored_when_keycloak_handles_auth() {
+    let config = Config::parse_from([
+        "mavi-vpn",
+        "--auth-token",
+        "change_me",
+        "--keycloak-enabled",
+        "--keycloak-url",
+        "https://auth.example.com",
+    ]);
+    assert!(config.validate().is_ok());
+}

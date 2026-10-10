@@ -64,3 +64,8 @@ oauth-client = ["dep:serde_json", "dep:base64", "dep:reqwest", "dep:rustls", "de
 # in-band reauth exchange used by the Linux/Windows/Android client cores.
 control-client = ["dep:tokio", "dep:bincode", "dep:thiserror"]
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation", "Win32_Security", "Win32_System_Pipes",
+    "Win32_System_Services", "Win32_System_SystemServices", "Win32_System_Threading",
+] }

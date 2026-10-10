@@ -104,9 +104,8 @@ pub fn set_adapter_network_config(
         ..
     } = config;
 
-    // Resolve split-tunnel whitelist domains before this adapter's DNS server
-    // or the split default routes are installed below, so this still queries
-    // the physical (pre-VPN) resolver.
+    // Only numeric exceptions from the authenticated server are accepted.
+    // Physical next hops are still captured before installing split defaults.
     let whitelist_ips = resolve_whitelist_ips(whitelist_domains, assigned_ipv6.is_some());
 
     let requested_adapter_name = adapter.get_name().unwrap_or_else(|_| "MaviVPN".to_string());

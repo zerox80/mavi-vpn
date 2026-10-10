@@ -163,6 +163,8 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - name: Test windows crate
         run: cargo test -p windows-vpn --verbose
+      - name: Test shared Windows IPC authentication
+        run: cargo test -p shared --verbose
       - name: Test Windows uninstaller ownership
         run: python -m unittest discover -s scripts/tests -p 'test_windows_*.py'
 

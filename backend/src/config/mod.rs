@@ -128,8 +128,8 @@ pub struct Config {
     #[arg(long, env = "VPN_DNS_V6")]
     pub dns_v6: Option<std::net::Ipv6Addr>,
 
-    /// Split-tunnelling: domain names provided here will be whitelisted on
-    /// the client side (resolved via local DNS, bypassing the VPN).
+    /// Split-tunnelling: domains/IPs resolved once by the server at startup;
+    /// authenticated IP literals bypass the VPN on clients (no client DNS).
     #[arg(long, env = "VPN_WHITELIST_DOMAINS", value_delimiter = ',', num_args = 0..)]
     pub whitelist_domains: Vec<String>,
 

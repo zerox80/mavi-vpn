@@ -204,9 +204,6 @@ class MainActivity : ComponentActivity() {
                         this@MainActivity,
                         code,
                         returnedState,
-                        viewModel.kcUrl.value,
-                        viewModel.kcRealm.value,
-                        viewModel.kcClientId.value,
                     )
                 if (tokens == null) {
                     pendingConnect = false
@@ -215,7 +212,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 viewModel.updateErrorMessage("")
-                viewModel.saveOAuthTokens(tokens)
+                viewModel.reloadOAuthTokens()
                 if (pendingConnect) {
                     // The user tapped Connect: now that a fresh login
                     // succeeded, bring the tunnel up with the new token.

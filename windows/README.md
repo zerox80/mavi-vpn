@@ -242,6 +242,11 @@ net stop MaviVPNService
 .\mavi-vpn-service.exe --console
 ```
 
+GUI und CLI pruefen vor dem Senden von Zugangsdaten den Prozess der verbundenen
+Named Pipe. Akzeptiert wird der laufende `MaviVPNService` oder fuer diesen
+Debug-Modus eine erhoeht gestartete `mavi-vpn-service.exe`. Ein nicht erhoehter
+Console-Prozess wird abgewiesen.
+
 ### Log-Dateien
 
 Der Windows-Service und die GUI schreiben eigene rotierende Log-Dateien. Die

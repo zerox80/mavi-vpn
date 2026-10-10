@@ -29,7 +29,11 @@ async fn connect() -> Result<tokio::net::windows::named_pipe::NamedPipeClient, S
     let mut last_busy_err = None;
     for _ in 0..PIPE_BUSY_RETRY_ATTEMPTS {
         match ClientOptions::new().open(shared::ipc::ipc_pipe_name()) {
-            Ok(client) => return Ok(client),
+            Ok(client) => {
+                shared::ipc::windows_server::authenticate(&client)
+                    .map_err(|e| format!("Could not authenticate the Mavi VPN service: {e}"))?;
+                return Ok(client);
+            }
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 last_busy_err = Some(e);
                 tokio::time::sleep(PIPE_BUSY_RETRY_DELAY).await;

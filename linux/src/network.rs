@@ -29,7 +29,7 @@ pub struct NetworkConfig {
     /// Whether DNS was successfully changed by this instance. This prevents a
     /// rollback before DNS setup from writing a fallback resolver config.
     dns_configured: bool,
-    /// Split-tunnel whitelist domain IPs resolved once at connect time.
+    /// Split-tunnel IP literals received from the authenticated server.
     pub whitelist_ips: Vec<IpAddr>,
     /// Only newly installed exceptions belong to this session's cleanup.
     owned_host_routes: Vec<routes::HostRoute>,
@@ -57,9 +57,7 @@ impl NetworkConfig {
 
         let has_ipv6 = assigned_ipv6.is_some();
 
-        // Resolve split-tunnel whitelist domains before DNS is redirected to
-        // the tunnel below, so this still queries the physical (pre-VPN)
-        // resolver.
+        // Accept only server-authenticated literal route exceptions.
         let whitelist_ips = whitelist::resolve_whitelist_ips(whitelist_domains, has_ipv6);
 
         // Capture all destination-specific paths before changing addresses or

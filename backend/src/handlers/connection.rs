@@ -206,7 +206,14 @@ pub(super) fn build_config_message(
         } else {
             None
         },
-        whitelist_domains: Some(config.whitelist_domains.clone()),
+        // The wire field keeps its old name/order for compatibility. Unresolved
+        // names must never reach a client's physical-network resolver.
+        whitelist_domains: Some(
+            shared::split_tunnel::parse_whitelist_ips(&config.whitelist_domains, ipv6_enabled)
+                .into_iter()
+                .map(|ip| ip.to_string())
+                .collect(),
+        ),
     }
 }
 
